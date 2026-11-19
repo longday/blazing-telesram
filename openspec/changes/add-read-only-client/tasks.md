@@ -4,18 +4,18 @@
 
 - [x] 1.1 Add `crates/yandex-proto` to the workspace with the pinned dependencies from design.md (rechecked on crates.io); verify `cargo build --locked --workspace` succeeds
 - [x] 1.2 Require `BT_RUNTIME_DIR` in the app (exit with an error naming the variable when missing), export it to `<repo>/.runtime` in `run.sh`, add `/.runtime/` to `.gitignore`; verify the app fails fast without it and `git check-ignore .runtime/x` matches
-- [ ] 1.3 Implement the session file (cookies with domain/path/expiry, uid, guid) written atomically with mode 0600 and a redacting `Debug`; verify unit tests cover round-trip, permissions and absence of cookie values in `Debug` output
+- [x] 1.3 Implement the session file (cookies with domain/path/expiry, uid, guid) written atomically with mode 0600 and a redacting `Debug`; verify unit tests cover round-trip, permissions and absence of cookie values in `Debug` output
 
 ## 2. Sign-in
 
-- [ ] 2.1 Implement the HTTP bootstrap in `yandex-proto` on a plain cookie set (no stored session, no WebSocket): CSRF token from `…/registry/csrf-token/`, then `request_user` with `{bind_phone_number: false}` and `X-CSRF-TOKEN`, parsing `uid`/`guid`/display name and mapping cookie rejection (401, `invalid_cookies`, `not_authorized`, `no_credentials`, `cookie_auth_failed`) to session expiry and `bad_csrf_token` to a CSRF error; verify unit tests on synthetic responses cover success and each error
+- [x] 2.1 Implement the HTTP bootstrap in `yandex-proto` on a plain cookie set (no stored session, no WebSocket): CSRF token from `…/registry/csrf-token/`, then `request_user` with `{bind_phone_number: false}` and `X-CSRF-TOKEN`, parsing `uid`/`guid`/display name and mapping cookie rejection (401, `invalid_cookies`, `not_authorized`, `no_credentials`, `cookie_auth_failed`) to session expiry and `bad_csrf_token` to a CSRF error; verify unit tests on synthetic responses cover success and each error
 - [ ] 2.2 Open a GPUI sign-in window with an incognito `wry` WebView child on `https://telemost.yandex.ru/` when no session exists, poll `yandex.ru` cookies, and once `Session_id` appears run the 2.1 bootstrap with them; save the session (cookies, uid, guid) and close only on success; closing the window quits without writing; verify unit tests for cookie-to-session conversion pass
 - [ ] 2.3 Add `bt-probe me` (bootstrap on the stored session); verify it prints uid, guid and display name and no cookie values
 - [ ] 2.4 Ask the user to run the one-time sign-in with their Yandex 360 account; verify `.runtime/session.json` exists with mode 0600, `bt-probe me` succeeds, and record in design.md which cookie domains the org sign-in produced
 
 ## 3. Protocol spike
 
-- [ ] 3.1 Implement the WS frame codec (request header, `0x05` separator, JSON body, push frames `0x03`); verify encode/decode unit tests on synthetic frames
+- [x] 3.1 Implement the WS frame codec (request header, `0x05` separator, JSON body, push frames `0x03`); verify encode/decode unit tests on synthetic frames
 - [ ] 3.2 Connect to Xiva with the stored session and `user=<uid>` from the bootstrap (fallback `guid`) and wait for the `subscribed` operation frame in `bt-probe listen --raw`; verify the subscription id is printed and no cookie values
 - [ ] 3.3 Determine the chat-list and history calls, the Xiva service string and event types on the live account; record them in design.md; save secret-free fixtures under `crates/yandex-proto/tests/fixtures/`
 - [ ] 3.4 Check read-call side effects: verify with `bt-probe` that unread counters are unchanged after reading history, and record whether connecting publishes presence (ask the user to look at their status from another device); stop and revisit specs with the user if any side effect exists
