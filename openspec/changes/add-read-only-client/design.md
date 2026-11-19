@@ -51,7 +51,13 @@ Observed with the user's Yandex 360 account (2026-11-20): cookies land on `yande
 All state lives under `BT_RUNTIME_DIR`, which is required: the app and probe exit with an error naming the variable when it is missing. `run.sh` sets it to `<repo>/.runtime`. Layout: `session.json` (mode 0600: cookies with domain/path/expiry, uid, guid), `cache/<uid>.sqlite`, `media/<uid>/` (avatar and thumbnail bytes). Alternative: macOS Keychain. Deferred by the user's choice while in development.
 
 ### Chat list and history loading
-Startup: cached state → HTTP bootstrap (`request_user`) → chat list → subscribe. History: WS `history` by `ChatId` with `MaxTimestamp`/`Limit` = 50, newest first. The exact chat-list call (dedicated method versus per-chat `history` with `Limit:1`, as the MCP research describes) is fixed by the first spike task against the live account before UI work starts.
+Startup: cached state → HTTP bootstrap (`request_user`) → chat list → subscribe. History: WS `history` by `ChatId` with `MaxTimestamp`/`Limit` = 50, newest first.
+
+Confirmed on the live account (task 3.3):
+- Chat list: WS `history` without `ChatId`, body `{Limit: 1, ChatDataFilter: {}}`, returns every chat's metadata with its newest message. History: WS `history` with `ChatId`, `Limit`, optional `MaxTimestamp` (exclusive). Both on `service_index` 0.
+- Xiva: `service=messenger-prod:version5*common+version5*main` (form-encoded); pushes are binary frames whose Xiva event is `delivery`.
+- Push kinds seen: message upsert (an edit re-sends the message with a higher version and `edited`), deletion as a plain message without text followed by a moderated-range push, heartbeats (type 2, every 30 s, from the account's own web session), bot requests and seen markers (ignored).
+- `subscribe` (`TtlMcs` 60 s) replies with `CurrentTime` and `LastModeratedRange`. The server throttles it: refreshing ~100 chats every 30 s gets `TOO_MANY_REQUESTS` (transport error 7) for ~80 % of the requests. Whether message pushes need a per-chat subscription at all is open; see Open Questions.
 
 ### Cache
 SQLite with `PRAGMA user_version` migrations; tables `chats` and `messages` keyed by server IDs/timestamps, storing normalized columns for ordering plus the raw JSON payload so later changes can render more fields without a resync. Server chunks replace the cached range they cover, which removes messages deleted on the server.
@@ -90,4 +96,4 @@ The demo is removed in the same change; `BT_STATE_PATH` files are ignored and ca
 
 ## Open Questions
 
-- Exact Xiva `service` string and serviceIndex values for chat events: read from the live handshake in the spike; they do not change the approach.
+- Per-chat `subscribe`: does the account-level `version5*main` topic deliver new messages of unsubscribed chats? Test: listen without `--subscribe` while a message arrives. If yes, subscribe only the open chat (or none); if no, pace subscriptions under the throttle. Either way the live-updates spec is unchanged.

@@ -19,6 +19,7 @@
 - [x] 3.2 Connect to Xiva with the stored session and `user=<uid>` from the bootstrap (fallback `guid`) and wait for the `subscribed` operation frame in `bt-probe listen --raw`; verify the subscription id is printed and no cookie values
 - [ ] 3.3 Determine the chat-list and history calls, the Xiva service string and event types on the live account; record them in design.md; save secret-free fixtures under `crates/yandex-proto/tests/fixtures/`
 - [ ] 3.4 Check read-call side effects: verify with `bt-probe` that unread counters are unchanged after reading history, and record whether connecting publishes presence (ask the user to look at their status from another device); stop and revisit specs with the user if any side effect exists
+- [ ] 3.5 Resolve the per-chat `subscribe` question in design.md (Open Questions) with a live listen without `--subscribe` while a message arrives; then subscribe only the open chat or pace subscriptions under the throttle; verify a live run logs no `TOO_MANY_REQUESTS` and still receives new messages in a chat that is not open
 
 ## 4. Protocol client
 

@@ -31,6 +31,20 @@ On first start a window with the Yandex sign-in page opens. Sign in as on `telem
 BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe -- me
 ```
 
+## Diagnostics
+
+The app logs to three places at once: the terminal (stderr), the log window (⌘⇧L or the 🐞 button next to search; «Копировать» copies it) and a JSON Lines file `.runtime/logs/<UTC time>-<pid>.jsonl`, one object per record, written as it happens. The ten newest files are kept.
+
+`BT_LOG` selects what is logged, in [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/0.3.23/tracing_subscriber/filter/struct.EnvFilter.html) syntax; the default is `info`. An invalid value stops the app at startup.
+
+```sh
+BT_LOG=debug ./run.sh                                   # every HTTP and socket request with status and timing
+BT_LOG=info,yandex_proto::xiva=trace ./run.sh           # plus raw Xiva frames, including message text
+jq -c 'select(.level != "DEBUG")' "$(ls -t .runtime/logs/*.jsonl | head -1)"   # read the running app's log
+```
+
+No level logs cookie values, tokens or URL query strings; `trace` does log message text, so share trace logs with care. `bt-probe` uses the same `BT_LOG` and writes its log to stderr only, e.g. `BT_LOG=yandex_proto::xiva=trace bt-probe listen --subscribe` shows the raw frames.
+
 ## License
 
 Original code is MIT. See [THIRD_PARTY.md](THIRD_PARTY.md) for the separately licensed GPUI input example and the patched dependency copies in `vendor/`.
