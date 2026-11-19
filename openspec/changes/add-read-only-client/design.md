@@ -8,7 +8,7 @@
   - Xiva WebSocket `wss://push.yandex.ru/v2/subscribe/websocket?service=messenger-prod:…&session=…&client=web_main&user=<uid>`;
   - files `files.messenger.yandex.ru` (`file_shortterm/{fileId}?size=`), avatars via `get-mssngr`/`get-yapic` and `files…/{avatarId}?size=`;
   - `historyChunkSize` 50, `reconnectInterval` 11000 ms; `backendConfig.chat_list_excluded_namespaces`, `hidden_namespaces`.
-- Auth is the Passport cookie session (`Session_id`, `sessionid2`, `yandexuid`, …) of `.yandex.ru`; identity comes from WS `whoami`.
+- Auth is the Passport cookie session (`Session_id`, `sessionid2`, `yandexuid`, …) of `.yandex.ru`. Identity comes from the registry HTTP method `request_user` with params exactly `{bind_phone_number: false}`; it requires `X-CSRF-TOKEN` (403 `bad_csrf_token` without it) and returns `data.user.{uid, guid, display_name}`; Xiva's `user=` parameter is `uid`, falling back to `guid` (MCP `src/auth/requestUser.ts`). A WS identity call is not confirmed and is not used.
 - WS frame: `0x01` + MessagePack `[serviceIndex, reqId, method]` + `0x05` + 11 zero bytes + UTF-8 JSON body; server pushes use frame type `0x03`; replies correlate by transport `reqId` and JSON `RequestId`.
 - Project rules: exact dependency versions, desktop app runs on the host (no containers), Telegram Desktop design without its code; graphics reuse would force GPL-3.0, so this change uses none.
 
@@ -34,7 +34,7 @@
 Alternative: one crate. Rejected: protocol code must stay free of UI and storage so the probe and unit tests build fast and stay focused.
 
 ### Read-only by construction
-`yandex-proto` exposes a closed `ReadRequest` enum (`Whoami`, `History`, `ChatList`, registry reads such as `get_users_data`, Xiva `subscribe`) and no generic "call any method" entry point. A unit test checks the encoded method names against an allowlist. Read markers, typing and heartbeats with presence are simply not representable. Alternative: a runtime flag. Rejected: one mistaken flag would mutate a real account.
+`yandex-proto` exposes a closed `ReadRequest` enum (`RequestUser`, `History`, `ChatList`, registry reads such as `get_users_data`, Xiva `subscribe`) and no generic "call any method" entry point. Fetching the CSRF token is a read; the token is sent only with allowlisted reads that require it, starting with `request_user`. A unit test checks the encoded method names against an allowlist. Read markers, typing and heartbeats with presence are simply not representable. Alternative: a runtime flag. Rejected: one mistaken flag would mutate a real account.
 
 ### Runtime model
 A dedicated thread runs a Tokio 1.54.1 runtime that owns HTTP and WS. `ChatClient` sends commands over `async-channel` 2.5.0 and exposes one `ClientEvent` stream (`ChatsReplaced`, `HistoryChunk`, `MessageUpserted`, `MessageDeleted`, `Connection(state)`, `SessionExpired`). The desktop crate drains it in a GPUI `cx.spawn` task and updates a `ChatStore` entity. Alternative: run networking on GPUI's executor with `async-tungstenite`. Rejected: Tokio-based `reqwest`/`tokio-tungstenite` are the proven stack in both reference projects, and isolating them keeps GPUI executor details out of the protocol crate.
@@ -43,13 +43,13 @@ A dedicated thread runs a Tokio 1.54.1 runtime that owns HTTP and WS. `ChatClien
 `tokio` 1.54.1, `reqwest` 0.13.5 (rustls, multipart, cookies off — cookies are set explicitly), `tokio-tungstenite` 0.30.0 (rustls), `rmpv` 1.3.1 for the frame header, `serde`/`serde_json` (versions already in `Cargo.lock`), `uuid` 1.29.3, `cookie` 0.18.2, `rusqlite` 0.43.0 (`bundled`), `wry` 0.57.3, `async-channel` 2.5.0. Versions are rechecked against crates.io when the task adds them.
 
 ### Sign-in
-A GPUI window hosts a `wry` WebView via `build_as_child` (GPUI's `Window` implements `HasWindowHandle`), incognito so WebKit keeps nothing outside `.runtime/`. It loads `https://telemost.yandex.ru/` and polls `cookies_for_url` for `https://yandex.ru/` once a second; when `Session_id` appears, the client verifies it with `whoami` before saving and closing the window. Alternative: system browser plus cookie import. Rejected: needs access to browser profiles and breaks with browser updates.
+A GPUI window hosts a `wry` WebView via `build_as_child` (GPUI's `Window` implements `HasWindowHandle`), incognito so WebKit keeps nothing outside `.runtime/`. It loads `https://telemost.yandex.ru/` and polls `cookies_for_url` for `https://yandex.ru/` once a second; when `Session_id` appears, the client runs the HTTP bootstrap (CSRF token, then `request_user`) with those cookies, and only on success saves cookies plus `uid`/`guid` and closes the window. The bootstrap needs no stored session and no WebSocket. Alternative: system browser plus cookie import. Rejected: needs access to browser profiles and breaks with browser updates.
 
 ### Runtime directory and session file
 All state lives under `BT_RUNTIME_DIR`, which is required: the app and probe exit with an error naming the variable when it is missing. `run.sh` sets it to `<repo>/.runtime`. Layout: `session.json` (mode 0600: cookies with domain/path/expiry, uid, guid), `cache/<uid>.sqlite`, `media/<uid>/` (avatar and thumbnail bytes). Alternative: macOS Keychain. Deferred by the user's choice while in development.
 
 ### Chat list and history loading
-Startup: cached state → `whoami` → chat list → subscribe. History: WS `history` by `ChatId` with `MaxTimestamp`/`Limit` = 50, newest first. The exact chat-list call (dedicated method versus per-chat `history` with `Limit:1`, as the MCP research describes) is fixed by the first spike task against the live account before UI work starts.
+Startup: cached state → HTTP bootstrap (`request_user`) → chat list → subscribe. History: WS `history` by `ChatId` with `MaxTimestamp`/`Limit` = 50, newest first. The exact chat-list call (dedicated method versus per-chat `history` with `Limit:1`, as the MCP research describes) is fixed by the first spike task against the live account before UI work starts.
 
 ### Cache
 SQLite with `PRAGMA user_version` migrations; tables `chats` and `messages` keyed by server IDs/timestamps, storing normalized columns for ordering plus the raw JSON payload so later changes can render more fields without a resync. Server chunks replace the cached range they cover, which removes messages deleted on the server.
@@ -61,7 +61,7 @@ Avatars and image thumbnails are fetched with the session cookies, stored under 
 The current GPUI layout is kept and bound to `ChatStore`. The composer and thread reply inputs become disabled controls with a read-only notice. The demo "meetings" filter, mute toggle and synthetic info panel are removed.
 
 ### Verification without windows on the host
-- Protocol and cache: unit tests on recorded frames (secrets stripped) and `bt-probe` commands (`whoami`, `chats`, `history <chat>`, `listen`) run on the host against the stored session; the probe never prints cookie values.
+- Protocol and cache: unit tests on recorded frames (secrets stripped) and `bt-probe` commands (`me`, `chats`, `history <chat>`, `listen`) run on the host against the stored session; the probe never prints cookie values.
 - UI: GPUI `test-support` headless tests (`TestAppContext`/`VisualTestContext`) drive `ChatStore` with fixture events.
 - Visual end-to-end: a macOS VM under Tart started with `--no-graphics`, screenshots taken inside the VM. Installing Tart is system configuration and needs the user's approval before that task starts.
 - The only window on the host is the one-time sign-in that the user starts.
