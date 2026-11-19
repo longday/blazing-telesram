@@ -15,4 +15,6 @@ lto = "thin"
 codegen-units = 8
 
 [patch.crates-io]
+block = { path = "vendor/block" }
+proc-macro-error2 = { path = "vendor/proc-macro-error2" }
 xattr = { path = "vendor/xattr" }

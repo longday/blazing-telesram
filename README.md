@@ -33,4 +33,4 @@ BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe
 
 ## License
 
-Original code is MIT. See [THIRD_PARTY.md](THIRD_PARTY.md) for the separately licensed GPUI input example and xattr compatibility copy.
+Original code is MIT. See [THIRD_PARTY.md](THIRD_PARTY.md) for the separately licensed GPUI input example and the patched dependency copies in `vendor/`.
