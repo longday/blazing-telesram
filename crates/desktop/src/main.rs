@@ -181,6 +181,10 @@ impl Render for Desktop {
     }
 }
 fn main() {
+    if let Err(error) = yandex_proto::runtime::RuntimeDir::from_env() {
+        eprintln!("{error}");
+        std::process::exit(2);
+    }
     Application::new().run(|cx:&mut App| {
         input::bind(cx);
         cx.bind_keys([KeyBinding::new("enter",Send,Some("Composer")),KeyBinding::new("enter",ThreadSend,Some("ThreadComposer")),KeyBinding::new("cmd-f",Search,Some("BlazingTelesram")),KeyBinding::new("ctrl-f",Search,Some("BlazingTelesram")),KeyBinding::new("cmd-q",Quit,None)]);

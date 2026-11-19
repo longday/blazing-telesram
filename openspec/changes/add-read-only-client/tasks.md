@@ -2,8 +2,8 @@
 
 ## 1. Foundation
 
-- [ ] 1.1 Add `crates/yandex-proto` to the workspace with the pinned dependencies from design.md (rechecked on crates.io); verify `cargo build --locked --workspace` succeeds
-- [ ] 1.2 Require `BT_RUNTIME_DIR` in the app (exit with an error naming the variable when missing), export it to `<repo>/.runtime` in `run.sh`, add `/.runtime/` to `.gitignore`; verify the app fails fast without it and `git check-ignore .runtime/x` matches
+- [x] 1.1 Add `crates/yandex-proto` to the workspace with the pinned dependencies from design.md (rechecked on crates.io); verify `cargo build --locked --workspace` succeeds
+- [x] 1.2 Require `BT_RUNTIME_DIR` in the app (exit with an error naming the variable when missing), export it to `<repo>/.runtime` in `run.sh`, add `/.runtime/` to `.gitignore`; verify the app fails fast without it and `git check-ignore .runtime/x` matches
 - [ ] 1.3 Implement the session file (cookies with domain/path/expiry, uid, guid) written atomically with mode 0600 and a redacting `Debug`; verify unit tests cover round-trip, permissions and absence of cookie values in `Debug` output
 
 ## 2. Sign-in

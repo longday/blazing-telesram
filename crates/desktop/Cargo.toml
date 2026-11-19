@@ -9,3 +9,4 @@ bt-chat-core = { path = "../chat-core" }
 # Compile Metal shaders at runtime: building them ahead of time needs full Xcode.
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 unicode-segmentation = "1.12"
+yandex-proto = { path = "../yandex-proto" }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/chat-core", "crates/desktop"]
+members = ["crates/chat-core", "crates/desktop", "crates/yandex-proto"]
 resolver = "2"
 
 [workspace.package]

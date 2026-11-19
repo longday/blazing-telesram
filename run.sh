@@ -16,4 +16,7 @@ fi
 # Install the toolchain pinned in rust-toolchain.toml when missing.
 rustup toolchain install --no-self-update
 
+export BT_RUNTIME_DIR="$PWD/.runtime"
+mkdir -p -m 700 "$BT_RUNTIME_DIR"
+
 exec cargo run --locked --release -p blazing-telesram "$@"
