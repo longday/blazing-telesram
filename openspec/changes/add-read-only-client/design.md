@@ -58,7 +58,13 @@ SQLite with `PRAGMA user_version` migrations; tables `chats` and `messages` keye
 Avatars and image thumbnails are fetched with the session cookies, stored under `media/<uid>/`, and decoded with the `image` crate already in the dependency tree; GPUI renders them with `img()`. Request concurrency is bounded (4) so a long chat list does not flood the file host.
 
 ### UI binding
-The current GPUI layout is kept and bound to `ChatStore`. The composer and thread reply inputs become disabled controls with a read-only notice. The demo "meetings" filter, mute toggle and synthetic info panel are removed.
+The current GPUI layout is kept and bound to `ChatStore`. The composer becomes a disabled control with a read-only notice. The demo "meetings" filter, mute toggle and synthetic info panel are removed; the thread panel goes too, because the model has no threads yet. The sidebar filter is one of All / Private / Groups / Channels / Unread.
+
+### Composition
+`desktop` is the composition root: `yandex_backend.rs` implements `chat-core`'s `Backend` over `yandex-proto` (wire → domain mapping, user-name lookup via `get_users_data`), so neither library depends on the other. Bootstrap waits for the Xiva `Connected` event (30 s deadline) before any WS request, because the socket actor rejects requests until subscribed. A `ChatChanged` push re-reads the chat list to emit the authoritative row. File downloads are out of scope; file cards show name and size only. Sign-in verification runs the HTTP bootstrap on a throwaway Tokio runtime; expiry and sign-out reopen the sign-in window.
+
+### Live edits racing history fetches
+The engine keeps the last 256 live changes per chat and replays those newer than a request's start over its history snapshot before replacing the cached range, so a fetch answered after a live delete or edit cannot resurrect or revert it.
 
 ### Verification without windows on the host
 - Protocol and cache: unit tests on recorded frames (secrets stripped) and `bt-probe` commands (`me`, `chats`, `history <chat>`, `listen`) run on the host against the stored session; the probe never prints cookie values.

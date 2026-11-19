@@ -1,0 +1,4 @@
+{
+  "ClientMessage": { "Plain": { "ChatId": "0/0/33333333-3333-4333-8333-333333333333", "Text": { "MessageText": "edited via push" } } },
+  "ServerMessageInfo": { "Timestamp": 1784000000001001, "SeqNo": 1, "Version": 3, "LastEditTimestamp": 1784000000020000, "From": { "Guid": "g-anna", "DisplayName": "Anna" } }
+}

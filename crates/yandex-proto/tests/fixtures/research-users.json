@@ -1,0 +1,9 @@
+{
+  "status": "ok",
+  "data": {
+    "users": [
+      { "guid": "g-anna", "display_name": "Anna Test", "avatar_id": "user_avatar/yapic/1/a", "uid": 4001 },
+      { "guid": "g-boris", "display_name": "Boris Test", "avatar_id": "", "uid": "4002" }
+    ]
+  }
+}

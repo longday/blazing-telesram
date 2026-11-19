@@ -1,0 +1,4 @@
+{
+  "ClientMessage": { "Plain": { "ChatId": "0/0/33333333-3333-4333-8333-333333333333" } },
+  "ServerMessageInfo": { "Timestamp": 1784000000001002, "SeqNo": 2, "Version": 4, "Deleted": true, "From": { "Guid": "g-anna", "DisplayName": "Anna" } }
+}

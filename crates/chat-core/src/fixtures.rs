@@ -1,0 +1,35 @@
+//! Shared builders for unit tests.
+
+use crate::model::*;
+
+pub fn chat(id: &str, last: Option<MessageTs>, pinned: Option<u32>) -> ChatSummary {
+    ChatSummary {
+        id: ChatId(id.into()),
+        kind: ChatKind::Group,
+        title: format!("chat {id}"),
+        avatar: None,
+        last_message: last.map(|timestamp| MessagePreview { author: None, text: "x".into(), timestamp }),
+        unread: 0,
+        muted: false,
+        pinned_rank: pinned,
+    }
+}
+
+pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
+    Message {
+        chat: ChatId(chat.into()),
+        timestamp: ts,
+        author: UserId("u".into()),
+        author_name: None,
+        author_avatar: None,
+        outgoing: false,
+        body: MessageBody::Text(text.into()),
+        edited: false,
+        reply_to: None,
+        forwarded_from: None,
+    }
+}
+
+pub fn id(chat: &str) -> ChatId {
+    ChatId(chat.into())
+}

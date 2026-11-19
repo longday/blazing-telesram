@@ -1,0 +1,42 @@
+{
+  "Chats": [
+    {
+      "ChatId": "11111111-1111-4111-8111-111111111111_22222222-2222-4222-8222-222222222222",
+      "PrivateChatInfo": {},
+      "PartnerInfo": { "Guid": "22222222-2222-4222-8222-222222222222", "DisplayName": "Boris Test", "PublicName": "boris", "AvatarId": "user_avatar/yapic/1000/abcdef" },
+      "LastSeqNo": 10,
+      "LastSeenByMeSeqNo": 7,
+      "LastTsMcs": 1784117592261029,
+      "Messages": [
+        { "ServerMessage": {
+          "ClientMessage": { "Plain": { "ChatId": "11111111-1111-4111-8111-111111111111_22222222-2222-4222-8222-222222222222", "Text": { "MessageText": "See you at the call" } } },
+          "ServerMessageInfo": { "Timestamp": 1784117592261029, "SeqNo": 10, "Version": 1, "From": { "Guid": "22222222-2222-4222-8222-222222222222", "DisplayName": "Boris Test" } }
+        } }
+      ]
+    },
+    {
+      "ChatId": "0/0/33333333-3333-4333-8333-333333333333",
+      "ChatInfo": { "Name": "Team chat", "AvatarId": "user_avatar/mssngr/2000/ghijkl" },
+      "Muted": true,
+      "LastSeqNo": 120,
+      "LastSeenByMeSeqNo": 120,
+      "LastTsMcs": 1784117000000000,
+      "Messages": []
+    },
+    {
+      "ChatId": "1/0/44444444-4444-4444-8444-444444444444",
+      "ChatInfo": { "Name": "Announcements" },
+      "LastSeqNo": 5,
+      "LastSeenByMeSeqNo": 2,
+      "LastTsMcs": 1784000000000000,
+      "Messages": [
+        { "ServerMessage": {
+          "ClientMessage": { "Plain": { "ChatId": "1/0/44444444-4444-4444-8444-444444444444", "Image": { "FileInfo": { "Id2": "bucket-a/55555555-5555-4555-8555-555555555555", "Name": "pic.png", "Size": 2048 }, "Width": 640, "Height": 480 } } },
+          "ServerMessageInfo": { "Timestamp": 1784000000000000, "SeqNo": 5, "CustomFrom": { "DisplayName": "Announcements" } }
+        } }
+      ]
+    },
+    { "ChatId": "95/0/66666666-6666-4666-8666-666666666666", "ChatInfo": { "Name": "Excluded by namespace 95" }, "Messages": [] },
+    { "ChatId": "5/0/77777777-7777-4777-8777-777777777777", "ChatInfo": { "Name": "Excluded by namespace 5" }, "Messages": [] }
+  ]
+}

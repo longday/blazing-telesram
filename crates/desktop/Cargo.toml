@@ -5,10 +5,18 @@ edition.workspace = true
 license = "MIT AND Apache-2.0"
 
 [dependencies]
+async-channel = "=2.5.0"
 bt-chat-core = { path = "../chat-core" }
 cookie = "=0.18.2"
 # Compile Metal shaders at runtime: building them ahead of time needs full Xcode.
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
+tokio = { version = "=1.54.1", features = ["rt", "time", "sync"] }
 unicode-segmentation = "1.12"
-yandex-proto = { path = "../yandex-proto" }
 wry = "=0.57.3"
+yandex-proto = { path = "../yandex-proto" }
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
+serde_json = "=1.0.154"
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", features = ["macros", "test-util"] }
