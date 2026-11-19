@@ -10,13 +10,13 @@
 
 - [x] 2.1 Implement the HTTP bootstrap in `yandex-proto` on a plain cookie set (no stored session, no WebSocket): CSRF token from `…/registry/csrf-token/`, then `request_user` with `{bind_phone_number: false}` and `X-CSRF-TOKEN`, parsing `uid`/`guid`/display name and mapping cookie rejection (401, `invalid_cookies`, `not_authorized`, `no_credentials`, `cookie_auth_failed`) to session expiry and `bad_csrf_token` to a CSRF error; verify unit tests on synthetic responses cover success and each error
 - [x] 2.2 Open a GPUI sign-in window with an incognito `wry` WebView child on `https://telemost.yandex.ru/` when no session exists, poll `yandex.ru` cookies, and once `Session_id` appears run the 2.1 bootstrap with them; save the session (cookies, uid, guid) and close only on success; closing the window quits without writing; verify unit tests for cookie-to-session conversion pass
-- [ ] 2.3 Add `bt-probe me` (bootstrap on the stored session); verify it prints uid, guid and display name and no cookie values
-- [ ] 2.4 Ask the user to run the one-time sign-in with their Yandex 360 account; verify `.runtime/session.json` exists with mode 0600, `bt-probe me` succeeds, and record in design.md which cookie domains the org sign-in produced
+- [x] 2.3 Add `bt-probe me` (bootstrap on the stored session); verify it prints uid, guid and display name and no cookie values
+- [x] 2.4 Ask the user to run the one-time sign-in with their Yandex 360 account; verify `.runtime/session.json` exists with mode 0600, `bt-probe me` succeeds, and record in design.md which cookie domains the org sign-in produced
 
 ## 3. Protocol spike
 
 - [x] 3.1 Implement the WS frame codec (request header, `0x05` separator, JSON body, push frames `0x03`); verify encode/decode unit tests on synthetic frames
-- [ ] 3.2 Connect to Xiva with the stored session and `user=<uid>` from the bootstrap (fallback `guid`) and wait for the `subscribed` operation frame in `bt-probe listen --raw`; verify the subscription id is printed and no cookie values
+- [x] 3.2 Connect to Xiva with the stored session and `user=<uid>` from the bootstrap (fallback `guid`) and wait for the `subscribed` operation frame in `bt-probe listen --raw`; verify the subscription id is printed and no cookie values
 - [ ] 3.3 Determine the chat-list and history calls, the Xiva service string and event types on the live account; record them in design.md; save secret-free fixtures under `crates/yandex-proto/tests/fixtures/`
 - [ ] 3.4 Check read-call side effects: verify with `bt-probe` that unread counters are unchanged after reading history, and record whether connecting publishes presence (ask the user to look at their status from another device); stop and revisit specs with the user if any side effect exists
 
@@ -25,7 +25,7 @@
 - [x] 4.1 Implement the closed `ReadRequest` set and its encoding; verify a unit test rejects any encoded method outside the read allowlist
 - [x] 4.2 Implement chat list, history chunks (50, `MaxTimestamp` paging), users data and media fetch (avatars, thumbnails) on fixtures; verify parsing tests for every fixture, including deleted, edited, forwarded, reply, image, file and unknown message types
 - [x] 4.3 Implement Xiva subscription, push decoding into message upsert/delete and chat events, reconnect with backoff from 11 s, and `SessionExpired` on auth rejection; verify unit tests with a fake socket cover reconnect and expiry
-- [ ] 4.4 Add `bt-probe chats`, `bt-probe history <chat>` and `bt-probe listen`; verify each against the live account without windows and without cookie values in output
+- [x] 4.4 Add `bt-probe chats`, `bt-probe history <chat>` and `bt-probe listen`; verify each against the live account without windows and without cookie values in output
 
 ## 5. Core: model, cache, sync
 
