@@ -6,7 +6,7 @@ use gpui::{
     Entity, EntityInputHandler, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
     ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
-    actions, div, fill, hsla, point, prelude::*, px, relative,
+    actions, div, fill, point, prelude::*, px, relative,
     rgb, rgba, size,
 };
 use unicode_segmentation::*;
@@ -246,16 +246,6 @@ impl TextInput {
             .grapheme_indices(true)
             .find_map(|(idx, _)| (idx > offset).then_some(idx))
             .unwrap_or(self.content.len())
-    }
-
-    fn reset(&mut self) {
-        self.content = "".into();
-        self.selected_range = 0..0;
-        self.selection_reversed = false;
-        self.marked_range = None;
-        self.last_layout = None;
-        self.last_bounds = None;
-        self.is_selecting = false;
     }
 }
 

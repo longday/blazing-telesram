@@ -4,9 +4,13 @@ use gpui::{
     App, Bounds, Context, IntoElement, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions, div, prelude::*, px, rgb, size,
 };
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::{Rc, Weak},
+    time::Duration,
+};
 use wry::{
-    Rect, WebView, WebViewBuilder,
+    NewWindowResponse, Rect, WebView, WebViewBuilder,
     dpi::{LogicalPosition, LogicalSize},
 };
 
@@ -67,6 +71,13 @@ fn has_session(cookies: &[LoginCookie]) -> bool {
     })
 }
 
+/// Scheme and host only: paths and queries of sign-in URLs may carry tokens.
+fn origin(url: &str) -> &str {
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    let end = url[after_scheme..].find(['/', '?', '#']).map_or(url.len(), |i| after_scheme + i);
+    &url[..end]
+}
+
 pub struct SignInWindow {
     webview: Option<Rc<WebView>>,
     paused: Rc<Cell<bool>>,
@@ -117,13 +128,31 @@ pub fn open_sign_in_window(
     let handle = cx
         .open_window(options, move |window, cx| {
             let paused = Rc::new(Cell::new(false));
+            // Weak: the handler lives inside the WebView it points at.
+            let this_view = Rc::new(RefCell::new(Weak::<WebView>::new()));
+            let popup_target = this_view.clone();
             let webview = WebViewBuilder::new()
                 .with_incognito(true)
                 .with_url(SIGN_IN_URL)
+                // Without a handler WebKit silently drops `window.open`/`target=_blank`, and the
+                // Telemost "Войти" button opens Passport that way. Cookies are polled, so the
+                // whole flow can run in this one view.
+                .with_new_window_req_handler(move |url, _| {
+                    eprintln!("sign-in: opening {} in the sign-in view", origin(&url));
+                    if let Some(view) = popup_target.borrow().upgrade()
+                        && let Err(error) = view.load_url(&url)
+                    {
+                        eprintln!("sign-in: cannot open the page: {error}");
+                    }
+                    NewWindowResponse::Deny
+                })
                 .build_as_child(&*window)
                 .map(Rc::new);
             let webview = match webview {
-                Ok(webview) => Some(webview),
+                Ok(webview) => {
+                    *this_view.borrow_mut() = Rc::downgrade(&webview);
+                    Some(webview)
+                }
                 Err(error) => {
                     build_failure.set(Some(error.to_string()));
                     None
@@ -228,5 +257,12 @@ mod tests {
         assert!(!has_session(&[cookie("sessionid2", "x", ".yandex.ru")]));
         assert!(!has_session(&[cookie("Session_id", "x", ".example.com")]));
         assert!(!has_session(&[cookie("Session_id", "x", ".notyandex.ru")]));
+    }
+
+    #[test]
+    fn origin_drops_path_and_query() {
+        assert_eq!(origin("https://passport.yandex.ru/auth?retpath=x&token=t"), "https://passport.yandex.ru");
+        assert_eq!(origin("https://sso.yandex.ru#frag"), "https://sso.yandex.ru");
+        assert_eq!(origin("about:blank"), "about:blank");
     }
 }
