@@ -15,7 +15,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SESSION_COOKIE: &str = "Session_id";
 const SESSION_DOMAIN: &str = "yandex.ru";
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct LoginCookie {
     pub name: String,
     pub value: String,
@@ -24,6 +24,21 @@ pub struct LoginCookie {
     pub expires_unix: Option<i64>,
     pub secure: bool,
     pub http_only: bool,
+}
+
+/// Never prints the value: it is a credential.
+impl std::fmt::Debug for LoginCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginCookie")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("domain", &self.domain)
+            .field("path", &self.path)
+            .field("expires_unix", &self.expires_unix)
+            .field("secure", &self.secure)
+            .field("http_only", &self.http_only)
+            .finish()
+    }
 }
 
 /// Missing domain becomes empty (WebKit always reports one), missing path `/`;

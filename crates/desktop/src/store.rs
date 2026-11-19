@@ -265,7 +265,7 @@ impl ChatStore {
         // A page without messages cannot make progress; treat it as the start so loading stops.
         timeline.reached_start |= chunk.reached_start || (older_page && chunk.messages.is_empty());
         let change = if timeline.loaded {
-            merge_chunk(&mut timeline.messages, chunk.messages)
+            merge_chunk(&mut timeline.messages, chunk.messages, chunk.replaces)
         } else {
             timeline.messages = normalized(chunk.messages);
             TimelineChange::Reset
@@ -338,12 +338,19 @@ fn normalized(mut messages: Vec<Message>) -> Vec<Message> {
     out
 }
 
-/// Replaces the span covered by `incoming` (so server-side removals vanish) and reports the change.
-fn merge_chunk(old: &mut Vec<Message>, incoming: Vec<Message>) -> TimelineChange {
+/// Replaces the range the core replaced (else the span covered by `incoming`), so server-side
+/// removals vanish, and reports the change.
+fn merge_chunk(
+    old: &mut Vec<Message>,
+    incoming: Vec<Message>,
+    replaces: Option<(Option<MessageTs>, Option<MessageTs>)>,
+) -> TimelineChange {
     let incoming = normalized(incoming);
-    let Some(span) = incoming.first().zip(incoming.last()).map(|(a, b)| a.timestamp..=b.timestamp) else {
+    let span = replaces.or_else(|| incoming.first().zip(incoming.last()).map(|(a, b)| (Some(a.timestamp), Some(b.timestamp))));
+    let Some((from, to)) = span else {
         return TimelineChange::Status;
     };
+    let covered = |ts: MessageTs| from.is_none_or(|f| ts >= f) && to.is_none_or(|t| ts <= t);
     let mut merged = Vec::with_capacity(old.len() + incoming.len());
     let mut incoming = incoming.into_iter().peekable();
     for existing in old.iter() {
@@ -352,7 +359,7 @@ fn merge_chunk(old: &mut Vec<Message>, incoming: Vec<Message>) -> TimelineChange
         }
         if incoming.peek().is_some_and(|m| m.timestamp == existing.timestamp) {
             merged.extend(incoming.next());
-        } else if !span.contains(&existing.timestamp) {
+        } else if !covered(existing.timestamp) {
             merged.push(existing.clone());
         }
     }
@@ -408,7 +415,7 @@ mod tests {
     #[test]
     fn older_page_is_a_prepend() {
         let mut old = vec![msg(3, "c"), msg(4, "d")];
-        let change = merge_chunk(&mut old, vec![msg(1, "a"), msg(2, "b")]);
+        let change = merge_chunk(&mut old, vec![msg(1, "a"), msg(2, "b")], None);
         assert_eq!(change, TimelineChange::Delta { prepended: 2, appended: 0, touched: vec![] });
         assert_eq!(texts(&old), [1, 2, 3, 4]);
     }
@@ -416,7 +423,7 @@ mod tests {
     #[test]
     fn catch_up_chunk_appends_and_updates() {
         let mut old = vec![msg(1, "a"), msg(2, "b"), msg(3, "c")];
-        let change = merge_chunk(&mut old, vec![msg(2, "b"), msg(3, "C"), msg(4, "d")]);
+        let change = merge_chunk(&mut old, vec![msg(2, "b"), msg(3, "C"), msg(4, "d")], None);
         assert_eq!(change, TimelineChange::Delta { prepended: 0, appended: 1, touched: vec![2] });
         assert_eq!(texts(&old), [1, 2, 3, 4]);
     }
@@ -424,7 +431,7 @@ mod tests {
     #[test]
     fn chunk_replaces_its_span() {
         let mut old = vec![msg(1, "a"), msg(2, "b"), msg(3, "c")];
-        let change = merge_chunk(&mut old, vec![msg(1, "a"), msg(3, "c")]);
+        let change = merge_chunk(&mut old, vec![msg(1, "a"), msg(3, "c")], None);
         assert_eq!(change, TimelineChange::Reset);
         assert_eq!(texts(&old), [1, 3]);
     }
@@ -432,7 +439,7 @@ mod tests {
     #[test]
     fn empty_chunk_changes_nothing() {
         let mut old = vec![msg(1, "a")];
-        assert_eq!(merge_chunk(&mut old, vec![]), TimelineChange::Status);
+        assert_eq!(merge_chunk(&mut old, vec![], None), TimelineChange::Status);
         assert_eq!(texts(&old), [1]);
     }
 

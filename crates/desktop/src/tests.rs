@@ -83,11 +83,12 @@ fn chunk(chat_id: &str, range: std::ops::RangeInclusive<i64>, reached_start: boo
         chat: ChatId(chat_id.into()),
         messages: range.map(|i| text(chat_id, i)).collect(),
         reached_start,
+        replaces: None,
     })
 }
 
 fn history(chat_id: &str, messages: Vec<Message>, reached_start: bool) -> ClientEvent {
-    ClientEvent::History(HistoryChunk { chat: ChatId(chat_id.into()), messages, reached_start })
+    ClientEvent::History(HistoryChunk { chat: ChatId(chat_id.into()), messages, reached_start, replaces: None })
 }
 
 fn media(id: &str, kind: MediaKind) -> MediaRef {
@@ -251,6 +252,27 @@ fn store_applies_events_and_issues_commands(cx: &mut TestAppContext) {
         assert!(s.selected().is_none());
     });
     assert!(h.commands().is_empty(), "nothing else was sent");
+}
+
+#[gpui::test]
+fn catch_up_drops_messages_deleted_beyond_the_returned_span(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.store.update(cx, |s, cx| s.select(ChatId("b".into()), cx));
+    h.feed(cx, [chunk("b", 1..=3, true)]);
+    let stamps = |h: &Harness, cx: &mut VisualTestContext| {
+        h.store.read_with(cx, |s, _| {
+            s.timeline(&ChatId("b".into())).unwrap().messages.iter().map(|m| m.timestamp).collect::<Vec<_>>()
+        })
+    };
+    // Messages 2 and 3 were deleted while offline; the core replaced everything from 1 on.
+    let catch_up = |messages, replaces| {
+        ClientEvent::History(HistoryChunk { chat: ChatId("b".into()), messages, reached_start: false, replaces })
+    };
+    h.feed(cx, [catch_up(vec![text("b", 1)], Some((Some(ts(1)), None)))]);
+    assert_eq!(stamps(&h, cx), [ts(1)]);
+    // An empty chunk that replaced the whole history clears it.
+    h.feed(cx, [catch_up(vec![], Some((None, None)))]);
+    assert!(stamps(&h, cx).is_empty());
 }
 
 // ---- 6.2 chat list ----

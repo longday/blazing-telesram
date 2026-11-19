@@ -612,6 +612,11 @@ impl TextInput {
     pub fn new(placeholder: &str, cx: &mut Context<Self>) -> Self {
         Self { focus_handle: cx.focus_handle(), content: "".into(), placeholder: placeholder.to_owned().into(), selected_range: 0..0, selection_reversed: false, marked_range: None, last_layout: None, last_bounds: None, is_selecting: false }
     }
+    #[cfg(test)]
+    pub fn set(&mut self, text: String, cx: &mut Context<Self>) {
+        self.selected_range = text.len()..text.len(); self.content = text.into();
+        self.marked_range = None; self.last_layout = None; cx.notify();
+    }
 }
 pub fn bind(cx: &mut App) {
     cx.bind_keys([

@@ -67,9 +67,16 @@ pub struct Message {
     pub forwarded_from: Option<String>,
 }
 
-/// Messages ordered oldest to newest, all older than `before` when paging.
+/// Messages ordered oldest to newest, all older than `before` when paging. `replaces` is the
+/// inclusive timestamp range (`None` bound = open) this chunk authoritatively replaced in the
+/// cache; without it a chunk only vouches for the span of its own messages.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct HistoryChunk { pub chat: ChatId, pub messages: Vec<Message>, pub reached_start: bool }
+pub struct HistoryChunk {
+    pub chat: ChatId,
+    pub messages: Vec<Message>,
+    pub reached_start: bool,
+    pub replaces: Option<(Option<MessageTs>, Option<MessageTs>)>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState { Connecting, Online, Offline }

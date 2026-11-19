@@ -90,19 +90,20 @@ impl Backend for YandexBackend {
         let wanted = chats.iter().flat_map(|c| {
             c.partner_guid.iter().chain(c.last_message.iter().filter_map(|m| m.from.as_ref()?.guid.as_ref()))
         });
-        users.load(wanted.cloned().collect()).await;
+        users.load(wanted.cloned().collect()).await?;
         Ok(chats.iter().map(|c| summary(c, &me, &self.users.lock().unwrap())).collect())
     }
 
     async fn history(&self, chat: &ChatId, before: Option<MessageTs>, _limit: usize) -> Result<HistoryChunk, BackendError> {
         let (client, me) = self.client()?;
         let page = client.history(&chat.0, before).await.map_err(backend_error)?;
-        Users { client: &client, cache: &self.users }.load(authors(&page.messages)).await;
+        Users { client: &client, cache: &self.users }.load(authors(&page.messages)).await?;
         let users = self.users.lock().unwrap();
         Ok(HistoryChunk {
             chat: chat.clone(),
             messages: page.messages.iter().map(|m| message(m, &me, &users)).collect(),
             reached_start: page.reached_start,
+            replaces: None,
         })
     }
 
@@ -133,9 +134,10 @@ impl Backend for YandexBackend {
                     XivaEvent::Disconnected { .. } => vec![LiveEvent::Disconnected],
                     XivaEvent::SessionExpired => vec![LiveEvent::Failed(BackendError::SessionExpired)],
                     XivaEvent::Push(PushEvent::MessageUpserted(wire)) => {
-                        Users { client: &client, cache: &users }.load(authors(std::slice::from_ref(&wire))).await;
-                        let message = message(&wire, &me, &users.lock().unwrap());
-                        vec![LiveEvent::MessageUpserted(message)]
+                        match (Users { client: &client, cache: &users }).load(authors(std::slice::from_ref(&wire))).await {
+                            Ok(()) => vec![LiveEvent::MessageUpserted(message(&wire, &me, &users.lock().unwrap()))],
+                            Err(error) => vec![LiveEvent::Failed(error)],
+                        }
                     }
                     XivaEvent::Push(PushEvent::MessageDeleted { chat, timestamp }) => {
                         vec![LiveEvent::MessageDeleted { chat: ChatId(chat), timestamp }]
@@ -145,6 +147,8 @@ impl Backend for YandexBackend {
                             let users = users.lock().unwrap();
                             chats.iter().filter(|c| c.id == chat).map(|c| LiveEvent::ChatChanged(summary(c, &me, &users))).collect()
                         }
+                        Err(ProtoError::SessionExpired) => vec![LiveEvent::Failed(BackendError::SessionExpired)],
+                        // A missed row update is repaired by the next chat-list fetch.
                         Err(_) => vec![],
                     },
                     XivaEvent::Push(PushEvent::Ignored { .. })
@@ -170,7 +174,9 @@ struct Users<'a> {
 }
 
 impl Users<'_> {
-    async fn load(&self, mut guids: Vec<String>) {
+    /// Names are cosmetic: a failed lookup leaves the fallbacks in place. Only session
+    /// rejection is an error, because then nothing else will work either.
+    async fn load(&self, mut guids: Vec<String>) -> Result<(), BackendError> {
         {
             let cache = self.cache.lock().unwrap();
             guids.retain(|g| !cache.contains_key(g));
@@ -178,12 +184,16 @@ impl Users<'_> {
         guids.sort();
         guids.dedup();
         if guids.is_empty() {
-            return;
+            return Ok(());
         }
-        // Names are cosmetic: a failed lookup leaves the fallbacks in place.
-        if let Ok(found) = self.client.users(&guids).await {
-            let mut cache = self.cache.lock().unwrap();
-            cache.extend(found.into_iter().map(|u| (u.guid.clone(), u)));
+        match self.client.users(&guids).await {
+            Ok(found) => {
+                let mut cache = self.cache.lock().unwrap();
+                cache.extend(found.into_iter().map(|u| (u.guid.clone(), u)));
+                Ok(())
+            }
+            Err(ProtoError::SessionExpired) => Err(BackendError::SessionExpired),
+            Err(_) => Ok(()),
         }
     }
 }

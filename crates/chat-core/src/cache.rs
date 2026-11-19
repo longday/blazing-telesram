@@ -142,7 +142,7 @@ impl Cache {
         let more = messages.len() > limit;
         messages.truncate(limit);
         messages.reverse();
-        Ok(HistoryChunk { chat: chat.clone(), messages, reached_start: !more && self.history_start(chat)? })
+        Ok(HistoryChunk { chat: chat.clone(), messages, reached_start: !more && self.history_start(chat)?, replaces: None })
     }
 
     pub fn message(&self, chat: &ChatId, ts: MessageTs) -> Result<Option<Message>, CacheError> {

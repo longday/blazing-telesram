@@ -66,7 +66,7 @@ impl ChatClient {
     /// Starts the client thread. The cache is opened on that thread, so this returns at once
     /// and the cached chats arrive as the first event.
     pub fn spawn<B: Backend>(backend: B, config: ClientConfig) -> io::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let (commands, command_rx) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
         std::thread::Builder::new().name("chat-client".into()).spawn(move || {
@@ -326,6 +326,7 @@ impl<B: Backend> Engine<B> {
                         chat: chat.clone(),
                         messages: Vec::new(),
                         reached_start: false,
+                        replaces: None,
                     })),
                     _ => {}
                 }
@@ -353,7 +354,7 @@ impl<B: Backend> Engine<B> {
         let limit = self.config.history_limit;
         let chunk = self
             .db(self.cache.history(&chat, Some(before), limit))
-            .unwrap_or(HistoryChunk { chat, messages: Vec::new(), reached_start: false });
+            .unwrap_or(HistoryChunk { chat, messages: Vec::new(), reached_start: false, replaces: None });
         self.emit(ClientEvent::History(chunk));
     }
 
@@ -644,6 +645,7 @@ impl<B: Backend> Engine<B> {
         replay_live(&mut chunk.messages, &raced, lo, hi);
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
+        chunk.replaces = Some((lo, hi));
         chunk
     }
 
@@ -773,7 +775,7 @@ mod tests {
                     .collect();
                 let reached_start = older.len() <= limit;
                 let messages = older[older.len().saturating_sub(limit)..].to_vec();
-                (HistoryChunk { chat: chat.clone(), messages, reached_start }, s.history_gate.clone())
+                (HistoryChunk { chat: chat.clone(), messages, reached_start, replaces: None }, s.history_gate.clone())
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -1088,6 +1090,8 @@ mod tests {
             unreachable!()
         };
         assert!(!chunk.reached_start);
+        // The UI must drop its older messages too: the whole history was replaced.
+        assert_eq!(chunk.replaces, Some((None, None)));
         let cached = h.cache().history(&id("a"), None, 50).unwrap();
         assert_eq!(stamps(&cached), [5, 6]);
         assert!(!cached.reached_start);

@@ -380,7 +380,9 @@ impl<C: Connector> Actor<C> {
                             if self.config.raw {
                                 self.emit(XivaEvent::Wire(WireRecord::Frame(frame.clone())));
                             }
-                            self.on_frame(frame, &mut pending);
+                            if self.on_frame(frame, &mut pending) {
+                                break End::Expired;
+                            }
                         }
                     },
                     SocketEvent::Closed { code, reason } => {
@@ -459,11 +461,13 @@ impl<C: Connector> Actor<C> {
         (end, established)
     }
 
-    fn on_frame(&self, frame: IncomingFrame, pending: &mut HashMap<u64, Pending>) {
+    /// Returns true when a reply says the session is rejected: nothing on this socket can work then.
+    fn on_frame(&self, frame: IncomingFrame, pending: &mut HashMap<u64, Pending>) -> bool {
         match frame {
             IncomingFrame::Reply { req_id, body, .. } => {
                 let Some(p) = pending.remove(&req_id) else {
-                    return self.emit(XivaEvent::Warning(format!("reply {req_id} without a request")));
+                    self.emit(XivaEvent::Warning(format!("reply {req_id} without a request")));
+                    return false;
                 };
                 let mismatch = body.get("RequestId").and_then(Json::as_str).is_some_and(|r| r != p.request_id);
                 let result = if mismatch {
@@ -471,16 +475,20 @@ impl<C: Connector> Actor<C> {
                 } else {
                     check_status(&body).map(|()| body)
                 };
+                let rejected = matches!(result, Err(ProtoError::SessionExpired));
                 match p.reply {
                     Some(reply) => {
                         let _ = reply.send(result);
                     }
+                    // A rejected session is reported as `SessionExpired` once the socket ends.
+                    None if rejected => {}
                     None => {
                         if let Err(e) = result {
                             self.emit(XivaEvent::Warning(format!("subscribe refused: {e}")));
                         }
                     }
                 }
+                rejected
             }
             IncomingFrame::ProxyStatus { req_id, error_code } => {
                 if let Some(p) = pending.remove(&req_id)
@@ -488,12 +496,16 @@ impl<C: Connector> Actor<C> {
                 {
                     let _ = reply.send(Err(transport_error(error_code)));
                 }
+                false
             }
-            IncomingFrame::Push { body, .. } => match decode_push(&body) {
-                Ok(PushEvent::Ignored { .. }) => {}
-                Ok(event) => self.emit(XivaEvent::Push(event)),
-                Err(e) => self.emit(XivaEvent::Warning(format!("undecodable push: {e}"))),
-            },
+            IncomingFrame::Push { body, .. } => {
+                match decode_push(&body) {
+                    Ok(PushEvent::Ignored { .. }) => {}
+                    Ok(event) => self.emit(XivaEvent::Push(event)),
+                    Err(e) => self.emit(XivaEvent::Warning(format!("undecodable push: {e}"))),
+                }
+                false
+            }
         }
     }
 
@@ -696,7 +708,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn application_status_and_timeouts_map_to_errors() {
+    async fn rejected_reply_fails_the_request_and_expires_the_session() {
         let connector = FakeConnector::default();
         let mut server = connector.accept();
         let (handle, mut events) = start(&connector);
@@ -706,7 +718,16 @@ mod tests {
         let (req_id, _, _) = server.next_request().await;
         server.reply(req_id, "history", json!({ "Status": 6 }));
         assert_eq!(task.await.unwrap(), Err(ProtoError::SessionExpired));
+        assert_eq!(next(&mut events).await, XivaEvent::SessionExpired);
+        assert_eq!(connector.targets.lock().unwrap().len(), 1);
+    }
 
+    #[tokio::test(start_paused = true)]
+    async fn unanswered_request_times_out() {
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        next(&mut events).await;
         // No reply at all: the request times out while pings keep the connection alive.
         let h = handle.clone();
         let task = tokio::spawn(async move { h.chat_list(&[]).await });
@@ -858,6 +879,23 @@ mod tests {
         second.subscribed("sub2");
         let (_, _, body) = second.next_request().await;
         assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub2");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rejected_subscription_expires_the_session() {
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        next(&mut events).await;
+        handle.watch_chats(vec!["c1".into()]);
+        yield_now().await;
+        server.subscribed("sub1");
+        next(&mut events).await;
+        let (req_id, _, _) = server.next_request().await;
+        server.reply(req_id, "subscribe", json!({ "Status": 6 }));
+        assert_eq!(next(&mut events).await, XivaEvent::SessionExpired);
+        assert_eq!(handle.chat_list(&[]).await, Err(ProtoError::SessionExpired));
+        assert_eq!(connector.targets.lock().unwrap().len(), 1);
     }
 
     #[tokio::test(start_paused = true)]
