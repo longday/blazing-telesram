@@ -263,7 +263,13 @@ impl ChatStore {
         let timeline = self.timelines.entry(chunk.chat.clone()).or_default();
         let older_page = std::mem::take(&mut timeline.loading_older);
         // A page without messages cannot make progress; treat it as the start so loading stops.
-        timeline.reached_start |= chunk.reached_start || (older_page && chunk.messages.is_empty());
+        let start = chunk.reached_start || (older_page && chunk.messages.is_empty());
+        // A replacement open at the bottom redefines where the history starts.
+        if chunk.replaces.is_some_and(|(from, _)| from.is_none()) {
+            timeline.reached_start = start;
+        } else {
+            timeline.reached_start |= start;
+        }
         let change = if timeline.loaded {
             merge_chunk(&mut timeline.messages, chunk.messages, chunk.replaces)
         } else {

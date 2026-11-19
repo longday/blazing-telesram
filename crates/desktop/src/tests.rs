@@ -275,6 +275,24 @@ fn catch_up_drops_messages_deleted_beyond_the_returned_span(cx: &mut TestAppCont
     assert!(stamps(&h, cx).is_empty());
 }
 
+#[gpui::test]
+fn replacement_over_a_gap_reopens_older_loading(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let b = ChatId("b".into());
+    h.store.update(cx, |s, cx| s.select(b.clone(), cx));
+    h.feed(cx, [chunk("b", 1..=2, true)]);
+    assert!(h.commands().iter().all(|c| !matches!(c, Command::LoadOlder { .. })), "start known: no paging");
+    // The core dropped the cached history: the new chunk does not reach the start, so the
+    // short timeline pages backwards again.
+    h.feed(cx, [ClientEvent::History(HistoryChunk {
+        chat: b.clone(),
+        messages: vec![text("b", 5), text("b", 6)],
+        reached_start: false,
+        replaces: Some((None, None)),
+    })]);
+    assert!(h.commands().contains(&Command::LoadOlder { chat: b, before: ts(5) }));
+}
+
 // ---- 6.2 chat list ----
 
 #[gpui::test]
