@@ -1,0 +1,20 @@
+{
+  "telemost.list_chats": {
+    "arguments": {},
+    "payload": {"chats": [{"id":"group-demo","title":"Студия Север"}]}
+  },
+  "telemost.list_chat_messages": {
+    "arguments": {"chat_id":"group-demo"},
+    "payload": {"messages": [
+      {"id":"m1","text":"Следующее дизайн-ревью состоится в пятницу.","reply_count":2},
+      {"id":"m2","text":"Документы уже добавлены в повестку.","reply_count":0}
+    ]}
+  },
+  "telemost.list_thread_messages": {
+    "arguments": {"chat_id":"group-demo","root_id":"m1"},
+    "payload": {"messages": [
+      {"id":"r1","text":"Я обновлю макеты к четвергу.","reply_count":0},
+      {"id":"r2","text":"Обсудим также поиск по чатам.","reply_count":0}
+    ]}
+  }
+}

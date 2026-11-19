@@ -1,0 +1,10 @@
+[package]
+name = "blazing-telesram"
+version.workspace = true
+edition.workspace = true
+license = "MIT AND Apache-2.0"
+
+[dependencies]
+bt-chat-core = { path = "../chat-core" }
+gpui = "=0.2.2"
+unicode-segmentation = "1.12"
