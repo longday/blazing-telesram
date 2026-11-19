@@ -99,7 +99,7 @@ impl SignInWindow {
             size: LogicalSize::new(f64::from(f32::from(view.width)), f64::from(f32::from(view.height))).into(),
         };
         if let Err(error) = webview.set_bounds(bounds) {
-            eprintln!("sign-in webview resize failed: {error}");
+            tracing::warn!(%error, "sign-in webview resize failed");
         }
     }
 }
@@ -138,11 +138,11 @@ pub fn open_sign_in_window(
                 // Telemost "Войти" button opens Passport that way. Cookies are polled, so the
                 // whole flow can run in this one view.
                 .with_new_window_req_handler(move |url, _| {
-                    eprintln!("sign-in: opening {} in the sign-in view", origin(&url));
+                    tracing::info!(origin = %origin(&url), "sign-in: opening a page in the sign-in view");
                     if let Some(view) = popup_target.borrow().upgrade()
                         && let Err(error) = view.load_url(&url)
                     {
-                        eprintln!("sign-in: cannot open the page: {error}");
+                        tracing::warn!(%error, "sign-in: cannot open the page");
                     }
                     NewWindowResponse::Deny
                 })

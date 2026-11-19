@@ -15,3 +15,5 @@ pub const BADGE_MUTED: u32 = 0x4b5967;
 pub const DIVIDER: u32 = 0x0b141c;
 pub const PLACEHOLDER: u32 = 0x22303f;
 pub const WARNING: u32 = 0x8a5a1f;
+pub const LOG_WARN: u32 = 0xe0a84f;
+pub const LOG_ERROR: u32 = 0xe06c6c;

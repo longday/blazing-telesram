@@ -1,16 +1,17 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
-use crate::desktop::{AccountMenu, Desktop};
+use crate::desktop::{AccountMenu, Desktop, ToggleLog};
 use crate::format::{fit_thumbnail, Clock};
+use crate::logging::{LogBuffer, LogLine};
 use crate::store::{ChatFilter, ChatStore, SessionState};
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
 use gpui::{
-    point, px, size, AppContext, Bounds, Context, Entity, ListState, Modifiers, Pixels, ScrollDelta, ScrollWheelEvent,
-    TestAppContext,
-    VisualTestContext,
+    point, px, size, AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, Pixels, ScrollDelta,
+    ScrollWheelEvent, TestAppContext, VisualTestContext,
 };
 use std::path::PathBuf;
+use std::time::Duration;
 
 const PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
@@ -811,4 +812,37 @@ fn expired_session_blocks_the_window_and_offers_sign_out(cx: &mut TestAppContext
     assert!(h.commands().is_empty(), "the overlay swallows clicks on the list");
     click(cx, "expired-sign-out");
     assert_eq!(h.commands(), [Command::SignOut]);
+}
+
+fn log_line(text: &str) -> LogLine {
+    LogLine { time_us: ts(1_000), level: tracing::Level::WARN, target: "yandex_proto::xiva".into(), text: text.into() }
+}
+
+#[gpui::test]
+fn log_window_opens_by_shortcut_follows_new_records_and_copies(cx: &mut TestAppContext) {
+    let buffer = LogBuffer::default();
+    buffer.push(log_line("disconnected reason=closed"));
+    cx.update(|cx| {
+        cx.set_global(buffer.clone());
+        cx.bind_keys([KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram"))]);
+    });
+    let (h, cx) = harness(cx);
+    let text = |cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.log_text());
+    assert_eq!(text(cx), None);
+
+    cx.simulate_keystrokes("cmd-shift-l");
+    assert!(shown(cx, "log-view"));
+    assert_eq!(text(cx).unwrap(), "00:00:00.001 WARN  yandex_proto::xiva disconnected reason=closed\n");
+
+    buffer.push(log_line("connecting"));
+    cx.executor().advance_clock(Duration::from_millis(300));
+    cx.run_until_parked();
+    assert!(text(cx).unwrap().ends_with("yandex_proto::xiva connecting\n"), "picked up without reopening");
+
+    click(cx, "log-copy");
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(copied, text(cx));
+
+    click(cx, "log-close");
+    assert_eq!(text(cx), None);
 }

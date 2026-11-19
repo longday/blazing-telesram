@@ -12,6 +12,8 @@ cookie = "=0.18.2"
 gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 tokio = { version = "=1.54.1", features = ["rt", "time", "sync"] }
 unicode-segmentation = "1.12"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "json", "std", "tracing-log"] }
 wry = "=0.57.3"
 yandex-proto = { path = "../yandex-proto" }
 

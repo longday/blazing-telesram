@@ -2,6 +2,7 @@ mod desktop;
 mod format;
 mod input;
 mod login;
+mod logging;
 mod store;
 mod theme;
 mod timeline;
@@ -12,7 +13,7 @@ mod tests;
 
 use bt_chat_core::model::UserId;
 use bt_chat_core::{ChatClient, ClientConfig};
-use desktop::{Desktop, Quit, Search};
+use desktop::{Desktop, Quit, Search, ToggleLog};
 use format::Clock;
 use gpui::{prelude::*, *};
 use login::{LoginCookie, SignInWindow};
@@ -23,18 +24,23 @@ use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::session::{Identity, Session, SessionCookie};
 
 fn main() {
-    let runtime = match RuntimeDir::from_env() {
-        Ok(runtime) => runtime,
+    // Nothing can be logged before the runtime directory and filter are known.
+    let runtime = RuntimeDir::from_env().map_err(|e| e.to_string());
+    let (runtime, log) = match runtime.and_then(|runtime| logging::init(runtime.path()).map(|log| (runtime, log))) {
+        Ok(started) => started,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
     Application::new().run(move |cx: &mut App| {
+        cx.set_global(log);
         input::bind(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-f", Search, Some("BlazingTelesram")),
             KeyBinding::new("ctrl-f", Search, Some("BlazingTelesram")),
+            KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram")),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -48,7 +54,7 @@ fn main() {
             Ok(Some(session)) => open_chat_window(runtime, session, cx),
             Ok(None) => open_sign_in(runtime, cx),
             Err(error) => {
-                eprintln!("cannot read the stored session: {error}");
+                tracing::error!(%error, "cannot read the stored session");
                 cx.quit();
             }
         }
@@ -99,12 +105,13 @@ fn open_sign_in(runtime: RuntimeDir, cx: &mut App) {
                 };
                 match saved {
                     Ok(session) => {
+                        tracing::info!("signed in");
                         // Open the next window first: closing the last one quits the app.
                         open_chat_window(runtime, session, cx);
                         let _ = handle.update(cx, |_, window, _| window.remove_window());
                     }
                     Err(error) => {
-                        eprintln!("sign-in verification failed: {error}");
+                        tracing::warn!(%error, "sign-in verification failed");
                         let _ = handle.update(cx, |view, _, _| view.resume_polling());
                     }
                 }
@@ -113,7 +120,7 @@ fn open_sign_in(runtime: RuntimeDir, cx: &mut App) {
         .detach();
     });
     if let Err(error) = opened {
-        eprintln!("cannot open the sign-in window: {error}");
+        tracing::error!(%error, "cannot open the sign-in window");
         cx.quit();
     }
 }
@@ -124,7 +131,7 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
     let client = match ChatClient::spawn(YandexBackend::new(session), config) {
         Ok(client) => client,
         Err(error) => {
-            eprintln!("cannot start the chat client: {error}");
+            tracing::error!(%error, "cannot start the chat client");
             return cx.quit();
         }
     };
@@ -151,7 +158,7 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
     let handle = match opened {
         Ok(handle) => handle,
         Err(error) => {
-            eprintln!("cannot open the chat window: {error}");
+            tracing::error!(%error, "cannot open the chat window");
             return cx.quit();
         }
     };

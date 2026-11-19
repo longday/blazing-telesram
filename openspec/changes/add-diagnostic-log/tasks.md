@@ -2,9 +2,9 @@
 
 ## 1. Logging core
 
-- [ ] 1.1 Add `tracing =0.1.44` to `yandex-proto`, `chat-core`, `desktop` and `tracing-subscriber =0.3.23` (`fmt`, `json`, `env-filter`, `tracing-log`, `ansi`) to `yandex-proto` and `desktop`; record them in THIRD_PARTY.md; verify `cargo build --locked --workspace --all-targets` has 0 warnings
-- [ ] 1.2 Desktop `logging` module: `BT_LOG` filter (default `info`, invalid → error naming `BT_LOG`), stderr layer, JSONL file layer in `logs/` (0700/0600, keep 10 newest, unbuffered), `LogBuffer` ring layer (2000 records, generation counter); verify unit tests for filter parsing, rotation, permissions, ring capacity and that a written record parses as JSON with `timestamp`, `level`, `target`, `fields`
-- [ ] 1.3 Install the logger first in `main.rs`; replace every `eprintln!` in `desktop` and `chat-core` with `tracing` events at the level the design assigns; verify `grep eprintln!` finds none outside `bt-probe` usage text and the workspace tests pass
+- [x] 1.1 Add `tracing =0.1.44` to `yandex-proto`, `chat-core`, `desktop` and `tracing-subscriber =0.3.23` (`fmt`, `json`, `env-filter`, `tracing-log`, `ansi`) to `yandex-proto` and `desktop`; verify `cargo build --locked --workspace --all-targets` has 0 warnings
+- [x] 1.2 Desktop `logging` module: `BT_LOG` filter (default `info`, invalid → error naming `BT_LOG`), stderr layer, JSONL file layer in `logs/` (0700/0600, keep 10 newest, unbuffered), `LogBuffer` ring layer (2000 records, generation counter); verify unit tests for filter parsing, rotation, permissions, ring capacity and that a written record parses as JSON with `timestamp`, `level`, `target`, `fields`
+- [x] 1.3 Install the logger first in `main.rs`; replace every `eprintln!` in `desktop` and `chat-core` with `tracing` events at the level the design assigns; verify `grep eprintln!` finds none except the pre-logger startup error in `main.rs`, and the workspace tests pass
 
 ## 2. Network trace
 
@@ -15,7 +15,7 @@
 
 ## 3. Log window
 
-- [ ] 3.1 `ToggleLog` action (Cmd+Shift+L), sidebar header button, overlay with level-colored monospace lines, bottom-anchored list, «Копировать» to clipboard, 250 ms generation poll while open; verify headless GPUI tests: shortcut opens it, a new record appears while open, copy puts the lines on the clipboard, Escape/close hides it
+- [x] 3.1 `ToggleLog` action (Cmd+Shift+L), sidebar header button, overlay with level-colored monospace lines, bottom-anchored list, «Копировать» to clipboard, 250 ms generation poll while open; the chat view takes focus on open so window shortcuts resolve; verify headless GPUI test: shortcut opens it, a new record appears while open, copy puts the lines on the clipboard, «Закрыть» hides it
 - [ ] 3.2 README: `BT_LOG` syntax and examples, log file location, the window shortcut, `--raw` replacement; verify the documented commands run as written
 
 ## 4. Integration

@@ -1,6 +1,7 @@
 //! Root view: chat list on the left, timeline on the right, read-only composer.
 
-use crate::format::{chat_time, one_line, Clock};
+use crate::format::{chat_time, log_time, one_line, Clock};
+use crate::logging::{LogBuffer, LogLine};
 use crate::input::TextInput;
 use crate::store::{ChatFilter, ChatStore, SessionState, StoreEvent, TimelineChange};
 use crate::theme::*;
@@ -9,8 +10,12 @@ use crate::widgets::{avatar, button};
 use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState};
 use gpui::{prelude::*, *};
 use std::ops::Range;
+use std::time::Duration;
 
-actions!(bt, [Search, Quit]);
+actions!(bt, [Search, Quit, ToggleLog]);
+
+/// How often an open log view looks for new records.
+const LOG_POLL: Duration = Duration::from_millis(250);
 
 const ROW_HEIGHT: f32 = 64.;
 const SIDEBAR_WIDTH: f32 = 340.;
@@ -37,6 +42,13 @@ struct OpenTimeline {
     list: ListState,
 }
 
+struct LogView {
+    lines: Vec<LogLine>,
+    generation: u64,
+    scroll: UniformListScrollHandle,
+    _poll: Task<()>,
+}
+
 pub struct Desktop {
     pub(crate) store: Entity<ChatStore>,
     clock: Clock,
@@ -44,6 +56,9 @@ pub struct Desktop {
     pub(crate) filter: ChatFilter,
     open: Option<OpenTimeline>,
     pub(crate) menu: AccountMenu,
+    log: Option<LogView>,
+    /// Focused when nothing else is, so window shortcuts resolve in this view's key context.
+    focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -59,7 +74,20 @@ impl Desktop {
                 }
             }),
         ];
-        Self { store, clock, search, filter: ChatFilter::All, open: None, menu: AccountMenu::Closed, _subscriptions: subscriptions }
+        // Keystrokes with nothing focused would skip this view's key context.
+        let focus = cx.focus_handle();
+        window.focus(&focus);
+        Self {
+            store,
+            clock,
+            search,
+            filter: ChatFilter::All,
+            open: None,
+            menu: AccountMenu::Closed,
+            log: None,
+            focus,
+            _subscriptions: subscriptions,
+        }
     }
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
@@ -70,6 +98,51 @@ impl Desktop {
         self.menu = AccountMenu::Closed;
         self.store.update(cx, |store, _| store.sign_out());
         cx.notify();
+    }
+
+    pub(crate) fn toggle_log(&mut self, cx: &mut Context<Self>) {
+        self.log = match self.log.take() {
+            Some(_) => None,
+            None => {
+                let poll = cx.spawn(async move |this, cx| loop {
+                    cx.background_executor().timer(LOG_POLL).await;
+                    if this.update(cx, |this, cx| this.refresh_log(cx)).is_err() {
+                        break;
+                    }
+                });
+                let mut view = LogView { lines: Vec::new(), generation: u64::MAX, scroll: UniformListScrollHandle::new(), _poll: poll };
+                Self::load_log(&mut view, cx);
+                Some(view)
+            }
+        };
+        cx.notify();
+    }
+
+    fn refresh_log(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.log.as_mut() else { return };
+        if Self::load_log(view, cx) {
+            cx.notify();
+        }
+    }
+
+    /// Takes a new snapshot when records were added and keeps the newest in view.
+    fn load_log(view: &mut LogView, cx: &mut Context<Self>) -> bool {
+        let buffer = cx.default_global::<LogBuffer>().clone();
+        let generation = buffer.generation();
+        if generation == view.generation {
+            return false;
+        }
+        view.generation = generation;
+        view.lines = buffer.snapshot();
+        if let Some(last) = view.lines.len().checked_sub(1) {
+            view.scroll.scroll_to_item(last, ScrollStrategy::Bottom);
+        }
+        true
+    }
+
+    pub(crate) fn log_text(&self) -> Option<String> {
+        let view = self.log.as_ref()?;
+        Some(view.lines.iter().map(|line| log_line(line, self.clock) + "\n").collect())
     }
 
     #[cfg(test)]
@@ -194,6 +267,22 @@ impl Desktop {
                             .bg(rgb(FIELD))
                             .key_context("Search")
                             .child(self.search.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("log-button")
+                            .debug_selector(|| "log-button".into())
+                            .size(px(40.))
+                            .flex_none()
+                            .rounded_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(16.))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(ROW_HOVER)))
+                            .child("🐞")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_log(cx))),
                     ),
             )
             .child(
@@ -552,9 +641,11 @@ impl Render for Desktop {
         let session = self.store.read(cx).session();
         let sidebar = self.sidebar(cx);
         let pane = self.chat_pane(cx);
+        let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
 
         div()
             .key_context("BlazingTelesram")
+            .track_focus(&self.focus)
             .relative()
             .size_full()
             .flex()
@@ -562,8 +653,10 @@ impl Render for Desktop {
             .text_color(rgb(INK))
             .text_size(px(14.))
             .on_action(cx.listener(|this, _: &Search, window, cx| window.focus(&this.search.focus_handle(cx))))
+            .on_action(cx.listener(|this, _: &ToggleLog, _, cx| this.toggle_log(cx)))
             .child(sidebar)
             .child(pane)
+            .children(log)
             .when(self.menu == AccountMenu::ConfirmSignOut && session == SessionState::Active, |d| {
                 d.child(overlay(
                     "sign-out-dialog",
@@ -597,6 +690,90 @@ impl Render for Desktop {
                 d.child(overlay("signed-out", "Вы вышли из аккаунта", "Данные сессии удалены.", vec![]))
             })
     }
+}
+
+impl Desktop {
+    fn log_panel(&self, view: &LogView, cx: &mut Context<Self>) -> Div {
+        let count = view.lines.len();
+        div()
+            .debug_selector(|| "log-view".into())
+            .absolute()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x000000aa))
+            .child(
+                div()
+                    .w(relative(0.9))
+                    .h(relative(0.85))
+                    .p(px(16.))
+                    .rounded(px(12.))
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(div().flex_1().text_size(px(17.)).font_weight(FontWeight::MEDIUM).child("Журнал"))
+                            .child(div().text_color(rgb(MUTED)).text_size(px(12.)).child(format!("{count} записей")))
+                            .child(button("log-copy", "Копировать").debug_selector(|| "log-copy".into()).on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    if let Some(text) = this.log_text() {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
+                                }),
+                            ))
+                            .child(
+                                button("log-close", "Закрыть")
+                                    .debug_selector(|| "log-close".into())
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_log(cx))),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .p(px(8.))
+                            .rounded(px(8.))
+                            .bg(rgb(BG))
+                            .font_family("Menlo")
+                            .text_size(px(12.))
+                            .child(
+                                uniform_list(
+                                    "log-lines",
+                                    count,
+                                    cx.processor(|this, range: Range<usize>, _, _| {
+                                        let Some(view) = this.log.as_ref() else { return Vec::new() };
+                                        range
+                                            .filter_map(|ix| view.lines.get(ix))
+                                            .map(|line| {
+                                                let color = match line.level {
+                                                    tracing::Level::ERROR => LOG_ERROR,
+                                                    tracing::Level::WARN => LOG_WARN,
+                                                    tracing::Level::INFO => INK,
+                                                    _ => MUTED,
+                                                };
+                                                div().truncate().text_color(rgb(color)).child(log_line(line, this.clock))
+                                            })
+                                            .collect()
+                                    }),
+                                )
+                                .track_scroll(view.scroll.clone())
+                                .size_full(),
+                            ),
+                    ),
+            )
+    }
+}
+
+/// One record as shown and copied: `HH:MM:SS.mmm LEVEL target message fields`.
+fn log_line(line: &LogLine, clock: Clock) -> String {
+    format!("{} {:<5} {} {}", log_time(line.time_us, clock), line.level, line.target, line.text)
 }
 
 /// Full-window modal that blocks everything beneath it.

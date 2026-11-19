@@ -176,10 +176,10 @@ fn open_cache(runtime_dir: &Path, account: &UserId) -> Cache {
     match Cache::open(runtime_dir, account) {
         Ok(cache) => cache,
         Err(first) => {
-            eprintln!("chat-core: cache unusable, recreating: {first}");
+            tracing::warn!(error = %first, "cache unusable, recreating");
             let _ = cache::remove_files(runtime_dir, account);
             Cache::open(runtime_dir, account).unwrap_or_else(|second| {
-                eprintln!("chat-core: cache unavailable, running in memory: {second}");
+                tracing::error!(error = %second, "cache unavailable, running in memory");
                 Cache::open_in_memory().expect("in-memory sqlite always opens")
             })
         }
@@ -231,7 +231,7 @@ fn remove_ignoring_missing(result: io::Result<()>) {
     if let Err(e) = result
         && e.kind() != io::ErrorKind::NotFound
     {
-        eprintln!("chat-core: sign-out cleanup failed: {e}");
+        tracing::warn!(error = %e, "sign-out cleanup failed");
     }
 }
 
@@ -288,7 +288,7 @@ impl<B: Backend> Engine<B> {
 
     /// Cache failures degrade to "not cached"; they must not take the client down.
     fn db<T>(&self, result: Result<T, CacheError>) -> Option<T> {
-        result.map_err(|e| eprintln!("chat-core: cache error: {e}")).ok()
+        result.map_err(|e| tracing::error!(error = %e, "cache error")).ok()
     }
 
     fn can_fetch(&self) -> bool {
@@ -375,8 +375,12 @@ impl<B: Backend> Engine<B> {
         let (account, chats, live) = match result {
             Ok(connected) => connected,
             Err(BackendError::SessionExpired) => return self.expire(),
-            Err(_) => return self.connection_lost(),
+            Err(error) => {
+                tracing::warn!(%error, "connecting failed");
+                return self.connection_lost();
+            }
         };
+        tracing::info!(chats = chats.len(), "connected");
         if account != self.account {
             self.switch_account(account);
         }
@@ -418,6 +422,7 @@ impl<B: Backend> Engine<B> {
         let factor = 1u32 << self.attempt.min(16);
         let delay = self.config.reconnect_base.saturating_mul(factor).min(self.config.reconnect_max);
         self.attempt = self.attempt.saturating_add(1);
+        tracing::info!(retry_in_ms = delay.as_millis() as u64, "offline");
         let (inputs, epoch) = (self.inputs.clone(), self.epoch);
         tokio::spawn(async move {
             tokio::time::sleep(delay).await;
@@ -433,6 +438,7 @@ impl<B: Backend> Engine<B> {
             pump.abort();
         }
         self.phase = Phase::Expired;
+        tracing::warn!("session expired");
         self.epoch += 1;
         self.media_deferred.clear();
         remove_ignoring_missing(fs::remove_file(&self.config.session_file));
@@ -452,6 +458,7 @@ impl<B: Backend> Engine<B> {
             pump.abort();
         }
         self.phase = Phase::Expired;
+        tracing::info!("signing out");
         self.epoch += 1;
         remove_ignoring_missing(fs::remove_file(&self.config.session_file));
         // Release the database file before deleting it.
@@ -492,7 +499,10 @@ impl<B: Backend> Engine<B> {
                 }
             }
             LiveEvent::Failed(BackendError::SessionExpired) => self.expire(),
-            LiveEvent::Failed(_) => self.connection_lost(),
+            LiveEvent::Failed(error) => {
+                tracing::warn!(%error, "live connection failed");
+                self.connection_lost();
+            }
         }
     }
 
@@ -586,7 +596,8 @@ impl<B: Backend> Engine<B> {
                 self.emit(ClientEvent::History(chunk));
             }
             Err(BackendError::SessionExpired) => self.expire(),
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(chat = %fetch.chat.0, %error, "history fetch failed");
                 // Paging must always answer, or the UI would wait forever for the chunk.
                 if let Some(before) = fetch.before {
                     self.emit_cached_older(fetch.chat, before);
@@ -683,11 +694,11 @@ impl<B: Backend> Engine<B> {
         match result {
             Ok(bytes) => match self.store_media(&media, &bytes) {
                 Ok(path) => self.emit(ClientEvent::MediaReady { media, path }),
-                Err(e) => eprintln!("chat-core: storing media failed: {e}"),
+                Err(e) => tracing::error!(error = %e, "storing media failed"),
             },
             Err(BackendError::SessionExpired) => self.expire(),
             // Not cached, so the UI can simply ask again later.
-            Err(_) => {}
+            Err(error) => tracing::warn!(media = %media.id, %error, "media fetch failed"),
         }
     }
 

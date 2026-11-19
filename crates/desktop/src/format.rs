@@ -119,6 +119,18 @@ pub fn clock_time(ts_us: i64, clock: Clock) -> String {
     format!("{:02}:{:02}", c.secs / 3600, c.secs / 60 % 60)
 }
 
+/// `HH:MM:SS.mmm` in local time, for log lines.
+pub fn log_time(ts_us: i64, clock: Clock) -> String {
+    let c = local(ts_us, clock);
+    format!("{:02}:{:02}:{:02}.{:03}", c.secs / 3600, c.secs / 60 % 60, c.secs % 60, ts_us.rem_euclid(US) / 1000)
+}
+
+/// `YYYYMMDD-HHMMSS` in UTC; sorts in time order, for file names.
+pub fn utc_stamp(ts_us: i64) -> String {
+    let c = civil(ts_us, 0);
+    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", c.year, c.month, c.dom, c.secs / 3600, c.secs / 60 % 60, c.secs % 60)
+}
+
 /// Chat row time: today `HH:MM`, within the last week the weekday, otherwise `DD.MM.YY`.
 pub fn chat_time(ts_us: i64, clock: Clock) -> String {
     let c = local(ts_us, clock);
