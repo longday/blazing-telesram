@@ -1,5 +1,11 @@
 schema: spec-driven
 
+context: |
+  The UI replicates the visual design of Telegram Desktop.
+  Never copy Telegram Desktop source code.
+  Telegram Desktop graphics (icons, images, animations, sounds) may be reused. The change that adds the first one
+  relicenses the project from MIT to GPL-3.0 and updates THIRD_PARTY.md.
+
 # Project context (optional)
 # Add only constraints that should guide OpenSpec artifacts and workflows.
 # Include constraints an agent cannot infer by reading the code.
