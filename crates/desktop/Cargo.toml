@@ -6,5 +6,6 @@ license = "MIT AND Apache-2.0"
 
 [dependencies]
 bt-chat-core = { path = "../chat-core" }
-gpui = "=0.2.2"
+# Compile Metal shaders at runtime: building them ahead of time needs full Xcode.
+gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 unicode-segmentation = "1.12"

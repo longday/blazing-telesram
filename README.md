@@ -11,6 +11,8 @@ Blazing Telesram (БТ) is a native Rust + GPUI desktop chat prototype. It runs 
 
 Use a Rust toolchain that supports edition 2024 and the [GPUI platform dependencies](https://crates.io/crates/gpui/0.2.2). Linux also needs a working Vulkan driver and the X11/XKB development libraries (on Debian/Ubuntu: `libxcb1-dev`, `libxkbcommon-dev`, and `libxkbcommon-x11-dev`). Other platforms have not been verified for this prototype.
 
+On macOS: `./run.sh` (needs rustup and Xcode Command Line Tools; full Xcode is not required).
+
 ```sh
 cargo run --locked -p blazing-telesram
 cargo test --locked --workspace
