@@ -151,10 +151,7 @@ impl Backend for YandexBackend {
                         // A missed row update is repaired by the next chat-list fetch.
                         Err(_) => vec![],
                     },
-                    XivaEvent::Push(PushEvent::Ignored { .. })
-                    | XivaEvent::Connecting
-                    | XivaEvent::Warning(_)
-                    | XivaEvent::Wire(_) => vec![],
+                    XivaEvent::Push(PushEvent::Ignored { .. }) | XivaEvent::Connecting | XivaEvent::Warning(_) => vec![],
                 };
                 for event in live {
                     if tx.send(event).await.is_err() {

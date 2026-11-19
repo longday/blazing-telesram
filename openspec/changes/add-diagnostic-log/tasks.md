@@ -8,15 +8,16 @@
 
 ## 2. Network trace
 
-- [ ] 2.1 Query-dropping URL helper and `debug` events for registry and media HTTP exchanges (method, host+path, status, elapsed), registry reply bodies at `trace` except CSRF; bootstrap steps at `info` without bodies; verify with existing fake-server tests plus a capture assertion that the history/users request line appears without query or body at `debug`
-- [ ] 2.2 Xiva events: connection lifecycle at `info`, socket request/reply at `debug` with elapsed time, push kinds at `debug`, operation frames and frame bodies at `trace`, one `debug` line per subscribe round; remove `XivaConfig::raw`, `WireRecord`, `XivaEvent::Wire` and `bt-probe listen --raw`; verify xiva tests updated (the raw-mode test becomes a trace-capture test) and pass
-- [ ] 2.3 `bt-probe` installs the stderr logger with `BT_LOG`; its diagnostics go through `tracing`, its command output stays on stdout; verify `BT_LOG=yandex_proto=debug bt-probe me` prints request lines on stderr and the identity on stdout
-- [ ] 2.4 Secret test: run registry, bootstrap and Xiva flows against fakes under a capturing `trace` subscriber and assert fake cookie, CSRF token and URL query values never appear; verify it passes
+- [x] 2.1 Query-dropping URL helper and `debug` events for registry and media HTTP exchanges (method, host+path, status, elapsed), registry reply bodies at `trace` except CSRF; bootstrap steps at `info` without bodies; verify with existing fake-server tests plus a capture assertion that the history/users request line appears without query or body at `debug`
+- [x] 2.2 Xiva events: connection lifecycle at `info`, socket request/reply at `debug` with elapsed time, push kinds at `debug`, operation frames and frame bodies at `trace`, one `debug` line per subscribe round; remove `XivaConfig::raw`, `WireRecord`, `XivaEvent::Wire` and `bt-probe listen --raw`; verify xiva tests updated (the raw-mode test becomes a trace-capture test) and pass
+- [x] 2.3 `bt-probe` installs the stderr logger with `BT_LOG`; its diagnostics go through `tracing`, its command output stays on stdout; verify `BT_LOG=yandex_proto=debug bt-probe me` prints request lines on stderr and the identity on stdout
+- [x] 2.5 Dependency trace ceiling (`yandex_proto::log::dependency_cap`) in both binaries; verify a real local WebSocket handshake under `BT_LOG=trace` through the `log` bridge leaks neither the fake cookie nor the URL query, and the test fails with the cap removed
+- [x] 2.4 Secret test: run registry, bootstrap and Xiva flows against fakes under a capturing `trace` subscriber and assert fake cookie, CSRF token and URL query values never appear; verify it passes
 
 ## 3. Log window
 
 - [x] 3.1 `ToggleLog` action (Cmd+Shift+L), sidebar header button, overlay with level-colored monospace lines, bottom-anchored list, «Копировать» to clipboard, 250 ms generation poll while open; the chat view takes focus on open so window shortcuts resolve; verify headless GPUI test: shortcut opens it, a new record appears while open, copy puts the lines on the clipboard, «Закрыть» hides it
-- [ ] 3.2 README: `BT_LOG` syntax and examples, log file location, the window shortcut, `--raw` replacement; verify the documented commands run as written
+- [x] 3.2 README: `BT_LOG` syntax and examples, log file location, the window shortcut, `--raw` replacement; verify the documented `bt-probe` commands run as written (the `./run.sh` lines are exercised by 4.1)
 
 ## 4. Integration
 

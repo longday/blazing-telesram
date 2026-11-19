@@ -34,6 +34,10 @@ Records keep the default target (module path, e.g. `yandex_proto::xiva`), so `BT
 ### `--raw` replaced by trace level
 `XivaConfig::raw`, `WireRecord`, `XivaEvent::Wire` and `bt-probe listen --raw` are removed; `BT_LOG=yandex_proto::xiva=trace bt-probe listen` shows the same frames. One mechanism instead of two.
 
+### Dependency trace ceiling
+`tungstenite` logs the whole WebSocket handshake request, `Cookie` header included, at `trace` (`handshake/client.rs:197` in 0.30.0), and the `log` bridge forwards it. `yandex_proto::log::dependency_cap()` is installed next to the `BT_LOG` filter in both binaries and drops `trace` records of every target outside `yandex_proto`, `bt_chat_core` and `blazing_telesram`, whatever `BT_LOG` says. Both binaries also share `yandex_proto::log::filter_from_env` for parsing. A desktop test runs a real local handshake with a fake cookie under `BT_LOG=trace` through the bridge and fails without the cap.
+Alternative: overriding directives appended to `BT_LOG` – a more specific user directive (`tungstenite::handshake=trace`) would win over them.
+
 ### Secrets by construction
 Events log chosen fields only; URLs pass through the query-dropping helper; HTTP headers, cookies and the CSRF reply are never logged. `SessionCookie` and `LoginCookie` already redact `Debug`. A test runs registry and Xiva flows against fakes with a capturing subscriber at `trace` and asserts the fake cookie and token values never appear.
 

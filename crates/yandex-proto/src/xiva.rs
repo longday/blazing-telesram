@@ -2,7 +2,7 @@
 //! socket (`history`, `subscribe`), operation frames (`subscribed`, `ping`) and push decoding.
 //! The socket is abstracted by [`Connector`]/[`Socket`] so tests run on a fake.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,9 +10,11 @@ use std::time::Duration;
 use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
+use tracing::{debug, info, trace, warn};
 
 use crate::error::ProtoError;
 use crate::frame::IncomingFrame;
+use crate::net::{millis, redact_url};
 use crate::request::{ReadRequest, Route, SocketContext};
 use crate::session::{SessionCookie, cookie_header};
 use crate::wire::{PushEvent, check_status, decode_push};
@@ -33,8 +35,6 @@ pub struct XivaConfig {
     pub request_timeout: Duration,
     /// Deadline for the first server `ping` after open, then 1.3 x its interval.
     pub first_ping_timeout: Duration,
-    /// Also emit [`XivaEvent::Wire`] for every frame.
-    pub raw: bool,
 }
 
 impl XivaConfig {
@@ -46,7 +46,6 @@ impl XivaConfig {
             backoff_max: Duration::from_secs(176),
             request_timeout: Duration::from_secs(30),
             first_ping_timeout: Duration::from_secs(15),
-            raw: false,
         }
     }
 }
@@ -93,12 +92,6 @@ pub trait Connector: Send + Sync + 'static {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WireRecord {
-    Operation(String),
-    Frame(IncomingFrame),
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub enum XivaEvent {
     Connecting,
     /// The `subscribed` operation frame arrived: pushes will flow.
@@ -109,7 +102,6 @@ pub enum XivaEvent {
     Push(PushEvent),
     /// Something undecodable or refused that did not break the connection.
     Warning(String),
-    Wire(WireRecord),
 }
 
 type Reply = oneshot::Sender<Result<Json, ProtoError>>;
@@ -201,8 +193,8 @@ fn ping_deadline(interval_secs: Option<f64>) -> Duration {
     Duration::from_secs_f64(secs * 1.3)
 }
 
-fn transport_error(code: u64) -> ProtoError {
-    let name = match code {
+fn transport_name(code: u64) -> &'static str {
+    match code {
         1 => "PROTOCOL_ERROR",
         2 => "BACKEND_CALL_ERROR",
         3 => "INTERNAL_ERROR",
@@ -212,7 +204,11 @@ fn transport_error(code: u64) -> ProtoError {
         7 => "TOO_MANY_REQUESTS",
         8 => "FRAME_TOO_LARGE",
         _ => "unknown",
-    };
+    }
+}
+
+fn transport_error(code: u64) -> ProtoError {
+    let name = transport_name(code);
     if matches!(code, 3 | 6 | 7) {
         ProtoError::Network(format!("transport error {code} {name}"))
     } else {
@@ -220,10 +216,93 @@ fn transport_error(code: u64) -> ProtoError {
     }
 }
 
+/// Kind name and chat id of a push for the log; never the message content.
+fn push_kind(event: &PushEvent) -> (&'static str, &str) {
+    match event {
+        PushEvent::MessageUpserted(message) => ("MessageUpserted", &message.chat),
+        PushEvent::MessageDeleted { chat, .. } => ("MessageDeleted", chat),
+        PushEvent::ChatChanged { chat } => ("ChatChanged", chat),
+        PushEvent::Ignored { .. } => ("Ignored", ""),
+    }
+}
+
 struct Pending {
     request_id: String,
     reply: Option<Reply>,
     deadline: Instant,
+    sent: Instant,
+    /// The subscribe round this request belongs to.
+    round: Option<u64>,
+}
+
+/// Outcome counts of one subscribe round. The server answers every chat separately and
+/// refuses some under load, so the round is summed up in one line instead of per chat.
+#[derive(Default)]
+struct Round {
+    chats: usize,
+    ok: usize,
+    failed: BTreeMap<String, usize>,
+}
+
+impl Round {
+    fn refused(&self) -> usize {
+        self.failed.values().sum()
+    }
+
+    fn unanswered(&self) -> usize {
+        self.chats.saturating_sub(self.ok + self.refused())
+    }
+
+    fn report(&self) {
+        let (chats, ok, refused, unanswered) = (self.chats, self.ok, self.refused(), self.unanswered());
+        if refused == 0 && unanswered == 0 {
+            debug!(chats, ok, "subscribe round");
+        } else {
+            let errors = self.failed.iter().map(|(name, n)| format!("{name}={n}")).collect::<Vec<_>>().join(", ");
+            warn!(chats, ok, refused, unanswered, %errors, "subscribe round");
+        }
+    }
+}
+
+#[derive(Default)]
+struct Rounds {
+    next: u64,
+    open: HashMap<u64, Round>,
+}
+
+impl Rounds {
+    fn start(&mut self) -> u64 {
+        self.next += 1;
+        self.open.insert(self.next, Round::default());
+        self.next
+    }
+
+    fn sent(&mut self, id: u64) {
+        if let Some(round) = self.open.get_mut(&id) {
+            round.chats += 1;
+        }
+    }
+
+    /// Counts one answer (or timeout) and reports the round once every chat has one.
+    fn record(&mut self, id: u64, outcome: Result<(), &str>) {
+        let Some(round) = self.open.get_mut(&id) else { return };
+        match outcome {
+            Ok(()) => round.ok += 1,
+            Err(name) => *round.failed.entry(name.to_owned()).or_default() += 1,
+        }
+        if round.unanswered() == 0 {
+            round.report();
+            self.open.remove(&id);
+        }
+    }
+
+    /// Reports rounds still waiting for answers when the connection ends.
+    fn flush(&mut self) {
+        for round in self.open.values().filter(|r| r.chats > 0) {
+            round.report();
+        }
+        self.open.clear();
+    }
 }
 
 enum End {
@@ -245,6 +324,12 @@ struct Actor<C: Connector> {
 impl<C: Connector> Actor<C> {
     fn emit(&self, event: XivaEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// Reports something undecodable or refused: to the log and to the event consumer.
+    fn warning(&self, message: String) {
+        warn!("{message}");
+        self.emit(XivaEvent::Warning(message));
     }
 
     fn backoff(&self, failures: u32) -> Duration {
@@ -270,10 +355,11 @@ impl<C: Connector> Actor<C> {
             let target = match self.target() {
                 Ok(t) => t,
                 Err(e) => {
-                    self.emit(XivaEvent::Warning(e.to_string()));
+                    self.warning(e.to_string());
                     return;
                 }
             };
+            info!(url = %redact_url(&target.url), "connecting");
             let connector = Arc::clone(&self.connector);
             let connect = connector.connect(&target);
             tokio::pin!(connect);
@@ -301,6 +387,7 @@ impl<C: Connector> Actor<C> {
             };
             let retry_in = self.backoff(failures);
             failures += 1;
+            info!(%reason, retry_in_secs = retry_in.as_secs(), "disconnected");
             self.emit(XivaEvent::Disconnected { reason, retry_in });
             let wake = tokio::time::sleep(retry_in);
             tokio::pin!(wake);
@@ -321,6 +408,7 @@ impl<C: Connector> Actor<C> {
 
     /// Stays alive answering `SessionExpired` until the handles are dropped.
     async fn expired(mut self) {
+        info!("session expired; not reconnecting");
         self.emit(XivaEvent::SessionExpired);
         while let Some(command) = self.rx.recv().await {
             if let Command::Request { reply, .. } = command {
@@ -333,6 +421,7 @@ impl<C: Connector> Actor<C> {
     async fn session<S: Socket>(&mut self, socket: &mut S) -> (End, bool) {
         let mut next_req = 1u64;
         let mut pending: HashMap<u64, Pending> = HashMap::new();
+        let mut rounds = Rounds::default();
         let mut subscription: Option<String> = None;
         let mut idle = Instant::now() + self.config.first_ping_timeout;
         let mut refresh: Option<Instant> = None;
@@ -349,9 +438,7 @@ impl<C: Connector> Actor<C> {
             tokio::select! {
                 event = socket.recv() => match event {
                     SocketEvent::Text(text) => {
-                        if self.config.raw {
-                            self.emit(XivaEvent::Wire(WireRecord::Operation(text.clone())));
-                        }
+                        trace!(frame = %text, "operation frame");
                         let op: Json = serde_json::from_str(&text).unwrap_or(Json::Null);
                         match op.get("operation").and_then(Json::as_str) {
                             Some("ping") => {
@@ -361,13 +448,14 @@ impl<C: Connector> Actor<C> {
                                 Some(id) if !id.is_empty() => {
                                     subscription = Some(id.to_owned());
                                     established = true;
+                                    info!(subscription_id = %id, "subscribed");
                                     self.emit(XivaEvent::Connected { subscription_id: id.to_owned() });
-                                    if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, subscription.as_deref()).await {
+                                    if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, &mut rounds, subscription.as_deref()).await {
                                         break End::Dropped(e);
                                     }
                                     refresh = (!self.watched.is_empty()).then(|| Instant::now() + SUBSCRIBE_REFRESH);
                                 }
-                                _ => self.emit(XivaEvent::Warning("subscribed frame without subscription-id".into())),
+                                _ => self.warning("subscribed frame without subscription-id".into()),
                             },
                             // The server revoked the subscription; a bad session shows on reconnect.
                             Some("unsubscribe") => break End::Dropped("server unsubscribed".into()),
@@ -375,12 +463,10 @@ impl<C: Connector> Actor<C> {
                         }
                     }
                     SocketEvent::Binary(bytes) => match IncomingFrame::decode(&bytes) {
-                        Err(e) => self.emit(XivaEvent::Warning(format!("undecodable frame: {e}"))),
+                        Err(e) => self.warning(format!("undecodable frame: {e}")),
                         Ok(frame) => {
-                            if self.config.raw {
-                                self.emit(XivaEvent::Wire(WireRecord::Frame(frame.clone())));
-                            }
-                            if self.on_frame(frame, &mut pending) {
+                            trace!(frame = ?frame, "frame");
+                            if self.on_frame(frame, &mut pending, &mut rounds) {
                                 break End::Expired;
                             }
                         }
@@ -399,7 +485,7 @@ impl<C: Connector> Actor<C> {
                     None => break End::Stopped,
                     Some(Command::Watch(chats)) => {
                         self.watched = chats;
-                        if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, subscription.as_deref()).await {
+                        if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, &mut rounds, subscription.as_deref()).await {
                             break End::Dropped(e);
                         }
                         refresh = (!self.watched.is_empty() && subscription.is_some()).then(|| Instant::now() + SUBSCRIBE_REFRESH);
@@ -419,10 +505,13 @@ impl<C: Connector> Actor<C> {
                             let _ = reply.send(Err(ProtoError::Network(e.clone())));
                             break End::Dropped(e);
                         }
+                        debug!(method = request.method(), req_id = next_req, "socket request");
                         pending.insert(next_req, Pending {
                             request_id: id,
                             reply: Some(reply),
                             deadline: Instant::now() + self.config.request_timeout,
+                            sent: Instant::now(),
+                            round: None,
                         });
                         next_req += 1;
                     }
@@ -434,12 +523,19 @@ impl<C: Connector> Actor<C> {
                     }
                     let expired: Vec<u64> = pending.iter().filter(|(_, p)| now >= p.deadline).map(|(k, _)| *k).collect();
                     for key in expired {
-                        if let Some(Pending { reply: Some(reply), .. }) = pending.remove(&key) {
-                            let _ = reply.send(Err(ProtoError::Network("request timed out".into())));
+                        let Some(p) = pending.remove(&key) else { continue };
+                        let elapsed_ms = millis(p.sent.elapsed());
+                        match (p.reply, p.round) {
+                            (Some(reply), _) => {
+                                debug!(req_id = key, elapsed_ms, "socket request timed out");
+                                let _ = reply.send(Err(ProtoError::Network("request timed out".into())));
+                            }
+                            (None, Some(round)) => rounds.record(round, Err("timed out")),
+                            (None, None) => {}
                         }
                     }
                     if refresh.is_some_and(|t| now >= t) {
-                        if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, subscription.as_deref()).await {
+                        if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, &mut rounds, subscription.as_deref()).await {
                             break End::Dropped(e);
                         }
                         refresh = Some(now + SUBSCRIBE_REFRESH);
@@ -447,6 +543,7 @@ impl<C: Connector> Actor<C> {
                 }
             }
         };
+        rounds.flush();
 
         let failure = match &end {
             End::Dropped(reason) => ProtoError::Network(format!("connection lost: {reason}")),
@@ -462,11 +559,11 @@ impl<C: Connector> Actor<C> {
     }
 
     /// Returns true when a reply says the session is rejected: nothing on this socket can work then.
-    fn on_frame(&self, frame: IncomingFrame, pending: &mut HashMap<u64, Pending>) -> bool {
+    fn on_frame(&self, frame: IncomingFrame, pending: &mut HashMap<u64, Pending>, rounds: &mut Rounds) -> bool {
         match frame {
-            IncomingFrame::Reply { req_id, body, .. } => {
+            IncomingFrame::Reply { req_id, method, body, .. } => {
                 let Some(p) = pending.remove(&req_id) else {
-                    self.emit(XivaEvent::Warning(format!("reply {req_id} without a request")));
+                    self.warning(format!("reply {req_id} without a request"));
                     return false;
                 };
                 let mismatch = body.get("RequestId").and_then(Json::as_str).is_some_and(|r| r != p.request_id);
@@ -476,6 +573,18 @@ impl<C: Connector> Actor<C> {
                     check_status(&body).map(|()| body)
                 };
                 let rejected = matches!(result, Err(ProtoError::SessionExpired));
+                let elapsed_ms = millis(p.sent.elapsed());
+                let error = result.as_ref().err().map(tracing::field::display);
+                // Subscribe replies are per chat; their round is logged once.
+                if p.reply.is_some() {
+                    debug!(req_id, method = %method, ok = error.is_none(), elapsed_ms, error, "socket reply");
+                } else {
+                    trace!(req_id, method = %method, ok = error.is_none(), elapsed_ms, error, "socket reply");
+                }
+                if let Some(round) = p.round {
+                    let failure = result.as_ref().err().map(ToString::to_string);
+                    rounds.record(round, failure.as_deref().map_or(Ok(()), Err));
+                }
                 match p.reply {
                     Some(reply) => {
                         let _ = reply.send(result);
@@ -484,42 +593,53 @@ impl<C: Connector> Actor<C> {
                     None if rejected => {}
                     None => {
                         if let Err(e) = result {
-                            self.emit(XivaEvent::Warning(format!("subscribe refused: {e}")));
+                            self.warning(format!("subscribe refused: {e}"));
                         }
                     }
                 }
                 rejected
             }
             IncomingFrame::ProxyStatus { req_id, error_code } => {
-                if let Some(p) = pending.remove(&req_id)
-                    && let Some(reply) = p.reply
-                {
-                    let _ = reply.send(Err(transport_error(error_code)));
+                if let Some(p) = pending.remove(&req_id) {
+                    let elapsed_ms = millis(p.sent.elapsed());
+                    debug!(req_id, error_code, elapsed_ms, "socket transport error");
+                    if let Some(round) = p.round {
+                        rounds.record(round, Err(transport_name(error_code)));
+                    }
+                    if let Some(reply) = p.reply {
+                        let _ = reply.send(Err(transport_error(error_code)));
+                    }
                 }
                 false
             }
             IncomingFrame::Push { body, .. } => {
                 match decode_push(&body) {
-                    Ok(PushEvent::Ignored { .. }) => {}
-                    Ok(event) => self.emit(XivaEvent::Push(event)),
-                    Err(e) => self.emit(XivaEvent::Warning(format!("undecodable push: {e}"))),
+                    Ok(PushEvent::Ignored { kind }) => debug!(%kind, "push ignored"),
+                    Ok(event) => {
+                        let (kind, chat) = push_kind(&event);
+                        debug!(kind, chat, "push");
+                        self.emit(XivaEvent::Push(event));
+                    }
+                    Err(e) => self.warning(format!("undecodable push: {e}")),
                 }
                 false
             }
         }
     }
 
-    /// Sends `subscribe` for every watched chat; replies are only checked for errors.
+    /// Sends `subscribe` for every watched chat; the answers are summed up per round.
     async fn subscribe_all<S: Socket>(
         &self,
         socket: &mut S,
         next_req: &mut u64,
         pending: &mut HashMap<u64, Pending>,
+        rounds: &mut Rounds,
         subscription: Option<&str>,
     ) -> Result<(), String> {
-        if subscription.is_none() {
+        if subscription.is_none() || self.watched.is_empty() {
             return Ok(());
         }
+        let round = rounds.start();
         for chat in &self.watched {
             let id = request_id();
             let ctx = SocketContext { req_id: *next_req, request_id: &id, subscription_id: subscription };
@@ -527,7 +647,12 @@ impl<C: Connector> Actor<C> {
                 continue;
             };
             socket.send(frame.encode()).await?;
-            pending.insert(*next_req, Pending { request_id: id, reply: None, deadline: Instant::now() + self.config.request_timeout });
+            rounds.sent(round);
+            let now = Instant::now();
+            pending.insert(
+                *next_req,
+                Pending { request_id: id, reply: None, deadline: now + self.config.request_timeout, sent: now, round: Some(round) },
+            );
             *next_req += 1;
         }
         Ok(())
@@ -542,6 +667,8 @@ mod tests {
     use rmpv::Value;
     use serde_json::json;
     use tokio::task::yield_now;
+
+    use crate::test_log::Capture;
 
     use super::*;
 
@@ -602,6 +729,12 @@ mod tests {
             frame.push(0x05);
             frame.extend_from_slice(&[0; 11]);
             frame.extend_from_slice(body.to_string().as_bytes());
+            self.push.send(SocketEvent::Binary(frame)).unwrap();
+        }
+        fn proxy_status(&self, req_id: u64, error_code: u64) {
+            let header = Value::Array(vec![Value::from(req_id), Value::from(error_code)]);
+            let mut frame = vec![0x02];
+            rmpv::encode::write_value(&mut frame, &header).unwrap();
             self.push.send(SocketEvent::Binary(frame)).unwrap();
         }
     }
@@ -899,14 +1032,121 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn raw_mode_forwards_wire_records() {
+    async fn trace_level_shows_operation_frames() {
+        let capture = Capture::default();
+        let _guard = capture.install();
         let connector = FakeConnector::default();
         let server = connector.accept();
-        let mut config = XivaConfig::production();
-        config.raw = true;
-        let (_handle, mut events) = XivaHandle::spawn(connector.clone(), config, "1".into(), vec![]);
+        let (_handle, mut events) = start(&connector);
         next(&mut events).await;
-        server.subscribed("s");
-        assert!(matches!(next(&mut events).await, XivaEvent::Wire(WireRecord::Operation(_))));
+        server.subscribed("s-1");
+        assert!(matches!(next(&mut events).await, XivaEvent::Connected { .. }));
+        let text = capture.text();
+        assert!(text.contains("operation frame") && text.contains("subscription-id"), "{text}");
+        assert!(text.contains("subscribed") && text.contains("s-1"), "{text}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn debug_level_logs_push_kind_without_message_text() {
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (_handle, mut events) = start(&connector);
+        next(&mut events).await;
+        server.push_frame(json!({
+            "ClientMessage": { "Plain": { "ChatId": "chat-9", "Text": { "MessageText": "TOPSECRET-TEXT" } } },
+            "ServerMessageInfo": { "Timestamp": 5 }
+        }));
+        assert!(matches!(next(&mut events).await, XivaEvent::Push(PushEvent::MessageUpserted(_))));
+        let text = capture.text();
+        assert!(text.contains("MessageUpserted") && text.contains("chat-9"), "{text}");
+        capture.assert_absent(&["TOPSECRET-TEXT", "operation frame"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subscribe_round_is_summed_up_in_one_line() {
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        next(&mut events).await;
+        handle.watch_chats(vec!["c1".into(), "c2".into(), "c3".into()]);
+        yield_now().await;
+        server.subscribed("sub1");
+        next(&mut events).await;
+        let (first, _, _) = server.next_request().await;
+        let (second, _, _) = server.next_request().await;
+        let (third, _, _) = server.next_request().await;
+        server.reply(first, "subscribe", json!({}));
+        server.proxy_status(second, 7);
+        server.proxy_status(third, 7);
+        // The actor handles frames in order: once this reply is back the round is over.
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.chat_list(&[]).await });
+        let (req_id, _, body) = server.next_request().await;
+        server.reply(req_id, "history", json!({ "RequestId": body["RequestId"] }));
+        task.await.unwrap().unwrap();
+        let rounds: Vec<String> = capture.text().lines().filter(|l| l.contains("subscribe round")).map(str::to_owned).collect();
+        assert_eq!(rounds.len(), 1, "{rounds:?}");
+        let line = &rounds[0];
+        assert!(line.contains("WARN") && line.contains("chats=3") && line.contains("ok=1") && line.contains("refused=2"), "{line}");
+        assert!(line.contains("TOO_MANY_REQUESTS=2"), "{line}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_fully_accepted_subscribe_round_is_a_debug_line() {
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        next(&mut events).await;
+        handle.watch_chats(vec!["c1".into(), "c2".into()]);
+        yield_now().await;
+        server.subscribed("sub1");
+        next(&mut events).await;
+        for _ in 0..2 {
+            let (req_id, _, _) = server.next_request().await;
+            server.reply(req_id, "subscribe", json!({}));
+        }
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.chat_list(&[]).await });
+        let (req_id, _, body) = server.next_request().await;
+        server.reply(req_id, "history", json!({ "RequestId": body["RequestId"] }));
+        task.await.unwrap().unwrap();
+        let text = capture.text();
+        let round = text.lines().find(|l| l.contains("subscribe round")).expect("round line");
+        assert!(round.contains("DEBUG") && round.contains("chats=2") && round.contains("ok=2"), "{round}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn log_never_contains_cookie_or_url_query_values() {
+        let capture = Capture::default();
+        let _guard = capture.install();
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let cookie = SessionCookie { value: "c00kie-VALUE".into(), ..cookie() };
+        let (handle, mut events) = XivaHandle::spawn(connector.clone(), XivaConfig::production(), "user-q-7f3a".into(), vec![cookie]);
+        next(&mut events).await;
+        server.subscribed("sub-1");
+        next(&mut events).await;
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.history("c1", None, 10).await });
+        let (req_id, _, body) = server.next_request().await;
+        server.reply(req_id, "history", json!({ "RequestId": body["RequestId"] }));
+        assert!(task.await.unwrap().is_ok());
+        server.push_frame(json!({ "ClientMessage": { "Typing": { "ChatId": "c1" } } }));
+        server.close("bye");
+        let XivaEvent::Disconnected { .. } = next(&mut events).await else { panic!() };
+
+        let target = connector.targets.lock().unwrap()[0].clone();
+        let session = target.url.split("session=").nth(1).and_then(|s| s.split('&').next()).unwrap().to_owned();
+        let text = capture.text();
+        for needle in ["connecting", "push.yandex.ru/v2/subscribe/websocket", "socket request", "socket reply", "disconnected"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        capture.assert_absent(&["c00kie-VALUE", "user-q-7f3a", &session, "?service", "client=web_main"]);
     }
 }

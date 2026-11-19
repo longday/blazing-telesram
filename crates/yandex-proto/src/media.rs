@@ -1,9 +1,12 @@
 //! Media fetch: avatars and image thumbnails. Downloading file attachments is not supported.
 
+use std::time::Instant;
+
 use reqwest::header::COOKIE;
+use tracing::debug;
 
 use crate::error::ProtoError;
-use crate::net::{HttpSettings, cookie_value, host_of, http_client};
+use crate::net::{HttpSettings, cookie_value, host_of, http_client, millis, redact_url};
 use crate::registry::http_error;
 use crate::session::{SessionCookie, cookie_header};
 
@@ -98,8 +101,12 @@ impl MediaClient {
         if !cookie_header(&self.cookies, &host_of(&url)?).is_empty() {
             request = request.header(COOKIE, cookie_value(&self.cookies, &host_of(&url)?)?);
         }
+        let started = Instant::now();
         let mut response = request.send().await?;
-        match response.status().as_u16() {
+        let status = response.status().as_u16();
+        // `elapsed_ms` is the time to the response headers; the body streams after it.
+        debug!(method = "GET", url = %redact_url(&url), status, elapsed_ms = millis(started.elapsed()), "media exchange");
+        match status {
             200..=299 => {}
             401 => return Err(ProtoError::SessionExpired),
             status => return Err(http_error("media", status)),
@@ -174,5 +181,20 @@ mod tests {
         let (base, _) = serve(vec![None]);
         let err = client(&base, Duration::from_millis(200)).fetch(&MediaTarget::Thumbnail { file_id: "b/u".into() }).await.unwrap_err();
         assert!(matches!(err, ProtoError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn log_shows_the_request_without_its_query() {
+        use crate::test_log::Capture;
+
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let (base, _) = serve(vec![bytes_response("200 OK", b"pixels-BODY")]);
+        client(&base, Duration::from_secs(5)).fetch(&MediaTarget::Thumbnail { file_id: "b/u".into() }).await.unwrap();
+        let text = capture.text();
+        for needle in ["media exchange", "127.0.0.1/file_shortterm/b/u", "status=200", "elapsed_ms"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        capture.assert_absent(&["MIDDLE2048", "size=", "pixels-BODY"]);
     }
 }

@@ -1,7 +1,13 @@
 //! Developer probe for the Yandex protocol layer. Read-only; never prints cookie values.
+//! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 use std::time::Duration;
+
+use tracing::error;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
 use yandex_proto::runtime::RuntimeDir;
@@ -10,12 +16,26 @@ use yandex_proto::wire::{WireBody, WireMessage};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, ProtoError};
 
-const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--raw] [--subscribe]";
+const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--subscribe]\nlog filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
 
+/// Installs the stderr logger; the error names `BT_LOG` when its value is not a filter.
+fn init_logging() -> Result<(), String> {
+    tracing_subscriber::registry()
+        .with(yandex_proto::log::filter_from_env()?)
+        .with(yandex_proto::log::dependency_cap())
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_ansi(std::io::stderr().is_terminal()))
+        .try_init()
+        .map_err(|e| format!("cannot install the logger: {e}"))
+}
+
 fn main() -> ExitCode {
+    if let Err(message) = init_logging() {
+        eprintln!("bt-probe: {message}");
+        return ExitCode::from(2);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
@@ -26,15 +46,14 @@ fn main() -> ExitCode {
             Ok(before) => block_on(history(chat, Some(before))),
             Err(_) => return usage(),
         },
-        ["listen", flags @ ..] if flags.iter().all(|f| ["--raw", "--subscribe"].contains(f)) => {
-            block_on(listen(flags.contains(&"--raw"), flags.contains(&"--subscribe")))
-        }
+        ["listen"] => block_on(listen(false)),
+        ["listen", "--subscribe"] => block_on(listen(true)),
         _ => return usage(),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, message)) => {
-            eprintln!("bt-probe: {message}");
+            error!("{message}");
             ExitCode::from(code)
         }
     }
@@ -84,9 +103,6 @@ async fn connect(config: ClientConfig) -> Result<(Client, XivaEvents), Failure> 
                     return Ok(());
                 }
                 Some(XivaEvent::SessionExpired) => return Err(fail(ProtoError::SessionExpired)),
-                Some(XivaEvent::Disconnected { reason, retry_in }) => {
-                    eprintln!("disconnected: {reason} (retry in {}s)", retry_in.as_secs());
-                }
                 Some(_) => {}
                 None => return Err((1, "connection task stopped".to_owned())),
             }
@@ -125,10 +141,8 @@ async fn history(chat: &str, before: Option<i64>) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn listen(raw: bool, subscribe: bool) -> Result<(), Failure> {
-    let mut config = ClientConfig::production();
-    config.xiva.raw = raw;
-    let (client, mut events) = connect(config).await?;
+async fn listen(subscribe: bool) -> Result<(), Failure> {
+    let (client, mut events) = connect(ClientConfig::production()).await?;
     if subscribe {
         let chats = client.chat_list().await.map_err(fail)?;
         println!("subscribing {} chats", chats.len());

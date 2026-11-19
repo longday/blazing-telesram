@@ -1,12 +1,15 @@
 //! Registry HTTP reads (`request_user`, `get_users_data`), reusing the bootstrap's wire format.
 
+use std::time::Instant;
+
 use reqwest::header::{ACCEPT, COOKIE, HeaderValue, REFERER};
 use reqwest::multipart::Form;
 use serde_json::Value as Json;
+use tracing::{debug, trace};
 
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
-use crate::net::{HttpSettings, cookie_value, host_of, http_client};
+use crate::net::{HttpSettings, cookie_value, host_of, http_client, millis, redact_url};
 use crate::request::{ReadRequest, Route};
 use crate::session::SessionCookie;
 use crate::wire::{WireUser, parse_users};
@@ -39,9 +42,12 @@ impl RegistryClient {
     }
 
     async fn csrf_token(&self) -> Result<String, ProtoError> {
+        let started = Instant::now();
         let response = self.common(self.http.post(&self.csrf_url)).send().await?;
         let status = response.status().as_u16();
         let body = response.bytes().await?;
+        // The reply body carries the token: it is never logged.
+        debug!(method = "POST", url = %redact_url(&self.csrf_url), status, elapsed_ms = millis(started.elapsed()), "csrf-token exchange");
         match status {
             401 | 403 => return Err(ProtoError::SessionExpired),
             200..=299 => {}
@@ -63,9 +69,19 @@ impl RegistryClient {
         if csrf {
             call = call.header("X-CSRF-TOKEN", self.csrf_token().await?);
         }
+        let started = Instant::now();
         let response = call.send().await?;
         let status = response.status().as_u16();
         let body = response.bytes().await?;
+        debug!(
+            method = "POST",
+            url = %redact_url(&self.api_url),
+            call = request.method(),
+            status,
+            elapsed_ms = millis(started.elapsed()),
+            "registry exchange"
+        );
+        trace!(call = request.method(), body = %String::from_utf8_lossy(&body), "registry reply body");
         if status == 401 {
             return Err(ProtoError::SessionExpired);
         }
@@ -222,5 +238,29 @@ mod tests {
     async fn socket_requests_are_not_executed_over_http() {
         let c = client("http://127.0.0.1:1", Duration::from_secs(1));
         assert!(matches!(c.execute(&ReadRequest::ChatList).await, Err(ProtoError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn log_shows_exchanges_but_no_secrets() {
+        use crate::test_log::Capture;
+
+        let capture = Capture::default();
+        let _guard = capture.install();
+        let (base, _) = serve(vec![
+            json_response("200 OK", r#"{"token":"t0k-CSRF-VALUE"}"#),
+            json_response("200 OK", r#"{"status":"ok","data":{"user":{"guid":"g-reply"}}}"#),
+        ]);
+        let mut endpoints = RegistryEndpoints::production();
+        endpoints.api_url = format!("{base}/api/?uid=Q-VALUE-1");
+        endpoints.csrf_url = format!("{base}/csrf/?uid=Q-VALUE-2");
+        let cookie = SessionCookie { value: "c00kie-VALUE".into(), domain: "127.0.0.1".into(), ..cookie() };
+        let c = RegistryClient::new(&endpoints, &HttpSettings::default(), &[cookie]).unwrap();
+        c.execute(&ReadRequest::RequestUser).await.unwrap();
+
+        let text = capture.text();
+        for needle in ["csrf-token exchange", "registry exchange", "127.0.0.1/csrf/", "127.0.0.1/api/", "status=200", "request_user", "g-reply"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2"]);
     }
 }

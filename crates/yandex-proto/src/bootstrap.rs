@@ -1,8 +1,10 @@
 use reqwest::header::{ACCEPT, COOKIE, HeaderValue, REFERER};
 use reqwest::multipart::Form;
 use serde_json::Value;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::info;
 
+use crate::net::{millis, redact_url};
 use crate::session::{Identity, SessionCookie, cookie_header};
 
 const REFERER_URL: &str = "https://yandex.ru/chat";
@@ -75,21 +77,28 @@ pub async fn bootstrap(
             .header(REFERER, REFERER_URL)
     };
 
+    // Steps log status only: bodies carry the CSRF token and user data.
+    let started = Instant::now();
     let response = common(client.post(&endpoints.csrf_url)).send().await?;
     let status = response.status().as_u16();
-    let token = parse_csrf_response(status, &response.bytes().await?)?;
+    let body = response.bytes().await?;
+    info!(step = "csrf-token", url = %redact_url(&endpoints.csrf_url), status, elapsed_ms = millis(started.elapsed()), "bootstrap");
+    let token = parse_csrf_response(status, &body)?;
 
     let form = Form::new().text(
         "request",
         r#"{"method":"request_user","params":{"bind_phone_number":false}}"#,
     );
+    let started = Instant::now();
     let response = common(client.post(&endpoints.api_url))
         .header("X-CSRF-TOKEN", token)
         .multipart(form)
         .send()
         .await?;
     let status = response.status().as_u16();
-    parse_request_user_response(status, &response.bytes().await?)
+    let body = response.bytes().await?;
+    info!(step = "request_user", url = %redact_url(&endpoints.api_url), status, elapsed_ms = millis(started.elapsed()), "bootstrap");
+    parse_request_user_response(status, &body)
 }
 
 fn parse_csrf_response(status: u16, body: &[u8]) -> Result<String, BootstrapError> {
@@ -372,5 +381,27 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), bootstrap(&endpoints, &local_cookies())).await;
         assert!(matches!(result, Ok(Err(BootstrapError::Network(_)))));
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn log_shows_steps_but_no_secrets_or_bodies() {
+        use crate::test_log::Capture;
+
+        let capture = Capture::default();
+        let _guard = capture.install();
+        let (mut endpoints, server) = stub(vec![
+            (200, r#"{"token":"tok-CSRF-1"}"#.into()),
+            (200, ok_body(r#"{"guid":"g-body","uid":4001,"display_name":"Ivan-BODY"}"#)),
+        ]);
+        endpoints.csrf_url.push_str("?uid=Q-VALUE-1");
+        endpoints.api_url.push_str("?uid=Q-VALUE-2");
+        bootstrap(&endpoints, &local_cookies()).await.unwrap();
+        server.join().unwrap();
+
+        let text = capture.text();
+        for needle in ["csrf-token", "request_user", "127.0.0.1/csrf-token/", "127.0.0.1/api/", "status=200"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        capture.assert_absent(&["SECRET", "tok-CSRF-1", "Q-VALUE-1", "Q-VALUE-2", "g-body", "Ivan-BODY"]);
     }
 }

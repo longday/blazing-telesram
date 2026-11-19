@@ -42,3 +42,29 @@ pub(crate) fn host_of(url: &str) -> Result<String, ProtoError> {
         .and_then(|u| u.host_str().map(str::to_owned))
         .ok_or_else(|| ProtoError::Protocol("invalid url".into()))
 }
+
+/// `host/path` of `url` for log lines: scheme, port, credentials, query and fragment are
+/// dropped because queries carry user ids, session ids and tokens.
+pub(crate) fn redact_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) => format!("{}{}", u.host_str().unwrap_or("?"), u.path()),
+        Err(_) => "<invalid url>".into(),
+    }
+}
+
+/// Whole milliseconds for log fields, saturating instead of truncating.
+pub(crate) fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redacted_url_keeps_only_host_and_path() {
+        assert_eq!(redact_url("https://u:p@yandex.ru:8443/messenger/api/?token=abc#frag"), "yandex.ru/messenger/api/");
+        assert_eq!(redact_url("wss://push.yandex.ru/v2/subscribe/websocket?session=a-b&user=4001"), "push.yandex.ru/v2/subscribe/websocket");
+        assert_eq!(redact_url("not a url?secret=1"), "<invalid url>");
+    }
+}

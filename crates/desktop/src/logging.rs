@@ -1,5 +1,5 @@
-//! Diagnostic log: one `BT_LOG` filter feeding stderr, a JSON Lines file under the runtime
-//! directory and an in-memory ring shown by the log window.
+//! Diagnostic log: one `BT_LOG` filter (see `yandex_proto::log`) feeding stderr, a JSON Lines
+//! file under the runtime directory and an in-memory ring shown by the log window.
 
 use crate::format::{Clock, utc_stamp};
 use std::collections::VecDeque;
@@ -15,8 +15,6 @@ use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, fmt};
 
-pub const LOG_VAR: &str = "BT_LOG";
-const DEFAULT_FILTER: &str = "info";
 const LOG_DIR: &str = "logs";
 const LOG_EXT: &str = "jsonl";
 /// Files kept after startup, the new one included.
@@ -115,12 +113,6 @@ impl<S: Subscriber> Layer<S> for LogBuffer {
     }
 }
 
-/// Parses a `BT_LOG` value; `None` or empty selects `info`.
-pub fn parse_filter(value: Option<&str>) -> Result<EnvFilter, String> {
-    let value = value.filter(|v| !v.trim().is_empty()).unwrap_or(DEFAULT_FILTER);
-    EnvFilter::builder().parse(value).map_err(|e| format!("{LOG_VAR}={value:?} is not a valid log filter: {e}"))
-}
-
 /// Creates `<runtime>/logs/<UTC stamp>-<pid>.jsonl` (owner-only), first deleting the oldest
 /// files so that [`KEEP_FILES`] remain afterwards.
 pub fn open_log_file(runtime: &Path, now_us: i64) -> io::Result<(File, PathBuf)> {
@@ -150,33 +142,32 @@ where
     fmt::layer().json().with_writer(Mutex::new(file))
 }
 
-/// Installs the global logger. Fails only on an invalid `BT_LOG`; a log file that cannot be
-/// created is reported through the other outputs.
+/// Installs the global logger, `log` crate bridge included. Fails only on an invalid `BT_LOG`;
+/// a log file that cannot be created is reported through the other outputs.
 pub fn init(runtime: &Path) -> Result<LogBuffer, String> {
-    let value = match std::env::var(LOG_VAR) {
-        Ok(value) => Some(value),
-        Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err(format!("{LOG_VAR} is not valid UTF-8")),
-    };
-    let filter = parse_filter(value.as_deref())?;
+    let filter = yandex_proto::log::filter_from_env()?;
     let buffer = LogBuffer::default();
-    let opened = open_log_file(runtime, Clock::system().now_us());
-    let (file, file_error) = match opened {
+    let (file, file_result) = match open_log_file(runtime, Clock::system().now_us()) {
         Ok((file, path)) => (Some(file), Ok(path)),
         Err(error) => (None, Err(error)),
     };
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(io::stderr).with_ansi(io::stderr().is_terminal()))
-        .with(file.map(file_layer))
-        .with(buffer.clone())
-        .try_init()
-        .map_err(|e| format!("cannot install the logger: {e}"))?;
-    match file_error {
+    install(filter, file, buffer.clone())?;
+    match file_result {
         Ok(path) => tracing::info!(path = %path.display(), "logging to file"),
         Err(error) => tracing::warn!(%error, "cannot create the log file; logging to stderr and the log window only"),
     }
     Ok(buffer)
+}
+
+fn install(filter: EnvFilter, file: Option<File>, buffer: LogBuffer) -> Result<(), String> {
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(yandex_proto::log::dependency_cap())
+        .with(fmt::layer().with_writer(io::stderr).with_ansi(io::stderr().is_terminal()))
+        .with(file.map(file_layer))
+        .with(buffer)
+        .try_init()
+        .map_err(|e| format!("cannot install the logger: {e}"))
 }
 
 #[cfg(test)]
@@ -184,13 +175,42 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    /// The only test that installs the global logger: the `log` bridge needs it. A real
+    /// WebSocket handshake with tungstenite, which logs the whole request (`Cookie` included)
+    /// at `trace`, under `BT_LOG=trace`.
     #[test]
-    fn filter_defaults_to_info_and_rejects_garbage() {
-        assert_eq!(parse_filter(None).unwrap().to_string(), "info");
-        assert_eq!(parse_filter(Some("  ")).unwrap().to_string(), "info");
-        assert!(parse_filter(Some("info,yandex_proto::xiva=trace")).is_ok());
-        let error = parse_filter(Some("yandex_proto=loud")).unwrap_err();
-        assert!(error.contains(LOG_VAR), "{error}");
+    fn trace_level_keeps_dependency_secrets_out() {
+        use futures::{SinkExt, StreamExt};
+        use yandex_proto::ws::TungsteniteConnector;
+        use yandex_proto::xiva::{Connector, Socket, Target};
+
+        const COOKIE: &str = "Session_id=fake-secret-4711";
+        let buffer = LogBuffer::default();
+        install(yandex_proto::log::parse_filter(Some("trace")).unwrap(), None, buffer.clone()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+                ws.send(tokio_tungstenite::tungstenite::Message::Close(None)).await.unwrap();
+                while ws.next().await.is_some() {}
+            });
+            let target = Target { url: format!("ws://{addr}/v2?session=fake-query-0815"), cookie: COOKIE.into(), origin: "https://yandex.ru".into() };
+            let mut socket = TungsteniteConnector::default().connect(&target).await.unwrap();
+            socket.close().await;
+            server.await.unwrap();
+        });
+        let lines = buffer.snapshot();
+        let text: String = lines.iter().map(|l| format!("{} {}\n", l.target, l.text)).collect();
+        assert!(
+            lines.iter().any(|l| l.target.starts_with("tungstenite") && l.level == Level::DEBUG),
+            "the log bridge delivers tungstenite records:\n{text}"
+        );
+        for secret in ["fake-secret-4711", "fake-query-0815"] {
+            assert!(!text.contains(secret), "{secret} leaked:\n{text}");
+        }
     }
 
     #[test]
