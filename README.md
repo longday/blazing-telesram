@@ -1,30 +1,35 @@
 # Blazing Telesram
 
-Blazing Telesram (БТ) is a native Rust + GPUI desktop chat prototype. It runs offline with synthetic data. No WebView, login, or connection to Yandex is included. This is an independent prototype, not affiliated with Telegram or Yandex.
+Blazing Telesram (БТ) is a native Rust + GPUI desktop client for Yandex Telemost / Messenger chats, styled after Telegram Desktop. It is not affiliated with Telegram or Yandex.
 
-- List, search and filter personal chats, groups, channels and mock meetings.
-- Browse a virtualized timeline with variable-height messages and load older pages.
-- Send local messages, open reply threads, and comment on mock channel posts.
-- Set `BT_STATE_PATH` to persist sent mock messages and replies in a local JSON file. Otherwise they are held in memory only.
+Current status: **read-only**. It shows your chat list, history, image thumbnails and file cards, and receives new messages live. It cannot send messages, mark chats as read or show typing. Chats and history are cached locally, so the last state is visible offline.
+
+> **Risk:** there is no public API. The client speaks the unofficial protocol of the Telemost web client, using your Yandex session cookies. Yandex can change or block it at any time.
 
 ## Run
 
-Use a Rust toolchain that supports edition 2024 and the [GPUI platform dependencies](https://crates.io/crates/gpui/0.2.2). Linux also needs a working Vulkan driver and the X11/XKB development libraries (on Debian/Ubuntu: `libxcb1-dev`, `libxkbcommon-dev`, and `libxkbcommon-x11-dev`). Other platforms have not been verified for this prototype.
-
-On macOS: `./run.sh` (needs rustup and Xcode Command Line Tools; full Xcode is not required).
+macOS only. Needs rustup and the Xcode Command Line Tools (full Xcode is not required).
 
 ```sh
-cargo run --locked -p blazing-telesram
+./run.sh
+```
+
+`run.sh` installs the pinned toolchain, sets `BT_RUNTIME_DIR` to `.runtime/` in the repository (git-ignored) and starts the app. To run cargo directly, set the variable yourself; the app refuses to start without it:
+
+```sh
+BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked --release -p blazing-telesram
 cargo test --locked --workspace
 ```
 
-## MCP contract experiment
+## Sign-in
+
+On first start a window with the Yandex sign-in page opens. Sign in as on `telemost.yandex.ru`; the window closes once the session is verified. The session (cookies, account ids) is stored in `.runtime/session.json` with mode 0600, not in the Keychain. Sign out from the app deletes the session, the account cache and downloaded media.
+
+`bt-probe` checks the stored session without the UI and never prints cookie values:
 
 ```sh
-cargo run --locked -p bt-chat-core --bin telemost-mock-check
+BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe -- me
 ```
-
-This reads local JSON-RPC fixtures for chat list, history and threads. Tool names come from the [Telemost MCP catalog](https://yandex.ru/dev/yandex-360/mcp/ru/telemost), but argument and response schemas are synthetic and have not been validated against the live API. The experiment makes no network calls. The desktop UI uses a separate local chat adapter.
 
 ## License
 

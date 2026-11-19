@@ -1,3 +1,4 @@
+mod login;
 mod input;
 use bt_chat_core::{ChatKind, ChatService, LocalChatService};
 use gpui::{prelude::*, *};

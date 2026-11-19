@@ -1,6 +1,7 @@
 use reqwest::header::{ACCEPT, COOKIE, HeaderValue, REFERER};
 use reqwest::multipart::Form;
 use serde_json::Value;
+use std::time::Duration;
 
 use crate::session::{Identity, SessionCookie, cookie_header};
 
@@ -18,6 +19,8 @@ const COOKIE_ERROR_CODES: [&str; 4] = [
 pub struct RegistryEndpoints {
     pub api_url: String,
     pub csrf_url: String,
+    /// Total deadline per HTTP request; a silent server must not hang sign-in.
+    pub timeout: Duration,
 }
 
 impl RegistryEndpoints {
@@ -25,6 +28,7 @@ impl RegistryEndpoints {
         Self {
             api_url: "https://yandex.ru/messenger/api/registry/api/".into(),
             csrf_url: "https://yandex.ru/messenger/api/registry/csrf-token/".into(),
+            timeout: Duration::from_secs(30),
         }
     }
 }
@@ -61,7 +65,10 @@ pub async fn bootstrap(
         .map_err(|_| BootstrapError::Protocol("cookie value is not a valid header".into()))?;
     cookie.set_sensitive(true);
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .connect_timeout(endpoints.timeout)
+        .timeout(endpoints.timeout)
+        .build()?;
     let common = |req: reqwest::RequestBuilder| {
         req.header(COOKIE, cookie.clone())
             .header(ACCEPT, "application/json")
@@ -230,6 +237,7 @@ mod tests {
         let endpoints = RegistryEndpoints {
             api_url: format!("{base}/api/"),
             csrf_url: format!("{base}/csrf-token/"),
+            timeout: Duration::from_secs(5),
         };
         let handle = thread::spawn(move || {
             let mut seen = Vec::new();
@@ -345,8 +353,24 @@ mod tests {
         let endpoints = RegistryEndpoints {
             api_url: format!("http://{addr}/api/"),
             csrf_url: format!("http://{addr}/csrf-token/"),
+            timeout: Duration::from_secs(5),
         };
         let err = bootstrap(&endpoints, &local_cookies()).await.unwrap_err();
         assert!(matches!(err, BootstrapError::Network(_)));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_times_out_on_silent_server() {
+        // Accepts the connection but never answers.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let endpoints = RegistryEndpoints {
+            api_url: format!("http://{addr}/api/"),
+            csrf_url: format!("http://{addr}/csrf-token/"),
+            timeout: Duration::from_millis(300),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), bootstrap(&endpoints, &local_cookies())).await;
+        assert!(matches!(result, Ok(Err(BootstrapError::Network(_)))));
+        drop(listener);
     }
 }
