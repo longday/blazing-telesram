@@ -1,6 +1,7 @@
 //! Pure, deterministic, offline chat model. No I/O or UI dependencies.
 use std::collections::VecDeque;
 mod service;
+pub mod model;
 pub mod telemost_mock;
 pub use service::{ChatService, LocalChatService};
 pub const TOTAL: usize = 10_000;
