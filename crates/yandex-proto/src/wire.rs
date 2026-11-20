@@ -561,13 +561,15 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
             PushEvent::MessageUpserted(message)
         });
     }
-    let kind = client.as_object().and_then(|o| o.keys().next().cloned()).unwrap_or_default();
+    // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
+    // modifier, not the event.
+    const MODIFIERS: [&str; 1] = ["NotificationBehaviour"];
     let chat_changing = ["SeenMarker", "Pin", "ClearUserHistory", "StateSync", "ChatApproval"];
-    if chat_changing.contains(&kind.as_str())
-        && let Some(chat) = present(client, &kind).and_then(|v| string(v, "ChatId"))
-    {
+    if let Some(chat) = chat_changing.iter().find_map(|kind| string(present(client, kind)?, "ChatId")) {
         return Ok(PushEvent::ChatChanged { chat });
     }
+    let keys = client.as_object().into_iter().flat_map(|o| o.keys());
+    let kind = keys.clone().find(|k| !MODIFIERS.contains(&k.as_str())).or_else(|| keys.clone().next()).cloned().unwrap_or_default();
     Ok(PushEvent::Ignored { kind })
 }
 

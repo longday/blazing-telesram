@@ -11,8 +11,10 @@ fn fixture(name: &str) -> Value {
 
 #[test]
 fn fixtures_hold_no_credentials() {
-    for name in ["chat-list", "history-page", "users", "push-edit", "push-deleted"] {
-        let text = fixture(&format!("research-{name}.json")).to_string().to_lowercase();
+    let research = ["chat-list", "history-page", "users", "push-edit", "push-deleted"].map(|n| format!("research-{n}"));
+    let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"].map(|n| format!("live-push-{n}"));
+    for name in research.iter().chain(&live) {
+        let text = fixture(&format!("{name}.json")).to_string().to_lowercase();
         for needle in ["session_id", "sessionid2", "csrf", "cookie", "@yandex"] {
             assert!(!text.contains(needle), "{name} contains {needle}");
         }
@@ -121,4 +123,22 @@ fn push_fixtures() {
         decode_push(&fixture("research-push-deleted.json")),
         Ok(PushEvent::MessageDeleted { chat: "0/0/33333333-3333-4333-8333-333333333333".into(), timestamp: 1_784_000_000_001_002 })
     );
+}
+
+/// Pushes captured on a live account (2026-11-20), identifiers and text replaced.
+#[test]
+fn live_push_fixtures() {
+    let Ok(PushEvent::MessageUpserted(message)) = decode_push(&fixture("live-push-message.json")) else { panic!("message") };
+    assert_eq!(message.timestamp, 1_795_172_236_485_108);
+    assert!(matches!(&message.body, WireBody::Text(t) if t == "live sample text"));
+    assert_eq!(message.from.unwrap().display_name.as_deref(), Some("Test User"));
+
+    // Read on another device: `NotificationBehaviour` comes along and must not hide it.
+    assert_eq!(
+        decode_push(&fixture("live-push-seen-marker.json")),
+        Ok(PushEvent::ChatChanged { chat: "100/0/00000003-0000-4000-8000-000000000003_1795070677887127".into() })
+    );
+    for (name, kind) in [("typing", "Typing"), ("reaction", "Reaction"), ("heartbeat", "Heartbeat")] {
+        assert_eq!(decode_push(&fixture(&format!("live-push-{name}.json"))), Ok(PushEvent::Ignored { kind: kind.into() }), "{name}");
+    }
 }

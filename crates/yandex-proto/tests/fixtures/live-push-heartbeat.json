@@ -1,0 +1,13 @@
+{
+  "ClientMessage": {
+    "Heartbeat": {
+      "Type": 2
+    }
+  },
+  "ServerMessageInfo": {
+    "From": {
+      "Guid": "00000001-0000-4000-8000-000000000001"
+    },
+    "Timestamp": 1795172228977025
+  }
+}

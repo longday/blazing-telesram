@@ -1,0 +1,17 @@
+{
+  "ClientMessage": {
+    "NotificationBehaviour": 2,
+    "SeenMarker": {
+      "ChatId": "100/0/00000003-0000-4000-8000-000000000003_1795070677887127",
+      "SeqNo": 2,
+      "Timestamp": 1795172203753066
+    }
+  },
+  "ServerMessageInfo": {
+    "From": {
+      "Guid": "00000004-0000-4000-8000-000000000004"
+    },
+    "SeqNo": 2,
+    "Timestamp": 1795172203753066
+  }
+}

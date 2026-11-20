@@ -465,7 +465,14 @@ impl<C: Connector> Actor<C> {
                     SocketEvent::Binary(bytes) => match IncomingFrame::decode(&bytes) {
                         Err(e) => self.warning(format!("undecodable frame: {e}")),
                         Ok(frame) => {
-                            trace!(frame = ?frame, "frame");
+                            // Bodies as JSON, so `jq` and fixtures can use them.
+                            match &frame {
+                                IncomingFrame::Push { event, body, .. } => trace!(event = %event, body = %body, "push frame"),
+                                IncomingFrame::Reply { req_id, method, body, .. } => {
+                                    trace!(req_id, method = %method, body = %body, "reply frame");
+                                }
+                                IncomingFrame::ProxyStatus { req_id, error_code } => trace!(req_id, error_code, "proxy status frame"),
+                            }
                             if self.on_frame(frame, &mut pending, &mut rounds) {
                                 break End::Expired;
                             }

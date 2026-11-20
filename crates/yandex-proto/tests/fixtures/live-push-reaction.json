@@ -1,0 +1,42 @@
+{
+  "ClientMessage": {
+    "Reaction": {
+      "Action": 2,
+      "ChatId": "0/0/00000003-0000-4000-8000-000000000003",
+      "Timestamp": 1795070677887127,
+      "Type": 100101
+    }
+  },
+  "MessageAuthorGuid": "00000004-0000-4000-8000-000000000004",
+  "Reactions": [
+    {
+      "Count": 1,
+      "Type": 100101
+    }
+  ],
+  "ReactionsVersion": 2,
+  "RecentUserReactions": [
+    {
+      "Timestamp": 1795172185683559,
+      "Type": 100101,
+      "UserInfo": {
+        "AvatarId": "user_avatar/yapic/1000/fake",
+        "DisplayName": "Test User",
+        "Guid": "00000007-0000-4000-8000-000000000007",
+        "Nickname": "test-user",
+        "Uid": 4001,
+        "Version": 1793302709442679
+      }
+    }
+  ],
+  "ServerMessageInfo": {
+    "From": {
+      "AvatarId": "user_avatar/yapic/1000/fake",
+      "DisplayName": "Test User",
+      "Guid": "00000007-0000-4000-8000-000000000007",
+      "Version": 1793302709442679
+    },
+    "Timestamp": 1795070677887127,
+    "Version": 2
+  }
+}

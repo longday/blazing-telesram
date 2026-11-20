@@ -1,0 +1,26 @@
+{
+  "ClientMessage": {
+    "Plain": {
+      "ChatId": "00000001-0000-4000-8000-000000000001_00000002-0000-4000-8000-000000000002",
+      "CustomPayload": "{}",
+      "PayloadId": "fake-payload-id",
+      "Text": {
+        "MessageText": "live sample text"
+      }
+    }
+  },
+  "ReadsVersion": 6267,
+  "ServerMessageInfo": {
+    "From": {
+      "AvatarId": "user_avatar/yapic/1000/fake",
+      "DisplayName": "Test User",
+      "Guid": "00000001-0000-4000-8000-000000000001",
+      "Version": 1788874593700484
+    },
+    "PrevTimestamp": 1795098924096000,
+    "SeqNo": 5685,
+    "Timestamp": 1795172236485108,
+    "Version": 1
+  },
+  "ShowReadsCount": true
+}
