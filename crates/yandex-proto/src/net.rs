@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::HeaderValue;
 
@@ -55,6 +55,43 @@ pub(crate) fn redact_url(url: &str) -> String {
 /// Whole milliseconds for log fields, saturating instead of truncating.
 pub(crate) fn millis(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Logs an exchange that failed without a usable response (DNS, TLS, timeout, broken body)
+/// with the fields its success line would carry, then returns the error without its URL.
+/// Use as `map_err` before `?`: the caller's error no longer says where it happened.
+pub(crate) fn failed<'a>(
+    call: &'static str,
+    method: &'static str,
+    url: &'a str,
+    started: Instant,
+) -> impl FnOnce(reqwest::Error) -> reqwest::Error + 'a {
+    move |error| {
+        let error = error.without_url();
+        tracing::warn!(
+            call,
+            method,
+            url = %redact_url(url),
+            elapsed_ms = millis(started.elapsed()),
+            timeout = error.is_timeout(),
+            error = %describe(&error),
+            "http exchange failed"
+        );
+        error
+    }
+}
+
+/// The error with its causes: reqwest's own text is only "error sending request".
+/// Pass an error stripped by `without_url`.
+pub(crate) fn describe(error: &reqwest::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 #[cfg(test)]

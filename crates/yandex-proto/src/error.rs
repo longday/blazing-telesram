@@ -25,6 +25,6 @@ impl From<BootstrapError> for ProtoError {
 impl From<reqwest::Error> for ProtoError {
     fn from(e: reqwest::Error) -> Self {
         // The URL may carry a user id or file id; keep it out of messages.
-        Self::Network(e.without_url().to_string())
+        Self::Network(crate::net::describe(&e.without_url()))
     }
 }

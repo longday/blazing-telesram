@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 use tracing::info;
 
-use crate::net::{millis, redact_url};
+use crate::net::{describe, failed, millis, redact_url};
 use crate::session::{Identity, SessionCookie, cookie_header};
 
 const REFERER_URL: &str = "https://yandex.ru/chat";
@@ -49,7 +49,7 @@ pub enum BootstrapError {
 
 impl From<reqwest::Error> for BootstrapError {
     fn from(e: reqwest::Error) -> Self {
-        Self::Network(e.without_url().to_string())
+        Self::Network(describe(&e.without_url()))
     }
 }
 
@@ -79,9 +79,10 @@ pub async fn bootstrap(
 
     // Steps log status only: bodies carry the CSRF token and user data.
     let started = Instant::now();
-    let response = common(client.post(&endpoints.csrf_url)).send().await?;
+    let fail = |started| failed("csrf-token", "POST", &endpoints.csrf_url, started);
+    let response = common(client.post(&endpoints.csrf_url)).send().await.map_err(fail(started))?;
     let status = response.status().as_u16();
-    let body = response.bytes().await?;
+    let body = response.bytes().await.map_err(fail(started))?;
     info!(step = "csrf-token", url = %redact_url(&endpoints.csrf_url), status, elapsed_ms = millis(started.elapsed()), "bootstrap");
     let token = parse_csrf_response(status, &body)?;
 
@@ -90,13 +91,15 @@ pub async fn bootstrap(
         r#"{"method":"request_user","params":{"bind_phone_number":false}}"#,
     );
     let started = Instant::now();
+    let fail = |started| failed("request_user", "POST", &endpoints.api_url, started);
     let response = common(client.post(&endpoints.api_url))
         .header("X-CSRF-TOKEN", token)
         .multipart(form)
         .send()
-        .await?;
+        .await
+        .map_err(fail(started))?;
     let status = response.status().as_u16();
-    let body = response.bytes().await?;
+    let body = response.bytes().await.map_err(fail(started))?;
     info!(step = "request_user", url = %redact_url(&endpoints.api_url), status, elapsed_ms = millis(started.elapsed()), "bootstrap");
     parse_request_user_response(status, &body)
 }
@@ -378,8 +381,15 @@ mod tests {
             csrf_url: format!("http://{addr}/csrf-token/"),
             timeout: Duration::from_millis(300),
         };
+        let capture = crate::test_log::Capture::default();
+        let _guard = capture.install();
         let result = tokio::time::timeout(Duration::from_secs(5), bootstrap(&endpoints, &local_cookies())).await;
         assert!(matches!(result, Ok(Err(BootstrapError::Network(_)))));
+        let text = capture.text();
+        let line = text.lines().find(|l| l.contains("http exchange failed")).unwrap_or_else(|| panic!("no failure line:\n{text}"));
+        for needle in ["WARN", "call=\"csrf-token\"", "method=\"POST\"", "/csrf-token/", "elapsed_ms=", "timeout=true"] {
+            assert!(line.contains(needle), "{needle}: {line}");
+        }
         drop(listener);
     }
 

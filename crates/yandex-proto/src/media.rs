@@ -6,7 +6,7 @@ use reqwest::header::COOKIE;
 use tracing::debug;
 
 use crate::error::ProtoError;
-use crate::net::{HttpSettings, cookie_value, host_of, http_client, millis, redact_url};
+use crate::net::{HttpSettings, cookie_value, failed, host_of, http_client, millis, redact_url};
 use crate::registry::http_error;
 use crate::session::{SessionCookie, cookie_header};
 
@@ -102,7 +102,7 @@ impl MediaClient {
             request = request.header(COOKIE, cookie_value(&self.cookies, &host_of(&url)?)?);
         }
         let started = Instant::now();
-        let mut response = request.send().await?;
+        let mut response = request.send().await.map_err(failed("media", "GET", &url, started))?;
         let status = response.status().as_u16();
         // `elapsed_ms` is the time to the response headers; the body streams after it.
         debug!(method = "GET", url = %redact_url(&url), status, elapsed_ms = millis(started.elapsed()), "media exchange");
@@ -112,7 +112,7 @@ impl MediaClient {
             status => return Err(http_error("media", status)),
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await? {
+        while let Some(chunk) = response.chunk().await.map_err(failed("media", "GET", &url, started))? {
             if bytes.len() + chunk.len() > MAX_BYTES {
                 return Err(ProtoError::Protocol("media response is too large".into()));
             }

@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
-use crate::net::{HttpSettings, cookie_value, host_of, http_client, millis, redact_url};
+use crate::net::{HttpSettings, cookie_value, failed, host_of, http_client, millis, redact_url};
 use crate::request::{ReadRequest, Route};
 use crate::session::SessionCookie;
 use crate::wire::{WireUser, parse_users};
@@ -43,9 +43,10 @@ impl RegistryClient {
 
     async fn csrf_token(&self) -> Result<String, ProtoError> {
         let started = Instant::now();
-        let response = self.common(self.http.post(&self.csrf_url)).send().await?;
+        let fail = |started| failed("csrf-token", "POST", &self.csrf_url, started);
+        let response = self.common(self.http.post(&self.csrf_url)).send().await.map_err(fail(started))?;
         let status = response.status().as_u16();
-        let body = response.bytes().await?;
+        let body = response.bytes().await.map_err(fail(started))?;
         // The reply body carries the token: it is never logged.
         debug!(method = "POST", url = %redact_url(&self.csrf_url), status, elapsed_ms = millis(started.elapsed()), "csrf-token exchange");
         match status {
@@ -70,9 +71,10 @@ impl RegistryClient {
             call = call.header("X-CSRF-TOKEN", self.csrf_token().await?);
         }
         let started = Instant::now();
-        let response = call.send().await?;
+        let fail = |started| failed(request.method(), "POST", &self.api_url, started);
+        let response = call.send().await.map_err(fail(started))?;
         let status = response.status().as_u16();
-        let body = response.bytes().await?;
+        let body = response.bytes().await.map_err(fail(started))?;
         debug!(
             method = "POST",
             url = %redact_url(&self.api_url),

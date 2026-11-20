@@ -26,6 +26,7 @@ Records keep the default target (module path, e.g. `yandex_proto::xiva`), so `BT
 
 ### Network trace placement
 - `registry.rs` and `media.rs`: one `debug` event per HTTP exchange: method, host+path (via a helper that drops the query), status, elapsed ms; `trace` adds the registry reply body except the CSRF reply.
+- `registry.rs`, `media.rs`, `bootstrap.rs`: an exchange that ends without a usable response (DNS, TLS, connect, timeout, broken body) logs one `warn` before the error returns: call, method, host+path, elapsed ms, timeout flag and the error's cause chain. The returned error has no URL, so this line is the only record of where it failed.
 - `bootstrap.rs`: `info` per step with status, never bodies (they carry tokens).
 - `xiva.rs`: `info` for connecting/subscribed/disconnected with reason and retry delay; `debug` per socket request (method, req_id) and its reply (status, elapsed ms); `debug` per push kind; `trace` for operation frames and decoded frame bodies. Subscribe refresh rounds log one `debug` line with the chat count, not one per chat.
 - `chat-core`: `info` for engine start, cache fallback and sign-out; `warn`/`error` for the current `eprintln!` sites; `debug` for history and media fetches.
