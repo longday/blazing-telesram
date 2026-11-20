@@ -318,6 +318,7 @@ impl<B: Backend> Engine<B> {
                 let limit = self.config.history_limit;
                 let cached = self.db(self.cache.history(&chat, None, limit));
                 self.open_chat = Some(chat.clone());
+                self.backend.watch(Some(&chat));
                 let fetch = self.can_fetch();
                 // With a fetch coming, an empty cache is not worth an (empty) event.
                 match cached {
@@ -398,6 +399,8 @@ impl<B: Backend> Engine<B> {
     fn become_online(&mut self, refresh_chats: bool) {
         self.phase = Phase::Online;
         self.attempt = 0;
+        // A connection starts with nothing watched, including after a reconnect.
+        self.backend.watch(self.open_chat.as_ref());
         self.set_connection(ConnectionState::Online);
         if refresh_chats {
             let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
@@ -735,6 +738,7 @@ mod tests {
         live: Option<Sender<LiveEvent>>,
         bootstrap_calls: usize,
         history_calls: Vec<(ChatId, Option<MessageTs>, usize)>,
+        watch_calls: Vec<Option<ChatId>>,
         media_calls: usize,
         /// When set, `history` takes its snapshot, then waits here before answering.
         history_gate: Option<Arc<tokio::sync::Notify>>,
@@ -797,6 +801,9 @@ mod tests {
             let mut s = self.state();
             s.media_calls += 1;
             s.media.get(&media.id).cloned().ok_or_else(|| BackendError::Protocol("no such media".into()))
+        }
+        fn watch(&self, chat: Option<&ChatId>) {
+            self.state().watch_calls.push(chat.cloned());
         }
         async fn subscribe(&self) -> Result<Receiver<LiveEvent>, BackendError> {
             let (tx, rx) = async_channel::unbounded();
@@ -1145,6 +1152,19 @@ mod tests {
         h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
         h.online();
         assert_eq!(h.fake.state().bootstrap_calls, 2);
+    }
+
+    #[test]
+    fn open_chat_is_watched_again_on_every_connection() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        h.client.send(Command::OpenChat(id("a")));
+        h.history("open");
+        assert_eq!(h.fake.state().watch_calls, [None, Some(id("a"))]);
+        h.fake.state().live = None;
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.online();
+        assert_eq!(h.fake.state().watch_calls, [None, Some(id("a")), Some(id("a"))]);
     }
 
     #[test]

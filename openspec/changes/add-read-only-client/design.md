@@ -57,7 +57,8 @@ Confirmed on the live account (task 3.3):
 - Chat list: WS `history` without `ChatId`, body `{Limit: 1, ChatDataFilter: {}}`, returns every chat's metadata with its newest message. History: WS `history` with `ChatId`, `Limit`, optional `MaxTimestamp` (exclusive). Both on `service_index` 0.
 - Xiva: `service=messenger-prod:version5*common+version5*main` (form-encoded); pushes are binary frames whose Xiva event is `delivery`.
 - Push kinds seen: message upsert (an edit re-sends the message with a higher version and `edited`), deletion as a plain message without text followed by a moderated-range push, heartbeats (type 2, every 30 s, from the account's own web session), bot requests and seen markers (ignored).
-- `subscribe` (`TtlMcs` 60 s) replies with `CurrentTime` and `LastModeratedRange`. The server throttles it: refreshing ~100 chats every 30 s gets `TOO_MANY_REQUESTS` (transport error 7) for ~80 % of the requests. Whether message pushes need a per-chat subscription at all is open; see Open Questions.
+- `subscribe` (`TtlMcs` 60 s) replies with `CurrentTime` and `LastModeratedRange`. The server throttles it: refreshing ~100 chats every 30 s gets `TOO_MANY_REQUESTS` (transport error 7) for ~80 % of the requests.
+- Message pushes need no per-chat subscription: a 12 h `bt-probe listen` with none (2026-11-19/20) received 84 `MessageUpserted` and 123 `ChatChanged` from 23 chats (private, `0/0/…`, `100/0/…`). Not observed for lack of traffic: channels `1/0/…` and `0/22`, `0/58`, `0/68` chats. Decision: `Backend::watch` subscribes only the open chat (one request per refresh); the engine sets it on open and after every connect. Alternative: pacing all chats under the throttle – ~100 requests per minute for no observed gain. If a chat kind turns out to need it, its pushes arrive while it is open and its row catches up on the next chat-list fetch.
 
 ### Cache
 SQLite with `PRAGMA user_version` migrations; tables `chats` and `messages` keyed by server IDs/timestamps, storing normalized columns for ordering plus the raw JSON payload so later changes can render more fields without a resync. Server chunks replace the cached range they cover, which removes messages deleted on the server.
@@ -93,7 +94,3 @@ The engine keeps the last 256 live changes per chat and replays those newer than
 ## Migration Plan
 
 The demo is removed in the same change; `BT_STATE_PATH` files are ignored and can be deleted. Rollback is reverting the change.
-
-## Open Questions
-
-- Per-chat `subscribe`: does the account-level `version5*main` topic deliver new messages of unsubscribed chats? Test: listen without `--subscribe` while a message arrives. If yes, subscribe only the open chat (or none); if no, pace subscriptions under the throttle. Either way the live-updates spec is unchanged.

@@ -16,7 +16,7 @@ use yandex_proto::wire::{WireBody, WireMessage};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, ProtoError};
 
-const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--subscribe]\nlog filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace";
+const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--watch <chat>]\nlog filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -46,8 +46,8 @@ fn main() -> ExitCode {
             Ok(before) => block_on(history(chat, Some(before))),
             Err(_) => return usage(),
         },
-        ["listen"] => block_on(listen(false)),
-        ["listen", "--subscribe"] => block_on(listen(true)),
+        ["listen"] => block_on(listen(None)),
+        ["listen", "--watch", chat] => block_on(listen(Some(chat))),
         _ => return usage(),
     };
     match result {
@@ -141,12 +141,10 @@ async fn history(chat: &str, before: Option<i64>) -> Result<(), Failure> {
     Ok(())
 }
 
-async fn listen(subscribe: bool) -> Result<(), Failure> {
+async fn listen(watch: Option<&str>) -> Result<(), Failure> {
     let (client, mut events) = connect(ClientConfig::production()).await?;
-    if subscribe {
-        let chats = client.chat_list().await.map_err(fail)?;
-        println!("subscribing {} chats", chats.len());
-        client.watch_chats(chats.into_iter().map(|c| c.id).collect());
+    if let Some(chat) = watch {
+        client.watch_chats(vec![chat.to_owned()]);
     }
     while let Some(event) = events.recv().await {
         match event {

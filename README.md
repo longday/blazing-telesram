@@ -43,7 +43,7 @@ BT_LOG=info,yandex_proto::xiva=trace ./run.sh           # plus raw Xiva frames, 
 jq -c 'select(.level != "DEBUG")' "$(ls -t .runtime/logs/*.jsonl | head -1)"   # read the running app's log
 ```
 
-No level logs cookie values, tokens or URL query strings; `trace` does log message text, so share trace logs with care. `bt-probe` uses the same `BT_LOG` and writes its log to stderr only, e.g. `BT_LOG=yandex_proto::xiva=trace bt-probe listen --subscribe` shows the raw frames.
+No level logs cookie values, tokens or URL query strings; `trace` does log message text, so share trace logs with care. `bt-probe` uses the same `BT_LOG` and writes its log to stderr only, e.g. `BT_LOG=yandex_proto::xiva=trace bt-probe listen --watch <chat>` shows the raw frames; `--watch` adds the per-chat subscription the app makes for the open chat.
 
 ## License
 

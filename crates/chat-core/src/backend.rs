@@ -52,4 +52,9 @@ pub trait Backend: Send + Sync + 'static {
 
     /// Opens the live stream. The channel closing means the connection is gone for good.
     fn subscribe(&self) -> impl Future<Output = Result<async_channel::Receiver<LiveEvent>, BackendError>> + Send;
+
+    /// The chat the user has open, or none. The general live stream already carries new
+    /// messages of every chat; per-chat updates are requested for this one only, because the
+    /// server throttles per-chat subscriptions. Every new connection starts with none.
+    fn watch(&self, chat: Option<&ChatId>);
 }

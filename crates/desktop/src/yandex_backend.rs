@@ -85,7 +85,6 @@ impl Backend for YandexBackend {
     async fn chat_list(&self) -> Result<Vec<ChatSummary>, BackendError> {
         let (client, me) = self.client()?;
         let chats = client.chat_list().await.map_err(backend_error)?;
-        client.watch_chats(chats.iter().map(|c| c.id.clone()).collect());
         let users = Users { client: &client, cache: &self.users };
         let wanted = chats.iter().flat_map(|c| {
             c.partner_guid.iter().chain(c.last_message.iter().filter_map(|m| m.from.as_ref()?.guid.as_ref()))
@@ -161,6 +160,12 @@ impl Backend for YandexBackend {
             }
         });
         Ok(rx)
+    }
+
+    fn watch(&self, chat: Option<&ChatId>) {
+        if let Some(connection) = self.inner.lock().unwrap().as_ref() {
+            connection.client.watch_chats(chat.map(|c| c.0.clone()).into_iter().collect());
+        }
     }
 }
 
