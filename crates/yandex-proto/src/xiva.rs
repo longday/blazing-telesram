@@ -484,6 +484,10 @@ impl<C: Connector> Actor<C> {
                 command = self.rx.recv() => match command {
                     None => break End::Stopped,
                     Some(Command::Watch(chats)) => {
+                        // Callers re-send the list after a reconnect, which already resubscribed it.
+                        if chats == self.watched {
+                            continue;
+                        }
                         self.watched = chats;
                         if let Err(e) = self.subscribe_all(socket, &mut next_req, &mut pending, &mut rounds, subscription.as_deref()).await {
                             break End::Dropped(e);
@@ -1010,8 +1014,17 @@ mod tests {
         let mut second = connector.accept();
         while !matches!(next(&mut events).await, XivaEvent::Connecting) {}
         second.subscribed("sub2");
-        let (_, _, body) = second.next_request().await;
-        assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub2");
+        for chat in ["c1", "c2"] {
+            let (_, _, body) = second.next_request().await;
+            assert_eq!(body["ChatId"], chat);
+            assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub2");
+        }
+        // The engine re-sends the open chats on `Connected`: no second round.
+        handle.watch_chats(vec!["c1".into(), "c2".into()]);
+        let h = handle.clone();
+        tokio::spawn(async move { h.chat_list(&[]).await });
+        let (_, method, _) = second.next_request().await;
+        assert_eq!(method, "history");
     }
 
     #[tokio::test(start_paused = true)]
