@@ -109,6 +109,7 @@ impl MediaClient {
         match status {
             200..=299 => {}
             401 => return Err(ProtoError::SessionExpired),
+            404 => return Err(ProtoError::NotFound),
             status => return Err(http_error("media", status)),
         }
         let mut bytes = Vec::new();
@@ -165,6 +166,7 @@ mod tests {
             bytes_response("200 OK", b"pixels"),
             bytes_response("401 Unauthorized", b""),
             bytes_response("403 Forbidden", b""),
+            bytes_response("404 Not Found", b""),
             bytes_response("502 Bad Gateway", b""),
         ]);
         let c = client(&base, Duration::from_secs(5));
@@ -173,6 +175,7 @@ mod tests {
         assert!(seen.lock().unwrap()[0].starts_with("GET /file_shortterm/b/u?size=MIDDLE2048"));
         assert_eq!(c.fetch(&thumb).await.unwrap_err(), ProtoError::SessionExpired);
         assert!(matches!(c.fetch(&thumb).await.unwrap_err(), ProtoError::Protocol(_)));
+        assert_eq!(c.fetch(&thumb).await.unwrap_err(), ProtoError::NotFound);
         assert!(matches!(c.fetch(&thumb).await.unwrap_err(), ProtoError::Network(_)));
     }
 

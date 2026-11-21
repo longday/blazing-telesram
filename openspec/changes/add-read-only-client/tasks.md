@@ -34,6 +34,7 @@
 - [x] 5.2 Implement the SQLite cache per account under `BT_RUNTIME_DIR/cache/<uid>.sqlite` (mode 0600, `user_version` migrations, range replacement); verify tests for cold load, deletion on range replace and account isolation
 - [x] 5.3 Implement `ChatClient` on its own Tokio thread with the command channel and `ClientEvent` stream (cache first, then HTTP bootstrap, chat list, subscribe, catch-up after reconnect); verify tests with a fake transport cover startup from cache, live upsert, delete and catch-up
 - [x] 5.4 Implement sign out (delete session, account cache and media); verify a test that the files are gone afterwards
+- [x] 5.5 Media the server answers 404 for (deleted users, bots) is not requested again for an hour and is logged at `debug`, not `warn`; verify a test that repeated requests within the TTL reach the backend once and that it is requested again after the TTL, and that a 404 maps to `NotFound`
 
 ## 6. Desktop UI
 

@@ -34,6 +34,7 @@ fn backend_error(error: ProtoError) -> BackendError {
         ProtoError::SessionExpired => BackendError::SessionExpired,
         ProtoError::Network(e) => BackendError::Network(e),
         ProtoError::Protocol(e) => BackendError::Protocol(e),
+        ProtoError::NotFound => BackendError::NotFound,
     }
 }
 

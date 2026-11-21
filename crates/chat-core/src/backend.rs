@@ -13,6 +13,9 @@ pub enum BackendError {
     Network(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    /// The item does not exist on the server (a media 404); asking again soon cannot help.
+    #[error("not found")]
+    NotFound,
 }
 
 /// What a subscription delivers. The backend owns reconnection of its live connection and

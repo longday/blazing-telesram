@@ -9,6 +9,9 @@ pub enum ProtoError {
     Network(String),
     #[error("unexpected server response: {0}")]
     Protocol(String),
+    /// HTTP 404 for media: the server has no such file.
+    #[error("not found")]
+    NotFound,
 }
 
 impl From<BootstrapError> for ProtoError {

@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
@@ -41,6 +41,8 @@ pub struct ClientConfig {
     /// First reconnect delay; doubles per failed attempt up to `reconnect_max`.
     pub reconnect_base: Duration,
     pub reconnect_max: Duration,
+    /// How long media the server answered 404 for is not requested again.
+    pub media_missing_ttl: Duration,
 }
 
 impl ClientConfig {
@@ -52,6 +54,7 @@ impl ClientConfig {
             history_limit: 50,
             reconnect_base: Duration::from_secs(11),
             reconnect_max: Duration::from_secs(90),
+            media_missing_ttl: Duration::from_secs(3600),
         }
     }
 }
@@ -142,6 +145,8 @@ struct Engine<B> {
     media_inflight: HashSet<MediaRef>,
     /// Requested while we could not fetch; started once online.
     media_deferred: Vec<MediaRef>,
+    /// Media the server answered 404 for, with the time of that answer.
+    media_missing: HashMap<MediaRef, Instant>,
     media_slots: Arc<Semaphore>,
 }
 
@@ -256,6 +261,7 @@ impl<B: Backend> Engine<B> {
             live_log: HashMap::new(),
             media_inflight: HashSet::new(),
             media_deferred: Vec::new(),
+            media_missing: HashMap::new(),
             media_slots: Arc::new(Semaphore::new(MEDIA_SLOTS)),
         };
         tokio::spawn(pump_commands(commands, inputs));
@@ -672,6 +678,13 @@ impl<B: Backend> Engine<B> {
                 return self.emit(ClientEvent::MediaReady { media, path });
             }
         }
+        match self.media_missing.get(&media) {
+            Some(at) if at.elapsed() < self.config.media_missing_ttl => return,
+            Some(_) => {
+                self.media_missing.remove(&media);
+            }
+            None => {}
+        }
         match self.phase {
             Phase::Expired => {}
             Phase::Online => {
@@ -700,6 +713,11 @@ impl<B: Backend> Engine<B> {
                 Err(e) => tracing::error!(error = %e, "storing media failed"),
             },
             Err(BackendError::SessionExpired) => self.expire(),
+            // Deleted users and bots have no avatar: expected, so not a warning.
+            Err(BackendError::NotFound) => {
+                tracing::debug!(media = %media.id, "media not found; not asking again for a while");
+                self.media_missing.insert(media, Instant::now());
+            }
             // Not cached, so the UI can simply ask again later.
             Err(error) => tracing::warn!(media = %media.id, %error, "media fetch failed"),
         }
@@ -800,7 +818,7 @@ mod tests {
         async fn fetch_media(&self, media: &MediaRef) -> Result<Vec<u8>, BackendError> {
             let mut s = self.state();
             s.media_calls += 1;
-            s.media.get(&media.id).cloned().ok_or_else(|| BackendError::Protocol("no such media".into()))
+            s.media.get(&media.id).cloned().ok_or(BackendError::NotFound)
         }
         fn watch(&self, chat: Option<&ChatId>) {
             self.state().watch_calls.push(chat.cloned());
@@ -838,6 +856,7 @@ mod tests {
         config.history_limit = limit;
         config.reconnect_base = Duration::from_millis(5);
         config.reconnect_max = Duration::from_millis(20);
+        config.media_missing_ttl = Duration::from_millis(300);
         fs::write(&config.session_file, "{}").unwrap();
         let client = ChatClient::spawn(fake.clone(), config).unwrap();
         Harness { dir, fake, events: client.events(), client }
@@ -1165,6 +1184,26 @@ mod tests {
         h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
         h.online();
         assert_eq!(h.fake.state().watch_calls, [None, Some(id("a")), Some(id("a"))]);
+    }
+
+    #[test]
+    fn missing_media_is_not_requested_again_until_the_ttl_passes() {
+        let h = start(|_, _| {}, 50);
+        h.online();
+        let gone = MediaRef { id: "deleted_user".into(), kind: MediaKind::Avatar };
+        // Within the TTL (300 ms in tests) repeated requests reach the server once.
+        for _ in 0..5 {
+            h.client.send(Command::FetchMedia(gone.clone()));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(h.fake.state().media_calls, 1);
+        std::thread::sleep(Duration::from_millis(350));
+        h.client.send(Command::FetchMedia(gone));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while h.fake.state().media_calls < 2 {
+            assert!(Instant::now() < deadline, "not requested again after the TTL");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     #[test]
