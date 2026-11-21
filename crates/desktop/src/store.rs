@@ -132,6 +132,10 @@ impl ChatStore {
                 self.media.insert(media.clone(), path);
                 cx.emit(StoreEvent::Media(media));
             }
+            // Re-requested when the chat or message that shows it is applied again.
+            ClientEvent::MediaUnavailable(media) => {
+                self.media_requested.remove(&media);
+            }
             ClientEvent::Connection(state) => {
                 self.connection = state;
                 cx.emit(StoreEvent::Connection);

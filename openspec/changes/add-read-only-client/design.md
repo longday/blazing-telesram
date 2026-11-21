@@ -65,7 +65,7 @@ SQLite with `PRAGMA user_version` migrations; tables `chats` and `messages` keye
 
 ### Media
 Avatars and image thumbnails are fetched with the session cookies, stored under `media/<uid>/`, and decoded with the `image` crate already in the dependency tree; GPUI renders them with `img()`. Request concurrency is bounded (4) so a long chat list does not flood the file host.
-Deleted users and some bots have avatar ids the file host answers 404 for. That answer becomes `NotFound`, logged at `debug`; the engine does not request that media again for an hour (`ClientConfig::media_missing_ttl`, kept in memory, so a restart asks once more) and the UI keeps the initials. Other failures stay `warn` and are retried on the next request.
+Deleted users and some bots have avatar ids the file host answers 404 for. That answer becomes `NotFound`, logged at `debug`; for an hour (`ClientConfig::media_missing_ttl`, kept in memory, so a restart asks once more) the engine answers requests for that media without asking the server, and the UI keeps the initials. Other failures stay `warn`. Every failed or skipped request ends with `MediaUnavailable`, which clears the store's request mark, so the next chat or history refresh asks again.
 
 ### UI binding
 The current GPUI layout is kept and bound to `ChatStore`. The composer becomes a disabled control with a read-only notice. The demo "meetings" filter, mute toggle and synthetic info panel are removed; the thread panel goes too, because the model has no threads yet. The sidebar filter is one of All / Private / Groups / Channels / Unread.

@@ -90,6 +90,8 @@ pub enum ClientEvent {
     MessageUpserted(Message),
     MessageDeleted { chat: ChatId, timestamp: MessageTs },
     MediaReady { media: MediaRef, path: PathBuf },
+    /// Not available now (failed, or missing on the server recently); the UI may ask again later.
+    MediaUnavailable(MediaRef),
     Connection(ConnectionState),
     SessionExpired,
     SignedOut,

@@ -256,6 +256,23 @@ fn store_applies_events_and_issues_commands(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn unavailable_media_is_requested_again_on_the_next_refresh(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let avatar = media("deleted_user", MediaKind::Avatar);
+    let mut a = chat("a", ChatKind::Private, "Анна", None);
+    a.avatar = Some(avatar.clone());
+    h.feed(cx, [ClientEvent::ChatsReplaced(vec![a.clone()])]);
+    assert_eq!(h.commands(), [Command::FetchMedia(avatar.clone())]);
+    h.feed(cx, [ClientEvent::ChatsReplaced(vec![a.clone()])]);
+    assert!(h.commands().is_empty(), "still in flight");
+
+    h.feed(cx, [ClientEvent::MediaUnavailable(avatar.clone())]);
+    assert!(h.commands().is_empty(), "no retry loop: waits for the next refresh");
+    h.feed(cx, [ClientEvent::ChatUpdated(a)]);
+    assert_eq!(h.commands(), [Command::FetchMedia(avatar)]);
+}
+
+#[gpui::test]
 fn catch_up_drops_messages_deleted_beyond_the_returned_span(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     h.store.update(cx, |s, cx| s.select(ChatId("b".into()), cx));

@@ -679,7 +679,7 @@ impl<B: Backend> Engine<B> {
             }
         }
         match self.media_missing.get(&media) {
-            Some(at) if at.elapsed() < self.config.media_missing_ttl => return,
+            Some(at) if at.elapsed() < self.config.media_missing_ttl => return self.emit(ClientEvent::MediaUnavailable(media)),
             Some(_) => {
                 self.media_missing.remove(&media);
             }
@@ -716,10 +716,14 @@ impl<B: Backend> Engine<B> {
             // Deleted users and bots have no avatar: expected, so not a warning.
             Err(BackendError::NotFound) => {
                 tracing::debug!(media = %media.id, "media not found; not asking again for a while");
-                self.media_missing.insert(media, Instant::now());
+                self.media_missing.insert(media.clone(), Instant::now());
+                self.emit(ClientEvent::MediaUnavailable(media));
             }
-            // Not cached, so the UI can simply ask again later.
-            Err(error) => tracing::warn!(media = %media.id, %error, "media fetch failed"),
+            // Not cached; the UI asks again on its next refresh.
+            Err(error) => {
+                tracing::warn!(media = %media.id, %error, "media fetch failed");
+                self.emit(ClientEvent::MediaUnavailable(media));
+            }
         }
     }
 
@@ -1191,19 +1195,17 @@ mod tests {
         let h = start(|_, _| {}, 50);
         h.online();
         let gone = MediaRef { id: "deleted_user".into(), kind: MediaKind::Avatar };
-        // Within the TTL (300 ms in tests) repeated requests reach the server once.
-        for _ in 0..5 {
-            h.client.send(Command::FetchMedia(gone.clone()));
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let unavailable = |h: &Harness| h.next("unavailable", |e| *e == ClientEvent::MediaUnavailable(gone.clone()));
+        h.client.send(Command::FetchMedia(gone.clone()));
+        unavailable(&h);
+        // Within the TTL (300 ms in tests) the answer comes without asking the server.
+        h.client.send(Command::FetchMedia(gone.clone()));
+        unavailable(&h);
         assert_eq!(h.fake.state().media_calls, 1);
         std::thread::sleep(Duration::from_millis(350));
-        h.client.send(Command::FetchMedia(gone));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while h.fake.state().media_calls < 2 {
-            assert!(Instant::now() < deadline, "not requested again after the TTL");
-            std::thread::sleep(Duration::from_millis(2));
-        }
+        h.client.send(Command::FetchMedia(gone.clone()));
+        unavailable(&h);
+        assert_eq!(h.fake.state().media_calls, 2, "asked again after the TTL");
     }
 
     #[test]
