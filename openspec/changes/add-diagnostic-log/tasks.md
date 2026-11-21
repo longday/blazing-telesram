@@ -21,4 +21,4 @@
 
 ## 4. Integration
 
-- [ ] 4.1 Live run with the stored session: `./run.sh` with `BT_LOG=debug` produces stderr lines and a growing JSONL file readable by another process while the app runs, with no cookie value present (scan the file for every stored cookie value without printing them)
+- [x] 4.1 Live run with the stored session: `./run.sh` with `BT_LOG=debug` produces stderr lines and a growing JSONL file readable by another process while the app runs, with no cookie value present (scan the file for every stored cookie value without printing them)
