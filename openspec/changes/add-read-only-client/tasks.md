@@ -47,6 +47,6 @@
 
 ## 7. Integration
 
-- [ ] 7.1 Propose installing Tart and a macOS VM image per the system-configuration rules; after the user's approval, set up a VM started with `--no-graphics`; verify `tart list` shows it running and a screenshot can be taken inside the VM
+- [x] 7.1 Propose installing Tart and a macOS VM image per the system-configuration rules; after the user's approval, set up a VM started with `--no-graphics`; verify `tart list` shows it running and a screenshot can be taken inside the VM (VM `bt-vm` from `ghcr.io/cirruslabs/macos-tahoe-base:latest`, commands via `tart exec`, `screencapture` works without extra permissions)
 - [ ] 7.2 Run the app in the VM with the copied session; verify by screenshots: chat list, open chat, pagination, thumbnails, read-only composer, cached start, offline indicator after cutting the VM network, and catch-up after restoring it
 - [ ] 7.3 Verify live updates end to end: ask the user to send one message to their account from another device; confirm it appears in the VM app and in `bt-probe listen`, and that the chat stays unread in the web client
