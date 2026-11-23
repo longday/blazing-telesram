@@ -2,7 +2,7 @@
 //! socket (`history`, `subscribe`), operation frames (`subscribed`, `ping`) and push decoding.
 //! The socket is abstracted by [`Connector`]/[`Socket`] so tests run on a fake.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,11 +13,12 @@ use tokio::time::Instant;
 use tracing::{debug, info, trace, warn};
 
 use crate::error::ProtoError;
-use crate::frame::IncomingFrame;
+use crate::frame::{IncomingFrame, RequestFrame};
 use crate::net::{millis, redact_url};
 use crate::request::{ReadRequest, Route, SocketContext};
 use crate::session::{SessionCookie, cookie_header};
 use crate::wire::{PushEvent, check_status, decode_push};
+use crate::write::{Committed, WriteRequest, parse_commit};
 
 const TOPICS: &str = "version5*common+version5*main";
 /// Chat subscriptions live 60 s; refresh at half that.
@@ -108,6 +109,7 @@ type Reply = oneshot::Sender<Result<Json, ProtoError>>;
 
 enum Command {
     Request { request: ReadRequest, reply: Reply },
+    Push { request: WriteRequest, reply: Reply },
     Watch(Vec<String>),
 }
 
@@ -147,6 +149,18 @@ impl XivaHandle {
             .send(Command::Request { request, reply })
             .map_err(|_| ProtoError::Network("connection task stopped".into()))?;
         rx.await.map_err(|_| ProtoError::Network("connection task stopped".into()))?
+    }
+
+    /// Sends one write and returns its commit outcome. A write issued on a connected socket
+    /// that has not yet received `subscribed` waits for it and then carries that connection's
+    /// subscription id; it fails when the connection ends first or after the request timeout.
+    /// Fails fast while offline; the caller retries after `XivaEvent::Connected`.
+    pub async fn push(&self, request: WriteRequest) -> Result<Committed, ProtoError> {
+        let (reply, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Push { request, reply })
+            .map_err(|_| ProtoError::Network("connection task stopped".into()))?;
+        parse_commit(&rx.await.map_err(|_| ProtoError::Network("connection task stopped".into()))??)
     }
 
     pub async fn chat_list(&self, excluded: &[u32]) -> Result<Vec<crate::wire::WireChat>, ProtoError> {
@@ -222,6 +236,7 @@ fn push_kind(event: &PushEvent) -> (&'static str, &str) {
         PushEvent::MessageUpserted(message) => ("MessageUpserted", &message.chat),
         PushEvent::MessageDeleted { chat, .. } => ("MessageDeleted", chat),
         PushEvent::ChatChanged { chat } => ("ChatChanged", chat),
+        PushEvent::Typing { chat, .. } => ("Typing", chat),
         PushEvent::Ignored { .. } => ("Ignored", ""),
     }
 }
@@ -233,6 +248,24 @@ struct Pending {
     sent: Instant,
     /// The subscribe round this request belongs to.
     round: Option<u64>,
+    /// A `push`: its reply carries a commit status, not an application status.
+    write: bool,
+}
+
+/// A request ready to go on the wire, with the caller's reply channel.
+struct Outgoing {
+    frame: RequestFrame,
+    request_id: String,
+    reply: Reply,
+    write: bool,
+}
+
+/// A `push` that arrived before the connection's `subscribed` frame: its envelope needs the
+/// subscription id, so it waits for it (or for the deadline, or for the connection to end).
+struct Held {
+    request: WriteRequest,
+    reply: Reply,
+    deadline: Instant,
 }
 
 /// Outcome counts of one subscribe round. The server answers every chat separately and
@@ -336,11 +369,16 @@ impl<C: Connector> Actor<C> {
         self.config.backoff_base.saturating_mul(1u32 << failures.min(10)).min(self.config.backoff_max)
     }
 
+    /// `LogData.YandexUid` of a push: the `yandexuid` cookie.
+    fn yandex_uid(&self) -> Option<&str> {
+        self.cookies.iter().find(|c| c.name == "yandexuid").map(|c| c.value.as_str())
+    }
+
     /// Offline handling of a command; `false` when every handle is gone.
     fn offline(&mut self, command: Option<Command>) -> bool {
         match command {
             None => return false,
-            Some(Command::Request { reply, .. }) => {
+            Some(Command::Request { reply, .. } | Command::Push { reply, .. }) => {
                 let _ = reply.send(Err(ProtoError::Network("not connected".into())));
             }
             Some(Command::Watch(chats)) => self.watched = chats,
@@ -411,7 +449,7 @@ impl<C: Connector> Actor<C> {
         info!("session expired; not reconnecting");
         self.emit(XivaEvent::SessionExpired);
         while let Some(command) = self.rx.recv().await {
-            if let Command::Request { reply, .. } = command {
+            if let Command::Request { reply, .. } | Command::Push { reply, .. } = command {
                 let _ = reply.send(Err(ProtoError::SessionExpired));
             }
         }
@@ -423,6 +461,7 @@ impl<C: Connector> Actor<C> {
         let mut pending: HashMap<u64, Pending> = HashMap::new();
         let mut rounds = Rounds::default();
         let mut subscription: Option<String> = None;
+        let mut held: VecDeque<Held> = VecDeque::new();
         let mut idle = Instant::now() + self.config.first_ping_timeout;
         let mut refresh: Option<Instant> = None;
         let mut established = false;
@@ -431,6 +470,7 @@ impl<C: Connector> Actor<C> {
             let wake = pending
                 .values()
                 .map(|p| p.deadline)
+                .chain(held.iter().map(|h| h.deadline))
                 .chain([idle])
                 .chain(refresh)
                 .min()
@@ -454,6 +494,9 @@ impl<C: Connector> Actor<C> {
                                         break End::Dropped(e);
                                     }
                                     refresh = (!self.watched.is_empty()).then(|| Instant::now() + SUBSCRIBE_REFRESH);
+                                    if let Err(e) = self.flush_held(socket, &mut next_req, &mut pending, &mut held, id).await {
+                                        break End::Dropped(e);
+                                    }
                                 }
                                 _ => self.warning("subscribed frame without subscription-id".into()),
                             },
@@ -506,31 +549,35 @@ impl<C: Connector> Actor<C> {
                             let _ = reply.send(Err(ProtoError::Protocol("not a socket request".into())));
                             continue;
                         }
-                        let id = request_id();
-                        let ctx = SocketContext { req_id: next_req, request_id: &id, subscription_id: subscription.as_deref() };
+                        let request_id = request_id();
+                        let ctx = SocketContext { req_id: next_req, request_id: &request_id, subscription_id: subscription.as_deref() };
                         let Some(frame) = request.socket_frame(&ctx) else {
                             let _ = reply.send(Err(ProtoError::Network("not subscribed yet".into())));
                             continue;
                         };
-                        if let Err(e) = socket.send(frame.encode()).await {
-                            let _ = reply.send(Err(ProtoError::Network(e.clone())));
+                        if let Err(e) = self.dispatch(socket, &mut next_req, &mut pending, Outgoing { frame, request_id, reply, write: false }).await {
                             break End::Dropped(e);
                         }
-                        debug!(method = request.method(), req_id = next_req, "socket request");
-                        pending.insert(next_req, Pending {
-                            request_id: id,
-                            reply: Some(reply),
-                            deadline: Instant::now() + self.config.request_timeout,
-                            sent: Instant::now(),
-                            round: None,
-                        });
-                        next_req += 1;
                     }
+                    Some(Command::Push { request, reply }) => match subscription.as_deref() {
+                        None => held.push_back(Held { request, reply, deadline: Instant::now() + self.config.request_timeout }),
+                        Some(id) => {
+                            if let Err(e) = self.push_frame(socket, &mut next_req, &mut pending, id, request, reply).await {
+                                break End::Dropped(e);
+                            }
+                        }
+                    },
                 },
                 () = tokio::time::sleep_until(wake) => {
                     let now = Instant::now();
                     if now >= idle {
                         break End::Dropped("no server ping in time".into());
+                    }
+                    // One timeout for every held push, so the oldest is always first.
+                    while held.front().is_some_and(|h| now >= h.deadline) {
+                        if let Some(h) = held.pop_front() {
+                            let _ = h.reply.send(Err(ProtoError::Network("request timed out".into())));
+                        }
                     }
                     let expired: Vec<u64> = pending.iter().filter(|(_, p)| now >= p.deadline).map(|(k, _)| *k).collect();
                     for key in expired {
@@ -566,6 +613,9 @@ impl<C: Connector> Actor<C> {
                 let _ = reply.send(Err(failure.clone()));
             }
         }
+        for h in held {
+            let _ = h.reply.send(Err(failure.clone()));
+        }
         (end, established)
     }
 
@@ -580,6 +630,8 @@ impl<C: Connector> Actor<C> {
                 let mismatch = body.get("RequestId").and_then(Json::as_str).is_some_and(|r| r != p.request_id);
                 let result = if mismatch {
                     Err(ProtoError::Protocol("RequestId of the reply does not match".into()))
+                } else if p.write {
+                    Ok(body)
                 } else {
                     check_status(&body).map(|()| body)
                 };
@@ -662,9 +714,72 @@ impl<C: Connector> Actor<C> {
             let now = Instant::now();
             pending.insert(
                 *next_req,
-                Pending { request_id: id, reply: None, deadline: now + self.config.request_timeout, sent: now, round: Some(round) },
+                Pending { request_id: id, reply: None, deadline: now + self.config.request_timeout, sent: now, round: Some(round), write: false },
             );
             *next_req += 1;
+        }
+        Ok(())
+    }
+
+    /// Sends the frame and registers its reply. A send error is answered to the caller and
+    /// returned, which ends the connection.
+    async fn dispatch<S: Socket>(
+        &self,
+        socket: &mut S,
+        next_req: &mut u64,
+        pending: &mut HashMap<u64, Pending>,
+        out: Outgoing,
+    ) -> Result<(), String> {
+        let Outgoing { frame, request_id, reply, write } = out;
+        if let Err(e) = socket.send(frame.encode()).await {
+            let _ = reply.send(Err(ProtoError::Network(e.clone())));
+            return Err(e);
+        }
+        debug!(method = %frame.method, req_id = *next_req, "socket request");
+        let now = Instant::now();
+        pending.insert(
+            *next_req,
+            Pending { request_id, reply: Some(reply), deadline: now + self.config.request_timeout, sent: now, round: None, write },
+        );
+        *next_req += 1;
+        Ok(())
+    }
+
+    /// Builds the push frame for the connection's subscription and sends it.
+    async fn push_frame<S: Socket>(
+        &self,
+        socket: &mut S,
+        next_req: &mut u64,
+        pending: &mut HashMap<u64, Pending>,
+        subscription: &str,
+        request: WriteRequest,
+        reply: Reply,
+    ) -> Result<(), String> {
+        let Some(uid) = self.yandex_uid() else {
+            let _ = reply.send(Err(ProtoError::Protocol("the session has no yandexuid cookie".into())));
+            return Ok(());
+        };
+        let request_id = request_id();
+        let ctx = SocketContext { req_id: *next_req, request_id: &request_id, subscription_id: Some(subscription) };
+        let Some(frame) = request.socket_frame(&ctx, uid) else {
+            let _ = reply.send(Err(ProtoError::Network("not subscribed yet".into())));
+            return Ok(());
+        };
+        self.dispatch(socket, next_req, pending, Outgoing { frame, request_id, reply, write: true }).await
+    }
+
+    /// Sends the pushes that waited for `subscribed`, in the order they were issued. Those not
+    /// yet sent when a send fails stay in `held` and are failed with the connection.
+    async fn flush_held<S: Socket>(
+        &self,
+        socket: &mut S,
+        next_req: &mut u64,
+        pending: &mut HashMap<u64, Pending>,
+        held: &mut VecDeque<Held>,
+        subscription: &str,
+    ) -> Result<(), String> {
+        while let Some(Held { request, reply, .. }) = held.pop_front() {
+            self.push_frame(socket, next_req, pending, subscription, request, reply).await?;
         }
         Ok(())
     }
@@ -1168,5 +1283,186 @@ mod tests {
             assert!(text.contains(needle), "{needle}: {text}");
         }
         capture.assert_absent(&["c00kie-VALUE", "user-q-7f3a", &session, "?service", "client=web_main"]);
+    }
+
+    fn cookies_with_uid() -> Vec<SessionCookie> {
+        vec![cookie(), SessionCookie { name: "yandexuid".into(), value: "uid-77".into(), ..cookie() }]
+    }
+
+    fn start_with_uid(connector: &FakeConnector) -> (XivaHandle, XivaEvents) {
+        XivaHandle::spawn(connector.clone(), XivaConfig::production(), "4001".into(), cookies_with_uid())
+    }
+
+    async fn connected(server: &Server, events: &mut XivaEvents, subscription_id: &str) {
+        server.subscribed(subscription_id);
+        while !matches!(next(events).await, XivaEvent::Connected { .. }) {}
+    }
+
+    fn typing(chat: &str) -> WriteRequest {
+        WriteRequest::Typing { chat: chat.into() }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_carries_the_subscription_id_and_uid_and_parses_the_commit() {
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        connected(&server, &mut events, "sub-1").await;
+        let h = handle.clone();
+        let task = tokio::spawn(async move {
+            h.push(WriteRequest::SendText { chat: "c".into(), payload_id: "p-1".into(), text: "hi".into(), reply: None }).await
+        });
+        let (req_id, method, body) = server.next_request().await;
+        assert_eq!((req_id, method.as_str()), (1, "push"));
+        assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub-1");
+        assert_eq!(body["ClientMessage"]["LogData"]["YandexUid"], "uid-77");
+        assert_eq!(body["ClientMessage"]["Plain"]["PayloadId"], "p-1");
+        assert_eq!((body["Meta"]["Origin"].as_u64(), body["ClientSupportedFeatures"].as_u64()), (Some(27), Some(0)));
+        // Status 1 is success for a push; the read path would call it an internal error.
+        server.reply(req_id, "push", json!({
+            "RequestId": body["RequestId"],
+            "Status": 1,
+            "MessageInfo": { "TimestampMcs": 1_795_444_073_973_086_i64, "PrevTimestampMcs": 5, "SeqNo": 6, "Version": 1 },
+        }));
+        let committed = task.await.unwrap().unwrap();
+        assert_eq!(committed.status, 1);
+        assert_eq!(committed.message.unwrap().timestamp_mcs, 1_795_444_073_973_086);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_refusals_are_commit_errors_and_do_not_end_the_session() {
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        connected(&server, &mut events, "sub-1").await;
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        let (req_id, _, body) = server.next_request().await;
+        server.reply(req_id, "push", json!({ "RequestId": body["RequestId"], "Status": 15 }));
+        assert_eq!(task.await.unwrap(), Err(ProtoError::Commit { status: 15, name: "NO_PERMISSION", permanent: true }));
+
+        // Status 6 is FOREIGN_PARTITION here, not the read path's UNAUTHORIZED: the socket stays up.
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        let (req_id, _, body) = server.next_request().await;
+        server.reply(req_id, "push", json!({ "RequestId": body["RequestId"], "Status": 6 }));
+        assert_eq!(task.await.unwrap(), Err(ProtoError::Commit { status: 6, name: "FOREIGN_PARTITION", permanent: false }));
+
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        let (req_id, _, _) = server.next_request().await;
+        server.reply(req_id, "push", json!({ "RequestId": "other", "Status": 1 }));
+        assert!(matches!(task.await.unwrap(), Err(ProtoError::Protocol(_))));
+
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        let (req_id, _, _) = server.next_request().await;
+        server.proxy_status(req_id, 7);
+        assert!(matches!(task.await.unwrap(), Err(ProtoError::Network(_))));
+    }
+
+    /// Runs the tasks the test just spawned until they block.
+    async fn settle() {
+        for _ in 0..5 {
+            yield_now().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_before_subscribed_waits_and_uses_that_subscription_id() {
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        assert_eq!(next(&mut events).await, XivaEvent::Connecting);
+        settle().await;
+        // Connected at the socket level, but no `subscribed` frame yet: two writes wait, in order.
+        let tasks: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|chat| {
+                let h = handle.clone();
+                tokio::spawn(async move { h.push(typing(chat)).await })
+            })
+            .collect();
+        settle().await;
+        assert!(tasks.iter().all(|t| !t.is_finished()));
+
+        server.subscribed("sub-1");
+        assert!(matches!(next(&mut events).await, XivaEvent::Connected { .. }));
+        for (chat, task) in ["a", "b"].into_iter().zip(tasks) {
+            let (req_id, method, body) = server.next_request().await;
+            assert_eq!(method, "push");
+            assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub-1");
+            assert_eq!(body["ClientMessage"]["Typing"]["ChatId"], chat);
+            server.reply(req_id, "push", json!({ "RequestId": body["RequestId"], "Status": 1 }));
+            assert!(task.await.unwrap().is_ok());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_fails_when_the_connection_ends_before_subscribed_and_while_offline() {
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        assert_eq!(next(&mut events).await, XivaEvent::Connecting);
+        settle().await;
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        settle().await;
+        server.close("net");
+        assert!(matches!(task.await.unwrap(), Err(ProtoError::Network(reason)) if reason.starts_with("connection lost")));
+        assert!(matches!(next(&mut events).await, XivaEvent::Disconnected { .. }));
+        settle().await;
+        assert_eq!(handle.push(typing("c")).await, Err(ProtoError::Network("not connected".into())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_waiting_for_subscribed_times_out() {
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        assert_eq!(next(&mut events).await, XivaEvent::Connecting);
+        // Pings keep the connection alive; `subscribed` never comes.
+        server.text(json!({ "operation": "ping", "server-interval-sec": 60 }));
+        settle().await;
+        assert_eq!(handle.push(typing("c")).await, Err(ProtoError::Network("request timed out".into())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_after_a_reconnect_uses_the_new_subscription_id() {
+        let connector = FakeConnector::default();
+        let first = connector.accept();
+        let (handle, mut events) = start_with_uid(&connector);
+        connected(&first, &mut events, "sub-1").await;
+        first.close("net");
+        let mut second = connector.accept();
+        while !matches!(next(&mut events).await, XivaEvent::Connecting) {}
+        connected(&second, &mut events, "sub-2").await;
+        let h = handle.clone();
+        let task = tokio::spawn(async move { h.push(typing("c")).await });
+        let (req_id, method, body) = second.next_request().await;
+        // The per-connection counter restarted with the new connection.
+        assert_eq!((req_id, method.as_str()), (1, "push"));
+        assert_eq!(body["ClientTransportId"]["XivaSubscriptionId"], "sub-2");
+        second.reply(req_id, "push", json!({ "RequestId": body["RequestId"], "Status": 1 }));
+        assert!(task.await.unwrap().is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_needs_the_yandexuid_cookie() {
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        connected(&server, &mut events, "sub-1").await;
+        assert!(matches!(handle.push(typing("c")).await, Err(ProtoError::Protocol(m)) if m.contains("yandexuid")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn push_on_an_expired_session_reports_it() {
+        let connector = FakeConnector::default();
+        connector.refuse(ConnectError::Unauthorized);
+        let (handle, mut events) = start_with_uid(&connector);
+        assert_eq!(next(&mut events).await, XivaEvent::Connecting);
+        assert_eq!(next(&mut events).await, XivaEvent::SessionExpired);
+        assert_eq!(handle.push(typing("c")).await, Err(ProtoError::SessionExpired));
     }
 }

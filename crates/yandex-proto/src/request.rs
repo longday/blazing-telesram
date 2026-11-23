@@ -1,10 +1,10 @@
-//! The closed set of requests this client can express.
+//! The closed set of read requests this client can express.
 //!
-//! There is deliberately no "call any method" entry point: every request is a variant of
+//! There is deliberately no "call any method" entry point: every read is a variant of
 //! [`ReadRequest`], its wire method comes from [`ReadRequest::method`], and
-//! [`ALLOWED_METHODS`] lists every name that can reach the server. Messages, edits, deletions,
-//! reactions, read markers, typing and presence heartbeats (all sent through the socket method
-//! `push` in the web client) are not representable.
+//! [`ALLOWED_METHODS`] lists every name it can put on the wire. Writes (messages, edits,
+//! deletions, read markers, typing; all the socket method `push`) are a separate closed set in
+//! [`crate::write`]; reactions and presence heartbeats are not representable at all.
 
 use serde_json::{Value, json};
 
@@ -19,7 +19,7 @@ pub const ALLOWED_METHODS: [&str; 4] = ["request_user", "get_users_data", "histo
 /// Lifetime of one app-level chat subscription (the web client's `TtlMcs`).
 pub(crate) const SUBSCRIPTION_TTL_MCS: i64 = 60_000_000;
 
-const USER_AGENT: &str = "chats-web/3.22.0";
+pub(crate) const USER_AGENT: &str = "chats-web/3.22.0";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReadRequest {

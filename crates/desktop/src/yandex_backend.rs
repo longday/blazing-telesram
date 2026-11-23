@@ -11,16 +11,23 @@ use yandex_proto::error::ProtoError;
 use yandex_proto::media::{AvatarSize, MediaTarget};
 use yandex_proto::session::Session;
 use yandex_proto::wire::{PushEvent, Relation, WireBody, WireChat, WireChatKind, WireMessage, WireSender, WireUser};
+use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 
 /// How long bootstrap waits for the Xiva subscription before reporting a network error.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long a typing indicator lives when the push does not say. Peers repeat their typing
+/// push every 3-5 s while they type (observed in live logs), so a bit more than that.
+const TYPING_LIFETIME: Duration = Duration::from_secs(7);
 
 pub struct YandexBackend {
     session: Session,
     config: ClientConfig,
     inner: Mutex<Option<Connection>>,
     users: Arc<Mutex<HashMap<String, WireUser>>>,
+    /// Test runs on the real account set `BT_WRITE_ONLY_CHAT`: no write leaves for any other chat.
+    write_only: Option<ChatId>,
 }
 
 struct Connection {
@@ -35,6 +42,9 @@ fn backend_error(error: ProtoError) -> BackendError {
         ProtoError::Network(e) => BackendError::Network(e),
         ProtoError::Protocol(e) => BackendError::Protocol(e),
         ProtoError::NotFound => BackendError::NotFound,
+        ProtoError::Commit { status, name, permanent } => {
+            BackendError::Rejected { reason: format!("{name} ({status})"), permanent }
+        }
     }
 }
 
@@ -56,15 +66,45 @@ async fn wait_connected(events: &mut XivaEvents, deadline: Duration) -> Result<(
         .unwrap_or_else(|_| Err(BackendError::Network("live connection timed out".into())))
 }
 
+/// `BT_WRITE_ONLY_CHAT`: unset means no limit; set, it must name a chat.
+pub fn parse_write_only(value: Option<String>) -> Result<Option<ChatId>, String> {
+    match value {
+        None => Ok(None),
+        Some(chat) if chat.trim().is_empty() => Err("BT_WRITE_ONLY_CHAT is set but empty".into()),
+        Some(chat) => Ok(Some(ChatId(chat))),
+    }
+}
+
+fn write_guard(allowed: Option<&ChatId>, chat: &ChatId) -> Result<(), BackendError> {
+    match allowed {
+        Some(allowed) if allowed != chat => {
+            Err(BackendError::Rejected { reason: "запись в этот чат запрещена BT_WRITE_ONLY_CHAT".into(), permanent: true })
+        }
+        _ => Ok(()),
+    }
+}
+
 impl YandexBackend {
-    pub fn new(session: Session) -> Self {
-        Self { session, config: ClientConfig::production(), inner: Mutex::new(None), users: Arc::default() }
+    pub fn new(session: Session, write_only: Option<ChatId>) -> Self {
+        Self { session, config: ClientConfig::production(), inner: Mutex::new(None), users: Arc::default(), write_only }
     }
 
     fn client(&self) -> Result<(Client, String), BackendError> {
         let inner = self.inner.lock().unwrap();
         let connection = inner.as_ref().ok_or_else(|| BackendError::Protocol("not bootstrapped".into()))?;
         Ok((connection.client.clone(), connection.me.clone()))
+    }
+
+    /// Every write goes through here: the guard, then one log line without content.
+    async fn push(&self, chat: &ChatId, request: WriteRequest) -> Result<Committed, BackendError> {
+        let kind = request.kind();
+        if let Err(error) = write_guard(self.write_only.as_ref(), chat) {
+            tracing::warn!(kind, chat = %chat.0, "write blocked by BT_WRITE_ONLY_CHAT");
+            return Err(error);
+        }
+        tracing::info!(kind, chat = %chat.0, "write");
+        let (client, _) = self.client()?;
+        client.push(request).await.map_err(backend_error)
     }
 }
 
@@ -104,6 +144,7 @@ impl Backend for YandexBackend {
             messages: page.messages.iter().map(|m| message(m, &me, &users)).collect(),
             reached_start: page.reached_start,
             replaces: None,
+            payloads: own_payloads(&page.messages, &me),
         })
     }
 
@@ -135,7 +176,7 @@ impl Backend for YandexBackend {
                     XivaEvent::SessionExpired => vec![LiveEvent::Failed(BackendError::SessionExpired)],
                     XivaEvent::Push(PushEvent::MessageUpserted(wire)) => {
                         match (Users { client: &client, cache: &users }).load(authors(std::slice::from_ref(&wire))).await {
-                            Ok(()) => vec![LiveEvent::MessageUpserted(message(&wire, &me, &users.lock().unwrap()))],
+                            Ok(()) => vec![upserted(&wire, &me, &users.lock().unwrap())],
                             Err(error) => vec![LiveEvent::Failed(error)],
                         }
                     }
@@ -151,6 +192,17 @@ impl Backend for YandexBackend {
                         // A missed row update is repaired by the next chat-list fetch.
                         Err(_) => vec![],
                     },
+                    XivaEvent::Push(PushEvent::Typing { chat, user, name, timeout_secs }) => {
+                        if name.is_none() {
+                            if let Err(error) = (Users { client: &client, cache: &users }).load(vec![user.clone()]).await {
+                                if tx.send(LiveEvent::Failed(error)).await.is_err() {
+                                    return;
+                                }
+                                continue;
+                            }
+                        }
+                        typing_event(chat, user, name, timeout_secs, &me, &users.lock().unwrap()).into_iter().collect()
+                    }
                     XivaEvent::Push(PushEvent::Ignored { .. }) | XivaEvent::Connecting | XivaEvent::Warning(_) => vec![],
                 };
                 for event in live {
@@ -169,25 +221,53 @@ impl Backend for YandexBackend {
         }
     }
 
-    async fn send_text(&self, _: &ChatId, _: &PayloadId, _: &str, _: Option<&ReplyTarget>) -> Result<Option<MessageTs>, BackendError> {
-        unimplemented!("add-sending 2.x")
+    async fn send_text(
+        &self,
+        chat: &ChatId,
+        payload: &PayloadId,
+        text: &str,
+        reply_to: Option<&ReplyTarget>,
+    ) -> Result<Option<MessageTs>, BackendError> {
+        let request = WriteRequest::SendText {
+            chat: chat.0.clone(),
+            payload_id: payload.0.clone(),
+            text: text.to_owned(),
+            reply: reply_to.map(reply_ref),
+        };
+        Ok(self.push(chat, request).await?.message.map(|info| info.timestamp_mcs))
     }
 
-    async fn edit(&self, _: &ChatId, _: MessageTs, _: &str) -> Result<(), BackendError> {
-        unimplemented!("add-sending 2.x")
+    async fn edit(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        text: &str,
+        reply_to: Option<&ReplyTarget>,
+    ) -> Result<(), BackendError> {
+        self.push(chat, edit_request(chat, timestamp, text, reply_to)).await.map(drop)
     }
 
-    async fn delete(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
-        unimplemented!("add-sending 2.x")
+    async fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
+        self.push(chat, WriteRequest::Delete { chat: chat.0.clone(), timestamp }).await.map(drop)
     }
 
-    async fn mark_seen(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
-        unimplemented!("add-sending 2.x")
+    async fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
+        self.push(chat, WriteRequest::Seen { chat: chat.0.clone(), timestamp }).await.map(drop)
     }
 
-    async fn typing(&self, _: &ChatId) -> Result<(), BackendError> {
-        unimplemented!("add-sending 2.x")
+    async fn typing(&self, chat: &ChatId) -> Result<(), BackendError> {
+        self.push(chat, WriteRequest::Typing { chat: chat.0.clone() }).await.map(drop)
     }
+}
+
+/// The quote is cut to the protocol's bound when the request is encoded.
+fn reply_ref(target: &ReplyTarget) -> ReplyRef {
+    ReplyRef { timestamp: target.timestamp, quote: target.text.clone() }
+}
+
+/// An edit rewrites the whole message, so a reply repeats its target.
+fn edit_request(chat: &ChatId, timestamp: MessageTs, text: &str, reply_to: Option<&ReplyTarget>) -> WriteRequest {
+    WriteRequest::Edit { chat: chat.0.clone(), timestamp, text: text.to_owned(), reply: reply_to.map(reply_ref) }
 }
 
 /// Resolves display names and avatars of users the wire left anonymous.
@@ -315,6 +395,16 @@ fn image_body(image: &yandex_proto::wire::WireImage, caption: Option<String>) ->
     }
 }
 
+fn is_own(wire: &WireMessage, me: &str) -> bool {
+    wire.from.as_ref().and_then(|f| f.guid.as_deref()) == Some(me)
+}
+
+/// `PayloadId`s of the account's own messages: a send that reached the server shows up here
+/// even when its confirmation and echo were lost.
+fn own_payloads(messages: &[WireMessage], me: &str) -> Vec<PayloadId> {
+    messages.iter().filter(|m| is_own(m, me)).filter_map(|m| m.payload_id.clone().map(PayloadId)).collect()
+}
+
 fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> Message {
     let from = wire.from.as_ref();
     let mut message = Message {
@@ -323,7 +413,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
         author: UserId(from.and_then(|f| f.guid.clone()).unwrap_or_default()),
         author_name: sender_name(from, users),
         author_avatar: sender_avatar(from, users),
-        outgoing: from.and_then(|f| f.guid.as_deref()) == Some(me),
+        outgoing: is_own(wire, me),
         body: body(&wire.body),
         edited: wire.edited,
         reply_to: None,
@@ -334,10 +424,16 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
         Relation::None => {}
         Relation::Reply { quote, reference, original } => {
             let original_text = original.as_ref().map(|o| preview(&body(&o.body)));
+            // A forward with a comment parses as a reply to its original, which lives in another
+            // chat. An edit would rebuild the reference with this chat's id, so such a quote gets
+            // no target timestamp: it stays visible, and core refuses to edit the message.
+            let mut source_chats = reference.iter().filter_map(|r| r.chat.as_ref()).chain(original.iter().filter_map(|o| o.chat.as_ref()));
+            let cross_chat = source_chats.any(|chat| *chat != wire.chat);
+            let timestamp = reference.as_ref().and_then(|r| r.timestamp).or(original.as_ref().and_then(|o| o.timestamp));
             message.reply_to = Some(ReplyQuote {
                 author: original.as_ref().and_then(|o| sender_name(o.from.as_ref(), users)),
                 text: quote.clone().or(original_text).unwrap_or_default(),
-                timestamp: reference.as_ref().and_then(|r| r.timestamp).or(original.as_ref().and_then(|o| o.timestamp)),
+                timestamp: timestamp.filter(|_| !cross_chat),
             });
         }
         Relation::Forward { originals } => {
@@ -352,10 +448,38 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
     message
 }
 
+/// An own message that is new and carries the sender's `PayloadId` is the echo of a send, from
+/// this or another client. Edits keep the `PayloadId` but are plain updates, and so is everything
+/// other people write.
+fn upserted(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> LiveEvent {
+    let message = message(wire, me, users);
+    match &wire.payload_id {
+        Some(payload) if message.outgoing && !wire.edited => LiveEvent::Echo { payload: PayloadId(payload.clone()), message },
+        _ => LiveEvent::MessageUpserted(message),
+    }
+}
+
+/// The user's own typing on another device is not shown to the user.
+fn typing_event(
+    chat: String,
+    user: String,
+    name: Option<String>,
+    timeout_secs: Option<u32>,
+    me: &str,
+    users: &HashMap<String, WireUser>,
+) -> Option<LiveEvent> {
+    if user == me {
+        return None;
+    }
+    let name = name.or_else(|| users.get(&user)?.display_name.clone());
+    let timeout = timeout_secs.filter(|s| *s > 0).map_or(TYPING_LIFETIME, |s| Duration::from_secs(s.into()));
+    Some(LiveEvent::Typing { chat: ChatId(chat), user: UserId(user), name, timeout })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yandex_proto::wire::{WireFile, WireForwarded};
+    use yandex_proto::wire::{WireFile, WireForwarded, WireRef};
 
     fn wire(body: WireBody, relation: Relation, from: &str) -> WireMessage {
         WireMessage {
@@ -363,6 +487,7 @@ mod tests {
             timestamp: 10,
             seq_no: None,
             version: None,
+            payload_id: None,
             from: Some(WireSender { guid: Some(from.into()), display_name: None, avatar_id: None }),
             body,
             edited: false,
@@ -373,6 +498,39 @@ mod tests {
 
     fn user(guid: &str, name: &str) -> (String, WireUser) {
         (guid.into(), WireUser { guid: guid.into(), display_name: Some(name.into()), avatar_id: Some(format!("av-{guid}")), uid: None })
+    }
+
+    fn test_session() -> Session {
+        Session { cookies: Vec::new(), identity: yandex_proto::session::Identity { uid: None, guid: "me".into(), display_name: None } }
+    }
+
+    #[test]
+    fn write_only_chat_blocks_writes_to_every_other_chat() {
+        let allowed = ChatId("self".into());
+        assert_eq!(write_guard(Some(&allowed), &allowed), Ok(()));
+        assert!(matches!(
+            write_guard(Some(&allowed), &ChatId("0/0/other".into())),
+            Err(BackendError::Rejected { permanent: true, .. })
+        ));
+        assert_eq!(write_guard(None, &ChatId("0/0/other".into())), Ok(()));
+    }
+
+    #[test]
+    fn write_only_chat_must_name_a_chat_when_set() {
+        assert_eq!(parse_write_only(None), Ok(None));
+        assert_eq!(parse_write_only(Some("self".into())), Ok(Some(ChatId("self".into()))));
+        assert!(parse_write_only(Some(" ".into())).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_blocked_write_never_reaches_the_connection() {
+        let backend = YandexBackend::new(test_session(), Some(ChatId("self".into())));
+        // Unbootstrapped: anything that got past the guard would fail with "not bootstrapped".
+        assert!(matches!(
+            backend.mark_seen(&ChatId("0/0/other".into()), 1).await,
+            Err(BackendError::Rejected { permanent: true, .. })
+        ));
+        assert!(matches!(backend.mark_seen(&ChatId("self".into()), 1).await, Err(BackendError::Protocol(_))));
     }
 
     #[test]
@@ -406,6 +564,120 @@ mod tests {
         let plain = Relation::Reply { quote: None, reference: None, original: Some(original) };
         let reply = message(&wire(WireBody::Text("a".into()), plain, "u1"), "me", &users).reply_to.unwrap();
         assert_eq!((reply.text.as_str(), reply.timestamp), ("orig", Some(5)));
+    }
+
+    #[test]
+    fn a_reply_keeps_its_timestamp_only_when_the_original_is_in_the_same_chat() {
+        let users = HashMap::new();
+        let reply = |reference_chat: Option<&str>, original_chat: Option<&str>| {
+            let original = WireForwarded {
+                chat: original_chat.map(Into::into),
+                timestamp: Some(5),
+                from: None,
+                body: WireBody::Text("orig".into()),
+            };
+            let reference = WireRef { chat: reference_chat.map(Into::into), timestamp: Some(5) };
+            let relation = Relation::Reply { quote: None, reference: Some(reference), original: Some(original) };
+            message(&wire(WireBody::Text("comment".into()), relation, "me"), "me", &users).reply_to.unwrap()
+        };
+        let same = reply(Some("0/0/a"), Some("0/0/a"));
+        assert_eq!((same.text.as_str(), same.timestamp), ("orig", Some(5)));
+        // A forward with a comment parses as a reply whose original lives in another chat: the
+        // quote stays visible, but an edit could not rebuild its reference, so it has no target.
+        for (reference_chat, original_chat) in [(Some("0/0/other"), Some("0/0/other")), (Some("0/0/other"), None), (None, Some("0/0/other"))] {
+            let cross = reply(reference_chat, original_chat);
+            assert_eq!((cross.text.as_str(), cross.timestamp), ("orig", None), "{reference_chat:?} {original_chat:?}");
+        }
+    }
+
+    #[test]
+    fn commit_refusals_become_rejections_that_keep_their_permanence() {
+        let refusal = |status, name, permanent| backend_error(ProtoError::Commit { status, name, permanent });
+        assert_eq!(
+            refusal(15, "NO_PERMISSION", true),
+            BackendError::Rejected { reason: "NO_PERMISSION (15)".into(), permanent: true }
+        );
+        assert_eq!(
+            refusal(18, "THROTTLED", false),
+            BackendError::Rejected { reason: "THROTTLED (18)".into(), permanent: false }
+        );
+        assert_eq!(backend_error(ProtoError::SessionExpired), BackendError::SessionExpired);
+        assert_eq!(backend_error(ProtoError::NotFound), BackendError::NotFound);
+    }
+
+    #[test]
+    fn own_new_message_with_a_payload_id_is_an_echo_everything_else_an_upsert() {
+        let users = HashMap::new();
+        let mut own = wire(WireBody::Text("hi".into()), Relation::None, "me");
+        own.payload_id = Some("p-1".into());
+        let LiveEvent::Echo { payload, message } = upserted(&own, "me", &users) else { panic!("echo") };
+        assert_eq!((payload, message.outgoing), (PayloadId("p-1".into()), true));
+
+        // An edit keeps the payload id but changes an existing message.
+        let mut edit = own.clone();
+        edit.edited = true;
+        assert!(matches!(upserted(&edit, "me", &users), LiveEvent::MessageUpserted(_)));
+        // A message without a payload id, and one from somebody else, are plain upserts.
+        let mut bare = own.clone();
+        bare.payload_id = None;
+        assert!(matches!(upserted(&bare, "me", &users), LiveEvent::MessageUpserted(_)));
+        let mut theirs = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        theirs.payload_id = Some("p-2".into());
+        assert!(matches!(upserted(&theirs, "me", &users), LiveEvent::MessageUpserted(_)));
+    }
+
+    #[test]
+    fn edit_repeats_the_reply_target_and_a_plain_edit_has_none() {
+        let chat = ChatId("0/0/a".into());
+        let target = ReplyTarget { timestamp: 7, author: Some("Ann".into()), text: "orig".into() };
+        assert_eq!(
+            edit_request(&chat, 9, "new", Some(&target)),
+            WriteRequest::Edit {
+                chat: "0/0/a".into(),
+                timestamp: 9,
+                text: "new".into(),
+                reply: Some(ReplyRef { timestamp: 7, quote: "orig".into() }),
+            }
+        );
+        assert_eq!(
+            edit_request(&chat, 9, "new", None),
+            WriteRequest::Edit { chat: "0/0/a".into(), timestamp: 9, text: "new".into(), reply: None }
+        );
+    }
+
+    #[test]
+    fn history_reports_the_payload_ids_of_own_messages_only() {
+        let with_payload = |from: &str, payload: Option<&str>| {
+            let mut m = wire(WireBody::Text("x".into()), Relation::None, from);
+            m.payload_id = payload.map(Into::into);
+            m
+        };
+        let messages = [
+            with_payload("me", Some("p-1")),
+            with_payload("u1", Some("p-2")),
+            with_payload("me", None),
+            with_payload("me", Some("p-3")),
+        ];
+        assert_eq!(own_payloads(&messages, "me"), [PayloadId("p-1".into()), PayloadId("p-3".into())]);
+        assert!(own_payloads(&[], "me").is_empty());
+    }
+
+    #[test]
+    fn typing_is_named_from_the_push_or_the_user_cache_and_never_shows_the_own_account() {
+        let users = HashMap::from([user("u1", "Ann")]);
+        let typing = |user: &str, name: Option<&str>, secs| typing_event("c".into(), user.into(), name.map(Into::into), secs, "me", &users);
+        let Some(LiveEvent::Typing { chat, user, name, timeout }) = typing("u1", None, None) else { panic!("typing") };
+        assert_eq!((chat, user, name.as_deref(), timeout), (ChatId("c".into()), UserId("u1".into()), Some("Ann"), TYPING_LIFETIME));
+        let Some(LiveEvent::Typing { name, .. }) = typing("u1", Some("Anna"), None) else { panic!("typing") };
+        assert_eq!(name.as_deref(), Some("Anna"));
+        let Some(LiveEvent::Typing { name, .. }) = typing("stranger", None, None) else { panic!("typing") };
+        assert_eq!(name, None);
+        // A stated timeout wins; a zero one means "not stated".
+        let Some(LiveEvent::Typing { timeout, .. }) = typing("u1", None, Some(3)) else { panic!("typing") };
+        assert_eq!(timeout, Duration::from_secs(3));
+        let Some(LiveEvent::Typing { timeout, .. }) = typing("u1", None, Some(0)) else { panic!("typing") };
+        assert_eq!(timeout, TYPING_LIFETIME);
+        assert!(typing("me", None, None).is_none());
     }
 
     #[test]

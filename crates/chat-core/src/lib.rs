@@ -1,4 +1,4 @@
-//! Sync core of the read-only client: domain model, offline cache and the `ChatClient` engine.
+//! Sync core of the client: domain model, offline cache, outbox and the `ChatClient` engine.
 //! No UI and no protocol code; the network is reached through [`Backend`].
 
 pub mod backend;

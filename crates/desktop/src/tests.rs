@@ -1,14 +1,14 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
-use crate::desktop::{AccountMenu, Desktop, ToggleLog};
+use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, ToggleLog};
 use crate::format::{fit_thumbnail, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::store::{ChatFilter, ChatStore, SessionState};
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
 use gpui::{
-    point, px, size, AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, Pixels, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, VisualTestContext,
+    point, px, size, AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, MouseButton, Pixels,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -86,11 +86,18 @@ fn chunk(chat_id: &str, range: std::ops::RangeInclusive<i64>, reached_start: boo
         messages: range.map(|i| text(chat_id, i)).collect(),
         reached_start,
         replaces: None,
+        payloads: Vec::new(),
     })
 }
 
 fn history(chat_id: &str, messages: Vec<Message>, reached_start: bool) -> ClientEvent {
-    ClientEvent::History(HistoryChunk { chat: ChatId(chat_id.into()), messages, reached_start, replaces: None })
+    ClientEvent::History(HistoryChunk {
+        chat: ChatId(chat_id.into()),
+        messages,
+        reached_start,
+        replaces: None,
+        payloads: Vec::new(),
+    })
 }
 
 fn media(id: &str, kind: MediaKind) -> MediaRef {
@@ -108,6 +115,11 @@ fn harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
     harness_with(cx, vec![], |_, _| {})
 }
 
+/// Marks that the app's key bindings are installed in this test app.
+struct KeysBound;
+
+impl gpui::Global for KeysBound {}
+
 /// `debug_bounds` entries are never removed once painted, so "not shown" is only meaningful in a window
 /// that never painted the element: tests of absence start from `events` and `setup` applied before the first frame.
 fn harness_with(
@@ -115,6 +127,13 @@ fn harness_with(
     events: Vec<ClientEvent>,
     setup: impl FnOnce(&mut Desktop, &mut Context<Desktop>) + 'static,
 ) -> (Harness, &mut VisualTestContext) {
+    cx.update(|cx| {
+        if !cx.has_global::<KeysBound>() {
+            crate::input::bind(cx);
+            cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("BlazingTelesram"))]);
+            cx.set_global(KeysBound);
+        }
+    });
     let (events_tx, event_rx) = async_channel::unbounded();
     let (command_tx, commands) = async_channel::unbounded();
     let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
@@ -285,7 +304,7 @@ fn catch_up_drops_messages_deleted_beyond_the_returned_span(cx: &mut TestAppCont
     };
     // Messages 2 and 3 were deleted while offline; the core replaced everything from 1 on.
     let catch_up = |messages, replaces| {
-        ClientEvent::History(HistoryChunk { chat: ChatId("b".into()), messages, reached_start: false, replaces })
+        ClientEvent::History(HistoryChunk { chat: ChatId("b".into()), messages, reached_start: false, replaces, payloads: Vec::new() })
     };
     h.feed(cx, [catch_up(vec![text("b", 1)], Some((Some(ts(1)), None)))]);
     assert_eq!(stamps(&h, cx), [ts(1)]);
@@ -308,6 +327,7 @@ fn replacement_over_a_gap_reopens_older_loading(cx: &mut TestAppContext) {
         messages: vec![text("b", 5), text("b", 6)],
         reached_start: false,
         replaces: Some((None, None)),
+        payloads: Vec::new(),
     })]);
     assert!(h.commands().contains(&Command::LoadOlder { chat: b, before: ts(5) }));
 }
@@ -408,7 +428,7 @@ fn rendered_rows(
     ];
     let (_h, cx) = harness_with(cx, vec![ClientEvent::ChatsReplaced(chats)], move |d, cx| {
         d.filter = filter;
-        d.search.update(cx, |input, cx| input.set(query.to_string(), cx));
+        d.search.update(cx, |input, cx| input.set_text(query, cx));
     });
     let rows = [("p1", row!("p1")), ("p2", row!("p2")), ("g", row!("g")), ("ch", row!("ch"))]
         .into_iter()
@@ -791,24 +811,7 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
     assert!(shown(cx, msg!(3, "avatar-image")));
 }
 
-// ---- 6.5 read-only, connection, sign-out ----
-
-#[gpui::test]
-fn composer_is_disabled_with_a_notice(cx: &mut TestAppContext) {
-    let (h, cx) = harness(cx);
-    open_group(&h, cx);
-    h.feed(cx, [chunk("g", 1..=3, true)]);
-    assert!(shown(cx, "composer"));
-    assert!(shown(cx, "composer-disabled"));
-    assert!(shown(cx, "composer-notice"));
-    assert!(crate::desktop::READ_ONLY_NOTICE.contains("только для чтения"));
-
-    click(cx, "composer-disabled");
-    cx.simulate_input("привет");
-    let typed = h.desktop.read_with(cx, |d, cx| d.search.read(cx).content.to_string());
-    assert!(typed.is_empty(), "no input field takes the text");
-    assert!(h.commands().is_empty(), "nothing is sent");
-}
+// ---- 6.5 connection, sign-out ----
 
 fn indicator_shown(cx: &mut TestAppContext, state: ConnectionState) -> bool {
     let (_h, cx) = harness_with(cx, vec![ClientEvent::Connection(state)], |_, _| {});
@@ -899,4 +902,1076 @@ fn log_window_opens_by_shortcut_follows_new_records_and_copies(cx: &mut TestAppC
 
     click(cx, "log-close");
     assert_eq!(text(cx), None);
+}
+
+// ---- add-sending helpers ----
+
+fn chat_g() -> ChatId {
+    ChatId("g".into())
+}
+
+fn own(chat_id: &str, i: i64, body: &str) -> Message {
+    message(chat_id, i, "me", true, MessageBody::Text(body.into()))
+}
+
+fn pending(chat_id: &str, i: i64, payload: &str, body: &str) -> Message {
+    let mut m = own(chat_id, i, body);
+    m.delivery = Delivery::Pending(PayloadId(payload.into()));
+    m
+}
+
+fn failed(chat_id: &str, i: i64, payload: &str, body: &str, reason: &str) -> Message {
+    let mut m = own(chat_id, i, body);
+    m.delivery = Delivery::Failed { payload: PayloadId(payload.into()), reason: reason.into() };
+    m
+}
+
+fn send_command(body: &str, reply_to: Option<ReplyTarget>) -> Command {
+    Command::Send { chat: chat_g(), text: body.into(), reply_to }
+}
+
+/// Everything the UI asked of the core except typing notices, which every composer edit produces.
+fn writes(h: &Harness) -> Vec<Command> {
+    h.commands().into_iter().filter(|c| !matches!(c, Command::Typing(_))).collect()
+}
+
+/// Opens the group chat "g" and loads `messages` as its newest chunk; pending commands are dropped.
+fn open_with(h: &Harness, cx: &mut VisualTestContext, messages: Vec<Message>) {
+    open_group(h, cx);
+    h.feed(cx, [history("g", messages, true)]);
+    h.commands();
+}
+
+fn composer_text(h: &Harness, cx: &mut VisualTestContext) -> String {
+    h.desktop.read_with(cx, |d, cx| d.composer_input().read(cx).content.to_string())
+}
+
+fn composer_reply(h: &Harness, cx: &mut VisualTestContext) -> Option<ReplyTarget> {
+    h.desktop.read_with(cx, |d, _| d.composer_reply().cloned())
+}
+
+fn composer_cursor(h: &Harness, cx: &mut VisualTestContext) -> usize {
+    h.desktop.read_with(cx, |d, cx| d.composer_input().read(cx).cursor())
+}
+
+fn composer_height(cx: &mut VisualTestContext) -> Pixels {
+    bounds(cx, "composer-input").expect("composer is on screen").size.height
+}
+
+fn right_click(cx: &mut VisualTestContext, selector: &'static str) {
+    let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    cx.simulate_mouse_down(b.center(), MouseButton::Right, Modifiers::none());
+    cx.simulate_mouse_up(b.center(), MouseButton::Right, Modifiers::none());
+}
+
+fn activate(cx: &mut VisualTestContext) {
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+}
+
+fn stamps(h: &Harness, cx: &mut VisualTestContext) -> Vec<i64> {
+    h.store.read_with(cx, |s, _| s.timeline(&chat_g()).unwrap().messages.iter().map(|m| m.timestamp).collect())
+}
+
+fn delivery_of(h: &Harness, cx: &mut VisualTestContext, i: i64) -> Delivery {
+    h.store.read_with(cx, |s, _| {
+        s.timeline(&chat_g()).unwrap().messages.iter().find(|m| m.timestamp == ts(i)).unwrap().delivery.clone()
+    })
+}
+
+fn reply_target_2() -> ReplyTarget {
+    ReplyTarget { timestamp: ts(2), author: Some("ALICE".into()), text: "сообщение 2".into() }
+}
+
+fn choose_reply_to_2(cx: &mut VisualTestContext) {
+    right_click(cx, msg!(2));
+    click(cx, "menu-reply");
+}
+
+// ---- 5.1 composer ----
+
+#[gpui::test]
+fn enter_sends_the_typed_text_and_empties_the_composer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("привет");
+    assert_eq!(composer_text(&h, cx), "привет");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("привет", None)]);
+    assert_eq!(composer_text(&h, cx), "");
+}
+
+#[gpui::test]
+fn the_send_button_sends_like_enter(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    click(cx, "composer-send");
+    assert!(writes(&h).is_empty(), "nothing to send yet");
+    cx.simulate_input("привет");
+    click(cx, "composer-send");
+    assert_eq!(writes(&h), [send_command("привет", None)]);
+    assert_eq!(composer_text(&h, cx), "");
+}
+
+#[gpui::test]
+fn shift_enter_inserts_a_line_break_and_sends_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("раз");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("два");
+    assert_eq!(composer_text(&h, cx), "раз\nдва");
+    assert!(writes(&h).is_empty());
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("раз\nдва", None)], "line breaks inside the text are kept");
+}
+
+#[gpui::test]
+fn blank_text_is_not_sent_and_the_rest_is_trimmed(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("   ");
+    cx.simulate_keystrokes("shift-enter enter");
+    assert!(writes(&h).is_empty(), "spaces and line breaks only");
+    assert_eq!(composer_text(&h, cx), "   \n");
+
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_input("  привет \n");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("привет", None)]);
+}
+
+#[gpui::test]
+fn composer_wraps_and_grows_up_to_eight_rows(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let one_row = composer_height(cx);
+    assert_eq!(one_row, px(22.));
+
+    cx.simulate_input(&"слово ".repeat(60));
+    cx.run_until_parked();
+    let wrapped = composer_height(cx);
+    assert!(wrapped > one_row && wrapped < px(22. * 8.), "wrapped text takes a few rows: {wrapped:?}");
+    assert_eq!(f32::from(wrapped) % 22., 0., "whole rows");
+
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_input("x");
+    for _ in 0..19 {
+        cx.simulate_keystrokes("shift-enter");
+        cx.simulate_input("x");
+    }
+    cx.run_until_parked();
+    assert_eq!(composer_height(cx), px(22. * 8.), "twenty rows are capped and scroll inside");
+
+    // Backspace until empty: the field shrinks back to one row.
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.run_until_parked();
+    assert_eq!(composer_height(cx), one_row);
+}
+
+#[gpui::test]
+fn clicks_and_vertical_keys_move_the_caret_between_rows(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    h.desktop.update(cx, |d, cx| d.composer_input().update(cx, |input, cx| input.set_text("aaa\naa", cx)));
+    cx.run_until_parked();
+    assert_eq!(composer_cursor(&h, cx), 6);
+
+    cx.simulate_keystrokes("up");
+    assert_eq!(composer_cursor(&h, cx), 2, "same column one row up");
+    cx.simulate_keystrokes("down");
+    assert_eq!(composer_cursor(&h, cx), 6);
+    cx.simulate_keystrokes("home");
+    assert_eq!(composer_cursor(&h, cx), 4, "row start");
+    cx.simulate_keystrokes("up end");
+    assert_eq!(composer_cursor(&h, cx), 3, "row end");
+
+    let field = bounds(cx, "composer-input").unwrap();
+    cx.simulate_click(point(field.left() + px(1.), field.top() + px(22. + 11.)), Modifiers::none());
+    assert_eq!(composer_cursor(&h, cx), 4, "a click on the second row lands in it");
+    cx.simulate_click(point(field.right() - px(1.), field.top() + px(11.)), Modifiers::none());
+    assert_eq!(composer_cursor(&h, cx), 3, "a click past the end of the first row lands at its end");
+}
+
+// ---- 5.2 delivery states ----
+
+#[gpui::test]
+fn a_sent_message_is_pending_then_confirmed_exactly_once(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
+    assert!(shown(cx, msg!(50, "pending")));
+    assert!(y(cx, msg!(50)) > y(cx, msg!(2)), "at the bottom of the timeline at once");
+    assert!(h.commands().is_empty());
+
+    let settled = ClientEvent::PendingSettled { chat: chat_g(), payload: PayloadId("p1".into()) };
+    let server = ClientEvent::MessageUpserted(own("g", 60, "привет"));
+    h.feed(cx, [settled.clone(), server.clone()]);
+    assert!(shown(cx, msg!(60, "sent")));
+    assert_eq!(stamps(&h, cx), [1, 2, 60], "one copy: the pending one is gone");
+
+    h.feed(cx, [settled, server]);
+    assert_eq!(stamps(&h, cx), [1, 2, 60], "a repeated signal changes nothing");
+}
+
+#[gpui::test]
+fn the_echo_may_come_first_and_still_leaves_one_copy(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::PendingSettled { chat: chat_g(), payload: PayloadId("p1".into()) },
+            ClientEvent::MessageUpserted(own("g", 40, "привет")),
+        ],
+    );
+    assert_eq!(stamps(&h, cx), [1, 40], "the server copy may sort before the local time");
+    assert_eq!(delivery_of(&h, cx, 40), Delivery::Sent);
+    assert!(shown(cx, msg!(40, "sent")));
+}
+
+#[gpui::test]
+fn a_new_pending_message_scrolls_into_view(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, (1..=80).map(|i| text("g", i)).collect());
+    scroll(cx, 800.);
+    let list = h.list(cx);
+    assert!(list.logical_scroll_top().item_ix < list.item_count(), "scrolled up");
+    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 90, "p1", "привет"))]);
+    assert!(shown(cx, msg!(90, "pending")), "the user's own message is brought into view");
+}
+
+#[gpui::test]
+fn a_rejected_message_shows_the_reason_and_retry_sends_it_again(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
+    h.feed(cx, [ClientEvent::MessageUpserted(failed("g", 50, "p1", "привет", "нет прав"))]);
+    assert!(shown(cx, msg!(50, "failed")));
+    assert!(shown(cx, msg!(50, "failed-reason")));
+    assert_eq!(stamps(&h, cx), [1, 50], "the failed message replaces the pending one in place");
+
+    click(cx, msg!(50, "retry"));
+    assert_eq!(h.commands(), [Command::Retry(PayloadId("p1".into()))]);
+}
+
+// ---- 5.3 reply ----
+
+#[gpui::test]
+fn reply_quotes_the_chosen_message_in_the_sent_one(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    assert!(shown(cx, "reply-bar"));
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+
+    cx.simulate_input("ответ");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("ответ", Some(reply_target_2()))]);
+    assert_eq!(composer_reply(&h, cx), None, "the bar goes away once the message is sent");
+}
+
+#[gpui::test]
+fn escape_and_the_close_button_cancel_the_reply(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(composer_reply(&h, cx), None);
+    cx.simulate_input("без цитаты");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("без цитаты", None)]);
+
+    choose_reply_to_2(cx);
+    click(cx, "reply-bar-close");
+    assert_eq!(composer_reply(&h, cx), None);
+    cx.simulate_input("после закрытия");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("после закрытия", None)], "the composer keeps focus after the click");
+}
+
+// ---- 5.4 drafts ----
+
+#[gpui::test]
+fn text_and_reply_target_are_restored_after_a_chat_switch(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_input("черновик");
+
+    click(cx, row!("p"));
+    let commands = h.commands();
+    let draft = Draft { chat: chat_g(), text: "черновик".into(), reply_to: Some(reply_target_2()) };
+    assert!(commands.contains(&Command::SaveDraft(draft)), "saved when the chat is left: {commands:?}");
+    assert_eq!(composer_text(&h, cx), "", "the other chat starts with an empty composer");
+    assert_eq!(composer_reply(&h, cx), None);
+
+    click(cx, row!("g"));
+    assert_eq!(composer_text(&h, cx), "черновик");
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+}
+
+#[gpui::test]
+fn a_chat_with_a_draft_shows_it_instead_of_the_last_message(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("привет\nмир");
+    click(cx, row!("p"));
+    assert!(shown(cx, part!("g", "draft")));
+    h.store.read_with(cx, |s, _| {
+        let summary = s.chat(&chat_g()).unwrap();
+        assert_eq!(chat_preview(s, summary), Preview::Draft("привет мир".into()));
+    });
+
+    click(cx, row!("g"));
+    cx.simulate_keystrokes("cmd-a backspace");
+    click(cx, row!("p"));
+    h.store.read_with(cx, |s, _| {
+        let summary = s.chat(&chat_g()).unwrap();
+        assert_eq!(chat_preview(s, summary), Preview::Message("превью 1".into()), "an emptied draft is gone");
+    });
+}
+
+#[gpui::test]
+fn a_draft_is_saved_one_second_after_the_last_keystroke(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let saved = |h: &Harness| writes(h).into_iter().find_map(|c| if let Command::SaveDraft(d) = c { Some(d.text) } else { None });
+
+    cx.simulate_input("а");
+    cx.executor().advance_clock(Duration::from_millis(900));
+    cx.run_until_parked();
+    assert_eq!(saved(&h), None);
+    cx.simulate_input("б");
+    cx.executor().advance_clock(Duration::from_millis(900));
+    cx.run_until_parked();
+    assert_eq!(saved(&h), None, "every keystroke restarts the wait");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(saved(&h), Some("аб".into()));
+}
+
+#[gpui::test]
+fn sending_discards_the_draft_without_a_second_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("привет");
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    h.commands();
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("привет", None)]);
+    h.store.read_with(cx, |s, _| assert!(s.draft(&chat_g()).is_none()));
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(writes(&h).is_empty(), "the core deletes the draft when it takes the message");
+}
+
+#[gpui::test]
+fn persisted_drafts_fill_the_composer_and_the_chat_row(cx: &mut TestAppContext) {
+    let draft = Draft { chat: chat_g(), text: "из прошлого".into(), reply_to: None };
+    let events = vec![
+        ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
+        ClientEvent::Drafts(vec![draft]),
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    assert!(shown(cx, part!("g", "draft")));
+    click(cx, row!("g"));
+    assert_eq!(composer_text(&h, cx), "из прошлого");
+}
+
+#[gpui::test]
+fn a_draft_that_arrives_late_fills_an_untouched_composer_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let draft = |text: &str| ClientEvent::Drafts(vec![Draft { chat: chat_g(), text: text.into(), reply_to: None }]);
+    h.feed(cx, [draft("пришёл позже")]);
+    assert_eq!(composer_text(&h, cx), "пришёл позже");
+
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.simulate_input("мой текст");
+    h.feed(cx, [draft("чужой")]);
+    assert_eq!(composer_text(&h, cx), "мой текст", "typed text is never overwritten");
+}
+
+// ---- 5.5 message menu, edit, delete ----
+
+#[gpui::test]
+fn own_message_menu_offers_reply_edit_copy_and_delete(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 1, "мой")]);
+    right_click(cx, msg!(1));
+    for item in ["menu-reply", "menu-copy", "menu-edit", "menu-delete"] {
+        assert!(shown(cx, item), "{item}");
+    }
+}
+
+#[gpui::test]
+fn other_users_message_menu_offers_reply_and_copy_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-reply") && shown(cx, "menu-copy"));
+    assert!(!shown(cx, "menu-edit") && !shown(cx, "menu-delete"));
+}
+
+#[gpui::test]
+fn a_pending_message_menu_offers_copy_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![pending("g", 5, "p1", "жду")]);
+    right_click(cx, msg!(5));
+    assert!(shown(cx, "menu-copy"));
+    assert!(!shown(cx, "menu-reply") && !shown(cx, "menu-edit") && !shown(cx, "menu-delete"));
+}
+
+#[gpui::test]
+fn copy_text_puts_the_message_on_the_clipboard(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    right_click(cx, msg!(1));
+    click(cx, "menu-copy");
+    assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), Some("сообщение 1".into()));
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+}
+
+#[gpui::test]
+fn escape_and_an_outside_click_close_the_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let open = |h: &Harness, cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.menu_is_open());
+    right_click(cx, msg!(1));
+    assert!(open(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!open(&h, cx));
+
+    right_click(cx, msg!(1));
+    assert!(open(&h, cx));
+    click(cx, "chat-header");
+    assert!(!open(&h, cx));
+    assert!(h.commands().is_empty(), "closing the menu changes nothing");
+}
+
+#[gpui::test]
+fn edit_loads_the_message_and_enter_saves_the_new_text(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), own("g", 2, "старый")]);
+    right_click(cx, msg!(2));
+    click(cx, "menu-edit");
+    assert!(shown(cx, "edit-bar"));
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(composer_text(&h, cx), "старый");
+
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("новый");
+    assert!(h.commands().is_empty(), "no typing notice while editing");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(h.commands(), [Command::Edit { chat: chat_g(), timestamp: ts(2), text: "новый".into() }]);
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
+    assert_eq!(composer_text(&h, cx), "");
+
+    let mut edited = own("g", 2, "новый");
+    edited.edited = true;
+    h.feed(cx, [ClientEvent::MessageUpserted(edited)]);
+    assert!(shown(cx, msg!(2, "edited")));
+}
+
+#[gpui::test]
+fn saving_an_unchanged_text_sends_no_edit(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "как было")]);
+    right_click(cx, msg!(2));
+    click(cx, "menu-edit");
+    cx.simulate_keystrokes("enter");
+    assert!(h.commands().is_empty());
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
+}
+
+#[gpui::test]
+fn up_in_an_empty_composer_edits_the_newest_own_sent_message(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let messages = vec![own("g", 2, "первое"), text("g", 3), own("g", 4, "второе"), pending("g", 9, "p1", "жду")];
+    open_with(&h, cx, messages);
+    cx.simulate_keystrokes("up");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(4)), "pending messages are skipped");
+    assert_eq!(composer_text(&h, cx), "второе");
+    assert!(shown(cx, "edit-bar"));
+
+    cx.simulate_keystrokes("escape");
+    cx.simulate_input("а");
+    cx.simulate_keystrokes("up");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None, "with text in the composer Up only moves the caret");
+}
+
+#[gpui::test]
+fn escape_cancels_an_edit_and_brings_back_the_draft(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "старый")]);
+    cx.simulate_input("черновик");
+    right_click(cx, msg!(2));
+    click(cx, "menu-edit");
+    assert_eq!(composer_text(&h, cx), "старый");
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(composer_text(&h, cx), "черновик");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
+    assert!(!h.commands().iter().any(|c| matches!(c, Command::Edit { .. })), "the message stays unchanged");
+}
+
+#[gpui::test]
+fn delete_asks_for_confirmation_and_then_deletes(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), own("g", 2, "мой")]);
+    right_click(cx, msg!(2));
+    click(cx, "menu-delete");
+    assert!(shown(cx, "delete-dialog"));
+    assert!(h.commands().is_empty(), "confirmation first");
+
+    click(cx, "confirm-delete");
+    assert_eq!(h.commands(), [Command::Delete { chat: chat_g(), timestamp: ts(2) }]);
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+
+    h.feed(cx, [ClientEvent::MessageDeleted { chat: chat_g(), timestamp: ts(2) }]);
+    assert!(shown(cx, msg!(2, "deleted")));
+}
+
+#[gpui::test]
+fn cancelling_the_confirmation_keeps_the_message(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "мой")]);
+    right_click(cx, msg!(2));
+    click(cx, "menu-delete");
+    click(cx, "cancel-delete");
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+    assert!(h.commands().is_empty());
+    assert_eq!(stamps(&h, cx), [2]);
+
+    right_click(cx, msg!(2));
+    click(cx, "menu-delete");
+    cx.simulate_keystrokes("escape");
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()), "Escape also cancels");
+}
+
+#[gpui::test]
+fn a_rejected_edit_or_deletion_shows_the_reason_for_a_while(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "старый")]);
+    h.feed(cx, [ClientEvent::ActionFailed { chat: chat_g(), reason: "слишком поздно".into() }]);
+    assert!(shown(cx, "toast"));
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), Some("слишком поздно".into()));
+    assert_eq!(stamps(&h, cx), [2]);
+    assert_eq!(h.store.read_with(cx, |s, _| s.timeline(&chat_g()).unwrap().messages[0].body.clone()), MessageBody::Text("старый".into()));
+
+    cx.executor().advance_clock(Duration::from_secs(6));
+    cx.run_until_parked();
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), None);
+}
+
+// ---- 6.1 read markers ----
+
+#[gpui::test]
+fn the_newest_visible_message_is_reported_once_while_the_window_is_active(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 1..=3, true)]);
+    assert!(h.commands().is_empty(), "an inactive window reports nothing");
+
+    activate(cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(3) }]);
+
+    h.feed(cx, [ClientEvent::MessageUpserted(text("g", 4))]);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(4) }]);
+    let mut edited = text("g", 4);
+    edited.edited = true;
+    h.feed(cx, [ClientEvent::MessageUpserted(edited)]);
+    assert!(h.commands().is_empty(), "the same position is not reported twice");
+
+    cx.deactivate_window();
+    h.feed(cx, [ClientEvent::MessageUpserted(text("g", 5))]);
+    assert!(h.commands().is_empty(), "nothing is reported while the window is in the background");
+    activate(cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(5) }]);
+}
+
+#[gpui::test]
+fn only_messages_in_view_are_reported_when_scrolled_up(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 1..=80, true)]);
+    scroll(cx, 800.);
+    activate(cx);
+    let marks = h.commands();
+    let [Command::MarkRead { timestamp, .. }] = marks.as_slice() else { panic!("one marker expected: {marks:?}") };
+    assert!((1..80).contains(timestamp), "a message above the newest one: {timestamp}");
+
+    scroll(cx, -1_000_000.);
+    cx.run_until_parked();
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(80) }]);
+}
+
+#[gpui::test]
+fn pending_and_failed_messages_are_never_reported(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [history("g", vec![text("g", 1), pending("g", 9, "p1", "жду"), failed("g", 10, "p2", "не вышло", "нет прав")], true)]);
+    activate(cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+}
+
+// ---- 6.2 typing ----
+
+fn typing_event(cx: &mut VisualTestContext, chat_id: &str, user: &str, name: Option<&str>, secs: u64) -> ClientEvent {
+    ClientEvent::Typing {
+        chat: ChatId(chat_id.into()),
+        user: UserId(user.into()),
+        name: name.map(str::to_string),
+        until: cx.executor().now() + Duration::from_secs(secs),
+    }
+}
+
+fn typing_text(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Option<String> {
+    h.store.read_with(cx, |s, _| s.typing_text(&ChatId(chat_id.into())))
+}
+
+#[gpui::test]
+fn every_composer_edit_notifies_the_core(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("а");
+    assert_eq!(h.commands(), [Command::Typing(chat_g())]);
+    cx.simulate_keystrokes("backspace");
+    assert_eq!(h.commands(), [Command::Typing(chat_g())]);
+}
+
+#[gpui::test]
+fn typing_shows_in_the_header_and_the_chat_row_and_then_expires(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let event = typing_event(cx, "g", "alice", Some("Алиса"), 5);
+    h.feed(cx, [event]);
+    assert!(shown(cx, "header-typing"));
+    assert!(shown(cx, part!("g", "typing")));
+    assert_eq!(typing_text(&h, cx, "g"), Some("Алиса печатает…".into()));
+
+    cx.executor().advance_clock(Duration::from_secs(4));
+    cx.run_until_parked();
+    assert_eq!(typing_text(&h, cx, "g"), Some("Алиса печатает…".into()), "still typing before the timeout");
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert_eq!(typing_text(&h, cx, "g"), None);
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(chat_preview(s, s.chat(&chat_g()).unwrap()), Preview::Message("превью 1".into()));
+    });
+}
+
+#[gpui::test]
+fn typing_text_names_the_typists(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    let alice = typing_event(cx, "g", "alice", Some("Алиса"), 5);
+    let bob = typing_event(cx, "g", "bob", Some("Боб"), 5);
+    let nameless = typing_event(cx, "ch", "carol", None, 5);
+    let private = typing_event(cx, "p", "dave", Some("Дэйв"), 5);
+    h.feed(cx, [alice, bob, nameless, private]);
+    assert_eq!(typing_text(&h, cx, "g"), Some("Алиса и ещё 1 печатают…".into()));
+    assert_eq!(typing_text(&h, cx, "ch"), Some("Кто-то печатает…".into()));
+    assert_eq!(typing_text(&h, cx, "p"), Some("печатает…".into()), "a private chat needs no name");
+}
+
+#[gpui::test]
+fn a_message_from_the_typist_ends_the_indicator(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    let alice = typing_event(cx, "g", "alice", Some("Алиса"), 5);
+    let bob = typing_event(cx, "g", "bob", Some("Боб"), 5);
+    h.feed(cx, [alice, bob]);
+    h.feed(cx, [ClientEvent::MessageUpserted(text("g", 2))]);
+    assert_eq!(typing_text(&h, cx, "g"), Some("Боб печатает…".into()), "only alice stopped");
+}
+
+#[gpui::test]
+fn an_already_expired_typing_event_is_ignored(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    let event = typing_event(cx, "g", "alice", Some("Алиса"), 0);
+    h.feed(cx, [event]);
+    assert_eq!(typing_text(&h, cx, "g"), None);
+}
+
+// ---- review fixes: overlays, refused sends, read markers, editable rules ----
+
+/// Installs the log buffer and the Cmd+Shift+L binding the real app has.
+fn with_log_shortcut(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(LogBuffer::default());
+        cx.bind_keys([KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram"))]);
+    });
+}
+
+fn log_is_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.log_text().is_some())
+}
+
+#[gpui::test]
+fn the_log_view_takes_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
+    with_log_shortcut(cx);
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("привет");
+    h.commands();
+
+    cx.simulate_keystrokes("cmd-shift-l");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("ещё");
+    assert!(h.commands().is_empty(), "neither a send nor a typing notice while the log is open");
+    assert_eq!(composer_text(&h, cx), "привет");
+
+    click(cx, "log-close");
+    cx.simulate_input("!");
+    assert_eq!(composer_text(&h, cx), "привет!", "the composer has the keyboard again");
+    assert_eq!(h.commands(), [Command::Typing(chat_g())]);
+}
+
+#[gpui::test]
+fn escape_closes_the_log_before_touching_the_reply(cx: &mut TestAppContext) {
+    with_log_shortcut(cx);
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_keystrokes("cmd-shift-l");
+    assert!(log_is_open(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!log_is_open(&h, cx));
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+}
+
+#[gpui::test]
+fn confirmation_dialogs_take_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "мой")]);
+    cx.simulate_input("привет");
+    h.commands();
+
+    right_click(cx, msg!(2));
+    click(cx, "menu-delete");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("ещё");
+    assert!(h.commands().is_empty());
+    assert_eq!(composer_text(&h, cx), "привет");
+    click(cx, "cancel-delete");
+    cx.simulate_input("!");
+    assert_eq!(composer_text(&h, cx), "привет!");
+    h.commands();
+
+    click(cx, "menu-button");
+    click(cx, "menu-sign-out");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("ещё");
+    assert!(h.commands().is_empty());
+    assert_eq!(composer_text(&h, cx), "привет!");
+    click(cx, "cancel-sign-out");
+    cx.simulate_input("?");
+    assert_eq!(composer_text(&h, cx), "привет!?");
+}
+
+fn refused(body: &str, reply_to: Option<ReplyTarget>) -> ClientEvent {
+    ClientEvent::SendRefused {
+        draft: Draft { chat: chat_g(), text: body.into(), reply_to },
+        reason: "диск переполнен".into(),
+    }
+}
+
+fn toast(h: &Harness, cx: &mut VisualTestContext) -> Option<String> {
+    h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string))
+}
+
+#[gpui::test]
+fn a_refused_send_puts_text_and_reply_back_in_an_empty_composer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_input("привет");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(writes(&h), [send_command("привет", Some(reply_target_2()))]);
+    assert_eq!(composer_text(&h, cx), "");
+    assert_eq!(composer_reply(&h, cx), None);
+
+    h.feed(cx, [refused("привет", Some(reply_target_2()))]);
+    assert_eq!(composer_text(&h, cx), "привет");
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+    assert_eq!(toast(&h, cx), Some("диск переполнен".into()));
+}
+
+#[gpui::test]
+fn a_refused_send_goes_in_front_of_what_was_typed_since(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_input("первое");
+    cx.simulate_keystrokes("enter");
+    h.commands();
+    cx.simulate_input("второе");
+    h.commands();
+
+    h.feed(cx, [refused("первое", Some(reply_target_2()))]);
+    assert_eq!(composer_text(&h, cx), "первое\nвторое");
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()), "no reply was chosen since, so the refused one returns");
+    assert_eq!(toast(&h, cx), Some("диск переполнен".into()));
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: Some(reply_target_2()) };
+    assert_eq!(writes(&h), [Command::SaveDraft(draft)], "both texts survive the autosave");
+}
+
+#[gpui::test]
+fn a_refused_send_keeps_the_reply_target_chosen_since(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    cx.simulate_input("первое");
+    cx.simulate_keystrokes("enter");
+    choose_reply_to_2(cx);
+    cx.simulate_input("второе");
+
+    let other = ReplyTarget { timestamp: ts(1), author: Some("ALICE".into()), text: "сообщение 1".into() };
+    h.feed(cx, [refused("первое", Some(other))]);
+    assert_eq!(composer_text(&h, cx), "первое\nвторое");
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+}
+
+#[gpui::test]
+fn a_refused_send_joins_the_saved_draft_of_a_chat_that_is_not_open(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    cx.simulate_input("первое");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("второе");
+    click(cx, row!("p"));
+    h.commands();
+
+    h.feed(cx, [refused("первое", None)]);
+    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: None };
+    h.store.read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
+    assert_eq!(writes(&h), [Command::SaveDraft(draft)]);
+    assert_eq!(composer_text(&h, cx), "", "the open chat is untouched");
+
+    click(cx, row!("g"));
+    assert_eq!(composer_text(&h, cx), "первое\nвторое");
+}
+
+#[gpui::test]
+fn a_refused_send_for_a_chat_that_is_not_open_becomes_its_draft(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    cx.simulate_input("первое");
+    cx.simulate_keystrokes("enter");
+    click(cx, row!("p"));
+    h.commands();
+
+    h.feed(cx, [refused("первое", Some(reply_target_2()))]);
+    let draft = Draft { chat: chat_g(), text: "первое".into(), reply_to: Some(reply_target_2()) };
+    assert_eq!(writes(&h), [Command::SaveDraft(draft)]);
+}
+
+#[gpui::test]
+fn a_refused_send_during_an_edit_comes_back_when_the_edit_ends(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "старый")]);
+    cx.simulate_input("первое");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("up");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+
+    h.feed(cx, [refused("первое", None)]);
+    assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(composer_text(&h, cx), "первое");
+}
+
+#[gpui::test]
+fn a_refused_send_during_an_edit_joins_the_draft_saved_before_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "старый")]);
+    cx.simulate_input("второе");
+    right_click(cx, msg!(2));
+    click(cx, "menu-edit");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+
+    h.feed(cx, [refused("первое", None)]);
+    assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(composer_text(&h, cx), "первое\nвторое");
+}
+
+#[gpui::test]
+fn a_refused_send_during_an_edit_saves_the_merged_pre_edit_draft_at_once(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 2, "старый")]);
+    cx.simulate_input("второе");
+    right_click(cx, msg!(2));
+    click(cx, "menu-edit");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    h.commands();
+
+    h.feed(cx, [refused("первое", None)]);
+    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: None };
+    assert_eq!(writes(&h), [Command::SaveDraft(draft.clone())], "persisted without further typing");
+    h.store.read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
+    assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
+}
+
+fn tall_own(i: i64) -> Message {
+    own("g", i, &(0..150).map(|n| format!("строка {n}")).collect::<Vec<_>>().join("\n"))
+}
+
+#[gpui::test]
+fn a_message_taller_than_the_viewport_counts_as_seen_once_its_bottom_is_visible(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![tall_own(2)]);
+    scroll(cx, 2_000.);
+    cx.run_until_parked();
+    activate(cx);
+    assert!(h.commands().is_empty(), "only the top of the message is visible");
+
+    scroll(cx, -1_000_000.);
+    cx.run_until_parked();
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(2) }]);
+}
+
+#[gpui::test]
+fn a_row_clipped_at_the_top_counts_as_seen_while_its_bottom_is_visible(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut messages = vec![own("g", 1, "первое")];
+    messages.extend((10..90).map(|i| pending("g", i, &format!("p{i}"), "жду")));
+    open_with(&h, cx, messages);
+    scroll_to_top(&h, cx);
+    scroll(cx, -10.);
+    cx.run_until_parked();
+    let list = h.list(cx);
+    let row = list.bounds_for_item(0).expect("the first row is laid out");
+    let viewport = list.viewport_bounds();
+    assert!(row.top() < viewport.top() && row.bottom() > viewport.top(), "clipped at the top: {row:?} in {viewport:?}");
+
+    activate(cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+}
+
+#[gpui::test]
+fn opening_the_log_closes_an_open_message_menu(cx: &mut TestAppContext) {
+    with_log_shortcut(cx);
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), own("g", 2, "мой")]);
+    cx.simulate_input("черновик");
+    h.commands();
+    right_click(cx, msg!(2));
+    assert!(h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+
+    cx.simulate_keystrokes("cmd-shift-l");
+    assert!(log_is_open(&h, cx));
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()), "no menu above the log");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("ещё");
+    assert!(h.commands().is_empty());
+    assert_eq!(composer_text(&h, cx), "черновик");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
+
+    click(cx, "log-close");
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()), "the menu does not come back");
+}
+
+#[gpui::test]
+fn a_sent_message_above_a_viewport_of_pending_ones_is_not_reported(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    let mut messages = vec![text("g", 1)];
+    messages.extend((10..90).map(|i| pending("g", i, &format!("p{i}"), "жду")));
+    h.feed(cx, [history("g", messages, true)]);
+    h.commands();
+    activate(cx);
+    assert!(h.commands().is_empty(), "the only sent message is far above the viewport");
+
+    scroll_to_top(&h, cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+}
+
+#[gpui::test]
+fn nothing_is_reported_while_the_log_covers_the_chat(cx: &mut TestAppContext) {
+    with_log_shortcut(cx);
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 1..=3, true)]);
+    activate(cx);
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(3) }]);
+
+    cx.simulate_keystrokes("cmd-shift-l");
+    h.feed(cx, [ClientEvent::MessageUpserted(text("g", 4))]);
+    assert!(h.commands().is_empty(), "the message arrived behind the log");
+
+    click(cx, "log-close");
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(4) }]);
+}
+
+#[gpui::test]
+fn a_history_chunk_carrying_the_payload_replaces_the_local_copy(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), pending("g", 9, "p1", "жду")]);
+    h.feed(cx, [ClientEvent::History(HistoryChunk {
+        chat: chat_g(),
+        messages: vec![text("g", 1), own("g", 5, "жду")],
+        reached_start: true,
+        replaces: None,
+        payloads: vec![PayloadId("p1".into())],
+    })]);
+    assert_eq!(stamps(&h, cx), [1, 5]);
+}
+
+fn forwarded_own(i: i64) -> Message {
+    let mut m = own("g", i, "пересланное");
+    m.forwarded_from = Some("Анна".into());
+    m
+}
+
+fn reply_without_id() -> Message {
+    let mut m = own("g", 1, "ответ");
+    m.reply_to = Some(ReplyQuote { author: None, text: "цитата".into(), timestamp: None });
+    m
+}
+
+#[gpui::test]
+fn a_forwarded_own_message_cannot_be_edited(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![forwarded_own(1)]);
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-delete") && shown(cx, "menu-copy"));
+    assert!(!shown(cx, "menu-edit"));
+}
+
+#[gpui::test]
+fn a_reply_without_a_quoted_message_id_cannot_be_edited(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reply_without_id()]);
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-delete"));
+    assert!(!shown(cx, "menu-edit"));
+}
+
+#[gpui::test]
+fn a_reply_with_a_quoted_message_id_can_be_edited(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut reply = reply_without_id();
+    reply.reply_to = Some(ReplyQuote { author: None, text: "цитата".into(), timestamp: Some(ts(1)) });
+    reply.timestamp = ts(2);
+    open_with(&h, cx, vec![text("g", 1), reply]);
+    right_click(cx, msg!(2));
+    assert!(shown(cx, "menu-edit"));
+}
+
+#[gpui::test]
+fn up_skips_own_messages_that_cannot_be_edited(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut unquotable = reply_without_id();
+    unquotable.timestamp = ts(5);
+    open_with(&h, cx, vec![own("g", 2, "первое"), forwarded_own(4), unquotable]);
+    cx.simulate_keystrokes("up");
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(composer_text(&h, cx), "первое");
 }

@@ -1,11 +1,14 @@
 //! One timeline row: day separator, grouped bubble, attachments.
 
+use crate::desktop::Desktop;
 use crate::format::{avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size, Clock};
 use crate::store::ChatStore;
 use crate::theme::*;
 use crate::widgets::avatar;
-use bt_chat_core::model::{ChatId, ChatKind, MediaRef, Message, MessageBody, ReplyQuote};
+use bt_chat_core::model::{ChatId, ChatKind, Delivery, MediaRef, Message, MessageBody, MessageTs, ReplyQuote};
 use gpui::{prelude::*, *};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const GROUP_GAP_US: i64 = 5 * 60 * 1_000_000;
 const BUBBLE_MAX: f32 = 480.;
@@ -21,8 +24,24 @@ pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
         && day_key(earlier.timestamp, clock) == day_key(later.timestamp, clock)
 }
 
-/// Renders message `ix` of `chat`; pure in the store so it can run inside list callbacks.
-pub fn message_row(store: &ChatStore, chat: &ChatId, ix: usize, clock: Clock) -> AnyElement {
+/// Where each row that was painted in the latest frame sits, in window coordinates. The list reports
+/// no item bounds while it follows the bottom, so the rows report them themselves; whoever reads the
+/// frame drains it.
+pub type RowBounds = Rc<RefCell<Vec<(MessageTs, Bounds<Pixels>)>>>;
+
+/// What a row needs besides the store's data: the entities its clicks act on.
+#[derive(Clone)]
+pub struct RowContext {
+    pub store: Entity<ChatStore>,
+    pub desktop: WeakEntity<Desktop>,
+    pub chat: ChatId,
+    pub clock: Clock,
+    pub rows: RowBounds,
+}
+
+/// Renders message `ix` of the context's chat; pure in the store so it can run inside list callbacks.
+pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
+    let (store, chat, clock) = (ctx.store.read(cx), &ctx.chat, ctx.clock);
     let Some(messages) = store.timeline(chat).map(|t| &t.messages) else { return div().into_any_element() };
     let Some(m) = messages.get(ix) else { return div().into_any_element() };
     let prev = ix.checked_sub(1).map(|i| &messages[i]);
@@ -49,6 +68,14 @@ pub fn message_row(store: &ChatStore, chat: &ChatId, ix: usize, clock: Clock) ->
         .w_full()
         .flex()
         .flex_col()
+        .on_children_prepainted({
+            let rows = ctx.rows.clone();
+            move |children, _, _| {
+                if let (Some(first), Some(last)) = (children.first(), children.last()) {
+                    rows.borrow_mut().push((ts, Bounds::from_corners(first.origin, last.bottom_right())));
+                }
+            }
+        })
         .when(new_day, |d| {
             d.child(
                 div().w_full().flex().justify_center().pt(px(8.)).pb(px(4.)).child(
@@ -75,14 +102,18 @@ pub fn message_row(store: &ChatStore, chat: &ChatId, ix: usize, clock: Clock) ->
                 .gap(px(8.))
                 .when(m.outgoing, |d| d.justify_end())
                 .children(avatar_slot)
-                .child(bubble(store, m, in_group_chat && group_start, clock)),
+                .child(bubble(ctx, store, m, in_group_chat && group_start)),
         )
         .into_any_element()
 }
 
-fn bubble(store: &ChatStore, m: &Message, show_name: bool, clock: Clock) -> Div {
+fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> Div {
     let ts = m.timestamp;
+    let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
     div()
+        .on_mouse_down(MouseButton::Right, move |event, _, cx| {
+            desktop.update(cx, |desktop, cx| desktop.open_menu(chat.clone(), ts, event.position, cx)).ok();
+        })
         .debug_selector(move || format!("msg-{ts}"))
         .max_w(px(BUBBLE_MAX))
         .min_w_0()
@@ -114,9 +145,11 @@ fn bubble(store: &ChatStore, m: &Message, show_name: bool, clock: Clock) -> Div 
         })
         .when_some(m.reply_to.as_ref(), |d, quote| d.child(reply_quote(ts, quote)))
         .child(body(store, m))
+        .when_some(failure(ctx, m), |d, failure| d.child(failure))
         .child(
             div()
                 .justify_end()
+                .items_center()
                 .flex()
                 .gap(px(4.))
                 .text_size(px(11.))
@@ -124,8 +157,48 @@ fn bubble(store: &ChatStore, m: &Message, show_name: bool, clock: Clock) -> Div 
                 .when(m.edited, |d| {
                     d.child(div().debug_selector(move || format!("msg-{ts}-edited")).child("изм."))
                 })
-                .child(clock_time(ts, clock)),
+                .child(clock_time(ts, ctx.clock))
+                .when(m.outgoing, |d| d.child(delivery_mark(ts, &m.delivery))),
         )
+}
+
+/// What the sender sees at the message time: a clock while queued, a check once the server has it, a red "!" when refused.
+fn delivery_mark(ts: i64, delivery: &Delivery) -> Div {
+    let (selector, glyph, color) = match delivery {
+        Delivery::Pending(_) => ("pending", "🕓", MUTED),
+        Delivery::Sent => ("sent", "✓", SENT_MARK),
+        Delivery::Failed { .. } => ("failed", "!", DANGER),
+    };
+    div().debug_selector(move || format!("msg-{ts}-{selector}")).text_color(rgb(color)).child(glyph)
+}
+
+/// The refusal reason and the retry action of a failed message.
+fn failure(ctx: &RowContext, m: &Message) -> Option<Div> {
+    let Delivery::Failed { payload, reason } = &m.delivery else { return None };
+    let ts = m.timestamp;
+    let (store, payload) = (ctx.store.clone(), payload.clone());
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(13.))
+            .child(
+                div()
+                    .debug_selector(move || format!("msg-{ts}-failed-reason"))
+                    .text_color(rgb(DANGER))
+                    .child(format!("Не отправлено: {reason}")),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("retry-{ts}")))
+                    .debug_selector(move || format!("msg-{ts}-retry"))
+                    .text_color(rgb(ACCENT))
+                    .cursor_pointer()
+                    .child("Повторить")
+                    .on_click(move |_, _, cx| store.update(cx, |store, _| store.retry(payload.clone()))),
+            ),
+    )
 }
 
 fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {

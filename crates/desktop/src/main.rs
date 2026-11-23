@@ -11,36 +11,47 @@ mod yandex_backend;
 #[cfg(test)]
 mod tests;
 
-use bt_chat_core::model::UserId;
+use bt_chat_core::model::{ChatId, UserId};
 use bt_chat_core::{ChatClient, ClientConfig};
-use desktop::{Desktop, Quit, Search, ToggleLog};
+use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog};
 use format::Clock;
 use gpui::{prelude::*, *};
 use login::{LoginCookie, SignInWindow};
 use store::{ChatStore, SessionState, StoreEvent};
-use yandex_backend::YandexBackend;
+use yandex_backend::{YandexBackend, parse_write_only};
 use yandex_proto::bootstrap::{BootstrapError, RegistryEndpoints, bootstrap};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::session::{Identity, Session, SessionCookie};
 
+/// `BT_WRITE_ONLY_CHAT`, read once at startup.
+struct WriteOnly(Option<ChatId>);
+
+impl Global for WriteOnly {}
+
 fn main() {
     // Nothing can be logged before the runtime directory and filter are known.
     let runtime = RuntimeDir::from_env().map_err(|e| e.to_string());
-    let (runtime, log) = match runtime.and_then(|runtime| logging::init(runtime.path()).map(|log| (runtime, log))) {
+    let started = runtime.and_then(|runtime| {
+        let write_only = parse_write_only(std::env::var("BT_WRITE_ONLY_CHAT").ok())?;
+        logging::init(runtime.path()).map(|log| (runtime, log, write_only))
+    });
+    let (runtime, log, write_only) = match started {
         Ok(started) => started,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), write_only = ?write_only.as_ref().map(|c| &c.0), "starting");
     Application::new().run(move |cx: &mut App| {
         cx.set_global(log);
+        cx.set_global(WriteOnly(write_only));
         input::bind(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-f", Search, Some("BlazingTelesram")),
             KeyBinding::new("ctrl-f", Search, Some("BlazingTelesram")),
             KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram")),
+            KeyBinding::new("escape", Dismiss, Some("BlazingTelesram")),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -128,7 +139,8 @@ fn open_sign_in(runtime: RuntimeDir, cx: &mut App) {
 fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
     let account = UserId(session.identity.xiva_user().to_owned());
     let config = ClientConfig::new(runtime.path(), runtime.session_file(), account);
-    let client = match ChatClient::spawn(YandexBackend::new(session), config) {
+    let write_only = cx.global::<WriteOnly>().0.clone();
+    let client = match ChatClient::spawn(YandexBackend::new(session, write_only), config) {
         Ok(client) => client,
         Err(error) => {
             tracing::error!(%error, "cannot start the chat client");

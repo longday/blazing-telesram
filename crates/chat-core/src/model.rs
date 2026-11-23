@@ -103,6 +103,10 @@ pub struct HistoryChunk {
     pub messages: Vec<Message>,
     pub reached_start: bool,
     pub replaces: Option<(Option<MessageTs>, Option<MessageTs>)>,
+    /// `PayloadId`s carried by own messages of this chunk; a matching outbox entry was
+    /// delivered even if its confirmation and echo were lost.
+    #[serde(default)]
+    pub payloads: Vec<PayloadId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +135,9 @@ pub enum ClientEvent {
     Typing { chat: ChatId, user: UserId, name: Option<String>, until: Instant },
     /// An edit or deletion did not happen; the message keeps its state.
     ActionFailed { chat: ChatId, reason: String },
+    /// A send was not accepted into durable storage; nothing was queued. The UI puts the
+    /// text and reply target back so the user can try again.
+    SendRefused { draft: Draft, reason: String },
 }
 
 /// UI to core. Writes are only the user's own actions: send, edit, delete, read, typing.

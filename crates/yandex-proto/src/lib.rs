@@ -1,4 +1,4 @@
-//! Read-only client for the Yandex Telemost web messenger protocol.
+//! Client for the Yandex Telemost web messenger protocol: reads, and a closed set of writes.
 
 pub mod bootstrap;
 pub mod client;
@@ -14,6 +14,7 @@ pub mod session;
 #[cfg(test)]
 mod test_log;
 pub mod wire;
+pub mod write;
 pub mod ws;
 pub mod xiva;
 

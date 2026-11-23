@@ -7,7 +7,7 @@ Keeps the server's read position in step with what the user actually saw, so unr
 ## ADDED Requirements
 
 ### Requirement: Mark what the user saw
-While the window is focused, the client SHALL report the newest message of the open chat that is visible in the timeline as read, at most once per newer message. It SHALL NOT report messages the user has not scrolled to, and SHALL report nothing while the window is unfocused.
+While the window is focused, the client SHALL report the newest message of the open chat that is visible in the timeline as read, at most once per newer message. It SHALL NOT report messages the user has not scrolled to, and SHALL report nothing while the window is unfocused or a dialog or the log view covers the chat.
 
 #### Scenario: Open an unread chat at the bottom
 - **GIVEN** a chat with unread messages

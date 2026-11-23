@@ -124,6 +124,8 @@ pub struct WireMessage {
     pub seq_no: Option<i64>,
     /// Grows on every edit or deletion of the same message.
     pub version: Option<i64>,
+    /// `Plain.PayloadId`: the id the sending client chose; the echo of an own send carries it.
+    pub payload_id: Option<String>,
     pub from: Option<WireSender>,
     pub body: WireBody,
     pub edited: bool,
@@ -170,7 +172,10 @@ pub enum PushEvent {
     /// Something that changes the chat row or its history without carrying a message:
     /// read state moved on another device, pin, history cleared, state sync.
     ChatChanged { chat: String },
-    /// Typing, presence, reactions and other events this client does not act on.
+    /// Someone is typing: `user` is the typist's guid. `timeout_secs` is the lifetime of the
+    /// indicator when the push states one.
+    Typing { chat: String, user: String, name: Option<String>, timeout_secs: Option<u32> },
+    /// Presence, reactions and other events this client does not act on.
     Ignored { kind: String },
 }
 
@@ -193,7 +198,7 @@ fn micros(value: &Json) -> Option<i64> {
     }
 }
 
-fn int_field(value: &Json, key: &str) -> Option<i64> {
+pub(crate) fn int_field(value: &Json, key: &str) -> Option<i64> {
     micros(present(value, key)?)
 }
 
@@ -423,6 +428,7 @@ pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireM
         timestamp,
         seq_no: int_field(info, "SeqNo"),
         version: int_field(info, "Version"),
+        payload_id: plain.and_then(|p| string(p, "PayloadId")),
         from: sender(info),
         body,
         edited,
@@ -560,6 +566,13 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
         } else {
             PushEvent::MessageUpserted(message)
         });
+    }
+    if let Some(typing) = present(client, "Typing") {
+        let from = present(body, "ServerMessageInfo").and_then(sender);
+        if let (Some(chat), Some(WireSender { guid: Some(user), display_name: name, .. })) = (string(typing, "ChatId"), from) {
+            let timeout_secs = int_field(typing, "TimeoutSeconds").and_then(|s| u32::try_from(s).ok());
+            return Ok(PushEvent::Typing { chat, user, name, timeout_secs });
+        }
     }
     // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
     // modifier, not the event.
@@ -759,5 +772,37 @@ mod tests {
         let m = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 1, "CustomFrom": { "DisplayName": "Channel", "AvatarId": "av" } }));
         let from = parse_server_message(&m, None).unwrap().from.unwrap();
         assert_eq!((from.guid, from.display_name.as_deref(), from.avatar_id.as_deref()), (None, Some("Channel"), Some("av")));
+    }
+
+    #[test]
+    fn payload_id_of_an_own_send_survives_decoding() {
+        let echo = msg(
+            json!({ "ChatId": "c", "PayloadId": "f2e6b568-c3ce-489d-e28c8f1d", "Text": { "MessageText": "hi" } }),
+            json!({ "Timestamp": 5, "From": { "Guid": "me" } }),
+        );
+        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&echo) else { panic!("echo") };
+        assert_eq!(m.payload_id.as_deref(), Some("f2e6b568-c3ce-489d-e28c8f1d"));
+        let plain = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
+        assert_eq!(parse_server_message(&plain, None).unwrap().payload_id, None);
+        // A system message has no `Plain` and therefore no payload id.
+        let system = json!({ "ClientMessage": { "SystemMessage": { "ChatId": "c" } }, "ServerMessageInfo": { "Timestamp": 5 } });
+        assert_eq!(parse_server_message(&system, None).unwrap().payload_id, None);
+    }
+
+    #[test]
+    fn typing_push_names_the_typist_and_may_carry_a_timeout() {
+        let info = json!({ "From": { "Guid": "g1", "DisplayName": "Anna" }, "Timestamp": 7 });
+        let typing = |inner: Json| json!({ "ClientMessage": { "Typing": inner }, "ServerMessageInfo": info });
+        assert_eq!(
+            decode_push(&typing(json!({ "ChatId": "c" }))),
+            Ok(PushEvent::Typing { chat: "c".into(), user: "g1".into(), name: Some("Anna".into()), timeout_secs: None })
+        );
+        assert_eq!(
+            decode_push(&typing(json!({ "ChatId": "c", "TimeoutSeconds": 6 }))),
+            Ok(PushEvent::Typing { chat: "c".into(), user: "g1".into(), name: Some("Anna".into()), timeout_secs: Some(6) })
+        );
+        // Without a typist there is nobody to show.
+        let anonymous = json!({ "ClientMessage": { "Typing": { "ChatId": "c" } }, "ServerMessageInfo": { "Timestamp": 7 } });
+        assert_eq!(decode_push(&anonymous), Ok(PushEvent::Ignored { kind: "Typing".into() }));
     }
 }

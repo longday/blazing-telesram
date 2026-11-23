@@ -2,13 +2,14 @@
 
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, HistoryChunk, MediaKind,
-    MediaRef, Message, MessageBody, MessageTs,
+    ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, Draft, HistoryChunk,
+    MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, UserId,
 };
 use gpui::{Context, EventEmitter};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
@@ -49,6 +50,14 @@ pub struct Timeline {
     pub loading_older: bool,
 }
 
+/// A chat member whose typing is shown until `until`.
+#[derive(Debug)]
+struct Typist {
+    user: UserId,
+    name: Option<String>,
+    until: Instant,
+}
+
 /// How a timeline changed; lets a list view splice instead of rebuilding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimelineChange {
@@ -56,17 +65,25 @@ pub enum TimelineChange {
     Reset,
     /// `prepended` messages added in front, `appended` at the end, and the (post-change) indexes in `touched` replaced in place.
     Delta { prepended: usize, appended: usize, touched: Vec<usize> },
+    /// The message at this (pre-removal) index is gone.
+    Removed { at: usize },
     /// Only loading flags changed.
     Status,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum StoreEvent {
     Chats,
     Timeline { chat: ChatId, change: TimelineChange },
     Media(MediaRef),
     Connection,
     Session,
+    /// The persisted drafts arrived.
+    Drafts,
+    /// An edit or deletion did not happen.
+    ActionFailed { chat: ChatId, reason: String },
+    /// A send was not queued; the UI puts the text and reply target back.
+    SendRefused { draft: Draft, reason: String },
 }
 
 pub struct ChatStore {
@@ -79,6 +96,8 @@ pub struct ChatStore {
     media_requested: HashSet<MediaRef>,
     connection: ConnectionState,
     session: SessionState,
+    drafts: HashMap<ChatId, Draft>,
+    typing: HashMap<ChatId, Vec<Typist>>,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -104,6 +123,8 @@ impl ChatStore {
             media_requested: HashSet::new(),
             connection: ConnectionState::Connecting,
             session: SessionState::Active,
+            drafts: HashMap::new(),
+            typing: HashMap::new(),
         }
     }
 
@@ -151,10 +172,19 @@ impl ChatStore {
                 self.timelines.clear();
                 self.media.clear();
                 self.media_requested.clear();
+                self.drafts.clear();
+                self.typing.clear();
                 self.session = SessionState::SignedOut;
                 cx.emit(StoreEvent::Session);
             }
-            event => unimplemented!("add-sending 4.x: {event:?}"),
+            ClientEvent::Drafts(drafts) => {
+                self.drafts = drafts.into_iter().map(|d| (d.chat.clone(), d)).collect();
+                cx.emit(StoreEvent::Drafts);
+            }
+            ClientEvent::PendingSettled { chat, payload } => self.settle(&chat, &payload, cx),
+            ClientEvent::SendRefused { draft, reason } => cx.emit(StoreEvent::SendRefused { draft, reason }),
+            ClientEvent::Typing { chat, user, name, until } => self.typing_started(chat, user, name, until, cx),
+            ClientEvent::ActionFailed { chat, reason } => cx.emit(StoreEvent::ActionFailed { chat, reason }),
         }
         cx.notify();
     }
@@ -187,6 +217,116 @@ impl ChatStore {
 
     pub fn sign_out(&mut self) {
         self.send(Command::SignOut);
+    }
+
+    /// Queues a message; the core answers with the pending copy. Sending replaces the chat's draft.
+    pub fn send_text(&mut self, chat: ChatId, text: String, reply_to: Option<ReplyTarget>, cx: &mut Context<Self>) {
+        self.drafts.remove(&chat);
+        self.send(Command::Send { chat, text, reply_to });
+        cx.notify();
+    }
+
+    pub fn retry(&self, payload: PayloadId) {
+        self.send(Command::Retry(payload));
+    }
+
+    pub fn edit(&self, chat: ChatId, timestamp: MessageTs, text: String) {
+        self.send(Command::Edit { chat, timestamp, text });
+    }
+
+    pub fn delete_message(&self, chat: ChatId, timestamp: MessageTs) {
+        self.send(Command::Delete { chat, timestamp });
+    }
+
+    pub fn mark_read(&self, chat: ChatId, timestamp: MessageTs) {
+        self.send(Command::MarkRead { chat, timestamp });
+    }
+
+    /// The user changed the composer text of `chat`.
+    pub fn typing(&self, chat: ChatId) {
+        self.send(Command::Typing(chat));
+    }
+
+    pub fn draft(&self, chat: &ChatId) -> Option<&Draft> {
+        self.drafts.get(chat)
+    }
+
+    /// Remembers the composer state of a chat and asks the core to persist it; nothing happens when
+    /// it equals what is already stored. An empty text with no reply removes the draft.
+    pub fn save_draft(&mut self, draft: Draft, cx: &mut Context<Self>) {
+        if draft.text.is_empty() && draft.reply_to.is_none() {
+            if self.drafts.remove(&draft.chat).is_none() {
+                return;
+            }
+        } else if self.drafts.get(&draft.chat) == Some(&draft) {
+            return;
+        } else {
+            self.drafts.insert(draft.chat.clone(), draft.clone());
+        }
+        self.send(Command::SaveDraft(draft));
+        cx.notify();
+    }
+
+    /// Who is typing in `chat`, as shown in the header and the chat row.
+    pub fn typing_text(&self, chat: &ChatId) -> Option<String> {
+        let typists = self.typing.get(chat).filter(|t| !t.is_empty())?;
+        if self.chats.get(chat).is_some_and(|c| c.kind == ChatKind::Private) {
+            return Some("печатает…".into());
+        }
+        let first = typists[0].name.as_deref().unwrap_or("Кто-то");
+        Some(match typists.len() {
+            1 => format!("{first} печатает…"),
+            n => format!("{first} и ещё {} печатают…", n - 1),
+        })
+    }
+
+    fn typing_started(&mut self, chat: ChatId, user: UserId, name: Option<String>, until: Instant, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        if until <= now {
+            return;
+        }
+        let typists = self.typing.entry(chat).or_default();
+        match typists.iter_mut().find(|t| t.user == user) {
+            Some(typist) => {
+                typist.name = name.or(typist.name.take());
+                typist.until = until;
+            }
+            None => typists.push(Typist { user, name, until }),
+        }
+        let wait = until - now;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            this.update(cx, |store, cx| store.expire_typing(cx)).ok();
+        })
+        .detach();
+    }
+
+    fn expire_typing(&mut self, cx: &mut Context<Self>) {
+        let now = cx.background_executor().now();
+        for typists in self.typing.values_mut() {
+            typists.retain(|t| t.until > now);
+        }
+        self.typing.retain(|_, typists| !typists.is_empty());
+        cx.notify();
+    }
+
+    /// A message by `user` ends their typing.
+    fn typing_stopped(&mut self, chat: &ChatId, user: &UserId) {
+        if let Some(typists) = self.typing.get_mut(chat) {
+            typists.retain(|t| &t.user != user);
+            if typists.is_empty() {
+                self.typing.remove(chat);
+            }
+        }
+    }
+
+    /// Drops the local copy of a send the server has confirmed or echoed; its server copy follows.
+    fn settle(&mut self, chat: &ChatId, payload: &PayloadId, cx: &mut Context<Self>) {
+        let Some(timeline) = self.timelines.get_mut(chat) else { return };
+        let pending = |m: &Message| matches!(&m.delivery, Delivery::Pending(p) | Delivery::Failed { payload: p, .. } if p == payload);
+        let Some(at) = timeline.messages.iter().position(pending) else { return };
+        timeline.messages.remove(at);
+        cx.emit(StoreEvent::Timeline { chat: chat.clone(), change: TimelineChange::Removed { at } });
     }
 
     pub fn chat(&self, id: &ChatId) -> Option<&ChatSummary> {
@@ -265,6 +405,11 @@ impl ChatStore {
         for message in &chunk.messages {
             self.want_message_media(message);
         }
+        // A send whose confirmation and echo were lost is told apart by its payload: its server copy
+        // arrives in this chunk, so the local one goes.
+        for payload in &chunk.payloads {
+            self.settle(&chunk.chat, payload, cx);
+        }
         let timeline = self.timelines.entry(chunk.chat.clone()).or_default();
         let older_page = std::mem::take(&mut timeline.loading_older);
         // A page without messages cannot make progress; treat it as the start so loading stops.
@@ -287,6 +432,9 @@ impl ChatStore {
 
     fn upsert(&mut self, message: Message, cx: &mut Context<Self>) {
         self.want_message_media(&message);
+        if message.delivery == Delivery::Sent {
+            self.typing_stopped(&message.chat, &message.author);
+        }
         let Some(timeline) = self.timelines.get_mut(&message.chat).filter(|t| t.loaded) else { return };
         let chat = message.chat.clone();
         let ts = message.timestamp;

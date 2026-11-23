@@ -3,13 +3,16 @@
 //! Domain values are stored as JSON next to the normalized columns used for ordering and
 //! range queries, so a row that no longer deserializes is skipped instead of failing a load.
 
-use crate::model::{ChatId, ChatSummary, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, UserId};
+use crate::model::{
+    ChatId, ChatSummary, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget,
+    UserId,
+};
 use crate::paths::cache_path;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
@@ -46,10 +49,37 @@ const MIGRATIONS: &[&str] = &["
         size INTEGER NOT NULL,
         PRIMARY KEY (kind, id)
     );
+",
+// Pending sends and unsent composer state; both must survive a restart.
+"
+    CREATE TABLE outbox (
+        payload_id TEXT PRIMARY KEY,
+        chat TEXT NOT NULL,
+        created_us INTEGER NOT NULL,
+        json TEXT NOT NULL
+    );
+    CREATE TABLE drafts (
+        chat TEXT PRIMARY KEY,
+        json TEXT NOT NULL
+    );
 "];
+
+/// A send that has not been confirmed yet. `created_us` is the local timestamp of its
+/// pending message; `failed` holds the server's reason once it was rejected for good.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct OutboxEntry {
+    pub payload: PayloadId,
+    pub chat: ChatId,
+    pub created_us: MessageTs,
+    pub text: String,
+    pub reply_to: Option<ReplyTarget>,
+    pub failed: Option<String>,
+}
 
 pub struct Cache {
     conn: Connection,
+    /// False for the in-memory fallback: its contents die with the process.
+    durable: bool,
 }
 
 pub(crate) fn kind_name(kind: MediaKind) -> &'static str {
@@ -73,14 +103,19 @@ impl Cache {
         }
         OpenOptions::new().create(true).write(true).truncate(false).mode(0o600).open(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Self::init(Connection::open(&path)?)
+        Self::init(Connection::open(&path)?, true)
     }
 
     pub fn open_in_memory() -> Result<Self, CacheError> {
-        Self::init(Connection::open_in_memory()?)
+        Self::init(Connection::open_in_memory()?, false)
     }
 
-    fn init(mut conn: Connection) -> Result<Self, CacheError> {
+    /// Whether what is stored survives a restart.
+    pub fn is_durable(&self) -> bool {
+        self.durable
+    }
+
+    fn init(mut conn: Connection, durable: bool) -> Result<Self, CacheError> {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let supported = MIGRATIONS.len() as i64;
         if version > supported {
@@ -92,7 +127,7 @@ impl Cache {
             tx.pragma_update(None, "user_version", index as i64 + 1)?;
             tx.commit()?;
         }
-        Ok(Self { conn })
+        Ok(Self { conn, durable })
     }
 
     /// Pinned chats first by rank, then newest activity first.
@@ -142,7 +177,20 @@ impl Cache {
         let more = messages.len() > limit;
         messages.truncate(limit);
         messages.reverse();
-        Ok(HistoryChunk { chat: chat.clone(), messages, reached_start: !more && self.history_start(chat)?, replaces: None })
+        Ok(HistoryChunk {
+            chat: chat.clone(),
+            messages,
+            reached_start: !more && self.history_start(chat)?,
+            replaces: None,
+            payloads: Vec::new(),
+        })
+    }
+
+    /// Cached messages newer than `after` (all when `None`), oldest first.
+    pub fn newer_than(&self, chat: &ChatId, after: Option<MessageTs>) -> Result<Vec<Message>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT json FROM messages WHERE chat = ?1 AND ts > ?2 ORDER BY ts")?;
+        let rows = stmt.query_map(params![chat.0, after.unwrap_or(MessageTs::MIN)], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
     }
 
     pub fn message(&self, chat: &ChatId, ts: MessageTs) -> Result<Option<Message>, CacheError> {
@@ -231,6 +279,57 @@ impl Cache {
         )?;
         Ok(())
     }
+
+    /// Unconfirmed sends in the order they were queued.
+    pub fn outbox(&self) -> Result<Vec<OutboxEntry>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT json FROM outbox ORDER BY rowid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+    }
+
+    /// Queues a send and drops the chat's draft in one transaction: either both happen or
+    /// neither, so a failed write never loses the draft or leaves an unstored send.
+    pub fn enqueue(&self, entry: &OutboxEntry) -> Result<(), CacheError> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO outbox (payload_id, chat, created_us, json) VALUES (?1, ?2, ?3, ?4)",
+            params![entry.payload.0, entry.chat.0, entry.created_us, encode(entry)],
+        )?;
+        tx.execute("DELETE FROM drafts WHERE chat = ?1", [&entry.chat.0])?;
+        Ok(tx.commit()?)
+    }
+
+    /// Inserts or updates an entry; an update keeps its queue position.
+    pub fn put_outbox(&self, entry: &OutboxEntry) -> Result<(), CacheError> {
+        self.conn.execute(
+            "INSERT INTO outbox (payload_id, chat, created_us, json) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT (payload_id) DO UPDATE SET json = excluded.json",
+            params![entry.payload.0, entry.chat.0, entry.created_us, encode(entry)],
+        )?;
+        Ok(())
+    }
+
+    pub fn remove_outbox(&self, payload: &PayloadId) -> Result<(), CacheError> {
+        self.conn.execute("DELETE FROM outbox WHERE payload_id = ?1", [&payload.0])?;
+        Ok(())
+    }
+
+    pub fn drafts(&self) -> Result<Vec<Draft>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT json FROM drafts ORDER BY chat")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+    }
+
+    pub fn put_draft(&self, draft: &Draft) -> Result<(), CacheError> {
+        self.conn
+            .execute("INSERT OR REPLACE INTO drafts (chat, json) VALUES (?1, ?2)", params![draft.chat.0, encode(draft)])?;
+        Ok(())
+    }
+
+    pub fn remove_draft(&self, chat: &ChatId) -> Result<(), CacheError> {
+        self.conn.execute("DELETE FROM drafts WHERE chat = ?1", [&chat.0])?;
+        Ok(())
+    }
 }
 
 fn put_chat(conn: &Connection, chat: &ChatSummary) -> Result<(), CacheError> {
@@ -249,7 +348,9 @@ fn put_message(conn: &Connection, chat: &ChatId, message: &Message) -> Result<()
     Ok(())
 }
 
-/// Deletes the account's cache database and its journal files.
+/// Deletes the account's cache database, its journal files and the `.broken-*` copies (with
+/// their sidecars) that `move_aside` kept: they hold the same history and drafts, so an
+/// explicit sign-out must not leave them behind.
 pub fn remove_files(runtime_dir: &Path, account: &UserId) -> io::Result<()> {
     let path = cache_path(runtime_dir, account);
     for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -260,13 +361,55 @@ pub fn remove_files(runtime_dir: &Path, account: &UserId) -> io::Result<()> {
             _ => {}
         }
     }
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name()) else { return Ok(()) };
+    let mut backup_prefix = file.to_os_string();
+    backup_prefix.push(".broken-");
+    let backup_prefix = backup_prefix.as_encoded_bytes();
+    let entries = match fs::read_dir(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        entries => entries?,
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().as_encoded_bytes().starts_with(backup_prefix) {
+            match fs::remove_file(entry.path()) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+    }
     Ok(())
+}
+
+/// Moves the account's database and journal files aside instead of deleting them: a cache
+/// that cannot be opened may still hold the only copy of unsent messages and drafts, and a
+/// sidecar kept next to its database lets SQLite recover it later. Returns the new path of
+/// the main file; an existing `.broken-*` file is never overwritten.
+pub fn move_aside(runtime_dir: &Path, account: &UserId, unix_secs: u64) -> io::Result<PathBuf> {
+    let path = cache_path(runtime_dir, account);
+    let with_suffix = |base: &Path, suffix: &str| {
+        let mut name = base.to_path_buf().into_os_string();
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    let target = (0u32..)
+        .map(|n| with_suffix(&path, &if n == 0 { format!(".broken-{unix_secs}") } else { format!(".broken-{unix_secs}-{n}") }))
+        .find(|target| !target.exists())
+        .expect("a free name exists");
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        match fs::rename(with_suffix(&path, suffix), with_suffix(&target, suffix)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(target)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures::{chat, id, msg};
+    use crate::model::Delivery;
 
     fn texts(chunk: &HistoryChunk) -> Vec<(MessageTs, String)> {
         chunk
@@ -397,5 +540,154 @@ mod tests {
         cache.put_media(&avatar, "avatar-x", 10).unwrap();
         assert_eq!(cache.media(&avatar).unwrap(), Some(("avatar-x".into(), 10)));
         assert_eq!(cache.media(&thumb).unwrap(), None);
+    }
+
+    fn entry(payload: &str, chat: &str, created_us: MessageTs, text: &str) -> OutboxEntry {
+        OutboxEntry { payload: PayloadId(payload.into()), chat: id(chat), created_us, text: text.into(), reply_to: None, failed: None }
+    }
+
+    #[test]
+    fn version_one_database_upgrades_in_place_and_keeps_its_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = UserId("9".into());
+        let path = cache_path(dir.path(), &account);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(MIGRATIONS[0]).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            put_chat(&conn, &chat("a", Some(2), None)).unwrap();
+            put_message(&conn, &id("a"), &msg("a", 2, "kept")).unwrap();
+            // A version-1 message row has no `delivery` field.
+            let mut json: serde_json::Value = serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
+            json.as_object_mut().unwrap().remove("delivery");
+            conn.execute("INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)", [json.to_string()]).unwrap();
+        }
+
+        let cache = Cache::open(dir.path(), &account).unwrap();
+        let version: i64 = cache.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(cache.chats().unwrap().len(), 1);
+        let chunk = cache.history(&id("a"), None, 50).unwrap();
+        assert_eq!(texts(&chunk), [(1, "old".into()), (2, "kept".into())]);
+        assert_eq!(chunk.messages[0].delivery, Delivery::Sent);
+        assert!(cache.outbox().unwrap().is_empty());
+        assert!(cache.drafts().unwrap().is_empty());
+        cache.put_outbox(&entry("p", "a", 3, "new")).unwrap();
+        cache.put_draft(&Draft { chat: id("a"), text: "d".into(), reply_to: None }).unwrap();
+        assert_eq!(cache.outbox().unwrap().len(), 1);
+        assert_eq!(cache.drafts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn outbox_keeps_queue_order_through_updates_and_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = UserId("5".into());
+        {
+            let cache = Cache::open(dir.path(), &account).unwrap();
+            cache.put_outbox(&entry("p1", "a", 30, "first")).unwrap();
+            cache.put_outbox(&entry("p2", "b", 20, "second")).unwrap();
+            let mut failed = entry("p1", "a", 30, "first");
+            failed.failed = Some("NO_PERMISSION".into());
+            cache.put_outbox(&failed).unwrap();
+        }
+        let cache = Cache::open(dir.path(), &account).unwrap();
+        let entries = cache.outbox().unwrap();
+        assert_eq!(entries.iter().map(|e| e.payload.0.as_str()).collect::<Vec<_>>(), ["p1", "p2"]);
+        assert_eq!(entries[0].failed.as_deref(), Some("NO_PERMISSION"));
+        cache.remove_outbox(&PayloadId("p1".into())).unwrap();
+        assert_eq!(cache.outbox().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn drafts_are_replaced_per_chat_and_removed() {
+        let cache = Cache::open_in_memory().unwrap();
+        let reply = ReplyTarget { timestamp: 4, author: Some("Ann".into()), text: "hi".into() };
+        cache.put_draft(&Draft { chat: id("a"), text: "one".into(), reply_to: None }).unwrap();
+        cache.put_draft(&Draft { chat: id("a"), text: "two".into(), reply_to: Some(reply.clone()) }).unwrap();
+        cache.put_draft(&Draft { chat: id("b"), text: "other".into(), reply_to: None }).unwrap();
+        let drafts = cache.drafts().unwrap();
+        assert_eq!(drafts.len(), 2);
+        assert_eq!((drafts[0].text.as_str(), drafts[0].reply_to.clone()), ("two", Some(reply)));
+        cache.remove_draft(&id("a")).unwrap();
+        assert_eq!(cache.drafts().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn enqueue_is_atomic_a_failed_insert_keeps_the_draft() {
+        let cache = Cache::open_in_memory().unwrap();
+        let draft = Draft { chat: id("a"), text: "typed".into(), reply_to: None };
+        cache.put_draft(&draft).unwrap();
+        cache.enqueue(&entry("p1", "b", 1, "ok")).unwrap();
+        cache.conn.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'full'); END;").unwrap();
+        assert!(cache.enqueue(&entry("p2", "a", 2, "refused")).is_err());
+        assert_eq!(cache.drafts().unwrap(), [draft]);
+        assert_eq!(cache.outbox().unwrap().len(), 1);
+
+        cache.conn.execute_batch("DROP TRIGGER refuse").unwrap();
+        cache.enqueue(&entry("p3", "a", 3, "ok")).unwrap();
+        assert!(cache.drafts().unwrap().is_empty());
+        assert_eq!(cache.outbox().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn move_aside_keeps_every_file_with_its_mode_and_never_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let account = UserId("3".into());
+        let path = cache_path(dir.path(), &account);
+        let named = |suffix: &str| {
+            let mut name = path.clone().into_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        drop(Cache::open(dir.path(), &account).unwrap());
+        fs::write(named("-wal"), b"wal").unwrap();
+
+        let first = move_aside(dir.path(), &account, 1700).unwrap();
+        assert_eq!(first, named(".broken-1700"));
+        assert!(!path.exists() && !named("-wal").exists());
+        assert_eq!(fs::read(named(".broken-1700-wal")).unwrap(), b"wal");
+        assert_eq!(fs::metadata(&first).unwrap().permissions().mode() & 0o777, 0o600);
+
+        // A repeat in the same second keeps both.
+        fs::write(&path, b"second").unwrap();
+        let second = move_aside(dir.path(), &account, 1700).unwrap();
+        assert_eq!(second, named(".broken-1700-1"));
+        assert_eq!(fs::read(&second).unwrap(), b"second");
+        assert!(first.exists());
+    }
+
+    #[test]
+    fn remove_files_also_deletes_the_accounts_moved_aside_backups_and_only_those() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mine, other, prefix) = (UserId("3".into()), UserId("33".into()), UserId("2".into()));
+        let named = |account: &UserId, suffix: &str| {
+            let mut name = cache_path(dir.path(), account).into_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        };
+        drop(Cache::open(dir.path(), &mine).unwrap());
+        fs::write(named(&mine, "-wal"), b"wal").unwrap();
+        let first = move_aside(dir.path(), &mine, 1700).unwrap();
+        fs::write(cache_path(dir.path(), &mine), b"x").unwrap();
+        let second = move_aside(dir.path(), &mine, 1700).unwrap();
+        for suffix in ["-journal", "-wal", "-shm"] {
+            fs::write(named(&mine, &format!(".broken-1700-1{suffix}")), b"s").unwrap();
+        }
+        let kept = [named(&other, ""), named(&other, ".broken-5"), named(&prefix, ".broken-5"), named(&other, ".broken-5-wal")];
+        for path in &kept {
+            fs::write(path, b"other").unwrap();
+        }
+        assert!(first.exists() && second.exists());
+
+        remove_files(dir.path(), &mine).unwrap();
+
+        let left: Vec<_> = fs::read_dir(cache_path(dir.path(), &mine).parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("3.sqlite"))
+            .collect();
+        assert!(left.is_empty(), "this account's files survive sign-out: {left:?}");
+        assert!(kept.iter().all(|path| path.exists()), "another account's files were deleted");
     }
 }

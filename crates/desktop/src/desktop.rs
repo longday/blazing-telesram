@@ -1,26 +1,27 @@
-//! Root view: chat list on the left, timeline on the right, read-only composer.
+//! Root view: chat list on the left, timeline and composer on the right.
+
+mod composer;
 
 use crate::format::{chat_time, log_time, one_line, Clock};
 use crate::logging::{LogBuffer, LogLine};
-use crate::input::TextInput;
+use crate::input::{InputEvent, TextInput};
 use crate::store::{ChatFilter, ChatStore, SessionState, StoreEvent, TimelineChange};
 use crate::theme::*;
-use crate::timeline;
+use crate::timeline::{self, RowBounds, RowContext};
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState};
+use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, MessageTs};
+use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 use std::time::Duration;
 
-actions!(bt, [Search, Quit, ToggleLog]);
+actions!(bt, [Search, Quit, ToggleLog, Dismiss]);
 
 /// How often an open log view looks for new records.
 const LOG_POLL: Duration = Duration::from_millis(250);
 
 const ROW_HEIGHT: f32 = 64.;
 const SIDEBAR_WIDTH: f32 = 340.;
-
-pub const READ_ONLY_NOTICE: &str = "Режим только для чтения: отправка сообщений пока недоступна";
 
 const FILTERS: [(&str, &str, ChatFilter); 5] = [
     ("filter-all", "Все", ChatFilter::All),
@@ -40,6 +41,7 @@ pub enum AccountMenu {
 struct OpenTimeline {
     chat: ChatId,
     list: ListState,
+    rows: RowBounds,
 }
 
 struct LogView {
@@ -56,7 +58,13 @@ pub struct Desktop {
     pub(crate) filter: ChatFilter,
     open: Option<OpenTimeline>,
     pub(crate) menu: AccountMenu,
+    compose: Compose,
+    message_menu: Option<MessageMenu>,
+    delete_pending: Option<(ChatId, MessageTs)>,
+    toast: Option<Toast>,
     log: Option<LogView>,
+    /// Whether a blocking overlay covered the chat when focus was last placed.
+    covered: bool,
     /// Focused when nothing else is, so window shortcuts resolve in this view's key context.
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
@@ -64,15 +72,25 @@ pub struct Desktop {
 
 impl Desktop {
     pub fn new(store: Entity<ChatStore>, clock: Clock, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextInput::new("Поиск", cx));
+        let search = cx.new(|cx| TextInput::single_line("Поиск", cx));
+        let compose = Compose::new(cx);
         let subscriptions = vec![
             cx.observe(&search, |_, _, cx| cx.notify()),
-            cx.observe(&store, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| {
-                if let StoreEvent::Timeline { chat, change } = event {
-                    this.apply_timeline_change(chat, change, cx);
-                }
+            cx.observe(&compose.input, |_, _, cx| cx.notify()),
+            cx.subscribe_in(&compose.input, window, |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx)),
+            cx.observe_in(&store, window, |this, _, window, cx| {
+                this.sync_open(window, cx);
+                cx.notify();
             }),
+            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
+                StoreEvent::Timeline { chat, change } => this.apply_timeline_change(chat, change, cx),
+                StoreEvent::Drafts => this.restore_late_draft(cx),
+                StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
+                StoreEvent::SendRefused { draft, reason } => this.send_refused(draft.clone(), reason.clone(), cx),
+                _ => {}
+            }),
+            // Whether the window is active decides if the visible messages count as read.
+            cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         ];
         // Keystrokes with nothing focused would skip this view's key context.
         let focus = cx.focus_handle();
@@ -84,10 +102,39 @@ impl Desktop {
             filter: ChatFilter::All,
             open: None,
             menu: AccountMenu::Closed,
+            compose,
+            message_menu: None,
+            delete_pending: None,
+            toast: None,
             log: None,
+            covered: false,
             focus,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// True while the log view or a modal dialog covers the chat: the composer ignores input and no
+    /// message counts as read until it is gone.
+    pub(crate) fn blocked(&self, cx: &App) -> bool {
+        self.log.is_some()
+            || self.delete_pending.is_some()
+            || self.menu == AccountMenu::ConfirmSignOut
+            || self.store.read(cx).session() != SessionState::Active
+    }
+
+    /// Moves keyboard focus out of the composer when an overlay opens and back when it closes.
+    fn place_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let covered = self.blocked(cx);
+        if covered == self.covered {
+            return;
+        }
+        self.covered = covered;
+        if !covered && self.open.is_some() {
+            window.focus(&self.compose.input.focus_handle(cx));
+        } else {
+            window.focus(&self.focus);
+        }
+        cx.notify();
     }
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
@@ -104,6 +151,8 @@ impl Desktop {
         self.log = match self.log.take() {
             Some(_) => None,
             None => {
+                // The message menu is drawn above the log; it must not outlive the cover's start.
+                self.message_menu = None;
                 let poll = cx.spawn(async move |this, cx| loop {
                     cx.background_executor().timer(LOG_POLL).await;
                     if this.update(cx, |this, cx| this.refresh_log(cx)).is_err() {
@@ -154,10 +203,23 @@ impl Desktop {
     fn apply_timeline_change(&mut self, chat: &ChatId, change: &TimelineChange, cx: &mut Context<Self>) {
         let Some(open) = self.open.as_mut().filter(|o| &o.chat == chat) else { return };
         let len = self.store.read(cx).timeline(chat).map_or(0, |t| t.messages.len());
+        // A message the user just sent stays in view even when they had scrolled up.
+        let follow = matches!(change, TimelineChange::Delta { appended, .. } if *appended > 0)
+            && self.store.read(cx).timeline(chat).and_then(|t| t.messages.last()).is_some_and(|m| matches!(m.delivery, Delivery::Pending(_)));
         let list = &open.list;
         match change {
             TimelineChange::Reset => list.reset(len),
             TimelineChange::Status => {}
+            TimelineChange::Removed { at } => {
+                list.splice(*at..*at + 1, 0);
+                // The neighbours of the gap may gain or lose their author line or date separator.
+                if *at > 0 {
+                    list.splice(*at - 1..*at, 1);
+                }
+                if *at < list.item_count() {
+                    list.splice(*at..*at + 1, 1);
+                }
+            }
             TimelineChange::Delta { prepended, appended, touched } => {
                 let before = list.item_count();
                 let anchor = list.logical_scroll_top();
@@ -187,6 +249,9 @@ impl Desktop {
         }
         if list.item_count() != len {
             list.reset(len);
+        }
+        if follow {
+            list.scroll_to(ListOffset { item_ix: list.item_count(), offset_in_item: px(0.) });
         }
         cx.notify();
     }
@@ -366,10 +431,7 @@ impl Desktop {
         let Some(chat) = store.chat(id) else { return div().into_any_element() };
         let selected = store.selected() == Some(id);
         let tag = format!("chat-{}", id.0);
-        let preview = chat.last_message.as_ref().map(|m| match &m.author {
-            Some(author) => format!("{author}: {}", one_line(&m.text)),
-            None => one_line(&m.text),
-        });
+        let preview = chat_preview(store, chat);
         let time = chat.last_message.as_ref().map(|m| chat_time(m.timestamp, self.clock));
         let (unread, muted, pinned) = (chat.unread, chat.muted, chat.pinned_rank.is_some());
         let click_id = id.clone();
@@ -420,15 +482,7 @@ impl Desktop {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(14.))
-                                    .text_color(rgb(MUTED))
-                                    .child(preview.unwrap_or_default()),
-                            )
+                            .child(preview_view(preview, &tag))
                             .when(pinned, |d| marker(d, format!("{tag}-pinned"), "📌"))
                             .when(unread > 0, |d| {
                                 d.child(
@@ -468,14 +522,9 @@ impl Desktop {
                 .child("Выберите чат, чтобы начать чтение")
                 .into_any_element();
         };
-        if self.open.as_ref().is_none_or(|o| o.chat != selected) {
-            let len = store.timeline(&selected).map_or(0, |t| t.messages.len());
-            self.open = Some(OpenTimeline {
-                chat: selected.clone(),
-                list: ListState::new(len, ListAlignment::Bottom, px(600.)),
-            });
-        }
-        let list = self.open.as_ref().map(|o| o.list.clone()).expect("open timeline was just set");
+        let Some((list, rows)) = self.open.as_ref().filter(|o| o.chat == selected).map(|o| (o.list.clone(), o.rows.clone())) else {
+            return div().flex_1().into_any_element();
+        };
         let summary: Option<&ChatSummary> = store.chat(&selected);
         let title = summary.map_or_else(|| "Чат".to_string(), |c| c.title.clone());
         let subtitle = summary.map_or("", |c| match c.kind {
@@ -483,6 +532,7 @@ impl Desktop {
             ChatKind::Group => "Группа",
             ChatKind::Channel => "Канал",
         });
+        let typing = store.typing_text(&selected);
         let header_avatar = avatar(store, summary.and_then(|c| c.avatar.as_ref()), &selected.0, &title, 40., "header-avatar".into());
         let timeline = store.timeline(&selected);
         let loaded = timeline.is_some_and(|t| t.loaded);
@@ -494,15 +544,15 @@ impl Desktop {
         } else if empty {
             centered("timeline-empty", "Сообщений пока нет")
         } else {
-            let (message_store, chat, clock) = (self.store.clone(), selected.clone(), self.clock);
+            let ctx = RowContext { store: self.store.clone(), desktop: cx.weak_entity(), chat: selected.clone(), clock: self.clock, rows };
             let probe_list = list.clone();
-            let (probe_store, probe_chat) = (self.store.clone(), selected.clone());
+            let (probe_store, probe_chat, probe_desktop) = (self.store.clone(), selected.clone(), cx.weak_entity());
             div()
                 .debug_selector(|| "timeline".into())
                 .relative()
                 .size_full()
                 .child(
-                    gpui::list(list, move |ix, _, cx| timeline::message_row(message_store.read(cx), &chat, ix, clock))
+                    gpui::list(list, move |ix, _, cx| timeline::message_row(&ctx, ix, cx))
                         .size_full(),
                 )
                 // Runs after the list is laid out: asks for older history when the top is in view.
@@ -513,6 +563,10 @@ impl Desktop {
                                 let (store, chat) = (probe_store.clone(), probe_chat.clone());
                                 window.defer(cx, move |_, cx| store.update(cx, |s, cx| s.load_older(&chat, cx)));
                             }
+                            let desktop = probe_desktop.clone();
+                            window.defer(cx, move |window, cx| {
+                                desktop.update(cx, |this, cx| this.check_read(window, cx)).ok();
+                            });
                         },
                         |_, _, _, _| {},
                     )
@@ -561,11 +615,18 @@ impl Desktop {
                             .flex()
                             .flex_col()
                             .child(div().font_weight(FontWeight::MEDIUM).child(title))
-                            .child(div().text_size(px(13.)).text_color(rgb(MUTED)).child(subtitle)),
+                            .child(match typing {
+                                Some(text) => div()
+                                    .debug_selector(|| "header-typing".into())
+                                    .text_size(px(13.))
+                                    .text_color(rgb(ACCENT))
+                                    .child(text),
+                                None => div().text_size(px(13.)).text_color(rgb(MUTED)).child(subtitle),
+                            }),
                     ),
             )
             .child(div().flex_1().min_h_0().child(content))
-            .child(composer())
+            .child(self.composer_view(cx))
             .into_any_element()
     }
 }
@@ -601,47 +662,60 @@ fn connection_text(state: ConnectionState) -> Option<&'static str> {
     }
 }
 
-/// A composer that cannot take input: no text field exists, only a notice.
-fn composer() -> Div {
-    div()
-        .debug_selector(|| "composer".into())
-        .flex_none()
-        .px(px(16.))
-        .py(px(10.))
-        .flex()
-        .flex_col()
-        .gap(px(4.))
-        .bg(rgb(PANEL))
-        .border_t_1()
-        .border_color(rgb(DIVIDER))
-        .child(
-            div()
-                .debug_selector(|| "composer-disabled".into())
-                .h(px(42.))
-                .px(px(16.))
-                .rounded(px(21.))
+/// What a chat row shows under the title.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Preview {
+    Typing(String),
+    Draft(String),
+    Message(String),
+}
+
+/// Typing outranks the draft, and the draft outranks the last message.
+pub(crate) fn chat_preview(store: &ChatStore, chat: &ChatSummary) -> Preview {
+    if let Some(text) = store.typing_text(&chat.id) {
+        return Preview::Typing(text);
+    }
+    if let Some(draft) = store.draft(&chat.id) {
+        let text = if draft.text.trim().is_empty() { draft.reply_to.as_ref().map_or("", |r| r.text.as_str()) } else { &draft.text };
+        return Preview::Draft(one_line(text));
+    }
+    Preview::Message(chat.last_message.as_ref().map_or_else(String::new, |m| match &m.author {
+        Some(author) => format!("{author}: {}", one_line(&m.text)),
+        None => one_line(&m.text),
+    }))
+}
+
+fn preview_view(preview: Preview, tag: &str) -> Div {
+    let line = div().flex_1().min_w_0().text_size(px(14.)).text_color(rgb(MUTED));
+    match preview {
+        Preview::Typing(text) => {
+            let selector = format!("{tag}-typing");
+            line.debug_selector(move || selector).truncate().text_color(rgb(ACCENT)).child(text)
+        }
+        Preview::Draft(text) => {
+            let selector = format!("{tag}-draft");
+            line.debug_selector(move || selector)
                 .flex()
-                .items_center()
-                .cursor_not_allowed()
-                .bg(rgb(BG))
-                .text_color(rgb(BADGE_MUTED))
-                .child("Написать сообщение…"),
-        )
-        .child(
-            div()
-                .debug_selector(|| "composer-notice".into())
-                .text_size(px(12.))
-                .text_color(rgb(MUTED))
-                .child(READ_ONLY_NOTICE),
-        )
+                .gap(px(4.))
+                .child(div().flex_none().text_color(rgb(DANGER)).child("Черновик:"))
+                .child(div().flex_1().min_w_0().truncate().child(text))
+        }
+        Preview::Message(text) => line.truncate().child(text),
+    }
 }
 
 impl Render for Desktop {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.store.read(cx).session();
+        if self.blocked(cx) != self.covered {
+            cx.defer_in(window, |this, window, cx| this.place_focus(window, cx));
+        }
         let sidebar = self.sidebar(cx);
         let pane = self.chat_pane(cx);
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
+        let toast = self.toast_view();
+        let menu = self.message_menu_view(cx);
+        let delete = self.delete_dialog(cx);
 
         div()
             .key_context("BlazingTelesram")
@@ -652,11 +726,19 @@ impl Render for Desktop {
             .bg(rgb(BG))
             .text_color(rgb(INK))
             .text_size(px(14.))
-            .on_action(cx.listener(|this, _: &Search, window, cx| window.focus(&this.search.focus_handle(cx))))
+            .on_action(cx.listener(|this, _: &Search, window, cx| {
+                if !this.blocked(cx) {
+                    window.focus(&this.search.focus_handle(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleLog, _, cx| this.toggle_log(cx)))
+            .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
             .child(sidebar)
             .child(pane)
             .children(log)
+            .children(toast)
+            .children(menu)
+            .children(delete)
             .when(self.menu == AccountMenu::ConfirmSignOut && session == SessionState::Active, |d| {
                 d.child(overlay(
                     "sign-out-dialog",

@@ -138,7 +138,23 @@ fn live_push_fixtures() {
         decode_push(&fixture("live-push-seen-marker.json")),
         Ok(PushEvent::ChatChanged { chat: "100/0/00000003-0000-4000-8000-000000000003_1795070677887127".into() })
     );
-    for (name, kind) in [("typing", "Typing"), ("reaction", "Reaction"), ("heartbeat", "Heartbeat")] {
+    assert_eq!(
+        decode_push(&fixture("live-push-typing.json")),
+        Ok(PushEvent::Typing {
+            chat: "100/0/00000005-0000-4000-8000-000000000005_1795170823506046".into(),
+            user: "00000006-0000-4000-8000-000000000006".into(),
+            name: None,
+            timeout_secs: None,
+        })
+    );
+    for (name, kind) in [("reaction", "Reaction"), ("heartbeat", "Heartbeat")] {
         assert_eq!(decode_push(&fixture(&format!("live-push-{name}.json"))), Ok(PushEvent::Ignored { kind: kind.into() }), "{name}");
     }
+}
+
+/// The echo of an own send carries the `PayloadId` the sender chose.
+#[test]
+fn live_echo_fixture_carries_the_payload_id() {
+    let Ok(PushEvent::MessageUpserted(message)) = decode_push(&fixture("live-push-message.json")) else { panic!("message") };
+    assert_eq!(message.payload_id.as_deref(), Some("fake-payload-id"));
 }

@@ -7,7 +7,7 @@ Shows chat members that someone is writing: the user's typing is reported to the
 ## ADDED Requirements
 
 ### Requirement: Report own typing
-While the user changes the composer text of a chat, the client SHALL report typing in that chat, repeating no more often than the server's typing lifetime requires, and SHALL stop reporting once the user stops typing.
+While the user changes the composer text of a new message in a chat (not while editing a sent one), the client SHALL report typing in that chat, repeating no more often than the server's typing lifetime requires, and SHALL stop reporting once the user stops typing.
 
 #### Scenario: User types
 - **WHEN** the user types in the composer

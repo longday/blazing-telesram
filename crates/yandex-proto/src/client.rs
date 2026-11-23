@@ -1,5 +1,5 @@
-//! Read-only facade over the socket, registry and media clients. This is what the adapter
-//! in `bt-chat-core` maps to its `Backend` trait.
+//! Facade over the socket, registry and media clients: reads, and the closed write set of
+//! [`WriteRequest`]. This is what the adapter in `bt-chat-core` maps to its `Backend` trait.
 
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
@@ -9,6 +9,7 @@ use crate::registry::RegistryClient;
 use crate::request::HISTORY_CHUNK;
 use crate::session::Session;
 use crate::wire::{DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireUser};
+use crate::write::{Committed, WriteRequest};
 use crate::ws::TungsteniteConnector;
 use crate::xiva::{Connector, XivaConfig, XivaEvents, XivaHandle};
 
@@ -78,6 +79,12 @@ impl Client {
     /// One page of up to `history_limit` messages older than `before` (newest page when `None`).
     pub async fn history(&self, chat: &str, before: Option<i64>) -> Result<WireHistory, ProtoError> {
         self.xiva.history(chat, before, self.history_limit).await
+    }
+
+    /// Sends one write. Fails fast with `ProtoError::Network` while the push socket is not
+    /// subscribed; a refusing commit status is `ProtoError::Commit`.
+    pub async fn push(&self, request: WriteRequest) -> Result<Committed, ProtoError> {
+        self.xiva.push(request).await
     }
 
     pub async fn users(&self, guids: &[String]) -> Result<Vec<WireUser>, ProtoError> {
