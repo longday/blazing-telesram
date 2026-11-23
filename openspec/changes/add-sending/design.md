@@ -1,0 +1,75 @@
+# Design
+
+## Context
+
+- The read-only client (`openspec/changes/archive/2026-11-23-add-read-only-client/design.md`) makes writes unrepresentable: `ReadRequest` is closed and `ALLOWED_METHODS` holds four read methods, enforced by tests in `crates/yandex-proto/src/request.rs`.
+- Every write in the web client is the socket method `push` with a JSON body; the reference `conarti/yandex-messenger-mcp` documents the forms (`docs/protocol-research.md` §9.3, §11.1, §14.4–14.6; `src/protocol/push.ts`, `src/protocol/mutations.ts`):
+  - envelope `{RequestId, ClientTransportId:{XivaSubscriptionId}, UserAgent, ClientMessage:{<variant>, LogData:{YandexUid}}, Meta:{Origin}, ClientSupportedFeatures}`; `XivaSubscriptionId` is the id from Xiva's `subscribed` operation frame;
+  - send: `Plain{ChatId, PayloadId, Text:{MessageText}}`; reply adds `ForwardedMessageRefs:[{ChatId, Timestamp}]` and `ForwardedMessageStyles:[{Quote}]`;
+  - edit: `Plain{ChatId, Timestamp, Text:{MessageText}}`; delete: `Plain{ChatId, Timestamp}`;
+  - read: `SeenMarker{ChatId, Timestamp, SeqNo?}`; typing: `Typing{ChatId}`;
+  - the response `Status` is a commit status (1 FULLY_COMMITTED, 8 DUPLICATE are success; 3 FAILED, 4 NO_SUCH_CHAT, 7 SENDER_NOT_IN_CHAT, 15 NO_PERMISSION, 18 THROTTLED, 23 RATE_LIMIT_EXCEEDED, …), not the application status of reads; a send also returns `MessageInfo{TimestampMcs, SeqNo, Version}`.
+- Evidence level: send, edit, delete and `SeenMarker` are confirmed live in the reference; reply and typing are only inferred from the web bundle.
+- Observed here (`bt-probe listen`, 2026-11-23): the server echo of an own message carries `ClientMessage.Plain.PayloadId`, so the echo can be matched to the outbox entry that produced it.
+- No text length limit, edit/delete time window, rate quota or server-side drafts are documented.
+
+## Goals / Non-Goals
+
+Goals: the four capabilities in `specs/`, with writes still limited to a closed, tested set.
+
+Non-goals: mentions, forwarding, reactions, pins, files, presence status; marking a chat unread.
+
+## Decisions
+
+### D1. Closed write set in the protocol crate
+A new `WriteRequest` enum (`SendText`, `Edit`, `Delete`, `Seen`, `Typing`) is the only way to build a `push`. `XivaHandle::push(WriteRequest) -> Result<Committed, ProtoError>` fills the envelope from actor state (subscription id, request id) and the session uid. Tests assert that `"push"` is the only new method, that the `ClientMessage` variants are exactly `Plain`, `SeenMarker` and `Typing`, and that the read allowlist is unchanged. A `push` waits for the `subscribed` frame of the current connection and fails fast while offline.
+Alternative: a generic `call(method, json)`. Rejected: it reopens every mutating method, including reactions and presence, which this change does not cover.
+
+### D2. Commit status is its own type
+`push` responses are parsed into `Committed { message: Option<MessageInfo> }` or `ProtoError::Commit { status, name }`; statuses split into permanent (NO_PERMISSION, SENDER_NOT_IN_CHAT, NO_SUCH_CHAT, BANNED, BLACKLISTED, BLOCKED_BY_PRIVACY, BAD_REQUEST, MESSAGE_NOT_FOUND) and transient (everything else, including THROTTLED and RATE_LIMIT_EXCEEDED). The read path's `check_status` is not reused, since status 1 means success here and an internal error there.
+
+### D3. Outbox with stable PayloadId
+Each send gets a UUID `PayloadId` once and is stored in a new cache table `outbox(payload_id PK, chat, created_us, json)` before any network call. The core sends outbox entries one at a time in creation order, after `Connected`; transient failures retry after reconnect or after a backoff of 5, 10 … 60 s (the unit of `RateLimit.WaitFor` is unknown); permanent failures mark the entry failed with the status name and stop until the user taps Retry. Resending reuses the `PayloadId`, so the server answers DUPLICATE instead of storing a second copy.
+Pending messages are ordinary `Message` values with a new `delivery` field (`Sent`, `Pending`, `Failed(reason)`) and a local timestamp (`created_us`); they sort after server messages. A confirmation (`MessageInfo.TimestampMcs`) or the echo push with the same `PayloadId`, whichever comes first, replaces the pending message with the server one; the other becomes a no-op.
+Alternative: memory-only queue. Rejected: the spec keeps pending messages across restarts.
+
+### D4. Edits and deletions are not queued
+Edit and delete run only while online and apply locally after a success status, then the echo push updates them again idempotently. Offline or failed attempts leave the message unchanged and show the reason in a toast. They target a message by timestamp, so a blind replay is unsafe to queue (edit replay may reapply an older text).
+
+### D5. Reply quote from the local copy
+The reply target is a loaded message of the open chat; its text, cut to 200 characters (the reference's bound), becomes `Quote`. The reference rereads it from the server; the local copy is the same text the user saw and needs no extra request.
+
+### D6. Read markers from the UI's visible range
+The desktop computes the newest message visible in the timeline from the list's visible range and sends `Command::MarkRead { chat, timestamp }` when the window is active and that timestamp is newer than the last one sent for the chat. The core drops markers not newer than the chat's known read position and sends `Seen` without `SeqNo` (optional in the form). On success the chat's unread counter becomes 0 when the marker is its newest message; otherwise the next chat update brings the server's count.
+
+### D7. Typing
+Outgoing: on composer text change, send `Typing` if none was sent for that chat in the last 4 s; nothing is sent after the user stops, since typing expires on its own. Incoming typing pushes become `ClientEvent::Typing { chat, user, until }` with `until = now + timeout_seconds`; the store expires them and clears a user's entry when their message arrives. Names come from the message authors already known for the chat, else from `get_users_data`.
+
+### D8. Multi-line input on the existing `TextInput`
+`TextInput` gains a multi-line mode: text is shaped with `WindowTextSystem::shape_text` and a wrap width into `WrappedLine`s; caret, selection and hit-testing use `WrappedLineLayout::position_for_index` and `closest_index_for_position`. The composer grows to 8 lines, then scrolls inside. Enter is a composer action (send); Shift+Enter inserts `\n`.
+Alternative: `gpui-component` 0.5.1, the last release on gpui 0.2.2. Rejected: 32 mandatory dependencies (tree-sitter, lsp-types, html5ever, notify, rust-i18n) for one text field, and the line is frozen there.
+
+### D9. Drafts in the cache
+New table `drafts(chat PK, text, reply_to)`; the store saves the composer of the chat being left on switch and 1 s after the last keystroke, and deletes the row on send. The chat row shows the draft instead of the last message.
+
+### D10. UI pieces
+Context menu: a right-click on a bubble opens an anchored popup with the items of the `message-editing` spec. Delete confirmation reuses the modal pattern of the sign-out confirmation. Reply and edit bars sit above the composer with an accent left border, an icon, the quoted author/text and a close button (`docs/mockups/1-main.svg`). Delivery marks: a clock for pending, one check for sent, a red "!" for failed, shown at the bubble's time.
+
+### D11. Live verification only in the self chat
+`bt-probe` gains `send-self <text>`, `edit-self <ts> <text>`, `delete-self <ts>`, `seen <chat> <ts>` and `typing-self`; the self-chat commands refuse any other chat id. UI verification in the VM also writes only to the self chat.
+
+## Risks / Trade-offs
+
+- [Writes act on the real account and cannot be undone] → the closed write set (D1), self-chat-only probe commands (D11), confirmation before deletion.
+- [Reply and typing forms are inferred, not confirmed] → live checks in the self chat are tasks; a form that fails its check is removed from this change rather than shipped unverified.
+- [Channels and restricted chats: write rights are not known in advance] → the server's permanent status marks the message failed with the reason; no retry loop.
+- [Read markers change what the user's other clients show] → markers only for messages visible in the focused window (D6); task 3.4 of the archived change verifies that loading alone changes nothing.
+- [Unknown rate limits] → one send in flight, backoff on THROTTLED/RATE_LIMIT_EXCEEDED.
+
+## Migration Plan
+
+Cache migration 2 adds `outbox` and `drafts`; existing caches upgrade in place. No rollback beyond deleting the cache file, which is disposable apart from pending messages and drafts.
+
+## Open Questions
+
+None blocking. The typing repeat interval (4 s) and lifetime are checked against the `timeout_seconds` of real typing pushes during live verification.
