@@ -14,7 +14,7 @@ The desktop app shows only synthetic chats. The goal is a client that looks like
 - **BREAKING**: remove the offline demo: synthetic data, local send/reply, `BT_STATE_PATH` persistence, the mock "meetings" filter and the `telemost-mock-check` MCP experiment with its fixtures.
 - Add a headless developer probe that exercises the protocol with the stored session, without opening windows.
 
-Planned follow-up changes, in order (not part of this change):
+Planned follow-up changes, in order (not part of this change); the target UI they converge on is sketched in `docs/mockups/`:
 1. Sending: text, reply, edit, delete, read markers, typing, drafts.
 2. Media: image and file upload/download, gallery, voice and video playback.
 3. Threads, reactions, mentions, forwarding, pins, important messages.
