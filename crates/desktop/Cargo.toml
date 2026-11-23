@@ -14,7 +14,7 @@ objc2 = "=0.6.5"
 # gpui 0.2.2 exposes only full display bounds; the initial window must fit the area left by the menu bar and Dock.
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSResponder", "NSScreen", "NSWindow", "objc2-core-foundation"] }
 tokio = { version = "=1.54.1", features = ["rt", "time", "sync"] }
-unicode-segmentation = "1.12"
+unicode-segmentation = "=1.13.3"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "json", "std", "tracing-log"] }
 wry = "=0.57.3"
