@@ -168,6 +168,26 @@ impl Backend for YandexBackend {
             connection.client.watch_chats(chat.map(|c| c.0.clone()).into_iter().collect());
         }
     }
+
+    async fn send_text(&self, _: &ChatId, _: &PayloadId, _: &str, _: Option<&ReplyTarget>) -> Result<Option<MessageTs>, BackendError> {
+        unimplemented!("add-sending 2.x")
+    }
+
+    async fn edit(&self, _: &ChatId, _: MessageTs, _: &str) -> Result<(), BackendError> {
+        unimplemented!("add-sending 2.x")
+    }
+
+    async fn delete(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
+        unimplemented!("add-sending 2.x")
+    }
+
+    async fn mark_seen(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
+        unimplemented!("add-sending 2.x")
+    }
+
+    async fn typing(&self, _: &ChatId) -> Result<(), BackendError> {
+        unimplemented!("add-sending 2.x")
+    }
 }
 
 /// Resolves display names and avatars of users the wire left anonymous.
@@ -308,6 +328,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
         edited: wire.edited,
         reply_to: None,
         forwarded_from: None,
+        delivery: Delivery::Sent,
     };
     match &wire.relation {
         Relation::None => {}

@@ -154,6 +154,7 @@ impl ChatStore {
                 self.session = SessionState::SignedOut;
                 cx.emit(StoreEvent::Session);
             }
+            event => unimplemented!("add-sending 4.x: {event:?}"),
         }
         cx.notify();
     }
@@ -415,6 +416,7 @@ mod tests {
             edited: false,
             reply_to: None,
             forwarded_from: None,
+            delivery: bt_chat_core::model::Delivery::Sent,
         }
     }
 

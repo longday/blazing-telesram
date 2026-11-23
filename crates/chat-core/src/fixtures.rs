@@ -27,6 +27,7 @@ pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
         edited: false,
         reply_to: None,
         forwarded_from: None,
+        delivery: Delivery::Sent,
     }
 }
 

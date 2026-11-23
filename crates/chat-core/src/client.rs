@@ -353,6 +353,7 @@ impl<B: Backend> Engine<B> {
                 self.sign_out();
                 return false;
             }
+            command => unimplemented!("add-sending 3.x: {command:?}"),
         }
         true
     }
@@ -512,6 +513,7 @@ impl<B: Backend> Engine<B> {
                 tracing::warn!(%error, "live connection failed");
                 self.connection_lost();
             }
+            event => unimplemented!("add-sending 3.x: {event:?}"),
         }
     }
 
@@ -831,6 +833,21 @@ mod tests {
             let (tx, rx) = async_channel::unbounded();
             self.state().live = Some(tx);
             Ok(rx)
+        }
+        async fn send_text(&self, _: &ChatId, _: &PayloadId, _: &str, _: Option<&ReplyTarget>) -> Result<Option<MessageTs>, BackendError> {
+            unimplemented!("add-sending 3.2")
+        }
+        async fn edit(&self, _: &ChatId, _: MessageTs, _: &str) -> Result<(), BackendError> {
+            unimplemented!("add-sending 3.4")
+        }
+        async fn delete(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
+            unimplemented!("add-sending 3.4")
+        }
+        async fn mark_seen(&self, _: &ChatId, _: MessageTs) -> Result<(), BackendError> {
+            unimplemented!("add-sending 3.5")
+        }
+        async fn typing(&self, _: &ChatId) -> Result<(), BackendError> {
+            unimplemented!("add-sending 3.6")
         }
     }
 

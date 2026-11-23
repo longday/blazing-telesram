@@ -72,6 +72,7 @@ fn message(chat: &str, i: i64, author: &str, outgoing: bool, body: MessageBody) 
         edited: false,
         reply_to: None,
         forwarded_from: None,
+        delivery: bt_chat_core::model::Delivery::Sent,
     }
 }
 
