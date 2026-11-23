@@ -673,6 +673,8 @@ dependencies = [
  "cookie",
  "futures",
  "gpui",
+ "objc2",
+ "objc2-app-kit",
  "serde_json",
  "tempfile",
  "tokio",

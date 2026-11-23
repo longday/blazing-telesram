@@ -144,7 +144,7 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
         }
     });
     let store = cx.new(|cx| ChatStore::new(events, commands, cx));
-    let bounds = Bounds::centered(None, size(px(1180.), px(800.)), cx);
+    let bounds = fitted_window_bounds(size(px(1180.), px(800.)), cx);
     let window_store = store.clone();
     let opened = cx.open_window(
         WindowOptions {
@@ -170,6 +170,28 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
         }
     })
     .detach();
+}
+
+/// Centers `preferred` in the primary screen area left by the menu bar and Dock, shrunk so that the window,
+/// title bar included, fits it.
+pub(crate) fn fitted_window_bounds(preferred: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask};
+    let Some(mtm) = objc2::MainThreadMarker::new() else { return Bounds::centered(None, preferred, cx) };
+    let (Some(screen), Some(primary)) = (NSScreen::mainScreen(mtm), cx.primary_display()) else {
+        return Bounds::centered(None, preferred, cx);
+    };
+    let visible = screen.visibleFrame();
+    let content = NSWindow::contentRectForFrameRect_styleMask(visible, NSWindowStyleMask::Titled, mtm);
+    let fitted = preferred.min(&size(px(content.size.width as f32), px(content.size.height as f32)));
+    // gpui takes the frame's top-left corner with the content size. AppKit measures y up from the primary
+    // screen's bottom edge; gpui measures it down from its top edge.
+    let top = primary.bounds().size.height - px((visible.origin.y + visible.size.height) as f32);
+    let frame_height = fitted.height + px((visible.size.height - content.size.height) as f32);
+    let origin = point(
+        px(visible.origin.x as f32) + (px(visible.size.width as f32) - fitted.width) / 2.,
+        top + (px(visible.size.height as f32) - frame_height) / 2.,
+    );
+    Bounds::new(origin, fitted)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 //! Sign-in window: a GPUI window hosting an incognito wry WebView on the Telemost page.
 //! The WebView is polled for the Yandex `Session_id` cookie; the caller verifies the cookies.
 use gpui::{
-    App, Bounds, Context, IntoElement, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
+    App, Context, IntoElement, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions, div, prelude::*, px, rgb, size,
 };
 use std::{
@@ -117,7 +117,7 @@ pub fn open_sign_in_window(
     cx: &mut App,
     on_cookies: impl Fn(Vec<LoginCookie>, &mut Window, &mut App) + 'static,
 ) -> Result<WindowHandle<SignInWindow>, String> {
-    let bounds = Bounds::centered(None, size(px(480.), px(720.)), cx);
+    let bounds = crate::fitted_window_bounds(size(px(480.), px(720.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions { title: Some("Вход в Яндекс".into()), ..Default::default() }),
