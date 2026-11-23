@@ -615,6 +615,42 @@ fn author_lines_avatars_and_bubble_sides(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn long_text_wraps_inside_its_own_row(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    let url = format!("https://gitlab.com/signax/hub/-/merge_requests/{}", "a1b2c3".repeat(60));
+    let words = "длинное сообщение из обычных слов, которое не помещается в одну строку пузыря ".repeat(6);
+    let image = MessageBody::Image {
+        media: media("m1", MediaKind::Thumbnail),
+        width: 800,
+        height: 600,
+        caption: Some(words.clone()),
+    };
+    h.feed(
+        cx,
+        [history(
+            "g",
+            vec![
+                message("g", 1, "alice", false, MessageBody::Text(url)),
+                message("g", 2, "bob", false, MessageBody::Text(words)),
+                message("g", 3, "alice", false, image),
+                message("g", 4, "bob", false, MessageBody::Text("после".into())),
+            ],
+            true,
+        )],
+    );
+
+    let bubbles = [msg!(1), msg!(2), msg!(3), msg!(4)].map(|s| bounds(cx, s).unwrap_or_else(|| panic!("{s} on screen")));
+    for pair in bubbles.windows(2) {
+        assert!(pair[0].bottom() <= pair[1].top(), "bubble {:?} overlaps the next one {:?}", pair[0], pair[1]);
+    }
+    assert!(bubbles[0].size.height > px(80.), "an unbreakable URL wraps over several lines: {:?}", bubbles[0]);
+    assert!(bubbles[1].size.height > px(80.), "long text wraps at word boundaries: {:?}", bubbles[1]);
+    assert!(bubbles[0].size.width <= px(480.), "the URL bubble keeps the max width: {:?}", bubbles[0]);
+    assert!(bubbles[3].size.width < px(120.), "a short message keeps a narrow bubble: {:?}", bubbles[3]);
+}
+
+#[gpui::test]
 fn private_chats_and_channels_do_not_label_authors(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_group(&h, cx);

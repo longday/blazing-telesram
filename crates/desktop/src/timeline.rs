@@ -9,6 +9,7 @@ use gpui::{prelude::*, *};
 
 const GROUP_GAP_US: i64 = 5 * 60 * 1_000_000;
 const BUBBLE_MAX: f32 = 480.;
+const BUBBLE_PAD_X: f32 = 12.;
 const THUMB_MAX: f32 = 320.;
 const AVATAR: f32 = 36.;
 
@@ -88,7 +89,7 @@ fn bubble(store: &ChatStore, m: &Message, show_name: bool, clock: Clock) -> Div 
         .flex()
         .flex_col()
         .gap(px(3.))
-        .px(px(12.))
+        .px(px(BUBBLE_PAD_X))
         .py(px(7.))
         .rounded(px(12.))
         .bg(rgb(if m.outgoing { OUTGOING } else { INCOMING }))
@@ -178,8 +179,10 @@ fn body(store: &ChatStore, m: &Message) -> AnyElement {
     }
 }
 
+/// The bubble is content-sized, so gpui measures its text at max-content width and keeps that single-line
+/// height even after the bubble is clamped; a max width on the text itself makes the measurement wrap.
 fn text_block(text: String) -> Div {
-    div().text_size(px(15.)).line_height(px(21.)).child(text)
+    div().max_w(px(BUBBLE_MAX - 2. * BUBBLE_PAD_X)).text_size(px(15.)).line_height(px(21.)).child(text)
 }
 
 /// Fixed-size box at the image's aspect ratio, so the row height does not change when the file arrives.
