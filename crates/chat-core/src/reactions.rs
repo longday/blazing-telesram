@@ -68,10 +68,10 @@ impl Reactions {
     /// (kept when it has none), `mine` follows the update when it says one, and `mine` is
     /// dropped when its type has no count left. Returns whether anything changed.
     pub fn apply(&mut self, update: &ReactionsUpdate) -> bool {
-        if let (Some(held), Some(new)) = (self.version, update.version) {
-            if new <= held {
-                return false;
-            }
+        if let (Some(held), Some(new)) = (self.version, update.version)
+            && new <= held
+        {
+            return false;
         }
         let mine = update
             .mine
@@ -93,12 +93,12 @@ impl Reactions {
     pub fn toggled(&self, code: ReactionCode) -> (Reactions, Option<ReactionCode>) {
         let target = if self.mine == Some(code) { None } else { Some(code) };
         let mut overlay = self.clone();
-        if let Some(old) = self.mine {
-            if let Some(at) = overlay.counts.iter().position(|count| count.code == old) {
-                overlay.counts[at].count = overlay.counts[at].count.saturating_sub(1);
-                if overlay.counts[at].count == 0 {
-                    overlay.counts.remove(at);
-                }
+        if let Some(old) = self.mine
+            && let Some(at) = overlay.counts.iter().position(|count| count.code == old)
+        {
+            overlay.counts[at].count = overlay.counts[at].count.saturating_sub(1);
+            if overlay.counts[at].count == 0 {
+                overlay.counts.remove(at);
             }
         }
         if let Some(new) = target {
