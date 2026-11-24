@@ -1,5 +1,6 @@
 //! Domain model shared by the sync core and the UI. Keys are server identifiers.
 
+use crate::reactions::{ReactionCode, Reactions};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -120,6 +121,19 @@ pub struct Message {
     pub forwarded_from: Option<String>,
     #[serde(default)]
     pub delivery: Delivery,
+    /// Server-confirmed reactions; rows cached before reactions existed have none.
+    #[serde(default)]
+    pub reactions: Reactions,
+}
+
+impl Message {
+    /// Keeps the reactions already known for this message when the incoming copy carries no
+    /// reaction state at all (an edit push, a history row without reactions).
+    pub fn inherit_reactions(&mut self, cached: &Message) {
+        if self.reactions.counts.is_empty() && self.reactions.version.is_none() {
+            self.reactions.clone_from(&cached.reactions);
+        }
+    }
 }
 
 /// Messages ordered oldest to newest, all older than `before` when paging. `replaces` is the
@@ -197,6 +211,10 @@ pub enum ClientEvent {
     ChatUpdated(ChatSummary),
     History(HistoryChunk),
     MessageUpserted(Message),
+    /// The reactions of a loaded message changed (a server update, or the optimistic overlay
+    /// of the user's own choice and its rollback). Carries no message body on purpose: it
+    /// must not look like a new or edited message.
+    ReactionsChanged { chat: ChatId, timestamp: MessageTs, reactions: Reactions },
     MessageDeleted { chat: ChatId, timestamp: MessageTs },
     MediaReady { media: MediaRef, path: PathBuf },
     /// Not available now (failed, or missing on the server recently); the UI may ask again later.
@@ -211,7 +229,7 @@ pub enum ClientEvent {
     PendingSettled { chat: ChatId, payload: PayloadId },
     /// `user` is typing in `chat` until `until` unless their message arrives first.
     Typing { chat: ChatId, user: UserId, name: Option<String>, until: Instant },
-    /// An edit or deletion did not happen; the message keeps its state.
+    /// A reaction, a deletion or an edit did not happen; the message keeps its state.
     ActionFailed { chat: ChatId, reason: String },
     /// A send was not accepted into durable storage; nothing was queued. The UI puts the
     /// text and reply target back so the user can try again.
@@ -229,7 +247,7 @@ pub enum ClientEvent {
     SearchFailed { id: SearchId, reason: SearchFailure },
 }
 
-/// UI to core. Writes are only the user's own actions: send, edit, delete, read, typing.
+/// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     OpenChat(ChatId),
@@ -240,6 +258,9 @@ pub enum Command {
     Retry(PayloadId),
     Edit { chat: ChatId, timestamp: MessageTs, text: String },
     Delete { chat: ChatId, timestamp: MessageTs },
+    /// The user chose reaction `code` on a message. The core decides from the cached state
+    /// whether that adds, replaces or removes the user's reaction.
+    ToggleReaction { chat: ChatId, timestamp: MessageTs, code: ReactionCode },
     /// The newest message of `chat` the user has seen in the focused window.
     MarkRead { chat: ChatId, timestamp: MessageTs },
     /// The user changed the composer text of `chat`.
@@ -258,6 +279,7 @@ pub enum Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::reactions::ReactionCount;
 
     fn thumb(id: &str) -> MediaRef {
         MediaRef { id: id.into(), kind: MediaKind::Thumbnail }
@@ -325,5 +347,52 @@ mod tests {
         let search = Command::Search { id: SearchId(2), query: "q".into() };
         assert_eq!(search.clone(), search);
         assert_ne!(Command::CancelSearch, search);
+    }
+
+    #[test]
+    fn a_message_cached_without_reactions_still_decodes() {
+        let mut json = serde_json::to_value(crate::fixtures::msg("0/0/c", 1, "hi")).unwrap();
+        assert!(json.as_object_mut().unwrap().remove("reactions").is_some());
+        let message: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(message.reactions, Reactions::default());
+        assert_eq!(message.body, MessageBody::Text("hi".into()));
+    }
+
+    #[test]
+    fn reactions_survive_a_json_round_trip() {
+        let mut message = crate::fixtures::msg("0/0/c", 1, "hi");
+        message.reactions = Reactions {
+            counts: vec![ReactionCount { code: ReactionCode(100101), count: 2 }],
+            mine: Some(ReactionCode(100101)),
+            version: Some(3),
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), message);
+    }
+
+    fn reacted(counts: &[(i64, u32)], mine: Option<i64>, version: Option<i64>) -> Message {
+        let mut message = crate::fixtures::msg("0/0/c", 1, "hi");
+        message.reactions = Reactions {
+            counts: counts.iter().map(|&(c, count)| ReactionCount { code: ReactionCode(c), count }).collect(),
+            mine: mine.map(ReactionCode),
+            version,
+        };
+        message
+    }
+
+    #[test]
+    fn inherit_reactions_copies_only_when_the_incoming_copy_has_no_reaction_state() {
+        let cached = reacted(&[(1, 2)], Some(1), Some(4));
+        let mut bare = crate::fixtures::msg("0/0/c", 1, "edited");
+        bare.inherit_reactions(&cached);
+        assert_eq!(bare.reactions, cached.reactions);
+
+        let mut with_counts = reacted(&[(2, 1)], None, None);
+        with_counts.inherit_reactions(&cached);
+        assert_eq!(with_counts.reactions, reacted(&[(2, 1)], None, None).reactions);
+
+        let mut with_version = reacted(&[], None, Some(5));
+        with_version.inherit_reactions(&cached);
+        assert_eq!(with_version.reactions, reacted(&[], None, Some(5)).reactions);
     }
 }

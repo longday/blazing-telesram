@@ -859,6 +859,7 @@ impl<B: Backend> Engine<B> {
             }),
             forwarded_from: None,
             delivery,
+            reactions: Default::default(),
         }
     }
 

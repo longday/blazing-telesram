@@ -1,10 +1,11 @@
 //! The seam between the sync engine and the network. Domain types only: the protocol crate
 //! implements [`Backend`], tests implement it with a fake. The only writes are the user's own
-//! actions listed on the trait.
+//! actions listed on the trait: send, edit, delete, react, read position and typing.
 
 use crate::model::{
     ChatId, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, ReplyTarget, SearchHits, UserId,
 };
+use crate::reactions::{ReactionCode, ReactionsUpdate};
 use std::io::Write;
 use std::time::Duration;
 
@@ -39,6 +40,9 @@ pub enum LiveEvent {
     /// An own message that carries the send's `PayloadId`, from this or another client.
     Echo { payload: PayloadId, message: Message },
     MessageDeleted { chat: ChatId, timestamp: MessageTs },
+    /// The server's reaction state of one message changed (a reaction push). Applied by the
+    /// engine only when it is newer than what the cache holds.
+    ReactionsChanged { chat: ChatId, timestamp: MessageTs, update: ReactionsUpdate },
     /// `user` is typing in `chat`; the indicator lives `timeout` unless renewed.
     Typing { chat: ChatId, user: UserId, name: Option<String>, timeout: Duration },
     /// Authoritative summary (unread counter, preview, pin, mute) of one chat.
@@ -108,6 +112,16 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> impl Future<Output = Result<(), BackendError>> + Send;
+
+    /// Sets the account's reaction on a message to `target`, or removes it when `None`. One
+    /// reaction per message: a `Some` replaces the previous one. Offline fails fast with
+    /// `Network`.
+    fn react(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        target: Option<ReactionCode>,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Moves the read position of `chat` up to `timestamp` inclusive.
     fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> impl Future<Output = Result<(), BackendError>> + Send;

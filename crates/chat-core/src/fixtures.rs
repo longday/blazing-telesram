@@ -28,6 +28,7 @@ pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
         reply_to: None,
         forwarded_from: None,
         delivery: Delivery::Sent,
+        reactions: Default::default(),
     }
 }
 
