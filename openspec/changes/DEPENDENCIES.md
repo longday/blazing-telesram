@@ -57,13 +57,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.1 | done (6fb4a72) | — | |
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
 | 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
-| 1.4 | ready (`search.rs`, `wire_fixtures.rs`; fixture from 1.3) | 1.3 | GS-P3 |
-| 2.1 | done on `integ/gs` (5798ec9, withdrawn patch) | — | GS-A |
-| 2.2 | blocked-by GS 1.4 (unit gate) | 2.1 | GS-A |
-| 3.1 | blocked-by GS 1.4 | 1.4, 2.1 | GS-A |
-| 3.2 | blocked-by GS 1.4 (unit gate) | 2.1 | GS-A |
-| 3.3 | blocked-by GS 1.4 (unit gate), 3.2 | 3.2 | GS-A |
-| 3.4 | blocked-by GS 1.4 (unit gate), 3.3 | 3.2, 3.3 | GS-A |
+| 1.4 | done (gs/1.4 merge; `WireSearchChat.kind` is only `Channel` or `Group`: no private-chat marker, so `PersonHit::chat` comes only from the guid map of 3.1) | 1.3 | GS-P3 |
+| 2.1 | done on `integ/gs` (5798ec9, withdrawn patch; re-apply on `main`) | — | GS-A |
+| 2.2 | blocked-by MD-C (core lane); unit GS-A | 2.1 | GS-A |
+| 3.1 | blocked-by MD-C (core lane) | 1.4, 2.1 | GS-A |
+| 3.2 | blocked-by MD-C (core lane) | 2.1 | GS-A |
+| 3.3 | blocked-by 3.2 | 3.2 | GS-A |
+| 3.4 | blocked-by 3.3 | 3.2, 3.3 | GS-A |
 | 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
 ## add-media-download (MD)
@@ -131,10 +131,9 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS 1.4 (`search.rs`, `wire_fixtures.rs`; unblocks GS-A and CM 1.3's `wire_fixtures.rs` slot).
-- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, waits only for the live session.
+- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, waits only for the live session (held by MD 1.3 now). It also unblocks CM 1.3, then CM 2.2.
 
-In flight: MD 1.3 [live] (Main), MD 4.3 (on `integ/md`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1 done, then 4.3, 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A, MR-B and CM-C1 wait for it. Merged so far: GS 1.1, 1.2, 1.3; MD 1.1, 1.2, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
+In flight: MD 1.3 [live] (Main), MD 4.3 (on `integ/md`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1 done, then 4.3, 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A (all its gates except the lane are met: 1.4 is on `main`), MR-B and CM-C1 wait for it. Merged so far: GS 1.1, 1.2, 1.3, 1.4; MD 1.1, 1.2, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
 
 ## Needs the user
 
