@@ -4,23 +4,66 @@
 //! load, the client, the CSRF request or the socket ahead of the guard, the exit code (a real
 //! attempt ends in 1) or the message would change; that is the primary signal.
 //!
-//! What the loopback listener covers and what it does not: it sees the HTTP requests (the
-//! registry, bootstrap and the CSRF exchange go through `reqwest`, which honours the proxy
-//! variables). The push socket does NOT go through the proxy: `ws.rs` connects with
-//! `tokio_tungstenite::connect_async_tls_with_config`, which ignores the environment and connects
-//! directly. So the test cannot promise that no real host is contacted: a regression that put a
-//! socket write ahead of the guard would open a direct connection with the made-up cookie (the
-//! server refuses it, no account is affected), and the listener would count nothing for it. The
-//! allowed cases, which would connect, are not run and the session is made up.
+//! The guarantee that no real host is contacted comes from the OS, not from the proxy variables:
+//! every `bt-probe` subprocess runs under macOS `sandbox-exec` with a profile that denies all
+//! network access except loopback. The HTTP requests (registry, bootstrap, the CSRF exchange, all
+//! `reqwest`, which honours the proxy variables) land on the loopback sentinel, which counts them.
+//! The push socket does not: `ws.rs` connects with `tokio_tungstenite::connect_async_tls_with_config`,
+//! which ignores the environment and would connect directly. Under the sandbox such a connect
+//! (or any other non-loopback one) fails with EPERM before a packet leaves the machine, so a
+//! regression that put a socket write ahead of the guard shows up as a changed exit code or
+//! message, never as traffic to the real push host.
+//!
+//! Without `sandbox-exec` (non-macOS) the tests do not run the probe unsandboxed: each one prints
+//! a skip message and returns. On macOS a `sandbox-exec` that exists but cannot apply the profile
+//! (for instance when the tests already run inside another sandbox) fails the suite loudly.
 
+use std::io::ErrorKind;
 use std::net::TcpListener;
 use std::process::{Command, Output};
+use std::sync::LazyLock;
 
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::session::{Identity, Session, SessionCookie};
 
 const GUID: &str = "c9a71201-70b5-992e-61f2-b27e2d3fc8fb";
 const OTHER_CHAT: &str = "0/0/some-other-chat";
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+/// Everything allowed except network access, which is allowed to loopback only. The later rule
+/// wins, so a connect to any non-loopback address fails with EPERM before leaving the machine.
+const SANDBOX_PROFILE: &str = r#"(version 1)
+(allow default)
+(deny network*)
+(allow network* (remote ip "localhost:*"))"#;
+
+/// Whether `sandbox-exec` exists. One that exists but cannot apply the profile panics instead of
+/// silently dropping the guard coverage.
+static SANDBOX_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
+    match Command::new(SANDBOX_EXEC).args(["-p", SANDBOX_PROFILE, "/usr/bin/true"]).output() {
+        Ok(out) => {
+            assert!(
+                out.status.success(),
+                "{SANDBOX_EXEC} cannot apply the loopback-only profile (already inside a sandbox?): {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            true
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => panic!("{SANDBOX_EXEC} failed to start: {e}"),
+    }
+});
+
+/// Whether probe subprocesses can run sandboxed. `false` (with a message) only when
+/// `sandbox-exec` does not exist, i.e. off macOS: the probe is never run unsandboxed, because a
+/// guard regression could then open a direct socket to a real host.
+fn sandbox_ready() -> bool {
+    let ready = *SANDBOX_AVAILABLE;
+    if !ready {
+        eprintln!("SKIPPED: {SANDBOX_EXEC} is unavailable; the probe is not run without the network sandbox");
+    }
+    ready
+}
 
 fn dummy_session(dir: &RuntimeDir) {
     Session {
@@ -58,8 +101,9 @@ impl Run {
     }
 }
 
-/// Runs `bt-probe args` with `BT_WRITE_ONLY_CHAT=limit`. Every proxy variable points at a
-/// loopback listener, which counts the HTTP connections the run opens (not the push socket).
+/// Runs `bt-probe args` under the loopback-only sandbox with `BT_WRITE_ONLY_CHAT=limit`. Every
+/// proxy variable points at a loopback listener, which counts the HTTP connections the run opens
+/// (not the push socket, which the sandbox would refuse).
 fn probe(args: &[&str], limit: &str, with_session: bool) -> Run {
     let sentinel = TcpListener::bind("127.0.0.1:0").unwrap();
     sentinel.set_nonblocking(true).unwrap();
@@ -68,7 +112,8 @@ fn probe(args: &[&str], limit: &str, with_session: bool) -> Run {
     if with_session {
         dummy_session(&RuntimeDir::new(runtime.path()));
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_bt-probe"))
+    let output = Command::new(SANDBOX_EXEC)
+        .args(["-p", SANDBOX_PROFILE, env!("CARGO_BIN_EXE_bt-probe")])
         .args(args)
         .env_clear()
         .env("BT_RUNTIME_DIR", runtime.path())
@@ -94,6 +139,9 @@ fn own_chat() -> String {
 
 #[test]
 fn self_writes_to_a_chat_the_limit_does_not_name_are_refused_before_any_connection() {
+    if !sandbox_ready() {
+        return;
+    }
     let commands: [&[&str]; 6] = [
         &["react-self", "5", "100101"],
         &["react-self", "5", "remove"],
@@ -109,6 +157,9 @@ fn self_writes_to_a_chat_the_limit_does_not_name_are_refused_before_any_connecti
 
 #[test]
 fn named_chat_writes_are_refused_before_the_session_or_any_connection() {
+    if !sandbox_ready() {
+        return;
+    }
     let own = own_chat();
     let commands: [Vec<&str>; 2] = [vec!["seen", &own, "5"], vec!["typing", &own]];
     for args in &commands {
@@ -120,6 +171,9 @@ fn named_chat_writes_are_refused_before_the_session_or_any_connection() {
 
 #[test]
 fn both_creation_commands_are_refused_whatever_the_limit_names() {
+    if !sandbox_ready() {
+        return;
+    }
     let own = own_chat();
     let commands: [&[&str]; 2] = [&["create-private", GUID, "--confirm-create"], &["create-chat", "Team", GUID, "--confirm-create"]];
     for args in commands {
@@ -133,6 +187,9 @@ fn both_creation_commands_are_refused_whatever_the_limit_names() {
 
 #[test]
 fn an_empty_limit_refuses_every_write_command() {
+    if !sandbox_ready() {
+        return;
+    }
     let own = own_chat();
     let commands: [Vec<&str>; 5] = [
         vec!["react-self", "5", "100101"],
