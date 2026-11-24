@@ -278,7 +278,13 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
         match change {
             LiveChange::Upsert(message) if in_range(message.timestamp) => {
                 match messages.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
-                    Ok(i) => messages[i] = message.clone(),
+                    Ok(i) => {
+                        // A reaction-less copy (an edit) must keep what the snapshot or an
+                        // earlier replayed event established for this row.
+                        let mut replacement = message.clone();
+                        replacement.inherit_reactions(&messages[i]);
+                        messages[i] = replacement;
+                    }
                     Err(i) => messages.insert(i, message.clone()),
                 }
             }
@@ -3292,6 +3298,35 @@ mod tests {
         let expected = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
         assert_eq!(chunk.messages[0].reactions, expected);
         assert_eq!(cached_reactions(&h), expected);
+    }
+
+    #[test]
+    fn a_reaction_event_then_an_edit_during_a_history_fetch_both_survive_its_snapshot() {
+        let gate = react_gate();
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(3), None)];
+                s.history.insert(id("a"), vec![reacted()]);
+                s.history_gate = Some(gate.clone());
+            },
+            50,
+        );
+        h.online();
+        h.client.send(Command::OpenChat(id("a")));
+        h.wait_for("the history request", |s| !s.history_calls.is_empty());
+        // Nothing is cached, so neither event can inherit from the cache: only the replay can.
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 1)], 6));
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        h.upserted("edit");
+        gate.notify_one();
+        let chunk = h.history("raced history");
+        let expected = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
+        let row = &chunk.messages[0];
+        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), expected.clone()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), expected));
     }
 
     #[test]
