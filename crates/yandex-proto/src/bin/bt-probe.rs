@@ -6,6 +6,9 @@
 //! of any chat into a local directory (never overwriting) and prints host and path of the
 //! request, never its query. `create-private` and `create-chat` are the commands that change the
 //! account outside the self chat, and they send nothing without `--confirm-create`.
+//! Every command that sends a write (`send-self`, `edit-self`, `delete-self`, `react-self`,
+//! `typing-self`, `seen`, `typing`, `create-private`, `create-chat`) obeys `BT_WRITE_ONLY_CHAT` like
+//! the desktop app: set, it limits writes to the chat it names, and it refuses every creation.
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::fs::{self, File, OpenOptions};
@@ -42,6 +45,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe create-private <guid> --confirm-create
        bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
+BT_WRITE_ONLY_CHAT limits every write command to the chat it names: a write to another chat, a set but empty value, and create-private / create-chat (a new chat is never the named one) are refused with exit code 2 before any connection or request
 download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
@@ -104,10 +108,10 @@ fn main() -> ExitCode {
             None => return usage(),
         },
         ["seen", chat, ts] => match ts.parse() {
-            Ok(ts) => block_on(write_named(WriteRequest::Seen { chat: (*chat).to_owned(), timestamp: ts })),
+            Ok(ts) => block_on(write_named(chat, WriteRequest::Seen { chat: (*chat).to_owned(), timestamp: ts })),
             Err(_) => return usage(),
         },
-        ["typing", chat] => block_on(write_named(WriteRequest::Typing { chat: (*chat).to_owned() })),
+        ["typing", chat] => block_on(write_named(chat, WriteRequest::Typing { chat: (*chat).to_owned() })),
         ["download", chat, ts, flags @ ..] => match (ts.parse(), download_flags(flags)) {
             (Ok(ts), Some(flags)) => block_on(download(chat, ts, flags)),
             _ => return usage(),
@@ -238,8 +242,9 @@ fn print_committed(committed: &Committed) {
 }
 
 async fn send_self(text: &str, flags: SendFlags<'_>) -> Result<(), Failure> {
+    let allowed = write_only()?;
     let session = load_session()?;
-    let chat = resolve_self_chat(flags.chat, &session.identity.guid).map_err(|e| (2, e))?;
+    let chat = guarded_self_chat(flags.chat, &session.identity.guid, allowed.as_deref())?;
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
     let reply = match flags.reply {
         Some(timestamp) => Some(reply_ref(&client, &chat, timestamp).await?),
@@ -292,8 +297,9 @@ fn stored_reply(message: &WireMessage) -> Result<Option<ReplyRef>, String> {
 }
 
 async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(), Failure> {
+    let allowed = write_only()?;
     let session = load_session()?;
-    let chat = resolve_self_chat(flags.chat, &session.identity.guid).map_err(|e| (2, e))?;
+    let chat = guarded_self_chat(flags.chat, &session.identity.guid, allowed.as_deref())?;
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
     let reply = match flags.reply {
         Some(target) => Some(reply_ref(&client, &chat, target).await?),
@@ -303,21 +309,73 @@ async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(
     Ok(())
 }
 
+/// The self chat a `*-self` write goes to: `resolve_self_chat`, then the `BT_WRITE_ONLY_CHAT`
+/// guard. Runs before the connection is made, so a refusal sends nothing.
+fn guarded_self_chat(requested: Option<&str>, guid: &str, allowed: Option<&str>) -> Result<String, Failure> {
+    let chat = resolve_self_chat(requested, guid).map_err(|e| (2, e))?;
+    chat_write_guard(allowed, &chat).map_err(|e| (2, e))?;
+    Ok(chat)
+}
+
 /// Delete, typing and reaction: one push into the self chat.
 async fn write_self(requested: Option<&str>, build: impl FnOnce(String) -> WriteRequest) -> Result<(), Failure> {
+    let allowed = write_only()?;
     let session = load_session()?;
-    let chat = resolve_self_chat(requested, &session.identity.guid).map_err(|e| (2, e))?;
+    let chat = guarded_self_chat(requested, &session.identity.guid, allowed.as_deref())?;
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
     print_committed(&client.push(build(chat)).await.map_err(fail)?);
     Ok(())
 }
 
 /// Read marker or typing in any chat; the caller names the chat on purpose. Neither carries text.
-async fn write_named(request: WriteRequest) -> Result<(), Failure> {
+/// `chat` is the chat `request` is addressed to, for the `BT_WRITE_ONLY_CHAT` guard.
+async fn write_named(chat: &str, request: WriteRequest) -> Result<(), Failure> {
+    let allowed = write_only()?;
+    chat_write_guard(allowed.as_deref(), chat).map_err(|e| (2, e))?;
     let session = load_session()?;
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
     print_committed(&client.push(request).await.map_err(fail)?);
     Ok(())
+}
+
+const WRITE_ONLY_VAR: &str = "BT_WRITE_ONLY_CHAT";
+
+/// `BT_WRITE_ONLY_CHAT` as the desktop app reads it: unset means no limit; set, it must name a
+/// chat (a blank value is an error, not "no limit").
+fn parse_write_only(value: Option<String>) -> Result<Option<String>, String> {
+    match value {
+        None => Ok(None),
+        Some(chat) if chat.trim().is_empty() => Err(format!("{WRITE_ONLY_VAR} is set but empty")),
+        Some(chat) => Ok(Some(chat)),
+    }
+}
+
+/// The limit from the environment; a usage-class failure (exit 2) when the value is unusable.
+/// A value that is not valid unicode cannot name a chat, so it refuses instead of lifting the limit.
+fn write_only() -> Result<Option<String>, Failure> {
+    let value = match std::env::var(WRITE_ONLY_VAR) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => return Err((2, format!("{WRITE_ONLY_VAR} is not valid unicode"))),
+    };
+    parse_write_only(value).map_err(|e| (2, e))
+}
+
+/// A write into `chat` is allowed when no limit is set or the limit names that chat.
+fn chat_write_guard(allowed: Option<&str>, chat: &str) -> Result<(), String> {
+    match allowed {
+        Some(allowed) if allowed != chat => Err(format!("refusing a write to {chat}: {WRITE_ONLY_VAR} limits writes to {allowed}; nothing was sent")),
+        _ => Ok(()),
+    }
+}
+
+/// Creating a chat writes outside any one chat and a new chat cannot be the named one, so any
+/// limit refuses it, whatever the target.
+fn creation_guard(allowed: Option<&str>) -> Result<(), Failure> {
+    match allowed {
+        Some(chat) => Err((2, format!("refusing to create a chat: {WRITE_ONLY_VAR} limits writes to {chat}, and a new chat can never be that chat; nothing was sent"))),
+        None => Ok(()),
+    }
 }
 
 async fn me() -> Result<(), Failure> {
@@ -494,6 +552,7 @@ fn creation_failure(error: ManageError) -> Failure {
 /// One `create_private_chat` (registry mutation with CSRF, sent once, never retried). Reached
 /// only with `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
 async fn create_private(guid: &str) -> Result<(), Failure> {
+    creation_guard(write_only()?.as_deref())?;
     let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
     eprintln!("creating the private chat with {guid}");
     match client.create_private_chat(guid).await.map_err(creation_failure)? {
@@ -554,6 +613,7 @@ fn group_refusal(plan: &GroupPlan<'_>) -> String {
 /// One `create_chat` (registry mutation with CSRF, sent once, never retried). Reached only with
 /// `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
 async fn create_chat(plan: GroupPlan<'_>) -> Result<(), Failure> {
+    creation_guard(write_only()?.as_deref())?;
     let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
     eprintln!("creating the group chat with {} participant(s)", plan.users.len());
     let users: Vec<String> = plan.users.iter().map(|user| (*user).to_owned()).collect();
@@ -894,6 +954,49 @@ mod tests {
         // The flag may stand anywhere among the guids.
         for rest in [&[GUID, "g-2", "--confirm-create"][..], &["--confirm-create", GUID, "g-2"], &[GUID, "--confirm-create", "g-2"]] {
             assert_eq!(create_chat_args("Team A", rest), Some(GroupPlan { title: "Team A", users: vec![GUID, "g-2"], confirmed: true }));
+        }
+    }
+
+    #[test]
+    fn a_write_limit_allows_only_the_chat_it_names() {
+        let own = format!("{GUID}_{GUID}");
+        assert_eq!(chat_write_guard(None, &own), Ok(()));
+        assert_eq!(chat_write_guard(Some(&own), &own), Ok(()));
+        let error = chat_write_guard(Some(&own), "0/0/some-group").unwrap_err();
+        assert!(error.contains("BT_WRITE_ONLY_CHAT") && error.contains("0/0/some-group") && error.contains("nothing was sent"), "{error}");
+    }
+
+    #[test]
+    fn the_limit_is_read_like_the_desktop_app_reads_it() {
+        assert_eq!(parse_write_only(None), Ok(None));
+        assert_eq!(parse_write_only(Some("0/0/c".into())), Ok(Some("0/0/c".into())));
+        for blank in ["", "  ", "\t"] {
+            assert!(parse_write_only(Some(blank.into())).unwrap_err().contains("set but empty"), "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn self_writes_are_refused_before_connecting_when_the_limit_names_another_chat() {
+        // `send-self`, `edit-self`, `delete-self`, `typing-self` and `react-self` all take their chat
+        // from `guarded_self_chat` before the connection is made.
+        let own = format!("{GUID}_{GUID}");
+        assert_eq!(guarded_self_chat(None, GUID, None), Ok(own.clone()));
+        assert_eq!(guarded_self_chat(None, GUID, Some(&own)), Ok(own.clone()));
+        let (code, message) = guarded_self_chat(None, GUID, Some("0/0/some-group")).unwrap_err();
+        assert_eq!(code, 2);
+        assert!(message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"), "{message}");
+        // `--chat` naming another chat stays an error of its own.
+        let (code, message) = guarded_self_chat(Some("0/0/some-group"), GUID, Some("0/0/some-group")).unwrap_err();
+        assert_eq!((code, message.contains("self chat only")), (2, true));
+    }
+
+    #[test]
+    fn creation_is_refused_whenever_a_limit_is_set() {
+        assert_eq!(creation_guard(None), Ok(()));
+        for allowed in [format!("{GUID}_{GUID}"), "0/0/some-group".to_owned()] {
+            let (code, message) = creation_guard(Some(&allowed)).unwrap_err();
+            assert_eq!(code, 2, "{allowed}");
+            assert!(message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"), "{message}");
         }
     }
 

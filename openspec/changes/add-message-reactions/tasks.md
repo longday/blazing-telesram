@@ -63,6 +63,7 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
   - Do: `message()` fills `Message.reactions`; the live loop maps `PushEvent::Reaction` to `LiveEvent::ReactionsChanged` through a small pure function; `react` builds `WriteRequest::Reaction` and goes through `push` (so `BT_WRITE_ONLY_CHAT` applies); add `reactions: Default::default()` to the `Message` literal.
   - Tests: counts and version map one to one; `mine` comes from the newest recent entry of the account; the actor-is-account cases for `Replace` and `Remove`; another actor with the account in `recent`; another actor without it gives "unknown" (`None`); `react(Some(code))` and `react(None)` produce the right requests; a write to another chat is blocked by `BT_WRITE_ONLY_CHAT`.
   - Done when: these tests exist.
+  - Review fixes (ReviewMR P2, branch `cm/fix-probe-guard`): the new `PushEvent::Reaction` arm of `push_kind` in `crates/yandex-proto/src/xiva.rs` handed the full chat id (it holds account guids) to the `debug!(kind, chat, "push")` line. Fixed at the log site for every kind: `push_kind` returns the kind only and the line is `debug!(kind, "push")`; no non-personal correlation id is added (nothing needs one). Test `debug_level_logs_no_chat_id_of_any_push_kind` (reaction and deletion pushes with a guid-bearing chat id; the guids are absent from the log) and `debug_level_logs_push_kind_without_message_text` now asserts that the chat id is absent.
 
 ## 5. Desktop UI
 
@@ -103,6 +104,7 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
   - Tests: argument parsing cases in the file's existing test style (a bad code, `remove`, a non-self chat refused).
   - Done when: these tests exist.
   - Done (decisions): `<code>` is a positive integer or `remove`, anything else is a usage error (exit 2); the self-chat refusal is `resolve_self_chat` through `write_self`, as for `delete-self`. Addition for 7.2 ("do rows carry `Reactions`"): `history` now appends the row's reaction state after its text (`describe`), because it prints no raw JSON; rows without the siblings print as before.
+  - Review fixes (ReviewMR P1, branch `cm/fix-probe-guard`): `react-self` ignored `BT_WRITE_ONLY_CHAT`. `write_self` (also used by `delete-self` and `typing-self`) and `send-self`/`edit-self` now take their chat from `guarded_self_chat`: `resolve_self_chat`, then the desktop's rule (allowed only when the variable names that chat; a blank value is an error), all before `connect`, with exit code 2 and a stderr message that names the variable and says nothing was sent. `seen` and `typing <chat>` (`write_named`) are guarded the same way, and `create-private` / `create-chat` are refused whenever a limit is set. A value that is not valid unicode refuses (the desktop reads it with `.ok()` and would treat it as unset; the probe fails closed). Tests: `a_write_limit_allows_only_the_chat_it_names`, `the_limit_is_read_like_the_desktop_app_reads_it`, `self_writes_are_refused_before_connecting_when_the_limit_names_another_chat`, `creation_is_refused_whenever_a_limit_is_set`.
 
 ## 7. Verification and close-out
 

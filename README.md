@@ -53,6 +53,8 @@ bt-probe create-chat <title> <guid>... --confirm-create  # sends the one request
 
 `create-chat` creates a group chat through the CSRF-guarded `create_chat` call with the payload the web client's own wizard sends (description empty, not a channel, `is_public: true`, your own guid not listed); that payload was read from the web client's code and has not been confirmed against the server yet. Same rules as `create-private`: once, never retried, no request without `--confirm-create`, the same exit codes; the title must be non-blank and at most 250 characters and at least one distinct guid is required. Participants the server could not add are printed by code; the group exists anyway.
 
+Every `bt-probe` command that writes (`send-self`, `edit-self`, `delete-self`, `react-self`, `typing-self`, `seen`, `typing`, `create-private`, `create-chat`) obeys `BT_WRITE_ONLY_CHAT` like the app: set, it limits writes to the chat it names; a write to another chat, a set but empty value and any creation (a new chat is never the named one) are refused on stderr with exit code 2 before the probe connects or sends anything.
+
 ## Diagnostics
 
 The app logs to three places at once: the terminal (stderr), the log window (⌘⇧L or the 🐞 button next to search; «Копировать» copies it) and a JSON Lines file `.runtime/logs/<UTC time>-<pid>.jsonl`, one object per record, written as it happens. The ten newest files are kept.
