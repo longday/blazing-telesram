@@ -513,7 +513,7 @@ mod tests {
     fn a_chat_row_written_before_partner_existed_loads_without_one() {
         let mut cache = Cache::open_in_memory().unwrap();
         let with_partner = ChatSummary { partner: Some(UserId("u1".into())), ..chat("a", Some(5), None) };
-        cache.replace_chats(&[with_partner.clone()]).unwrap();
+        cache.replace_chats(std::slice::from_ref(&with_partner)).unwrap();
         assert_eq!(cache.chat(&id("a")).unwrap(), Some(with_partner.clone()), "the field round-trips");
         let mut json: serde_json::Value = serde_json::from_str(&encode(&with_partner)).unwrap();
         assert!(json.as_object_mut().unwrap().remove("partner").is_some(), "the field is serialized today");
