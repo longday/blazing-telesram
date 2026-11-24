@@ -92,12 +92,13 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
 
 ## 6. bt-probe
 
-- [ ] 6.1 `bt-probe react-self`
+- [x] 6.1 `bt-probe react-self`
   - Owns: `crates/yandex-proto/src/bin/bt-probe.rs` (including the `WireMessage` literal in its tests).
   - Depends on: 2.1, 2.2.
   - Do: `react-self <micros> <code|remove> [--chat <self chat>]` built like the other `*-self` commands and refusing any chat but the account's self chat; update `USAGE` and the file's module docs; `listen` already prints pushes through `Debug`, so reaction pushes show up there.
   - Tests: argument parsing cases in the file's existing test style (a bad code, `remove`, a non-self chat refused).
   - Done when: these tests exist.
+  - Done (decisions): `<code>` is a positive integer or `remove`, anything else is a usage error (exit 2); the self-chat refusal is `resolve_self_chat` through `write_self`, as for `delete-self`. Addition for 7.2 ("do rows carry `Reactions`"): `history` now appends the row's reaction state after its text (`describe`), because it prints no raw JSON; rows without the siblings print as before.
 
 ## 7. Verification and close-out
 

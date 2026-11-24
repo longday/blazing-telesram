@@ -1,5 +1,8 @@
 //! Developer probe for the Yandex protocol layer. Reads, plus a few writes that act on the
-//! account's self chat only; never prints cookie values. `download` saves one file or image
+//! account's self chat only (send, edit, delete, typing, and `react-self`, which sets, replaces or
+//! removes the account's own reaction on a self-chat message); never prints cookie values.
+//! `listen` prints reaction pushes through `Debug` like every other push and `history` lists the
+//! reactions of a message after its text. `download` saves one file or image
 //! of any chat into a local directory (never overwriting) and prints host and path of the
 //! request, never its query. `create-private` and `create-chat` are the commands that change the
 //! account outside the self chat, and they send nothing without `--confirm-create`.
@@ -23,7 +26,7 @@ use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
-use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
+use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError};
 
@@ -31,6 +34,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
        bt-probe edit-self <micros> <text> [--reply <micros>] [--chat <self chat>]
        bt-probe delete-self <micros> [--chat <self chat>]
+       bt-probe react-self <micros> <code|remove> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
        bt-probe download <chat> <micros> [--item N] [--to <dir>]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
@@ -42,6 +46,7 @@ download takes the file or the N-th (from 1) image of the message with that time
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
+react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
 whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
@@ -86,6 +91,12 @@ fn main() -> ExitCode {
         },
         ["delete-self", ts, flags @ ..] => match (ts.parse(), chat_flag(flags)) {
             (Ok(ts), Some(chat)) => block_on(write_self(chat, move |chat| WriteRequest::Delete { chat, timestamp: ts })),
+            _ => return usage(),
+        },
+        ["react-self", ts, change, flags @ ..] => match (ts.parse(), reaction_change(change), chat_flag(flags)) {
+            (Ok(ts), Some(change), Some(chat)) => {
+                block_on(write_self(chat, move |chat| WriteRequest::Reaction { chat, timestamp: ts, change }))
+            }
             _ => return usage(),
         },
         ["typing-self", flags @ ..] => match chat_flag(flags) {
@@ -179,6 +190,15 @@ fn chat_flag<'a>(flags: &[&'a str]) -> Option<Option<&'a str>> {
         ["--chat", chat] => Some(Some(chat)),
         _ => None,
     }
+}
+
+/// The `<code|remove>` argument of `react-self`: `remove`, or a positive integer reaction type
+/// (the wire carries `Type` as an integer); anything else is a usage error.
+fn reaction_change(arg: &str) -> Option<ReactionChange> {
+    if arg == "remove" {
+        return Some(ReactionChange::Remove);
+    }
+    arg.parse::<i64>().ok().filter(|code| *code > 0).map(ReactionChange::Set)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -283,7 +303,7 @@ async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(
     Ok(())
 }
 
-/// Delete and typing: one push into the self chat.
+/// Delete, typing and reaction: one push into the self chat.
 async fn write_self(requested: Option<&str>, build: impl FnOnce(String) -> WriteRequest) -> Result<(), Failure> {
     let session = load_session()?;
     let chat = resolve_self_chat(requested, &session.identity.guid).map_err(|e| (2, e))?;
@@ -712,7 +732,21 @@ fn describe(message: &WireMessage) -> String {
         }
         _ => String::new(),
     };
-    format!("{}\t{author}\t{body}{flags}{reply}", message.timestamp)
+    format!("{}\t{author}\t{body}{flags}{reply}{}", message.timestamp, reactions_note(message))
+}
+
+/// The reaction state of a history row, as the server sent it: counts `code×count`, the version
+/// and the recent reactors' codes. Empty when the row carried none of the three siblings.
+fn reactions_note(message: &WireMessage) -> String {
+    let Some(reactions) = &message.reactions else { return String::new() };
+    let counts: Vec<String> = reactions.counts.iter().map(|c| format!("{}x{}", c.code, c.count)).collect();
+    let recent: Vec<String> = reactions
+        .recent
+        .iter()
+        .map(|r| format!("{}:{}", r.user.as_deref().unwrap_or("?"), r.code))
+        .collect();
+    let version = reactions.version.map_or_else(|| "-".to_owned(), |v| v.to_string());
+    format!(" (reactions [{}], version {version}, recent [{}])", counts.join(" "), recent.join(" "))
 }
 
 #[cfg(test)]
@@ -733,6 +767,7 @@ mod tests {
             body: WireBody::Text("mine".into()),
             edited: false,
             relation,
+            reactions: None,
             raw: serde_json::Value::Null,
         }
     }
@@ -800,6 +835,39 @@ mod tests {
         assert_eq!(chat_flag(&[]), Some(None));
         assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
         assert_eq!(chat_flag(&["c"]), None);
+    }
+
+    #[test]
+    fn react_self_takes_a_positive_code_or_remove() {
+        assert_eq!(reaction_change("100101"), Some(ReactionChange::Set(100_101)));
+        assert_eq!(reaction_change("remove"), Some(ReactionChange::Remove));
+        for bad in ["", "0", "-5", "x", "1.5", "Remove", "remove ", "100101 ", "99999999999999999999"] {
+            assert_eq!(reaction_change(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn react_self_refuses_a_chat_other_than_the_self_chat() {
+        // The command goes through `write_self`, so `resolve_self_chat` is what guards the chat.
+        assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
+        let error = resolve_self_chat(Some("0/0/some-group"), GUID).unwrap_err();
+        assert!(error.contains("self chat only"), "{error}");
+        assert_eq!(resolve_self_chat(None, GUID).unwrap(), format!("{GUID}_{GUID}"));
+    }
+
+    #[test]
+    fn a_history_row_lists_its_reactions_only_when_it_has_them() {
+        use yandex_proto::wire::{WireReactionCount, WireReactions, WireReactor};
+        let mut row = message(Relation::None);
+        assert_eq!(describe(&row), "20\t?\tmine");
+        row.reactions = Some(WireReactions {
+            counts: vec![WireReactionCount { code: 100_101, count: 2 }],
+            version: Some(3),
+            recent: vec![WireReactor { user: Some("u".into()), code: 100_101, timestamp: None }],
+        });
+        assert_eq!(describe(&row), "20\t?\tmine (reactions [100101x2], version 3, recent [u:100101])");
+        row.reactions = Some(WireReactions { version: Some(4), ..WireReactions::default() });
+        assert_eq!(describe(&row), "20\t?\tmine (reactions [], version 4, recent [])");
     }
 
     #[test]
