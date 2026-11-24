@@ -18,11 +18,15 @@ The client SHALL show a chat info panel for the open chat, opened from the chat 
 - **THEN** the panel disappears and the chat timeline keeps its scroll position
 
 ### Requirement: Private chats need no member request
-For a private chat the panel SHALL show the other participant known from the chat list entry and SHALL NOT send a member request, because the server does not provide a member list for private chats.
+For a private chat, including the account's own chat, the panel SHALL NOT send a member request, because the server does not provide a member list for private chats. It SHALL show the other participant only when the chat list entry names one, and SHALL NOT invent a participant otherwise.
 
-#### Scenario: Private chat panel needs no request
-- **WHEN** the user opens the info panel of a private chat
-- **THEN** no member request is sent and the panel shows the other participant named by the chat list entry
+#### Scenario: Private chat with a partner
+- **WHEN** the user opens the info panel of a private chat whose chat list entry names a partner
+- **THEN** no member request is sent and the panel shows that partner
+
+#### Scenario: Private chat without a named partner
+- **WHEN** the user opens the info panel of a private chat (or the account's own chat) whose chat list entry names no partner
+- **THEN** no member request is sent and the panel shows no participant rows
 
 ### Requirement: Admin role is shown
 In a group chat the panel SHALL mark participants that the server reports with the admin role, and SHALL NOT mark anyone else: a participant with any other role, or with no role, is unmarked. The panel SHALL NOT assume administrators come first in the list.
