@@ -8,7 +8,7 @@ Context document: `research.md` in this directory (verbatim research report with
 
 ## What Changes
 
-- Read the member list of a group chat (HTTP Registry method `get_chat_members`, paged with `limit` / `guid_offset`; users with their `admin` or `member` role, plus groups and departments when the server reports any) and show it in a read-only chat info panel opened from the chat header. The server refuses the list for private chats, the self chat and (for this account) channels with HTTP 403 `no_permissions_for_this_chat_operation`, so the panel of a private chat shows the partner known from the chat list entry and a refused list is shown as not available to the account. `get_group_members` is not used: it answers `bad_request` for every shape tried (task 1.2).
+- Read the member list of a group chat (HTTP Registry method `get_chat_members`, paged with `limit` / `guid_offset`; users with their `admin` or `member` role) and show it in a read-only chat info panel opened from the chat header. The server refuses the list for private chats, the self chat and (for this account) channels with HTTP 403 `no_permissions_for_this_chat_operation`, so the panel of a private chat shows the partner known from the chat list entry and a refused list is shown as not available to the account. `get_group_members` is not used: it answers `bad_request` for every shape tried (task 1.2). The reply also carries `groups` and `departments` arrays; they were empty in all 70 groups of the account and their element shape is unknown, so showing them is out of scope (see Non-goals).
 - Read the current user's profile from the socket `whoami` call (`UserInfo`, `UserStatusInfo`). The client does not send `whoami` yet (only its frame encoding exists in `crates/yandex-proto/src/frame.rs`), so it becomes a new socket read; `get_current_user_data` is NOT used (server answers `No such path`). Shown read-only (name, avatar, own status text as the server reports it; `UserStatus` is `{}` when no status is set).
 - Create a private chat with a user (`create_private_chat`: `guid`, `wait_for_update`, `onetime_user_token`) and, subject to the gate in decision 1 below, a group chat (`create_chat`: parameters currently opaque), each from an explicit user action ("New chat" / "Write" on a member) that shows the chosen participants and title in a confirmation dialog before anything is sent.
 - Protocol layer: members/profile reads join the closed read allowlist (`whoami`, `get_chat_members`); creation becomes the first Registry (HTTP, CSRF) mutations, as a closed, separately tested set in a new module that contains no other management method.
@@ -17,7 +17,7 @@ Context document: `research.md` in this directory (verbatim research report with
 ## Capabilities
 
 ### New Capabilities
-- `chat-members`: read-only view of a chat's participants (users, groups, departments, admin role) and of the current user's profile.
+- `chat-members`: read-only view of a chat's participants (users and the admin role) and of the current user's profile.
 - `chat-creation`: creating private and group chats from an explicit user action, with confirmation of participants/title and safe failure handling.
 
 ### Modified Capabilities
@@ -31,7 +31,7 @@ Context document: `research.md` in this directory (verbatim research report with
 - `crates/desktop`: `yandex_backend.rs` implementation, `store.rs` state, chat info panel, profile view, "New chat" flow with confirmation.
 - `bt-probe`: read-members/`whoami` probe; guarded create-chat probes for payload discovery.
 - Dependency on `add-sending` is satisfied: it is archived (`openspec/changes/archive/2026-11-24-add-sending/`) and its closed-write-set conventions (`write.rs`, `BT_WRITE_ONLY_CHAT` guard in `yandex_backend.rs`) are the base this change follows. Sibling changes in flight (`add-message-reactions`, `add-media-download`, `add-global-search`) may also extend `ALLOWED_METHODS`; whoever lands second extends the exact-list tests instead of replacing them.
-- Risk: `create_chat` / `create_private_chat` change the real account and may create duplicates on retry (no known idempotency key); the protocol is unofficial. Live verification limited to chats created with the user's explicit approval. The read shapes are observed live (task 1.2, `design.md`), except the populated `UserStatus` and the element shapes of `groups` / `departments` in a member list, which no account chat produced; the parsers treat them as optional.
+- Risk: `create_chat` / `create_private_chat` change the real account and may create duplicates on retry (no known idempotency key); the protocol is unofficial. Live verification limited to chats created with the user's explicit approval. The read shapes are observed live (task 1.2, `design.md`), except the populated `UserStatus`, which no account chat produced; the parser accepts only a non-blank `text` there.
 
 ## Non-goals
 
@@ -39,6 +39,7 @@ Context document: `research.md` in this directory (verbatim research report with
 - Invite links (`invite`, `invite_renew`) and `invite_hash` handling — slice (b).
 - Editing chat info (`set_chat_info`), editing the profile, setting statuses/availability — slice (c).
 - Searching the directory for people (`search`, `get_members_and_contacts_suggest`): participants are chosen only among people the client already knows (see decision 7).
+- Showing the `groups` and `departments` entries of a member list: always empty in all 70 groups of the account, element shape unknown; the parser accepts and ignores them.
 - Any mutation without an explicit user action; any live mutation on the real account without user approval.
 
 ## Follow-ups
@@ -47,6 +48,7 @@ Context document: `research.md` in this directory (verbatim research report with
 - (c) Profile and status changes: only after the semantics (status message vs availability vs online presence), rights and side effects on other devices are decided and probed.
 - Directory search as a participant source for "New chat" (reuse the `search` read of `add-global-search` once it lands).
 - Group creation, if the gate in decision 1 fails: a separate change `add-group-chat-creation`.
+- Groups and departments in the member list: once a non-empty example is recorded (live reply or web client code), add their display with a spec delta.
 
 ## Decisions on the Open Questions
 

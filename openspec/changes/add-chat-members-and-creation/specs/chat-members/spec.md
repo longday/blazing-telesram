@@ -7,11 +7,11 @@ Lets the user see who is in a chat and see their own profile, read-only, so they
 ## ADDED Requirements
 
 ### Requirement: Chat info panel
-The client SHALL show a chat info panel for the open chat, opened from the chat header and closed by the user, that lists the chat's participants. For a group chat the panel SHALL list the users and, when the server reports any, the groups and departments, as the server's member list gives them. Each user row SHALL show the avatar (or initials) and the name.
+The client SHALL show a chat info panel for the open chat, opened from the chat header and closed by the user, that lists the chat's participants. For a group chat the panel SHALL list the users of the server's member list. Each user row SHALL show the avatar (or initials) and the name.
 
 #### Scenario: Open the panel of a group
 - **WHEN** the user opens the info panel of a group chat
-- **THEN** the panel lists the group's users, and its groups and departments when the server reports any
+- **THEN** the panel lists the group's users
 
 #### Scenario: Close the panel
 - **WHEN** the user closes the panel or opens another chat
@@ -22,7 +22,7 @@ For a private chat the panel SHALL show the other participant known from the cha
 
 #### Scenario: Private chat panel needs no request
 - **WHEN** the user opens the info panel of a private chat
-- **THEN** no member request is sent and the panel shows the other participant named by the chat list entry, without any group or department sections
+- **THEN** no member request is sent and the panel shows the other participant named by the chat list entry
 
 ### Requirement: Admin role is shown
 In a group chat the panel SHALL mark participants that the server reports with the admin role, and SHALL NOT mark anyone else: a participant with any other role, or with no role, is unmarked. The panel SHALL NOT assume administrators come first in the list.
