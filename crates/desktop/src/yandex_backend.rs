@@ -42,6 +42,8 @@ fn backend_error(error: ProtoError) -> BackendError {
         ProtoError::Network(e) => BackendError::Network(e),
         ProtoError::Protocol(e) => BackendError::Protocol(e),
         ProtoError::NotFound => BackendError::NotFound,
+        // Placeholder until `BackendError::Storage` exists (tasks 2.1/3.1).
+        ProtoError::Storage(e) => BackendError::Protocol(format!("local write failed: {e}")),
         ProtoError::Commit { status, name, permanent } => {
             BackendError::Rejected { reason: format!("{name} ({status})"), permanent }
         }
