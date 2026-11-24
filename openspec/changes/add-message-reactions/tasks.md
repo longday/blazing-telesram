@@ -54,7 +54,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
 
 ## 4. Desktop adapter
 
-- [ ] 4.1 Map reactions between wire and domain, implement `Backend::react` (D7)
+- [x] 4.1 Map reactions between wire and domain, implement `Backend::react` (D7)
   - Owns: `crates/desktop/src/yandex_backend.rs` (including its tests and the `WireMessage` literal there).
   - Depends on: 2.1, 2.2, 3.1.
   - Do: `message()` fills `Message.reactions`; the live loop maps `PushEvent::Reaction` to `LiveEvent::ReactionsChanged` through a small pure function; `react` builds `WriteRequest::Reaction` and goes through `push` (so `BT_WRITE_ONLY_CHAT` applies); add `reactions: Default::default()` to the `Message` literal.
