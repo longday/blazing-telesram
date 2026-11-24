@@ -10,7 +10,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it. Inside a unit, tasks with disjoint files run in parallel on branches cut from the unit's integration branch (`integ/<change>`), and the Integrator merges them into it.
 3. **Withdrawn work is not in flight (decision, Integrator).** "In flight" means started and not yet merged. Three finished branches are *withdrawn* back to "not started" and kept only as saved patches, because their units are gated on something that has not happened and would otherwise keep their files locked for hours: `integ/gs` with GS 2.1 (one 93-line commit, 5798ec9, gated on the live chain GS 1.2 → 1.4), `md/5.1` (README text for a feature that does not exist yet, gated on every MD unit), `rx/2.1` (gated on the MR-B1 slot). Their owner re-applies the patch (cherry-pick or rebase) when the unit actually starts. This is a deliberate reading of the rule, chosen for the critical path: the alternative (GS 2.1 stays in flight) leaves `model.rs`, `backend.rs` and chat-core `client.rs` locked until GS 1.4 and GS-C merge, so no MD, CM or MR core work could start in the meantime. If Main prefers the strict reading, MD 2.1 and everything in MD-C become blocked-by GS-C and the core-lane order becomes GS-C → MD-C → MR-B1 → CM-C1…
 4. **Order when several units are startable:** the first whose locks are free; ties go to GS > MD > MR > CM (GS is furthest along; MD has no live gate; MR is last because it is the largest compile-coupled bundle and would hold the most files for the longest; CM is gated by live reads and approvals so it fills the lanes while it waits).
-5. Live-account tasks share one session and run one at a time, in this order: GS 1.3, CM 1.2, MD 1.3 (a re-check), MR 7.2, then the manual runs GS 4.1, MD 5.2, CM 5.2.
+5. Live-account tasks share one session and run one at a time, in this order: GS 1.3 (done), MD 1.3 (done), CM 1.2, MR 7.2, then the manual runs GS 4.1, MD 5.2, CM 5.2. The host firewall (Little Snitch) lets only the `bt-probe` binary of the main checkout (`<main checkout>/target/debug/bt-probe`) reach the network; a binary built in a worktree `target` directory gets no connection, so live runs use the main checkout's build (the live task's `bt-probe.rs` changes must be on `main` first, or the run is done after the merge).
 6. **Zero build warnings** (project convention: the `tasks.md` of every archived change and of CM 7.1 require `cargo build --workspace --all-targets` with 0 warnings; there is no CI and no `-D warnings`, but `main` builds with 0 warnings today). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. Therefore a unit also contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used. Consequence: unit boundaries are drawn at "first caller", see "Merge units".
 
 ## Why these units (compile gaps found by `cargo check` and by reading the code)
@@ -72,16 +72,16 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|------|
 | 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
 | 1.2 | done (e5f2dde) | 1.1 | MD-R1 |
-| 1.3 | in progress [live] (run by Main; `design.md`, maybe `media.rs`) | 1.2 | MD-R3 |
+| 1.3 | done (merge of `md/1.3`, docs only; live re-check: a 57.5 MiB `MiscFile` and two images saved in full, sizes match, no change to `media.rs`) | 1.2 | MD-R3 |
 | 2.1 | done on `integ/md` (772b224) | — | MD-C |
 | 2.2 | done (e8e533e) | — | MD-K |
 | 2.3 | done on `integ/md` (da5e226) | 2.1, 2.2 | MD-C |
 | 3.1 | done on `integ/md` (f24ea97); the "download is not wired yet" placeholder is gone | 2.1 | MD-C |
 | 4.1 | done on `integ/md` (1447dbf); `ChatStore::download`/`cancel_download`/`download_state` have no caller until 4.3 and 4.2 (unit MD-C) | 2.1 | MD-C |
-| 4.3 | in progress (from `integ/md`; first caller of `download`/`cancel_download`/`download_state`) | 2.1, 4.1, 2.3 | MD-C |
-| 4.2 | blocked-by MD 4.3 (`open_viewer`, `tests.rs`) | 4.1, 4.3 | MD-C |
-| 5.1 | done on `md/5.1` (7e9858a, parked), merges in MD-D | — | MD-D |
-| 5.2 | blocked-by all MD | all | MD-D [live] manual if 1.3 found a file |
+| 4.3 | done on `integ/md` (9d28a4b); only warning left: `Desktop::open_viewer` unused, consumed by 4.2 | 2.1, 4.1, 2.3 | MD-C |
+| 4.2 | in progress (`md/4.2`, base `md/4.3`); merges into `integ/md`, then MD-C goes to `main` | 4.1, 4.3 | MD-C |
+| 5.1 | done on `md/5.1` (7e9858a, parked); merges to `main` right after MD-C (README only, describes a feature that is then on `main`) | — | MD-D |
+| 5.2 | blocked-by MD-C on `main` | all | MD-D [live] manual run with the `main` build |
 
 ## add-chat-members-and-creation (CM)
 
@@ -89,7 +89,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|---------------|
 | 0.1 | done, static PASS (2a781dd; `create_chat` payload recorded in `design.md` D4) | — | gate for 6.1 passed |
 | 1.1 | done (5fce6ae; allowlist now 8 names, `write.rs` pin updated) | — | |
-| 1.2 | ready [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`); queues for the live session after MD 1.3 (the session is held by MD 1.3 now) | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
+| 1.2 | ready [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`); the live session is free | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
@@ -131,9 +131,9 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, waits only for the live session (held by MD 1.3 now). It also unblocks CM 1.3, then CM 2.2.
+- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, live session free. It also unblocks CM 1.3, then CM 2.2.
 
-In flight: MD 1.3 [live] (Main), MD 4.3 (on `integ/md`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1 done, then 4.3, 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A (all its gates except the lane are met: 1.4 is on `main`), MR-B and CM-C1 wait for it. Merged so far: GS 1.1, 1.2, 1.3, 1.4; MD 1.1, 1.2, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
+In flight: MD 4.2 (`md/4.2`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1, 4.3 done, then 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A (all its gates except the lane are met), MR-B and CM-C1 wait for it. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
 
 ## Needs the user
 
