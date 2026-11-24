@@ -59,7 +59,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|------|
 | 1.1 | done (6fb4a72) | — | |
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
-| 1.3 | ready [live] (`bt-probe.rs`, fixture; first in the live order) | 1.2 | GS-P2 |
+| 1.3 | in progress (gs/1.3) [live] | 1.2 | GS-P2 |
 | 1.4 | blocked-by GS 1.3 | 1.3 | GS-P3 |
 | 2.1 | done on `integ/gs` (5798ec9, parked) | — | GS-C |
 | 2.2 | blocked-by GS 1.4 (unit gate) | 2.1 | GS-C |
@@ -76,11 +76,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
 | 1.2 | done (e5f2dde) | 1.1 | MD-R1 |
 | 1.3 | ready [live] re-check, after GS 1.3 in the live order (`design.md`, maybe `media.rs`; URL already verified by plain GETs, see `design.md`) | 1.2 | MD-R3 |
-| 2.1 | done on `integ/md` (772b224); placeholder `download` in `yandex_backend.rs` must be replaced by 3.1 before MD-C merges to `main` | — | MD-C |
+| 2.1 | done on `integ/md` (772b224) | — | MD-C |
 | 2.2 | done (e8e533e) | — | MD-K |
-| 2.3 | in progress (MD-C, `integ/md`) | 2.1, 2.2 | MD-C |
-| 3.1 | in progress (MD-C, `integ/md`) | 2.1 | MD-C |
-| 4.1 | in progress (MD-C, `integ/md`); also adds `name: None` to the three `MessageBody::Image` literals in `tests.rs` | 2.1 | MD-C |
+| 2.3 | in progress (md/2.3, from `integ/md`) | 2.1, 2.2 | MD-C |
+| 3.1 | done on `integ/md` (f24ea97); the "download is not wired yet" placeholder is gone | 2.1 | MD-C |
+| 4.1 | in progress (md/4.1, from `integ/md`); also adds `name: None` to the three `MessageBody::Image` literals in `tests.rs` | 2.1 | MD-C |
 | 4.3 | blocked-by MD-C | 2.1, 4.1 | MD-U1 |
 | 4.2 | blocked-by MD 4.3 | 4.1, 4.3 | MD-U2 |
 | 5.1 | done on `md/5.1` (7e9858a, parked), merges in MD-D | — | MD-D |
@@ -94,7 +94,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.1 | done (5fce6ae; allowlist now 8 names, `write.rs` pin updated) | — | |
 | 1.2 | blocked-by GS 1.3 (`bt-probe.rs` and the live session); then ready | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
-| 2.1 | ready (`manage.rs`, `registry.rs`, `lib.rs`; disjoint from CM 1.1) | — | `manage.rs`, `registry.rs`, `lib.rs` |
+| 2.1 | in progress (cm/2.1; `manage.rs`, `registry.rs`, `lib.rs`) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
 | 3.1 | blocked-by CM 1.3, 2.2 + core lane | 1.3, 2.2 | CM-C1 |
 | 3.2 | blocked-by CM 3.1 | 3.1 | CM-C2 |
@@ -132,13 +132,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 7.2 | blocked-by MR 1.1, 6.1, 7.1 | | **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); confirm with the user |
 | 7.3 | blocked-by MR 7.1, 7.2 | | archive |
 
-## Ready now (nothing in flight touches their files)
+## Ready now (not started, nothing in flight touches their files)
 
-- GS 1.3 [live] (GS-P2, critical path of the live chain)
-- CM 2.1 (`manage.rs`, `registry.rs`, `lib.rs`) (CM 1.1 merged; CM 1.2 is live and queues after GS 1.3)
-- MD 1.3 [live] (after GS 1.3 in the live order)
+- MD 1.3 [live] re-check, queued after GS 1.3 in the live order (touches `design.md`, maybe `media.rs`).
 
-In flight: MD-C (MD 2.3, 3.1, 4.1 on `integ/md`) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`), so GS-C, MR-B1 and CM-C1 wait for it (or for GS 1.4/CM 1.3 which gate them anyway). Merged so far: GS 1.1, 1.2; MD 1.1, 1.2, 2.2; CM 0.1; MR 1.1.
+In flight: GS 1.3 (gs/1.3), CM 2.1 (cm/2.1), MD 2.3 (md/2.3) and MD 4.1 (md/4.1) on `integ/md`. MD-C holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`), so GS-C, MR-B1 and CM-C1 wait for it (or for GS 1.4/CM 1.3 which gate them anyway). Queued behind GS 1.3 (`bt-probe.rs`, live session): CM 1.2. Merged so far: GS 1.1, 1.2; MD 1.1, 1.2, 2.2; CM 0.1, 1.1; MR 1.1.
 
 ## Needs the user
 
