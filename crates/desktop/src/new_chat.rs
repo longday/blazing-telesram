@@ -116,8 +116,10 @@ pub enum Notice {
     Sending,
     /// Nothing was created; the text is the reason (also the offline refusal).
     Failed(String),
-    /// The request was sent and its result is not known; the chat may exist.
+    /// The request was sent, its result is not known and the refreshed list did not hold the chat.
     Unknown(String),
+    /// The chat may exist and the chat list could not be read to tell; the text is the reason.
+    Unverified(String),
 }
 
 pub fn notice(state: Option<&CreationState>) -> Notice {
@@ -126,6 +128,7 @@ pub fn notice(state: Option<&CreationState>) -> Notice {
         Some(CreationState::InFlight) => Notice::Sending,
         Some(CreationState::Failed { reason, unknown: false }) => Notice::Failed(reason.clone()),
         Some(CreationState::Failed { reason, unknown: true }) => Notice::Unknown(reason.clone()),
+        Some(CreationState::Unverified { reason }) => Notice::Unverified(reason.clone()),
     }
 }
 
@@ -162,7 +165,8 @@ fn note(selector: &'static str, text: impl Into<SharedString>) -> Div {
 
 /// The modal. Debug selectors: `new-chat-view`, `new-chat-search`, `candidate-<guid>` (+ `-avatar`),
 /// `new-chat-empty`, `new-chat-identity`, `new-chat-nomatch`, `new-chat-participant` (+ `-avatar`),
-/// `new-chat-sending`, `new-chat-error`, `new-chat-unknown`, `new-chat-cancel`, `new-chat-create`.
+/// `new-chat-sending`, `new-chat-error`, `new-chat-unknown`, `new-chat-unverified`, `new-chat-cancel`,
+/// `new-chat-create`.
 pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
     let query = state.search.read(cx).content.to_string();
     let (all, creation, identity) = {
@@ -253,6 +257,19 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
                         .text_size(px(13.))
                         .text_color(rgb(MUTED))
                         .child("Список чатов обновлён. Нажмите «Создать», чтобы попробовать ещё раз."),
+                ),
+        ),
+        Notice::Unverified(reason) => Some(
+            div()
+                .debug_selector(|| "new-chat-unverified".into())
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().text_color(rgb(LOG_WARN)).child(reason))
+                .child(
+                    div().text_size(px(13.)).text_color(rgb(MUTED)).child(
+                        "Список чатов не прочитан. Перед новой попыткой клиент сначала его прочитает и ничего не отправит, пока это не удастся.",
+                    ),
                 ),
         ),
     };

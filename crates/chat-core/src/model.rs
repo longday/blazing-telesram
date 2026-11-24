@@ -304,10 +304,16 @@ pub enum ClientEvent {
     /// refreshed list names it: the chat may exist, the UI cannot open it.
     ChatCreated { chat: Option<ChatId>, existing: bool },
     /// A `CreatePrivateChat` produced no chat. `unknown` is set when the request was sent and its
-    /// outcome is not known (the chat may exist; the list was refreshed and nothing is retried);
-    /// otherwise nothing was created and `reason` is the server's, or the offline text when
-    /// nothing was sent.
+    /// outcome is not known (the chat may exist; the list was refreshed, did not hold it, and nothing
+    /// is retried); otherwise nothing was created and `reason` is the server's, or the offline text
+    /// when nothing was sent.
     CreationFailed { reason: String, unknown: bool },
+    /// A `CreatePrivateChat` produced no chat and the chat list could not be read to check: either the
+    /// request was sent, its outcome is unknown and the refresh that should have shown whether the
+    /// chat exists failed, or the list check that precedes a new attempt after such a result failed
+    /// (then no request was sent). A chat may exist unseen. Until a read of the list succeeds, a new
+    /// `CreatePrivateChat` reads it first and sends nothing when that fails again.
+    CreationUnverified { reason: String },
 }
 
 /// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing,

@@ -8,7 +8,7 @@ use crate::desktop::Desktop;
 use crate::store::{ChatStore, MembersState};
 use crate::theme::*;
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, Member, MemberRole};
+use bt_chat_core::model::{ChatId, ChatKind, ConnectionState, Member, MemberRole};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 
@@ -29,11 +29,15 @@ pub enum Body {
     Ready { shown: usize, partial: bool },
 }
 
-pub fn body(state: Option<&MembersState>) -> Body {
+/// What the panel shows for the list `state` while the client is in `connection`. A loaded list is shown
+/// only while the client is online: a list that is on screen when the connection drops, or that arrives
+/// after it dropped, gives way to the offline notice instead of being presented as current.
+pub fn body(state: Option<&MembersState>, connection: ConnectionState) -> Body {
     match state {
         None | Some(MembersState::Loading) => Body::Loading,
         Some(MembersState::Failed { offline: true, .. }) => Body::Offline,
         Some(MembersState::Failed { reason, .. }) => Body::Failed(reason.clone()),
+        Some(MembersState::Ready(_)) if connection != ConnectionState::Online => Body::Offline,
         Some(MembersState::Ready(members)) => Body::Ready { shown: members.users.len(), partial: members.partial },
     }
 }
@@ -124,7 +128,7 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
             ChatKind::Group => "Группа",
             ChatKind::Channel => "Канал",
         });
-        (title, kind, body(state.members_state(chat)))
+        (title, kind, body(state.members_state(chat), state.connection()))
     };
     let content = match body {
         Body::Loading => notice("info-loading", "Загрузка участников…").into_any_element(),

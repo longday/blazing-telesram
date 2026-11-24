@@ -126,8 +126,21 @@ pub enum CreationState {
     /// A request is out (or the core is answering from the list); a second one is not sent.
     InFlight,
     /// Nothing was created (`unknown` false) or the result is not known and the chat may exist
-    /// (`unknown` true); `reason` is ready to show. The core refreshed the list when `unknown`.
+    /// (`unknown` true); `reason` is ready to show. The core refreshed the list when `unknown` and it
+    /// did not hold the chat.
     Failed { reason: String, unknown: bool },
+    /// The chat may exist and the core could not read the chat list to tell (after an unknown result,
+    /// or in the check before a new attempt). Another attempt is allowed: the core reads the list first.
+    Unverified { reason: String },
+}
+
+/// A created chat the store selects as soon as the chat list holds it.
+#[derive(Clone, Debug, PartialEq)]
+enum PendingOpen {
+    /// The chat the creation reply or the refreshed list named.
+    Chat(ChatId),
+    /// Nothing named it: the private chat with this person, whenever the list shows one.
+    Partner(UserId),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -179,8 +192,10 @@ pub struct ChatStore {
     members: HashMap<ChatId, MembersState>,
     profile: Option<ProfileState>,
     creation: Option<CreationState>,
+    /// The person of the creation in flight.
+    creating: Option<UserId>,
     /// A created chat to select once the list holds it.
-    pending_open: Option<ChatId>,
+    pending_open: Option<PendingOpen>,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -214,6 +229,7 @@ impl ChatStore {
             members: HashMap::new(),
             profile: None,
             creation: None,
+            creating: None,
             pending_open: None,
         }
     }
@@ -257,6 +273,7 @@ impl ChatStore {
             ClientEvent::SessionExpired => {
                 self.session = SessionState::Expired;
                 self.creation = None;
+                self.creating = None;
                 self.pending_open = None;
                 cx.emit(StoreEvent::Session);
             }
@@ -272,6 +289,7 @@ impl ChatStore {
                 self.members.clear();
                 self.profile = None;
                 self.creation = None;
+                self.creating = None;
                 self.pending_open = None;
                 self.drafts.clear();
                 self.typing.clear();
@@ -307,7 +325,10 @@ impl ChatStore {
                 self.finish_profile(ProfileState::Failed { reason, offline }, cx);
             }
             ClientEvent::ChatCreated { chat, existing } => self.chat_created(chat, existing, cx),
-            ClientEvent::CreationFailed { reason, unknown } => self.creation_failed(reason, unknown, cx),
+            ClientEvent::CreationFailed { reason, unknown } => {
+                self.creation_failed(CreationState::Failed { reason, unknown }, cx);
+            }
+            ClientEvent::CreationUnverified { reason } => self.creation_failed(CreationState::Unverified { reason }, cx),
         }
         cx.notify();
     }
@@ -633,6 +654,7 @@ impl ChatStore {
         }
         self.creation = Some(CreationState::InFlight);
         self.pending_open = None;
+        self.creating = Some(user.clone());
         self.send(Command::CreatePrivateChat { user });
         cx.emit(StoreEvent::Creation);
         cx.notify();
@@ -645,7 +667,7 @@ impl ChatStore {
     /// Forgets a failure (the dialog closed or the user edited the choice). A creation that is in
     /// flight cannot be recalled and stays, so its outcome still reaches the UI.
     pub fn dismiss_creation(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.creation, Some(CreationState::Failed { .. })) {
+        if matches!(self.creation, Some(CreationState::Failed { .. } | CreationState::Unverified { .. })) {
             self.creation = None;
             cx.emit(StoreEvent::Creation);
             cx.notify();
@@ -653,11 +675,12 @@ impl ChatStore {
     }
 
     /// A creation that is not in flight (late, or ended by an expired session) changes nothing.
-    fn creation_failed(&mut self, reason: String, unknown: bool, cx: &mut Context<Self>) {
+    fn creation_failed(&mut self, failure: CreationState, cx: &mut Context<Self>) {
         if self.creation != Some(CreationState::InFlight) {
             return;
         }
-        self.creation = Some(CreationState::Failed { reason, unknown });
+        self.creating = None;
+        self.creation = Some(failure);
         cx.emit(StoreEvent::Creation);
     }
 
@@ -666,7 +689,13 @@ impl ChatStore {
             return;
         }
         self.creation = None;
-        self.pending_open = chat.clone();
+        // A chat the answer does not name is opened once the list shows the private chat with that person.
+        let creating = self.creating.take();
+        self.pending_open = match (chat.clone(), creating) {
+            (Some(chat), _) => Some(PendingOpen::Chat(chat)),
+            (None, Some(user)) => Some(PendingOpen::Partner(user)),
+            (None, None) => None,
+        };
         cx.emit(StoreEvent::Creation);
         self.open_pending(cx);
         cx.emit(StoreEvent::ChatCreated { chat, existing });
@@ -674,7 +703,16 @@ impl ChatStore {
 
     /// Selects the created chat once the list holds it.
     fn open_pending(&mut self, cx: &mut Context<Self>) {
-        if let Some(chat) = self.pending_open.take_if(|id| self.chats.contains_key(id)) {
+        let found = match self.pending_open.as_ref() {
+            Some(PendingOpen::Chat(id)) => self.chats.contains_key(id).then(|| id.clone()),
+            Some(PendingOpen::Partner(user)) => self
+                .chats
+                .values()
+                .find(|c| c.kind == ChatKind::Private && c.partner.as_ref() == Some(user))
+                .map(|c| c.id.clone()),
+            None => None,
+        };
+        if let Some(chat) = found {
             self.select(chat, cx);
         }
     }
@@ -1688,17 +1726,61 @@ mod tests {
         }
 
         #[gpui::test]
-        fn a_created_chat_without_an_id_ends_the_creation_and_selects_nothing(cx: &mut TestAppContext) {
+        fn a_created_chat_without_an_id_is_selected_once_the_list_shows_the_person(cx: &mut TestAppContext) {
             let rig = Rig::new(cx);
             rig.list(cx, &["a"]);
-            rig.create(cx, "u9");
+            rig.create(cx, "u-p");
             rig.commands();
             rig.take_events();
             rig.apply(cx, ClientEvent::ChatCreated { chat: None, existing: false });
             assert_eq!(rig.state(cx), None);
-            assert_eq!(rig.selected(cx), None);
+            assert_eq!(rig.selected(cx), None, "the list does not show the person yet");
             assert!(rig.commands().is_empty());
             assert_eq!(rig.take_events(), [StoreEvent::Creation, StoreEvent::ChatCreated { chat: None, existing: false }]);
+
+            rig.list(cx, &["a", "b"]);
+            assert_eq!(rig.selected(cx), None, "other chats are not the created one");
+
+            rig.list(cx, &["a", "b", "p"]);
+            assert_eq!(rig.selected(cx), Some(chat("p")));
+            assert_eq!(rig.commands(), [Command::OpenChat(chat("p"))]);
+
+            rig.list(cx, &["a", "b", "p", "q"]);
+            assert!(rig.commands().is_empty(), "it is opened once");
+        }
+
+        #[gpui::test]
+        fn the_wait_for_an_unnamed_created_chat_ends_with_any_choice_of_the_user(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.list(cx, &["a"]);
+            rig.create(cx, "u-p");
+            rig.apply(cx, ClientEvent::ChatCreated { chat: None, existing: false });
+            rig.select(cx, "a");
+            rig.commands();
+
+            rig.list(cx, &["a", "p"]);
+            assert_eq!(rig.selected(cx), Some(chat("a")), "the user's choice wins");
+            assert!(rig.commands().is_empty());
+        }
+
+        #[gpui::test]
+        fn an_unverified_creation_is_kept_until_dismissed_and_allows_another_attempt(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.create(cx, "u9");
+            rig.commands();
+            rig.take_events();
+
+            rig.apply(cx, ClientEvent::CreationUnverified { reason: "список не прочитан".into() });
+            assert_eq!(rig.state(cx), Some(CreationState::Unverified { reason: "список не прочитан".into() }));
+            assert_eq!(rig.take_events(), [StoreEvent::Creation]);
+            assert_eq!(rig.selected(cx), None);
+
+            rig.create(cx, "u9");
+            assert_eq!(rig.state(cx), Some(CreationState::InFlight), "the next attempt is the user's");
+            assert_eq!(rig.commands(), [Command::CreatePrivateChat { user: user("u9") }]);
+            rig.apply(cx, ClientEvent::CreationUnverified { reason: "список не прочитан".into() });
+            rig.dismiss(cx);
+            assert_eq!(rig.state(cx), None);
         }
 
         #[gpui::test]

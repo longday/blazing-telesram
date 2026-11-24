@@ -8,6 +8,7 @@ use crate::desktop::Desktop;
 use crate::store::{ChatStore, ProfileState};
 use crate::theme::*;
 use crate::widgets::{avatar, button};
+use bt_chat_core::model::ConnectionState;
 use gpui::{prelude::*, *};
 
 /// What the view shows.
@@ -23,11 +24,15 @@ pub enum Body {
     Ready { name: String, status: Option<String> },
 }
 
-pub fn body(state: Option<&ProfileState>) -> Body {
+/// What the view shows for `state` while the client is in `connection`. A loaded profile is shown only
+/// while the client is online: one on screen when the connection drops, or arriving after it dropped, gives
+/// way to the offline notice instead of being presented as current.
+pub fn body(state: Option<&ProfileState>, connection: ConnectionState) -> Body {
     match state {
         None | Some(ProfileState::Loading) => Body::Loading,
         Some(ProfileState::Failed { offline: true, .. }) => Body::Offline,
         Some(ProfileState::Failed { reason, .. }) => Body::Failed(reason.clone()),
+        Some(ProfileState::Ready(_)) if connection != ConnectionState::Online => Body::Offline,
         Some(ProfileState::Ready(profile)) => Body::Ready {
             name: profile.name.clone().unwrap_or_else(|| "Без имени".into()),
             status: profile.status_text.clone(),
@@ -50,7 +55,7 @@ fn retry(cx: &mut Context<Desktop>) -> Stateful<Div> {
 pub fn render(store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
     let content = {
         let state = store.read(cx);
-        match body(state.profile_state()) {
+        match body(state.profile_state(), state.connection()) {
             Body::Loading => notice("profile-loading", "Загрузка профиля…").into_any_element(),
             Body::Offline => div()
                 .flex()

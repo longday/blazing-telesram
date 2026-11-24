@@ -14,8 +14,13 @@ The client SHALL create a chat only after the user confirms a dialog that lists 
 - **THEN** exactly one create request is sent
 
 #### Scenario: Cancel
-- **WHEN** the user presses "Отмена" or Escape in the dialog
+- **WHEN** the user presses "Отмена" or Escape in the dialog before pressing "Создать"
 - **THEN** nothing is sent and no chat is created
+
+#### Scenario: Cancel after confirming
+- **GIVEN** the user pressed "Создать" and the create request is in flight
+- **WHEN** the user presses "Отмена" or Escape
+- **THEN** nothing changes: a request that already left cannot be recalled, so the dialog stays open until the outcome (created, rejected, unknown or unverified) is shown to the user and is never hidden by a cancel
 
 #### Scenario: Enter in a field
 - **WHEN** the user presses Enter in the search or title field of the dialog
@@ -27,6 +32,10 @@ The user SHALL be able to start a private chat with a person the client knows. I
 #### Scenario: New private chat
 - **WHEN** the user confirms a private chat with a person who has no chat with the account
 - **THEN** a private chat is created and opened once it appears in the chat list
+
+#### Scenario: The reply names no chat
+- **WHEN** the create reply and the refreshed chat list do not name the new private chat
+- **THEN** the dialog closes and says the chat will appear in the list, the open chat stays, and the chat is opened when a later list holds the private chat with that person, unless the user chose another chat meanwhile
 
 #### Scenario: Chat already exists
 - **WHEN** the user chooses a person who already has a private chat with the account
@@ -63,7 +72,7 @@ While a creation is in flight the client SHALL ignore further creation requests.
 - **THEN** nothing is sent, the dialog says the connection is missing and keeps the entered data
 
 ### Requirement: Unknown result is reported honestly
-When the connection fails after the create request was sent, the client SHALL say the result is unknown, refresh the chat list and let the user decide; it SHALL NOT retry by itself. Before another explicit attempt at a private chat, an existing chat with that person SHALL be opened instead.
+When the connection fails after the create request was sent, the client SHALL say the result is unknown, refresh the chat list and let the user decide; it SHALL NOT retry by itself. It SHALL say the list was refreshed only when it was, and before another attempt it SHALL open an existing chat with that person instead, and after an unchecked result send nothing until a read of the list succeeds.
 
 #### Scenario: Connection lost after sending
 - **WHEN** the create request was sent and no reply arrived
@@ -72,6 +81,15 @@ When the connection fails after the create request was sent, the client SHALL sa
 #### Scenario: The chat appeared after all
 - **WHEN** the refreshed list contains the private chat the user wanted
 - **THEN** the client opens it instead of creating another
+
+#### Scenario: The list could not be refreshed
+- **WHEN** the create request was sent, no reply arrived and the chat list could not be read afterwards
+- **THEN** the dialog says the result is unknown and the list could not be read (it does not say the list was refreshed), keeps the entered data and sends no second request
+
+#### Scenario: Another attempt after an unchecked unknown result
+- **GIVEN** the last creation ended unknown and the list could not be read
+- **WHEN** the user presses "Создать" again
+- **THEN** the client reads the chat list first; if that fails the dialog says so and nothing is sent, if the list holds the private chat it is opened, otherwise the create request is sent
 
 ### Requirement: Rejection is shown
 When the server rejects a creation, the client SHALL show the reason, keep the entered data, and SHALL NOT retry by itself.

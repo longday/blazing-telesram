@@ -46,6 +46,13 @@ const SEARCH_LIMIT: usize = 10;
 const UNKNOWN_CHAT_REASON: &str = "Чат не найден";
 /// Shown when a creation was sent and its outcome is not known: the chat may exist.
 const CREATION_UNKNOWN_REASON: &str = "Результат неизвестен: чат мог быть создан";
+/// Shown when a creation was sent, its outcome is not known and the list that would show the chat could
+/// not be read either.
+const CREATION_UNVERIFIED_REASON: &str =
+    "Результат неизвестен: чат мог быть создан, а список чатов обновить не удалось";
+/// Shown when the list check that precedes a new creation (after an unverified one) failed: nothing was sent.
+const LIST_CHECK_FAILED_REASON: &str =
+    "Не удалось проверить список чатов: прошлое создание могло пройти, новое не отправлено";
 
 enum LiveChange {
     Upsert(Message),
@@ -163,6 +170,8 @@ enum Input {
         result: Result<Option<ChatId>, CreateError>,
         chats: Option<Result<Vec<ChatSummary>, BackendError>>,
     },
+    /// The list read that precedes a `CreatePrivateChat` for `user` after an unverified result.
+    ListChecked { user: UserId, chats: Result<Vec<ChatSummary>, BackendError> },
 }
 
 /// A server write that is attempted once and not queued.
@@ -239,6 +248,9 @@ struct Engine<B> {
     profile_inflight: bool,
     /// A chat creation is running (or its list refresh is); a second one is dropped meanwhile.
     creation_inflight: bool,
+    /// A creation ended unknown and the list could not be read afterwards, so its chat may exist unseen.
+    /// The next creation reads the list first and is not sent unless that succeeds.
+    creation_unverified: bool,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -509,6 +521,7 @@ impl<B: Backend> Engine<B> {
             members_inflight: HashSet::new(),
             profile_inflight: false,
             creation_inflight: false,
+            creation_unverified: false,
         };
         tokio::spawn(pump_commands(commands, inputs));
 
@@ -573,6 +586,7 @@ impl<B: Backend> Engine<B> {
             Input::Members { chat, result } => self.handle_members(chat, result),
             Input::Profile(result) => self.handle_profile(result),
             Input::Created { user, result, chats } => self.handle_created(user, result, chats),
+            Input::ListChecked { user, chats } => self.handle_list_checked(user, chats),
             Input::Connected { .. } | Input::Retry(_) | Input::Live { .. } | Input::LiveClosed(_) | Input::OutboxResume(_) => {}
         }
         true
@@ -748,6 +762,7 @@ impl<B: Backend> Engine<B> {
         self.members_inflight.clear();
         self.profile_inflight = false;
         self.creation_inflight = false;
+        self.creation_unverified = false;
         self.outbox = self.db(self.cache.outbox()).unwrap_or_default();
         self.outbox_inflight = None;
         self.read_marks.clear();
@@ -1289,7 +1304,9 @@ impl<B: Backend> Engine<B> {
 
     /// Starts a private chat with `user`. Attempted once, never queued, never retried, nothing
     /// persisted: a second command while one runs is dropped, offline answers at once without a
-    /// request, and a chat the account already has is reported without one.
+    /// request, and a chat the account already has is reported without one. After a creation whose
+    /// outcome could not be checked (`creation_unverified`) the list is read first, and nothing is sent
+    /// unless that read succeeds and does not show the chat.
     fn create_private_chat(&mut self, user: UserId) {
         if self.creation_inflight {
             return;
@@ -1301,6 +1318,15 @@ impl<B: Backend> Engine<B> {
             return self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
         }
         self.creation_inflight = true;
+        if !self.creation_unverified {
+            return self.send_creation(user);
+        }
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move { post(&inputs, Input::ListChecked { user, chats: backend.chat_list().await }) });
+    }
+
+    /// Sends the creation request. Needs `creation_inflight` set.
+    fn send_creation(&self, user: UserId) {
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
             let result = backend.create_private_chat(&user).await;
@@ -1314,6 +1340,32 @@ impl<B: Backend> Engine<B> {
         });
     }
 
+    /// The list read before a creation that follows an unverified one: when it fails, nothing is sent and
+    /// the check is still owed; when it shows the chat, that chat is opened; otherwise the creation goes out.
+    fn handle_list_checked(&mut self, user: UserId, chats: Result<Vec<ChatSummary>, BackendError>) {
+        if !self.creation_inflight {
+            return;
+        }
+        let listed = chats.is_ok();
+        self.handle_chats(chats);
+        if self.phase == Phase::Expired {
+            self.creation_inflight = false;
+            return;
+        }
+        if !listed {
+            self.creation_inflight = false;
+            tracing::warn!("chat list check before a creation failed");
+            return self.emit(ClientEvent::CreationUnverified { reason: LIST_CHECK_FAILED_REASON.into() });
+        }
+        self.creation_unverified = false;
+        if let Some(chat) = self.private_chat_with(&user) {
+            self.creation_inflight = false;
+            tracing::info!("private chat found by the list check before a creation");
+            return self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+        }
+        self.send_creation(user);
+    }
+
     fn handle_created(
         &mut self,
         user: UserId,
@@ -1323,6 +1375,8 @@ impl<B: Backend> Engine<B> {
         if !std::mem::take(&mut self.creation_inflight) {
             return;
         }
+        // Whether the list was read after the request: `handle_chats` ignores a failed read.
+        let listed = chats.as_ref().is_some_and(|chats| chats.is_ok());
         if let Some(chats) = chats {
             self.handle_chats(chats);
             if self.phase == Phase::Expired {
@@ -1342,14 +1396,20 @@ impl<B: Backend> Engine<B> {
                 self.emit(ClientEvent::CreationFailed { reason: read_failure_reason(error), unknown: false });
             }
             // Never retried here. The refreshed list may already hold the chat: then it is simply opened.
+            // Without a successful read the chat may exist unseen: the next attempt reads the list first.
             Err(CreateError::Unknown(_)) => match self.private_chat_with(&user) {
                 Some(chat) => {
                     tracing::info!("private chat found after an unknown result");
                     self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
                 }
-                None => {
+                None if listed => {
                     tracing::warn!("private chat creation outcome unknown");
                     self.emit(ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true });
+                }
+                None => {
+                    tracing::warn!("private chat creation outcome unknown and the chat list could not be read");
+                    self.creation_unverified = true;
+                    self.emit(ClientEvent::CreationUnverified { reason: CREATION_UNVERIFIED_REASON.into() });
                 }
             },
         }
@@ -1806,6 +1866,8 @@ mod tests {
         create_calls: Vec<UserId>,
         /// When set, `create_private_chat` records its call, then waits here before answering.
         create_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Failures of the next `chat_list` calls, one per call, then the list again.
+        chat_list_errors: VecDeque<BackendError>,
     }
 
     #[derive(Clone, Default)]
@@ -1841,7 +1903,11 @@ mod tests {
             }
         }
         async fn chat_list(&self) -> Result<Vec<ChatSummary>, BackendError> {
-            Ok(self.state().chats.clone())
+            let mut s = self.state();
+            match s.chat_list_errors.pop_front() {
+                Some(error) => Err(error),
+                None => Ok(s.chats.clone()),
+            }
         }
         async fn history(
             &self,
@@ -4729,7 +4795,10 @@ mod tests {
     }
 
     fn is_creation_outcome(event: &ClientEvent) -> bool {
-        matches!(event, ClientEvent::ChatCreated { .. } | ClientEvent::CreationFailed { .. })
+        matches!(
+            event,
+            ClientEvent::ChatCreated { .. } | ClientEvent::CreationFailed { .. } | ClientEvent::CreationUnverified { .. }
+        )
     }
 
     fn creation_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
@@ -4889,5 +4958,80 @@ mod tests {
         h.quiet();
         let events = h.drain();
         assert!(creation_events(&events).is_empty(), "expiry is not a creation failure: {events:?}");
+    }
+
+    #[test]
+    fn an_unknown_result_with_an_unreadable_list_is_not_reported_as_a_checked_one() {
+        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        h.online();
+        h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::CreationUnverified { reason: CREATION_UNVERIFIED_REASON.into() }));
+        assert!(!seen.iter().any(|e| matches!(e, ClientEvent::ChatsReplaced(_))), "no list was read: {seen:?}");
+        h.quiet();
+        assert!(creation_events(&h.drain()).is_empty());
+        assert_eq!(h.fake.state().create_calls.len(), 1, "never retried by itself");
+    }
+
+    #[test]
+    fn after_an_unverified_result_the_next_attempt_checks_the_list_first_and_sends_nothing_while_it_fails() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into())), Ok(Some(id("p")))]),
+            50,
+        );
+        h.online();
+        // The refresh after the unknown result fails, and so does the check before the second attempt.
+        h.fake.state().chat_list_errors =
+            VecDeque::from([BackendError::Network("down".into()), BackendError::Network("still down".into())]);
+        h.client.send(create_with("u9"));
+        h.next("unverified", |e| matches!(e, ClientEvent::CreationUnverified { .. }));
+
+        h.client.send(create_with("u9"));
+        let event = h.next("the check failed", is_creation_outcome);
+        assert_eq!(event, ClientEvent::CreationUnverified { reason: LIST_CHECK_FAILED_REASON.into() });
+        h.quiet();
+        assert_eq!(h.fake.state().create_calls.len(), 1, "no second request without a successful list check");
+
+        // The list is readable again and does not hold the chat: now the creation goes out.
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
+        assert_eq!(h.fake.state().create_calls.len(), 2);
+    }
+
+    #[test]
+    fn the_check_before_a_new_attempt_opens_a_chat_that_exists_instead_of_creating_another() {
+        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        h.online();
+        h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
+        h.client.send(create_with("u9"));
+        h.next("unverified", |e| matches!(e, ClientEvent::CreationUnverified { .. }));
+
+        // The chat was created after all; it shows up once the list can be read.
+        h.fake.state().chats = vec![private("p", "u9")];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: true }));
+        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        h.quiet();
+        assert_eq!(h.fake.state().create_calls.len(), 1, "only the first request ever left");
+    }
+
+    #[test]
+    fn a_checked_unknown_result_leaves_no_check_owed() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into())), Ok(Some(id("p")))]),
+            50,
+        );
+        h.online();
+        h.client.send(create_with("u9"));
+        let event = h.next("the outcome", is_creation_outcome);
+        assert_eq!(event, ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true });
+
+        // The list was read, so the user's next press goes straight to the backend.
+        h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
+        h.client.send(create_with("u9"));
+        h.wait_for("the second request", |s| s.create_calls.len() == 2);
     }
 }

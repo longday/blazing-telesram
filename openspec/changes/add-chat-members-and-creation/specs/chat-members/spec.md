@@ -59,6 +59,11 @@ The panel SHALL show a loading state while the list is requested, an error state
 - **WHEN** the user opens the panel
 - **THEN** the panel says the member list is unavailable offline
 
+#### Scenario: Connection drops while a list is shown
+- **GIVEN** the panel shows a loaded member list
+- **WHEN** the client goes offline
+- **THEN** the panel replaces the list with the offline notice, and a list that arrives while the client is not online is not shown; when the client is online again the panel requests the list anew instead of showing the earlier one as current
+
 ### Requirement: Partial lists are never shown as complete
 The server returns members in pages and reports neither a total nor a "more" flag; a page shorter than the requested size is the last one. The client SHALL load the following pages until the last page or a fixed upper bound, and when the bound is reached while the last page was full it SHALL state that the list may be incomplete and how many members are shown; it SHALL NOT present a bounded list as the full one.
 
@@ -103,6 +108,11 @@ The client SHALL let the user open their own profile from the account menu. The 
 #### Scenario: Profile unavailable
 - **WHEN** the client is offline or the profile request fails
 - **THEN** the view says the profile could not be loaded and shows no name, avatar or status from an earlier session
+
+#### Scenario: Connection drops while the profile is shown
+- **GIVEN** the profile view shows the account's name, avatar and status
+- **WHEN** the client goes offline
+- **THEN** the view replaces them with the offline notice, a profile that arrives while the client is not online is not shown, and when the client is online again the profile is requested anew
 
 ### Requirement: Viewing changes nothing
 Opening the info panel or the profile SHALL send only read requests; it SHALL NOT change server state, and the client SHALL NOT send any membership, role, invite, chat-info or profile management request.

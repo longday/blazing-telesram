@@ -3192,8 +3192,16 @@ fn members_failed(chat_id: &str, reason: &str, offline: bool) -> ClientEvent {
     ClientEvent::MembersFailed { chat: ChatId(chat_id.into()), reason: reason.into(), offline }
 }
 
+/// Brings the client online the way the core does: a state is announced only when it changes.
+fn go_online(h: &Harness, cx: &mut VisualTestContext) {
+    if h.store.read_with(cx, |s, _| s.connection()) != ConnectionState::Online {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    }
+}
+
 /// Opens the group "g" with one message and its info panel; the drained commands are the member request.
 fn open_info(h: &Harness, cx: &mut VisualTestContext) {
+    go_online(h, cx);
     open_with(h, cx, vec![text("g", 1)]);
     click(cx, "chat-header");
     assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "opening asks for the members, nothing else");
@@ -3285,6 +3293,67 @@ fn offline_the_panel_says_the_list_is_unavailable(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_loaded_list_gives_way_to_the_offline_notice_when_the_connection_drops(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    assert!(shown(cx, "info-count"));
+    assert!(shown(cx, "member-a"));
+    assert!(!shown(cx, "info-offline"));
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(shown(cx, "info-offline"), "an offline notice instead of the stale list");
+    assert!(!shown(cx, "info-error"));
+    h.store.read_with(cx, |s, _| {
+        let body = crate::info_panel::body(s.members_state(&chat_g()), s.connection());
+        assert_eq!(body, crate::info_panel::Body::Offline);
+    });
+    assert!(h.commands().is_empty(), "going offline sends nothing");
+}
+
+#[gpui::test]
+fn a_list_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    assert!(shown(cx, "info-offline"), "the late answer does not repaint the list");
+    assert!(!shown(cx, "info-count"));
+    assert!(!shown(cx, "member-a"));
+}
+
+#[gpui::test]
+fn coming_back_online_asks_for_the_list_again(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(h.commands().is_empty());
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Connecting)]);
+    assert!(h.commands().is_empty(), "nothing is asked while still connecting");
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "the list from before the drop is not shown as current");
+    assert!(shown(cx, "info-loading"));
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    assert!(shown(cx, "info-count"));
+}
+
+#[test]
+fn the_panel_body_follows_the_state_and_the_connection() {
+    use crate::info_panel::{body, Body};
+    use crate::store::MembersState;
+    let users = vec![member("a", "А", MemberRole::Member, false)];
+    let ready = MembersState::Ready(ChatMembers { chat: chat_g(), users, partial: true });
+    assert_eq!(body(Some(&ready), ConnectionState::Online), Body::Ready { shown: 1, partial: true });
+    assert_eq!(body(Some(&ready), ConnectionState::Offline), Body::Offline);
+    assert_eq!(body(Some(&ready), ConnectionState::Connecting), Body::Offline);
+    assert_eq!(body(Some(&MembersState::Loading), ConnectionState::Offline), Body::Loading);
+    let failed = MembersState::Failed { reason: "r".into(), offline: false };
+    assert_eq!(body(Some(&failed), ConnectionState::Offline), Body::Failed("r".into()));
+}
+
+#[gpui::test]
 fn a_bounded_list_says_how_many_are_shown_and_that_more_may_exist(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_info(&h, cx);
@@ -3300,6 +3369,7 @@ fn a_bounded_list_says_how_many_are_shown_and_that_more_may_exist(cx: &mut TestA
 #[gpui::test]
 fn a_private_chat_shows_its_partner_without_group_parts(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
+    go_online(&h, cx);
     open_group(&h, cx);
     click(cx, row!("p"));
     h.feed(cx, [chunk("p", 1..=2, true)]);
@@ -3317,6 +3387,7 @@ fn a_private_chat_shows_its_partner_without_group_parts(cx: &mut TestAppContext)
 #[gpui::test]
 fn a_private_chat_without_a_named_partner_lists_nobody(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
+    go_online(&h, cx);
     open_group(&h, cx);
     click(cx, row!("p"));
     h.feed(cx, [chunk("p", 1..=2, true)]);
@@ -3399,6 +3470,7 @@ fn profile_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
 
 /// Opens the profile through the account menu; the drained commands are the profile request.
 fn open_profile(h: &Harness, cx: &mut VisualTestContext) {
+    go_online(h, cx);
     click(cx, "menu-button");
     click(cx, "menu-profile");
     assert_eq!(h.commands(), [Command::LoadProfile], "opening asks for the profile, nothing else");
@@ -3407,6 +3479,7 @@ fn open_profile(h: &Harness, cx: &mut VisualTestContext) {
 #[gpui::test]
 fn the_account_menu_opens_the_profile_with_name_avatar_and_status(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
+    go_online(&h, cx);
     assert!(!shown(cx, "profile-view"));
     click(cx, "menu-button");
     assert!(shown(cx, "menu-profile"));
@@ -3484,6 +3557,40 @@ fn offline_the_profile_says_it_could_not_be_loaded(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_loaded_profile_gives_way_to_the_offline_notice_when_the_connection_drops(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    assert!(shown(cx, "profile-name"));
+    assert!(!shown(cx, "profile-offline"));
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(shown(cx, "profile-offline"), "an offline notice instead of the stale profile");
+    assert!(!shown(cx, "profile-error"));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(crate::profile::body(s.profile_state(), s.connection()), crate::profile::Body::Offline);
+    });
+    assert!(h.commands().is_empty(), "going offline sends nothing");
+
+    // Back online: the profile is asked for again, the old one is not shown as current.
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading));
+    assert!(shown(cx, "profile-loading"));
+}
+
+#[gpui::test]
+fn a_profile_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    assert!(shown(cx, "profile-offline"), "the late answer does not repaint the profile");
+    assert!(!shown(cx, "profile-name"));
+    assert!(!shown(cx, "profile-status"));
+}
+
+#[gpui::test]
 fn every_open_asks_again_and_shows_nothing_from_before(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
@@ -3494,25 +3601,32 @@ fn every_open_asks_again_and_shows_nothing_from_before(cx: &mut TestAppContext) 
 
     open_profile(&h, cx);
     assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading), "the old profile is not current");
-    h.store.read_with(cx, |s, _| assert_eq!(crate::profile::body(s.profile_state()), crate::profile::Body::Loading));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(crate::profile::body(s.profile_state(), s.connection()), crate::profile::Body::Loading);
+    });
 }
 
 #[test]
 fn the_profile_body_follows_the_state() {
     use crate::profile::{body, Body};
     use crate::store::ProfileState;
-    assert_eq!(body(None), Body::Loading);
-    assert_eq!(body(Some(&ProfileState::Loading)), Body::Loading);
-    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: true })), Body::Offline);
-    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: false })), Body::Failed("r".into()));
+    let online = ConnectionState::Online;
+    assert_eq!(body(None, online), Body::Loading);
+    assert_eq!(body(Some(&ProfileState::Loading), online), Body::Loading);
+    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: true }), online), Body::Offline);
+    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: false }), online), Body::Failed("r".into()));
     assert_eq!(
-        body(Some(&ProfileState::Ready(profile_of(None, None)))),
+        body(Some(&ProfileState::Ready(profile_of(None, None))), online),
         Body::Ready { name: "Без имени".into(), status: None }
     );
     assert_eq!(
-        body(Some(&ProfileState::Ready(profile_of(Some("Иван"), Some("занят"))))),
+        body(Some(&ProfileState::Ready(profile_of(Some("Иван"), Some("занят")))), online),
         Body::Ready { name: "Иван".into(), status: Some("занят".into()) }
     );
+    let ready = ProfileState::Ready(profile_of(Some("Иван"), None));
+    assert_eq!(body(Some(&ready), ConnectionState::Offline), Body::Offline);
+    assert_eq!(body(Some(&ready), ConnectionState::Connecting), Body::Offline);
+    assert_eq!(body(Some(&ProfileState::Loading), ConnectionState::Offline), Body::Loading);
 }
 
 #[gpui::test]
@@ -3840,15 +3954,22 @@ fn a_created_chat_closes_the_dialog_and_is_opened(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_created_chat_the_list_does_not_name_still_closes_the_dialog(cx: &mut TestAppContext) {
+fn a_created_chat_the_list_does_not_name_closes_the_dialog_and_is_opened_once_listed(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     choose_alice(&h, cx);
     click(cx, "new-chat-create");
     h.commands();
     h.feed(cx, [ClientEvent::ChatCreated { chat: None, existing: false }]);
     assert!(!dialog_open(&h, cx));
-    assert_eq!(selected_chat(&h, cx), Some(chat_g()), "nothing to open, the open chat stays");
+    assert_eq!(selected_chat(&h, cx), Some(chat_g()), "nothing to open yet, the open chat stays");
     assert!(h.commands().is_empty());
+
+    // The list later shows the private chat with that person: it is opened (spec "New private chat").
+    let mut chats = people_chats();
+    chats.push(person_chat("n", "Алиса", "alice"));
+    h.feed(cx, [ClientEvent::ChatsReplaced(chats)]);
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("n".into()))]);
 }
 
 #[gpui::test]
@@ -3927,6 +4048,31 @@ fn an_unknown_result_is_said_honestly_and_not_retried(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(h.commands().is_empty(), "no second request");
+}
+
+#[gpui::test]
+fn an_unverified_result_says_the_list_could_not_be_read_and_the_next_attempt_is_the_users(cx: &mut TestAppContext) {
+    use crate::new_chat::{notice, Notice};
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(cx, [ClientEvent::CreationUnverified { reason: "Результат неизвестен: список не обновлён".into() }]);
+    assert!(shown(cx, "new-chat-unverified"));
+    assert!(!shown(cx, "new-chat-unknown"), "the list was not refreshed, the dialog must not say it was");
+    assert!(!shown(cx, "new-chat-error"));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(notice(s.creation_state()), Notice::Unverified("Результат неизвестен: список не обновлён".into()));
+        assert!(crate::new_chat::can_create(true, s.creation_state()));
+    });
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "no second request by itself");
+
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_alice()], "the core owes the list check; the press is the user's");
+    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
 }
 
 #[gpui::test]
@@ -4095,8 +4241,10 @@ fn the_dialog_notice_follows_the_creation_state() {
     assert_eq!(notice(Some(&CreationState::InFlight)), Notice::Sending);
     assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: false })), Notice::Failed("r".into()));
     assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: true })), Notice::Unknown("r".into()));
+    assert_eq!(notice(Some(&CreationState::Unverified { reason: "r".into() })), Notice::Unverified("r".into()));
     assert!(!can_create(false, None), "nobody chosen");
     assert!(can_create(true, None));
     assert!(!can_create(true, Some(&CreationState::InFlight)));
     assert!(can_create(true, Some(&CreationState::Failed { reason: "r".into(), unknown: true })));
+    assert!(can_create(true, Some(&CreationState::Unverified { reason: "r".into() })));
 }

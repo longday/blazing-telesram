@@ -10,8 +10,8 @@ use crate::new_chat::{self, Candidate, NewChat};
 use crate::profile;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
-    ChatFilter, ChatStore, CreationState, ProfileState, SearchStatus, SessionState, StoreEvent, TimelineChange,
-    SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
+    ChatFilter, ChatStore, CreationState, MembersState, ProfileState, SearchStatus, SessionState, StoreEvent,
+    TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
 };
 use crate::theme::*;
 use crate::timeline::{self, RowBounds, RowContext};
@@ -125,7 +125,10 @@ impl Desktop {
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
                 StoreEvent::Timeline { chat, change } => this.apply_timeline_change(chat, change, cx),
                 StoreEvent::Drafts => this.restore_late_draft(cx),
-                StoreEvent::Connection => this.resume_search(cx),
+                StoreEvent::Connection => {
+                    this.resume_search(cx);
+                    this.resume_reads(cx);
+                }
                 StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
                 StoreEvent::SendRefused { draft, reason } => this.send_refused(draft.clone(), reason.clone(), cx),
                 StoreEvent::ChatCreated { chat, .. } => this.new_chat_created(chat.is_none(), cx),
@@ -448,6 +451,26 @@ impl Desktop {
             .is_some_and(|state| state.query == query && !matches!(state.status, SearchStatus::Failed(_)));
         if !current {
             self.store.update(cx, |store, cx| store.search(query.to_string(), cx));
+        }
+    }
+
+    /// The connection came back: an open panel or profile whose data was withheld as offline (or whose
+    /// load was refused offline) asks again, so nothing from before the drop is shown as current.
+    fn resume_reads(&mut self, cx: &mut Context<Self>) {
+        let store = self.store.read(cx);
+        if store.connection() != ConnectionState::Online {
+            return;
+        }
+        let members = self.info_chat().filter(|chat| {
+            matches!(store.members_state(chat), Some(MembersState::Ready(_) | MembersState::Failed { offline: true, .. }))
+        });
+        let profile = self.profile
+            && matches!(store.profile_state(), Some(ProfileState::Ready(_) | ProfileState::Failed { offline: true, .. }));
+        if let Some(chat) = members {
+            self.store.update(cx, |store, cx| store.load_members(chat, cx));
+        }
+        if profile {
+            self.store.update(cx, |store, cx| store.load_profile(cx));
         }
     }
 
