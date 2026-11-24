@@ -10,6 +10,7 @@ use yandex_proto::bootstrap::bootstrap;
 use yandex_proto::client::{Client, ClientConfig};
 use yandex_proto::error::ProtoError;
 use yandex_proto::media::{AvatarSize, MediaTarget};
+use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{PushEvent, Relation, WireBody, WireChat, WireChatKind, WireMessage, WireSender, WireUser};
 use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
@@ -27,6 +28,8 @@ pub struct YandexBackend {
     config: ClientConfig,
     inner: Mutex<Option<Connection>>,
     users: Arc<Mutex<HashMap<String, WireUser>>>,
+    /// What the last `chat_list()` showed; search hits resolve private chats and titles from it.
+    known: Mutex<KnownChats>,
     /// Test runs on the real account set `BT_WRITE_ONLY_CHAT`: no write leaves for any other chat.
     write_only: Option<ChatId>,
 }
@@ -107,7 +110,14 @@ fn write_guard(allowed: Option<&ChatId>, chat: &ChatId) -> Result<(), BackendErr
 
 impl YandexBackend {
     pub fn new(session: Session, write_only: Option<ChatId>) -> Self {
-        Self { session, config: ClientConfig::production(), inner: Mutex::new(None), users: Arc::default(), write_only }
+        Self {
+            session,
+            config: ClientConfig::production(),
+            inner: Mutex::new(None),
+            users: Arc::default(),
+            known: Mutex::default(),
+            write_only,
+        }
     }
 
     fn client(&self) -> Result<(Client, String), BackendError> {
@@ -152,7 +162,12 @@ impl Backend for YandexBackend {
             c.partner_guid.iter().chain(c.last_message.iter().filter_map(|m| m.from.as_ref()?.guid.as_ref()))
         });
         users.load(wanted.cloned().collect()).await?;
-        Ok(chats.iter().map(|c| summary(c, &me, &self.users.lock().unwrap())).collect())
+        let summaries: Vec<ChatSummary> = {
+            let users = self.users.lock().unwrap();
+            chats.iter().map(|c| summary(c, &me, &users)).collect()
+        };
+        *self.known.lock().unwrap() = KnownChats::of(&chats, &summaries);
+        Ok(summaries)
     }
 
     async fn history(&self, chat: &ChatId, before: Option<MessageTs>, _limit: usize) -> Result<HistoryChunk, BackendError> {
@@ -286,6 +301,29 @@ impl Backend for YandexBackend {
     async fn typing(&self, chat: &ChatId) -> Result<(), BackendError> {
         self.push(chat, WriteRequest::Typing { chat: chat.0.clone() }).await.map(drop)
     }
+
+    async fn search(&self, query: &str, limit: usize) -> Result<SearchHits, BackendError> {
+        let (client, me) = self.client()?;
+        let reply = client.search(query).await.map_err(backend_error)?;
+        let items = reply.decoded;
+        // Search items carry names only sometimes; the user cache fills the rest.
+        let nameless = items.users.iter().filter(|u| u.display_name.is_none()).map(|u| u.guid.clone());
+        let anonymous = items.messages.iter().filter_map(|m| {
+            let from = m.from.as_ref()?;
+            from.guid.clone().filter(|_| from.display_name.is_none())
+        });
+        Users { client: &client, cache: &self.users }.load(nameless.chain(anonymous).collect()).await?;
+        let hits = search_hits(&items, &me, &self.users.lock().unwrap(), &self.known.lock().unwrap(), limit);
+        // Counts only: the query and the hits' text stay out of the log above `trace`.
+        tracing::debug!(
+            chats = hits.chats.len(),
+            people = hits.people.len(),
+            messages = hits.messages.len(),
+            skipped = items.skipped,
+            "search mapped"
+        );
+        Ok(hits)
+    }
 }
 
 /// The quote is cut to the protocol's bound when the request is encoded.
@@ -326,6 +364,96 @@ impl Users<'_> {
             Err(ProtoError::SessionExpired) => Err(BackendError::SessionExpired),
             Err(_) => Ok(()),
         }
+    }
+}
+
+/// The chat list as the last `chat_list()` call returned it: what a search hit needs to point at
+/// an existing chat. The search reply has no private-chat marker (private chats have no name),
+/// so a person's chat can only come from here.
+#[derive(Default)]
+struct KnownChats {
+    /// Partner guid to the private chat with that person.
+    private: HashMap<String, ChatId>,
+    /// Chat id to the title the list shows.
+    titles: HashMap<String, String>,
+}
+
+impl KnownChats {
+    fn of(chats: &[WireChat], summaries: &[ChatSummary]) -> Self {
+        let private = chats
+            .iter()
+            .filter(|c| c.kind == WireChatKind::Private)
+            .filter_map(|c| Some((c.partner_guid.clone()?, ChatId(c.id.clone()))))
+            .collect();
+        let titles = summaries.iter().map(|s| (s.id.0.clone(), s.title.clone())).collect();
+        Self { private, titles }
+    }
+}
+
+/// Maps decoded search items to hits, at most `limit` per kind. A message hit has no chat title
+/// on the wire: it comes from the loaded chat list, else from a chat hit of the same reply, else
+/// it stays empty.
+fn search_hits(
+    items: &SearchItems,
+    me: &str,
+    users: &HashMap<String, WireUser>,
+    known: &KnownChats,
+    limit: usize,
+) -> SearchHits {
+    let avatar = |id: Option<String>| id.map(|id| MediaRef { id, kind: MediaKind::Avatar });
+    let chat_title = |id: &str| {
+        let listed = known.titles.get(id);
+        listed.or_else(|| items.chats.iter().find(|c| c.id == id)?.title.as_ref()).cloned()
+    };
+    SearchHits {
+        chats: items
+            .chats
+            .iter()
+            .take(limit)
+            .map(|c| ChatHit {
+                id: ChatId(c.id.clone()),
+                kind: match c.kind {
+                    WireChatKind::Private => ChatKind::Private,
+                    WireChatKind::Group => ChatKind::Group,
+                    WireChatKind::Channel => ChatKind::Channel,
+                },
+                title: c.title.clone().or_else(|| known.titles.get(&c.id).cloned()).unwrap_or_else(|| "Без названия".into()),
+                avatar: avatar(c.avatar_id.clone()),
+            })
+            .collect(),
+        people: items
+            .users
+            .iter()
+            .take(limit)
+            .map(|u| {
+                let cached = users.get(&u.guid);
+                PersonHit {
+                    user: UserId(u.guid.clone()),
+                    name: u
+                        .display_name
+                        .clone()
+                        .or_else(|| cached?.display_name.clone())
+                        .unwrap_or_else(|| "Без названия".into()),
+                    avatar: avatar(u.avatar_id.clone().or_else(|| cached?.avatar_id.clone())),
+                    chat: known.private.get(&u.guid).cloned(),
+                }
+            })
+            .collect(),
+        messages: items
+            .messages
+            .iter()
+            .take(limit)
+            .map(|m| {
+                let own = m.from.as_ref().and_then(|f| f.guid.as_deref()) == Some(me);
+                MessageHit {
+                    chat: ChatId(m.chat.clone()),
+                    chat_title: chat_title(&m.chat).unwrap_or_default(),
+                    timestamp: m.timestamp,
+                    author_name: if own { Some("Вы".into()) } else { sender_name(m.from.as_ref(), users) },
+                    text: preview(&body(&m.body)),
+                }
+            })
+            .collect(),
     }
 }
 
@@ -518,6 +646,7 @@ fn typing_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yandex_proto::search::{WireSearchChat, WireSearchMessage, WireSearchUser};
     use yandex_proto::wire::{WireFile, WireForwarded, WireRef};
 
     fn wire(body: WireBody, relation: Relation, from: &str) -> WireMessage {
@@ -830,6 +959,161 @@ mod tests {
         assert_eq!((s.title.as_str(), s.unread, s.muted), ("Ann", 2, true));
         let preview = s.last_message.unwrap();
         assert_eq!((preview.author.as_deref(), preview.text.as_str()), (Some("Вы"), "hey"));
+    }
+
+    fn search_message(chat: &str, from: Option<(&str, Option<&str>)>, text: &str) -> WireSearchMessage {
+        WireSearchMessage {
+            chat: chat.into(),
+            timestamp: 7,
+            from: from.map(|(guid, name)| WireSender {
+                guid: Some(guid.into()),
+                display_name: name.map(Into::into),
+                avatar_id: None,
+            }),
+            body: WireBody::Text(text.into()),
+        }
+    }
+
+    fn search_user(guid: &str, name: Option<&str>) -> WireSearchUser {
+        WireSearchUser { guid: guid.into(), display_name: name.map(Into::into), avatar_id: None }
+    }
+
+    fn search_chat(id: &str, kind: WireChatKind, title: Option<&str>) -> WireSearchChat {
+        WireSearchChat { id: id.into(), kind, title: title.map(Into::into), avatar_id: Some("av".into()), members_count: None }
+    }
+
+    fn listed_chats() -> KnownChats {
+        KnownChats {
+            private: HashMap::from([("u1".into(), ChatId("0/0/u1".into()))]),
+            titles: HashMap::from([("0/0/u1".into(), "Ann".into()), ("0/1/g".into(), "Team".into())]),
+        }
+    }
+
+    #[test]
+    fn search_maps_chats_people_and_messages() {
+        let users = HashMap::from([user("u2", "Bob")]);
+        let items = SearchItems {
+            chats: vec![
+                search_chat("0/1/g", WireChatKind::Group, Some("Team")),
+                search_chat("1/2/c", WireChatKind::Channel, Some("News")),
+                search_chat("0/1/h", WireChatKind::Group, None),
+            ],
+            users: vec![search_user("u1", Some("Ann")), search_user("u9", Some("Eve"))],
+            messages: vec![
+                // Listed chat, author named by the wire.
+                search_message("0/0/u1", Some(("u1", Some("Ann"))), "привет"),
+                // Chat only in the reply's chat hits, author from the user cache.
+                search_message("1/2/c", Some(("u2", None)), "news"),
+                // Unknown chat and author; the own message is told by the account guid.
+                search_message("0/9/x", None, "lost"),
+                search_message("0/1/g", Some(("me", None)), "mine"),
+            ],
+            skipped: 0,
+        };
+        let hits = search_hits(&items, "me", &users, &listed_chats(), 10);
+
+        let chats: Vec<_> = hits.chats.iter().map(|c| (c.id.0.as_str(), c.kind, c.title.as_str())).collect();
+        assert_eq!(
+            chats,
+            [
+                ("0/1/g", ChatKind::Group, "Team"),
+                ("1/2/c", ChatKind::Channel, "News"),
+                // A hit without a title takes none from a list that lacks it either.
+                ("0/1/h", ChatKind::Group, "Без названия"),
+            ]
+        );
+        assert_eq!(hits.chats[0].avatar, Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }));
+
+        let messages: Vec<_> = hits
+            .messages
+            .iter()
+            .map(|m| (m.chat.0.as_str(), m.chat_title.as_str(), m.author_name.as_deref(), m.text.as_str()))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                ("0/0/u1", "Ann", Some("Ann"), "привет"),
+                ("1/2/c", "News", Some("Bob"), "news"),
+                ("0/9/x", "", None, "lost"),
+                ("0/1/g", "Team", Some("Вы"), "mine"),
+            ]
+        );
+        assert_eq!(hits.messages[0].timestamp, 7);
+    }
+
+    #[test]
+    fn a_person_opens_a_private_chat_only_when_the_chat_list_has_one() {
+        let users = HashMap::from([user("u3", "Cat")]);
+        let items = SearchItems {
+            users: vec![search_user("u1", Some("Ann")), search_user("u9", Some("Eve")), search_user("u3", None)],
+            ..SearchItems::default()
+        };
+        let hits = search_hits(&items, "me", &users, &listed_chats(), 10);
+        let people: Vec<_> = hits.people.iter().map(|p| (p.user.0.as_str(), p.name.as_str(), p.chat.clone())).collect();
+        assert_eq!(
+            people,
+            [("u1", "Ann", Some(ChatId("0/0/u1".into()))), ("u9", "Eve", None), ("u3", "Cat", None)]
+        );
+        // The avatar of a nameless hit comes from the user cache too.
+        assert_eq!(hits.people[2].avatar, Some(MediaRef { id: "av-u3".into(), kind: MediaKind::Avatar }));
+        // Nothing but the map opens a private chat: the reply has no private chat hit.
+        assert!(hits.chats.is_empty());
+    }
+
+    #[test]
+    fn search_returns_at_most_limit_hits_per_kind() {
+        let items = SearchItems {
+            chats: (0..4).map(|i| search_chat(&format!("0/1/{i}"), WireChatKind::Group, Some("t"))).collect(),
+            users: (0..4).map(|i| search_user(&format!("u{i}"), Some("n"))).collect(),
+            messages: (0..4).map(|i| search_message(&format!("0/1/{i}"), None, "m")).collect(),
+            skipped: 0,
+        };
+        let hits = search_hits(&items, "me", &HashMap::new(), &KnownChats::default(), 3);
+        assert_eq!((hits.chats.len(), hits.people.len(), hits.messages.len()), (3, 3, 3));
+    }
+
+    #[test]
+    fn the_chat_list_gives_private_chats_by_partner_and_titles_by_chat() {
+        let chat = |id: &str, kind, partner: Option<&str>| WireChat {
+            id: id.into(),
+            kind,
+            title: None,
+            avatar_id: None,
+            partner_guid: partner.map(Into::into),
+            last_activity: None,
+            unread: 0,
+            muted: false,
+            last_message: None,
+            raw: serde_json::Value::Null,
+        };
+        let users = HashMap::from([user("u1", "Ann")]);
+        let chats = [
+            chat("0/0/u1", WireChatKind::Private, Some("u1")),
+            chat("0/1/g", WireChatKind::Group, None),
+            // A private chat whose partner is unknown cannot be found by guid.
+            chat("0/0/zz", WireChatKind::Private, None),
+        ];
+        let summaries: Vec<_> = chats.iter().map(|c| summary(c, "me", &users)).collect();
+        let known = KnownChats::of(&chats, &summaries);
+        assert_eq!(known.private, HashMap::from([("u1".to_owned(), ChatId("0/0/u1".into()))]));
+        assert_eq!(known.titles.get("0/0/u1").map(String::as_str), Some("Ann"));
+        assert_eq!(known.titles.get("0/1/g").map(String::as_str), Some("Без названия"));
+    }
+
+    #[test]
+    fn search_errors_keep_their_kind() {
+        assert_eq!(backend_error(ProtoError::Network("down".into())), BackendError::Network("down".into()));
+        assert_eq!(
+            backend_error(ProtoError::Protocol("search: no data".into())),
+            BackendError::Protocol("search: no data".into())
+        );
+        assert_eq!(backend_error(ProtoError::SessionExpired), BackendError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn search_needs_a_connection() {
+        let backend = YandexBackend::new(test_session(), None);
+        assert!(matches!(backend.search("q", 10).await, Err(BackendError::Protocol(_))));
     }
 
     #[tokio::test(start_paused = true)]
