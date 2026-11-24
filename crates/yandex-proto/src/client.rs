@@ -3,8 +3,6 @@
 
 use std::io::Write;
 
-use serde_json::Value;
-
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
@@ -13,7 +11,10 @@ use crate::registry::RegistryClient;
 use crate::request::{HISTORY_CHUNK, ReadRequest, SEARCH_LIMIT, SearchEntity};
 use crate::search::SearchReply;
 use crate::session::Session;
-use crate::wire::{DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireChatKind, WireHistory, WireUser};
+use crate::wire::{
+    DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireMembers, WireProfile, WireUser, parse_members,
+    parse_profile,
+};
 use crate::write::{Committed, WriteRequest};
 use crate::ws::TungsteniteConnector;
 use crate::xiva::{Connector, XivaConfig, XivaEvents, XivaHandle};
@@ -108,20 +109,24 @@ impl Client {
         self.registry.search(query, limit, entities).await
     }
 
-    /// Raw `whoami` reply of the signed-in account (socket). Untyped until the shape is recorded.
-    pub async fn whoami_raw(&self) -> Result<Value, ProtoError> {
-        self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await
+    /// The signed-in account's profile (socket `whoami`).
+    pub async fn whoami(&self) -> Result<WireProfile, ProtoError> {
+        parse_profile(&self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await?)
     }
 
-    /// Raw member list of `chat`: `get_chat_members` for private chats, `get_group_members` for
-    /// groups and channels. Untyped until the shape is recorded.
-    pub async fn members_raw(&self, chat: &str, kind: &WireChatKind) -> Result<Value, ProtoError> {
-        let chat = chat.to_owned();
-        let request = match kind {
-            WireChatKind::Private => ReadRequest::ChatMembers { chat },
-            WireChatKind::Group | WireChatKind::Channel => ReadRequest::GroupMembers { chat },
+    /// One page of up to `limit` members of a **group** chat (`get_chat_members`): the first page
+    /// when `guid_offset` is `None`, else the users after that guid. The server sends no paging
+    /// marker, so a page shorter than `limit` is the last. Private chats, the self chat and
+    /// channels are refused with `no_permissions_for_this_chat_operation`, which surfaces as
+    /// `ProtoError::Protocol` carrying that code.
+    pub async fn members(&self, chat: &str, limit: u32, guid_offset: Option<&str>) -> Result<WireMembers, ProtoError> {
+        let request = ReadRequest::ChatMembers {
+            chat: chat.to_owned(),
+            limit,
+            guid_offset: guid_offset.map(str::to_owned),
+            roles: None,
         };
-        self.registry.execute(&request).await
+        parse_members(&self.registry.execute(&request).await?)
     }
 
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
@@ -161,6 +166,48 @@ mod tests {
         assert!(client.chat_list().await.is_err());
         assert_eq!(client.history_limit, 50);
         assert_eq!(client.guid, "g");
-        assert!(client.whoami_raw().await.is_err());
+        assert!(client.whoami().await.is_err());
+    }
+
+    async fn client_with_registry(base: &str) -> Client {
+        let session = Session { cookies: vec![], identity: Identity { uid: None, guid: "g".into(), display_name: None } };
+        let mut config = ClientConfig::production();
+        config.xiva.base_url = "ws://127.0.0.1:1/v2".into();
+        config.registry.api_url = format!("{base}/api/");
+        config.registry.csrf_url = format!("{base}/csrf/");
+        Client::start(&session, config).unwrap().0
+    }
+
+    #[tokio::test]
+    async fn members_sends_the_paged_body_and_parses_the_live_group_page() {
+        use crate::registry::stub::{json_response, serve};
+        use crate::wire::WireMemberRole;
+        let page = include_str!("../tests/fixtures/live-members-group.json");
+        let reply = format!(r#"{{"status":"ok","data":{page}}}"#);
+        let (base, seen) = serve(vec![json_response("200 OK", &reply), json_response("200 OK", &reply)]);
+        let client = client_with_registry(&base).await;
+
+        let members = client.members("0/0/c", 50, Some("g-last")).await.unwrap();
+        assert_eq!(members.users.len(), 4);
+        assert_eq!(members.users[0].role, WireMemberRole::Admin);
+        let request = seen.lock().unwrap()[0].clone();
+        assert!(request.contains("get_chat_members") && !request.to_lowercase().contains("x-csrf-token"));
+        assert!(request.contains(r#""chat_id":"0/0/c""#) && request.contains(r#""limit":50"#));
+        assert!(request.contains(r#""guid_offset":"g-last""#) && !request.contains("roles"));
+
+        client.members("0/0/c", 50, None).await.unwrap();
+        assert!(!seen.lock().unwrap()[1].contains("guid_offset"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_member_read_surfaces_the_server_code() {
+        use crate::registry::stub::{json_response, serve};
+        let refusal = include_str!("../tests/fixtures/live-members-private.json");
+        let (base, _) = serve(vec![json_response("403 Forbidden", refusal)]);
+        let err = client_with_registry(&base).await.members("a_b", 50, None).await.unwrap_err();
+        assert!(
+            matches!(&err, ProtoError::Protocol(m) if m.contains("no_permissions_for_this_chat_operation")),
+            "{err:?}"
+        );
     }
 }

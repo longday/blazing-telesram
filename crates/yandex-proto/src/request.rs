@@ -14,7 +14,7 @@ use crate::frame::RequestFrame;
 pub const HISTORY_CHUNK: u32 = 50;
 
 /// Every method name `ReadRequest` can put on the wire.
-pub const ALLOWED_METHODS: [&str; 8] = [
+pub const ALLOWED_METHODS: [&str; 7] = [
     "request_user",
     "get_users_data",
     "history",
@@ -22,8 +22,10 @@ pub const ALLOWED_METHODS: [&str; 8] = [
     "search",
     "whoami",
     "get_chat_members",
-    "get_group_members",
 ];
+
+/// Members per `get_chat_members` page, what the web client asks for (the server default is 20).
+pub const MEMBERS_PAGE: u32 = 50;
 
 /// Rows per result set requested from `search` (the server default), the same for every entity.
 pub const SEARCH_LIMIT: u32 = 10;
@@ -50,10 +52,29 @@ pub enum ReadRequest {
     Search { query: String, limit: u32, entities: Vec<SearchEntity> },
     /// Socket `whoami`: the profile of the signed-in account (`guid` is the session's own).
     Whoami { guid: String },
-    /// Registry `get_chat_members`; works on the bare cookie. Used for private chats.
-    ChatMembers { chat: String },
-    /// Registry `get_group_members`; works on the bare cookie. Carries the member role.
-    GroupMembers { chat: String },
+    /// Registry `get_chat_members`; works on the bare cookie. One page of up to `limit` users;
+    /// the next page starts after `guid_offset` (the guid of the previous page's last user).
+    /// Answers group chats only: private chats, the self chat and channels are refused with
+    /// `no_permissions_for_this_chat_operation`. `get_group_members` is deliberately not
+    /// representable: it answers `bad_request` for every shape and no client code calls it.
+    ChatMembers { chat: String, limit: u32, guid_offset: Option<String>, roles: Option<Vec<RoleFilter>> },
+}
+
+/// Role names `get_chat_members` accepts in `roles` (any other value is `bad_request`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoleFilter {
+    Admin,
+    Member,
+}
+
+impl RoleFilter {
+    /// Name in the `roles` request parameter.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Member => "member",
+        }
+    }
 }
 
 /// What a `search` can look for. `contacts` is deliberately not representable.
@@ -99,7 +120,6 @@ impl ReadRequest {
             Self::Search { .. } => "search",
             Self::Whoami { .. } => "whoami",
             Self::ChatMembers { .. } => "get_chat_members",
-            Self::GroupMembers { .. } => "get_group_members",
             Self::SubscribeChat { .. } => "subscribe",
         }
     }
@@ -107,10 +127,7 @@ impl ReadRequest {
     pub fn route(&self) -> Route {
         match self {
             Self::RequestUser => Route::Registry { csrf: true },
-            Self::GetUsersData { .. }
-            | Self::Search { .. }
-            | Self::ChatMembers { .. }
-            | Self::GroupMembers { .. } => Route::Registry { csrf: false },
+            Self::GetUsersData { .. } | Self::Search { .. } | Self::ChatMembers { .. } => Route::Registry { csrf: false },
             Self::ChatList | Self::History { .. } | Self::SubscribeChat { .. } | Self::Whoami { .. } => Route::Socket,
         }
     }
@@ -125,7 +142,16 @@ impl ReadRequest {
                 "limit": limit,
                 "entities": entities.iter().map(|e| e.wire_name()).collect::<Vec<_>>(),
             }),
-            Self::ChatMembers { chat } | Self::GroupMembers { chat } => json!({ "chat_id": chat }),
+            Self::ChatMembers { chat, limit, guid_offset, roles } => {
+                let mut params = json!({ "chat_id": chat, "limit": limit });
+                if let Some(offset) = guid_offset {
+                    params["guid_offset"] = Value::from(offset.as_str());
+                }
+                if let Some(roles) = roles {
+                    params["roles"] = roles.iter().map(|r| r.wire_name()).collect::<Vec<_>>().into();
+                }
+                params
+            }
             _ => return None,
         };
         Some(json!({ "method": self.method(), "params": params }).to_string())
@@ -150,11 +176,8 @@ impl ReadRequest {
                 "UserAgent": USER_AGENT,
                 "ClientSupportedFeatures": 0,
             }),
-            Self::RequestUser
-            | Self::GetUsersData { .. }
-            | Self::Search { .. }
-            | Self::ChatMembers { .. }
-            | Self::GroupMembers { .. } => return None,
+            // Registry requests have no socket frame.
+            Self::RequestUser | Self::GetUsersData { .. } | Self::Search { .. } | Self::ChatMembers { .. } => return None,
         };
         body["RequestId"] = Value::from(ctx.request_id);
         Some(RequestFrame {
@@ -186,8 +209,13 @@ mod tests {
                 entities: vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats],
             },
             ReadRequest::Whoami { guid: "g-self".into() },
-            ReadRequest::ChatMembers { chat: "0/0/c".into() },
-            ReadRequest::GroupMembers { chat: "0/0/c".into() },
+            ReadRequest::ChatMembers { chat: "0/0/c".into(), limit: MEMBERS_PAGE, guid_offset: None, roles: None },
+            ReadRequest::ChatMembers {
+                chat: "0/0/c".into(),
+                limit: 20,
+                guid_offset: Some("g-last".into()),
+                roles: Some(vec![RoleFilter::Admin, RoleFilter::Member]),
+            },
         ];
         for request in &all {
             match request {
@@ -198,8 +226,7 @@ mod tests {
                 | ReadRequest::SubscribeChat { .. }
                 | ReadRequest::Search { .. }
                 | ReadRequest::Whoami { .. }
-                | ReadRequest::ChatMembers { .. }
-                | ReadRequest::GroupMembers { .. } => {}
+                | ReadRequest::ChatMembers { .. } => {}
             }
         }
         all
@@ -247,7 +274,7 @@ mod tests {
         ] {
             assert!(looks_mutating(method), "{method} must be flagged");
         }
-        for method in ["whoami", "get_chat_members", "get_group_members", "search"] {
+        for method in ["whoami", "get_chat_members", "search"] {
             assert!(!looks_mutating(method), "{method} must not be flagged");
         }
     }
@@ -259,12 +286,10 @@ mod tests {
         }
         assert_eq!(
             ALLOWED_METHODS,
-            [
-                "request_user", "get_users_data", "history", "subscribe", "search", "whoami", "get_chat_members",
-                "get_group_members",
-            ]
+            ["request_user", "get_users_data", "history", "subscribe", "search", "whoami", "get_chat_members"]
         );
-        assert_eq!(ALLOWED_METHODS.len(), 8);
+        assert_eq!(ALLOWED_METHODS.len(), 7);
+        assert!(!ALLOWED_METHODS.contains(&"get_group_members"), "answers bad_request for every shape");
     }
 
     #[test]
@@ -280,21 +305,43 @@ mod tests {
     }
 
     #[test]
-    fn member_reads_are_cookie_only_registry_requests_with_the_chat_id() {
-        for (request, method) in [
-            (ReadRequest::ChatMembers { chat: "0/0/c".into() }, "get_chat_members"),
-            (ReadRequest::GroupMembers { chat: "0/0/c".into() }, "get_group_members"),
-        ] {
-            assert_eq!(request.method(), method);
-            assert!(ALLOWED_METHODS.contains(&method));
-            assert_eq!(request.route(), Route::Registry { csrf: false });
-            let body: Value = serde_json::from_str(&request.registry_body().unwrap()).unwrap();
-            let expected: Value =
-                serde_json::from_str(&format!(r#"{{"method":"{method}","params":{{"chat_id":"0/0/c"}}}}"#)).unwrap();
-            assert_eq!(body, expected);
-            let ctx = SocketContext { req_id: 1, request_id: "rid", subscription_id: Some("sub") };
-            assert!(request.socket_frame(&ctx).is_none());
-        }
+    fn member_read_is_a_cookie_only_registry_request_with_the_documented_body() {
+        let ctx = SocketContext { req_id: 1, request_id: "rid", subscription_id: Some("sub") };
+        let first = ReadRequest::ChatMembers { chat: "0/0/c".into(), limit: MEMBERS_PAGE, guid_offset: None, roles: None };
+        assert_eq!(MEMBERS_PAGE, 50);
+        assert_eq!(first.method(), "get_chat_members");
+        assert_eq!(first.route(), Route::Registry { csrf: false });
+        assert!(first.socket_frame(&ctx).is_none());
+        let body: Value = serde_json::from_str(&first.registry_body().unwrap()).unwrap();
+        assert_eq!(body, json!({ "method": "get_chat_members", "params": { "chat_id": "0/0/c", "limit": 50 } }));
+    }
+
+    #[test]
+    fn a_paged_member_request_carries_the_offset_and_roles_only_when_given() {
+        let paged = ReadRequest::ChatMembers {
+            chat: "0/0/c".into(),
+            limit: 50,
+            guid_offset: Some("00000000-0000-4000-8000-000000000050".into()),
+            roles: Some(vec![RoleFilter::Admin]),
+        };
+        let body: Value = serde_json::from_str(&paged.registry_body().unwrap()).unwrap();
+        assert_eq!(
+            body,
+            json!({ "method": "get_chat_members", "params": {
+                "chat_id": "0/0/c",
+                "limit": 50,
+                "guid_offset": "00000000-0000-4000-8000-000000000050",
+                "roles": ["admin"],
+            } })
+        );
+        let both = ReadRequest::ChatMembers {
+            chat: "c".into(),
+            limit: 1,
+            guid_offset: None,
+            roles: Some(vec![RoleFilter::Admin, RoleFilter::Member]),
+        };
+        let body: Value = serde_json::from_str(&both.registry_body().unwrap()).unwrap();
+        assert_eq!(body["params"], json!({ "chat_id": "c", "limit": 1, "roles": ["admin", "member"] }));
     }
 
     #[test]

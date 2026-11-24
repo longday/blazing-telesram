@@ -2,8 +2,8 @@ use serde_json::Value;
 use yandex_proto::request::SearchEntity;
 use yandex_proto::search::parse_search;
 use yandex_proto::wire::{
-    DEFAULT_EXCLUDED_NAMESPACES, PushEvent, Relation, WireBody, WireChatKind, decode_push, parse_chat_list,
-    parse_history, parse_users,
+    DEFAULT_EXCLUDED_NAMESPACES, PushEvent, Relation, WireBody, WireChatKind, WireMemberRole, decode_push,
+    parse_chat_list, parse_history, parse_members, parse_profile, parse_users,
 };
 
 fn fixture(name: &str) -> Value {
@@ -15,7 +15,8 @@ fn fixture(name: &str) -> Value {
 fn fixtures_hold_no_credentials() {
     let research = ["chat-list", "history-page", "users", "push-edit", "push-deleted"].map(|n| format!("research-{n}"));
     let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"].map(|n| format!("live-push-{n}"));
-    for name in research.iter().chain(&live) {
+    let members = ["members-group", "members-private", "whoami"].map(|n| format!("live-{n}"));
+    for name in research.iter().chain(&live).chain(&members) {
         let text = fixture(&format!("{name}.json")).to_string().to_lowercase();
         for needle in ["session_id", "sessionid2", "csrf", "cookie", "@yandex"] {
             assert!(!text.contains(needle), "{name} contains {needle}");
@@ -234,4 +235,61 @@ fn live_search_fixture() {
     assert_eq!(without_avatar.id, "0/22/00000000-0000-4000-8000-000000000017");
     assert_eq!(without_avatar.avatar_id, None);
     assert_eq!(without_avatar.members_count, Some(5));
+}
+
+/// A `get_chat_members` page of a real group (2026-11-24; four users from different groups to
+/// cover every key seen, placeholders for names, e-mails, positions, organisations and ids).
+/// `groups` and `departments` were empty in all 70 groups probed, so they are not modelled.
+#[test]
+fn live_members_group_fixture() {
+    let members = parse_members(&fixture("live-members-group.json")).unwrap();
+    assert_eq!(members.skipped, 0);
+    let [admin, member, required_only, deleted] = members.users.as_slice() else { panic!("{:?}", members.users) };
+
+    assert_eq!((admin.guid.as_str(), &admin.role), ("00000000-0000-4000-8000-000000000001", &WireMemberRole::Admin));
+    assert_eq!(admin.display_name.as_deref(), Some("<name>"));
+    assert_eq!(admin.avatar_id.as_deref(), Some("user_avatar/yapic/1/placeholder"));
+    assert!(!admin.deleted);
+
+    assert_eq!(member.role, WireMemberRole::Member);
+    assert!(!member.deleted);
+
+    // Only the keys every user carries: no avatar.
+    assert_eq!(required_only.guid, "00000000-0000-4000-8000-000000000003");
+    assert_eq!(required_only.role, WireMemberRole::Member);
+    assert_eq!((required_only.display_name.as_deref(), required_only.avatar_id.as_deref()), (Some("<name>"), None));
+
+    assert!(deleted.deleted);
+    assert_eq!(deleted.role, WireMemberRole::Member);
+
+    // Empty `groups` and `departments` change nothing; neither does a page without them.
+    let raw = fixture("live-members-group.json");
+    assert_eq!(raw["groups"], serde_json::json!([]));
+    assert_eq!(raw["departments"], serde_json::json!([]));
+    let users_only = serde_json::json!({ "users": raw["users"] });
+    assert_eq!(parse_members(&users_only).unwrap(), members);
+}
+
+/// What the server says for private chats, the self chat and channels: an error body, no users.
+#[test]
+fn live_members_refusal_fixture() {
+    let refusal = fixture("live-members-private.json");
+    assert_eq!(refusal["status"], "error");
+    assert_eq!(refusal["data"]["code"], "no_permissions_for_this_chat_operation");
+    assert!(parse_members(&refusal["data"]).is_err(), "an error body is not a member page");
+}
+
+/// The `whoami` reply of a real account (2026-11-24, placeholders): no status set, so
+/// `UserStatus` is `{}`. The populated shape was not observed; the variant below is synthetic.
+#[test]
+fn live_whoami_fixture() {
+    let mut raw = fixture("live-whoami.json");
+    let profile = parse_profile(&raw).unwrap();
+    assert_eq!(profile.guid.as_deref(), Some("00000000-0000-4000-8000-000000000001"));
+    assert_eq!(profile.name.as_deref(), Some("<name>"));
+    assert_eq!(profile.avatar_id.as_deref(), Some("user_avatar/yapic/1/placeholder"));
+    assert_eq!(profile.status_text, None, "an empty UserStatus is no status");
+
+    raw["UserStatusInfo"]["UserStatus"] = serde_json::json!({ "text": "Out of office" });
+    assert_eq!(parse_profile(&raw).unwrap().status_text.as_deref(), Some("Out of office"));
 }

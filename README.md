@@ -33,14 +33,14 @@ On first start a window with the Yandex sign-in page opens. Sign in as on `telem
 BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe -- me
 ```
 
-Two more read-only commands inspect the profile and chat member endpoints; both print the raw reply as pretty JSON on stdout (it carries names, emails and positions, so keep it out of commits and logs), a header line goes to stderr:
+Two more read-only commands inspect the profile and chat member endpoints; both print the parsed reply (`{:#?}`: guids, display names, roles, status text) on stdout, a header line goes to stderr; keep it out of commits and logs:
 
 ```sh
 bt-probe whoami                                  # the signed-in account: UserInfo and UserStatusInfo
-bt-probe members <chat> [--method chat|group]    # get_chat_members (default) or get_group_members for one chat id
+bt-probe members <chat>                          # get_chat_members, first page of 50 users of one chat id
 ```
 
-`members` answers for group chats only: private chats, the self chat and (for the account it was recorded on) channels are refused with `no_permissions_for_this_chat_operation`, and `get_group_members` currently answers `bad_request`. Without paging parameters the server returns the first 20 users.
+`members` answers for group chats only: private chats, the self chat and (for the account it was recorded on) channels are refused with `no_permissions_for_this_chat_operation`. The client has no `get_group_members` call: it answers `bad_request` for every shape.
 
 ## Diagnostics
 
