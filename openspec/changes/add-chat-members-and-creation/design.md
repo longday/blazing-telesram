@@ -43,6 +43,46 @@ Alternative: reuse `BackendError::Network` for everything. Rejected: it cannot s
 
 **D4 outcome:** recorded here by task 0.1 (static result: payload and reply shape, or "not determined") and by task 6.2 (live result). Gates: 6.1 needs a static PASS; 6.3 and 6.4 need a live PASS. Until the static result is recorded no group task starts.
 
+**Static result (task 0.1, 2026-11-24): PASS.** The payload is fully determined by the web client's own code, in two independent bundle versions. No request was sent to the account: only public, cookie-less GETs of static files on `yastatic.net` and of the public `https://yandex.ru/chat/` page. No participant, title or account data was involved.
+
+Sources (both minified webpack bundles, read as text):
+- `https://yastatic.net/s3/chat-static/_/0x8b21684/web/app.js` + `ui.chunk.js` (the build the reference cites as `chats-web/3.21.0`): `createChat(e){return this.request("create_chat",e).then(R)}` in the registry API class of `app.js`; the only group/channel caller is the action `Xe` (exported `P4`, module 77964 of `app.js`) used by the create-chat wizard `CreateChatWizardContainer` in `ui.chunk.js`.
+- `https://yastatic.net/s3/chat-static/telemessenger/_/3.6.3/web/app.js` + `ui.chunk.js` (what `https://yandex.ru/chat/` serves today): same `createChat(e){return this.request("create_chat",e).then(x.o)}`, caller `e3` (`app.js`) and wizard step `ef.onCreate` (`ui.chunk.js`). The wizard is the same for "Create group" (`channel:false`) and "Create channel" (`channel:true`).
+
+**Envelope.** Registry POST, multipart field `request` = `{"method":"create_chat","params":<payload>}`, no per-call options, so the transport default applies: `X-CSRF-TOKEN` header (CSRF on), retried by the web client only on `bad_csrf_token`. Success is `status: "ok"` with the result in `data`.
+
+**Payload** (`params`), fields in the order the client builds them:
+
+| field | type | rule from the client |
+|---|---|---|
+| `name` | string | the group title as typed; the wizard disables "next" while `name.trim()` is empty, so the client never sends a blank title; the length limit `maxChatTitle` is 250 (server config injected in the page) |
+| `description` | string | always sent, `""` when the user typed nothing; limit `maxChatDescription` 500 |
+| `permissions.users` | array of string | the participants' **guids** (`member.data.guid`), plain strings, not objects; the code does not add the caller's own guid (the wizard's contact list excludes the signed-in user), so 6.1 must not list it either |
+| `permissions.groups`, `permissions.departments` | array | **only in the older/flag-off form**: `group_id` / `department_id` values, `[]` when none are picked |
+| `group_refs`, `department_refs` | array of `{id, organization_id}` | **only in the flag-on form** (the form of 3.6.3, chosen by the feature flag `enableImprovementsFederations`, default false in code, `true` in the flags the public page serves today): replaces `permissions.groups`/`departments`, `[]` when none are picked; `permissions` then holds `users` only |
+| `channel` | bool | `false` for a group chat, `true` for a channel |
+| `is_public` | bool | the wizard's form object starts with `isPublic: true` and the group wizard has no control to change it, so the client always sends `true`; in chat info the same property is edited as `public` for groups and `is_public` for channels (`public` is derived from `invite_hash` on read), so what `is_public: true` does to a group (link-joinable or not) is not shown by the code |
+| `avatar_id`, `key` | string | optional: merged in only after the client uploaded an avatar (`upload_avatar`); never sent otherwise; this change omits them |
+
+No other fields exist in either build: in particular no `alias` (the reference's `{ alias, ... }` is the optional vanity name; the wizard does not send it and `check_alias` is a separate method), no `version`, no `wait_for_update`, no one-time token.
+
+**Example body, flag-on form (current production client, one participant, no groups/departments):**
+
+```json
+{"method":"create_chat","params":{"name":"Test group","description":"","permissions":{"users":["<guid>"]},"group_refs":[],"department_refs":[],"channel":false,"is_public":true}}
+```
+
+Flag-off form (the older bundle): `{"name":"Test group","description":"","permissions":{"users":["<guid>"],"groups":[],"departments":[]},"channel":false,"is_public":true}`.
+
+**Reply shape.** `data` is `{ "chat": { "chat_id": "<id>", ... }, "errors": [ { "code": "<code>", ... } ] }`; the client's normaliser keeps `errors` and runs `normalizeYambGroupChat` over `chat`. The only field the client relies on is `chat.chat_id` (group ids look like `0/0/<guid>`); the rest of `chat` is the usual chat-info object (`name`, `description`, `members`, `version`, `invite_hash`, `rights`/`role`, ...). `errors` is optional and non-fatal: when present and non-empty the chat **exists** and the toast lists participants that could not be added (codes seen in the bundle: `blocked_by_privacy_settings`, `join_denied`, `no_guest_access`, `federation_no_mutual_friendship`). A rejected call is a registry error (`status` not ok, `data.code`), and the web client shows `error.create_chat`. After success the client opens the chat and loads its history with up to 3 retries 300 ms apart ("history not found" is logged, not shown), i.e. the new chat can be briefly invisible to reads: a list refresh straight after the reply may not yet contain it (D5 already opens it once it is in `chats`).
+
+**What this fixes for the later tasks.**
+- 6.1: `ManageRequest::CreateChat { title, users }` builds the flag-on form above with `description: ""`, `channel: false`, `is_public: true` (the values the web wizard sends), empty `group_refs`/`department_refs`; the tolerant reply parser takes `data.chat.chat_id` (`Option`) and keeps `errors` only as a count and the codes for the log; a `status: ok` reply without an id is still success (D3). The probe's confirmation text must print the title, every guid and the `is_public: true` value.
+- 6.2 must settle live, because the code cannot: (a) which of the two forms the account's server accepts (the flag value of the signed-in account is not readable without an account request; if the flag-on form is refused with a validation error, try the flag-off form once and record the result); (b) what `is_public: true` means for a group, and whether the user accepts a throwaway group created that way (if the server also accepts `false`, prefer it and record it); (c) the real reply shape and whether the new chat shows up in a list refresh at once.
+- Residual risk that stays with 6.2 and the 6.F fallback: none of the above was observed against the server; the code says what the web client sends, not what the server tolerates.
+
+**Incidental static finding for task 5.1 (private chat, does not replace its live check).** In both bundles `createPrivateChat(guid, waitForUpdate, token)` sends `{ guid, wait_for_update, onetime_user_token }` with `undefined` values dropped by `JSON.stringify`. The callers pass `waitForUpdate` as `undefined` unless their own optional argument says otherwise, and the token comes from `chatsMeta.chatIdToOneTimeToken[chatId]`, which only a one-time-token deep link fills. So the ordinary web flow sends `{ "guid": "<guid>" }` alone; D2's `{ guid, wait_for_update: true }` is a variant the web client can send but does not by default, and `onetime_user_token` is not required by the client's own default path. The web client also does not call `create_private_chat` when a person is opened from search unless the person is a robot: it builds a local transient chat there and calls `activate_chat` from its "ensure chat" path ([INFERENCE]: that is, when the first message is sent); the reply is `{ chat, user }`.
+
 ### D5. Creation flow in the engine: no queue, no retry
 New commands `CreatePrivateChat { user }` (and `CreateGroupChat { title, users }` from task 6.3); events `ChatCreated { chat: Option<ChatId>, existing: bool }` and `CreationFailed { reason: String, unknown: bool }`. The engine handles a creation like an `Action` (attempted once, not queued, nothing persisted):
 - one creation at a time; a second command while one is in flight is ignored (the UI also disables the button);

@@ -4,7 +4,7 @@ Each task names the files it owns and what it depends on. Tasks without a depend
 
 ## 0. Gate (decision D4)
 
-- [ ] 0.1 Read-only discovery of the `create_chat` payload: study the web client's bundle, then record in `design.md` under "D4 outcome" either the full payload (title field, participant list field and element form, optional and default fields) and reply shape, or "not determined". No request is sent to the account. Files: `openspec/changes/add-chat-members-and-creation/design.md` (D4 outcome only). Depends: none. Verify: the D4 outcome section states PASS with a concrete example body, or FAIL with what was missing; on FAIL run task 6.F immediately.
+- [x] 0.1 Read-only discovery of the `create_chat` payload: study the web client's bundle, then record in `design.md` under "D4 outcome" either the full payload (title field, participant list field and element form, optional and default fields) and reply shape, or "not determined". No request is sent to the account. Files: `openspec/changes/add-chat-members-and-creation/design.md` (D4 outcome only). Depends: none. Verify: the D4 outcome section states PASS with a concrete example body, or FAIL with what was missing; on FAIL run task 6.F immediately.
 
 ## 1. Protocol reads (`yandex-proto`, stream P1)
 
