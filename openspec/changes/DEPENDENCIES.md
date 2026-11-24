@@ -31,7 +31,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | MD-D | MD 5.1 (merged, ad90cc4), 5.2 (manual) | `README.md` | 5.2 after MD-C |
 | MD-R1 / R3 | MD 1.2 (`bt-probe.rs`), MD 1.3 (`design.md`, maybe `media.rs`) | | MD-P; 1.2 after GS 1.3 on `bt-probe.rs` |
 | GS-P1..P3 | GS 1.2, 1.3, 1.4 | 1.2: `search.rs`, `registry.rs`, proto `client.rs`, `lib.rs`; 1.3: `bt-probe.rs`, fixture [live]; 1.4: `search.rs`, `wire_fixtures.rs` | 1.2 after MD-P (proto `client.rs`) |
-| GS-A | GS 2.1 (done, on `integ/gs`), 2.2, 3.1, 3.2, 3.3, 3.4 | `model.rs`, `backend.rs`, chat-core `client.rs`, `yandex_backend.rs`, `store.rs`, `search_results.rs`, `main.rs`, `desktop.rs`, `tests.rs` | GS 1.4 merged; core lane free (rule 6: `ChatStore::search`, `cancel_search`, `search_state` are first called by 3.4, so GS-C and GS-U are one unit) |
+| GS-A | GS 2.1 (done, on `integ/gs`), 2.2, 3.1, 3.2, 3.3, 3.4, 3.5 (clippy error fix in `tests.rs`) | `model.rs`, `backend.rs`, chat-core `client.rs`, `yandex_backend.rs`, `store.rs`, `search_results.rs`, `main.rs`, `desktop.rs`, `tests.rs` | GS 1.4 and MD-C merged; core lane free (rule 6: `ChatStore::search`, `cancel_search`, `search_state` are first called by 3.4, so GS-C and GS-U are one unit) |
 | CM-P1.. | CM 1.1 (`request.rs`, `write.rs`, proto `client.rs`); 1.2 (`bt-probe.rs`, `README.md`, fixtures, `design.md`) [live]; 1.3 (`wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs`); 2.1 (`manage.rs`, `registry.rs`, `lib.rs`); 2.2 (`client.rs`, `bt-probe.rs`, `README.md`); 6.1 (`manage.rs`, `registry.rs`, `client.rs`, `bt-probe.rs`, `README.md`) | | see per-task table |
 | CM-C1 | CM 3.1 | `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` (literal) | CM 1.3, 2.2; core lane free (only trait methods and a pub field: no `dead_code`) |
 | CM-M | CM 3.2, 4.1, 4.2 | `model.rs`, chat-core `client.rs`, `store.rs`, `info_panel.rs`, `profile.rs`, `desktop.rs`, `tests.rs` | CM-C1 (rule 6: members state is first used by the info panel, profile state by the profile view) |
@@ -78,7 +78,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 2.3 | done (86dd403) | 2.1, 2.2 | MD-C |
 | 3.1 | done (86dd403); the "download is not wired yet" placeholder is gone | 2.1 | MD-C |
 | 4.1 | done (86dd403) | 2.1 | MD-C |
-| 4.3 | done (86dd403); follow-up `md/4.3-fit` (viewer picture fits the window; `desktop.rs`, `tests.rs`, `viewer.rs`) in flight, not merged | 2.1, 4.1, 2.3 | MD-C |
+| 4.3 | done (86dd403; follow-up `md/4.3-fit`, the viewer picture fits the window, merged in aca841a) | 2.1, 4.1, 2.3 | MD-C |
 | 4.2 | done (86dd403; valid PNG test fixture) | 4.1, 4.3 | MD-C |
 | 5.1 | done (ad90cc4, README) | — | MD-D |
 | 5.2 | ready [live] manual run with the `main` build | all | MD-D |
@@ -131,11 +131,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A (GS 2.1 re-applied from `integ/gs`, then 2.2, 3.1, 3.2, 3.3, 3.4): all gates met (GS 1.4 on `main`, MD-C on `main`); **but** `md/4.3-fit` (in flight) edits `desktop.rs`, `tests.rs`, `viewer.rs`, which GS-A's core-lane and UI files include, so GS-A starts when `md/4.3-fit` is merged (or is declared withdrawn).
+- GS-A (GS 2.1 re-applied from `integ/gs`, then 2.2, 3.1, 3.2, 3.3, 3.4, 3.5): all gates met (GS 1.4, MD-C and `md/4.3-fit` on `main`), core lane free. First `tests.rs` owner of the lane: it also fixes the pre-existing `reversed_empty_ranges` clippy error (task 3.5).
 - MD 5.2 [live, manual] (`main` build; owns no files).
 - CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
-In flight: `md/4.3-fit`, `cm/1.2`. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3), 5.1; CM 0.1, 1.1, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
+In flight: `cm/1.2`. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`, aca841a), 5.1; CM 0.1, 1.1, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
 
 ## Needs the user
 
