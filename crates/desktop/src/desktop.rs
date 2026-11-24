@@ -26,8 +26,6 @@ const LOG_POLL: Duration = Duration::from_millis(250);
 
 const ROW_HEIGHT: f32 = 64.;
 const SIDEBAR_WIDTH: f32 = 340.;
-/// Most local rows kept on screen while server results are listed below them.
-const LOCAL_ROWS_WITH_RESULTS: usize = 5;
 
 const FILTERS: [(&str, &str, ChatFilter); 5] = [
     ("filter-all", "Все", ChatFilter::All),
@@ -451,7 +449,6 @@ impl Desktop {
         let connection = store.connection();
         let count = rows.len();
         let results = self.search_view(&rows, cx).map(|view| search_results::render(&view, &self.store, cx));
-        let listing = results.is_some();
 
         div()
             .relative()
@@ -558,20 +555,46 @@ impl Desktop {
                             }))
                     })),
             )
-            .child(match empty {
-                Some(text) => div()
+            .child(match (results, empty) {
+                // Server results below the local rows: one scrolling column, the rows themselves unchanged.
+                (Some(results), empty) => {
+                    let local = match empty {
+                        Some(text) => div()
+                            .debug_selector(|| "chat-list-empty".into())
+                            .flex()
+                            .justify_center()
+                            .py(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child(text),
+                        None => div()
+                            .debug_selector(|| "chat-list".into())
+                            .flex()
+                            .flex_col()
+                            .children(rows.iter().map(|id| self.chat_row(id, cx))),
+                    };
+                    div()
+                        .id("search-scroll")
+                        .debug_selector(|| "search-scroll".into())
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(local)
+                        .child(div().border_t_1().border_color(rgb(DIVIDER)).child(results))
+                        .into_any_element()
+                }
+                (None, Some(text)) => div()
                     .debug_selector(|| "chat-list-empty".into())
-                    .when(listing, |d| d.flex_none().py(px(12.)))
-                    .when(!listing, |d| d.flex_1().pt(px(40.)))
+                    .flex_1()
                     .flex()
                     .justify_center()
+                    .pt(px(40.))
                     .text_color(rgb(MUTED))
                     .child(text)
                     .into_any_element(),
-                None => div()
+                (None, None) => div()
                     .debug_selector(|| "chat-list".into())
-                    .when(listing, |d| d.flex_none().h(px(count.min(LOCAL_ROWS_WITH_RESULTS) as f32 * ROW_HEIGHT)))
-                    .when(!listing, |d| d.flex_1().min_h_0())
+                    .flex_1()
+                    .min_h_0()
                     .child(
                         uniform_list(
                             "chat-list",
@@ -584,17 +607,6 @@ impl Desktop {
                     )
                     .into_any_element(),
             })
-            .children(results.map(|results| {
-                div()
-                    .id("search-results")
-                    .debug_selector(|| "search-results".into())
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .border_t_1()
-                    .border_color(rgb(DIVIDER))
-                    .child(results)
-            }))
             .when(self.menu == AccountMenu::Open, |d| {
                 d.child(
                     div()

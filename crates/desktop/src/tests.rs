@@ -701,6 +701,20 @@ fn a_failed_search_keeps_the_local_rows(cx: &mut TestAppContext) {
     assert_eq!(h.commands(), [search_command(1, "ан")], "a failure is not retried by itself");
 }
 
+#[gpui::test]
+fn every_local_match_stays_above_the_server_results(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let chats = (0..8).map(|i| chat(&format!("c{i}"), ChatKind::Group, &format!("Чат {i}"), Some(i + 1))).collect();
+    h.feed(cx, [ClientEvent::ChatsReplaced(chats), ClientEvent::Connection(ConnectionState::Online)]);
+    type_search(cx, "чат");
+    pass(cx, SEARCH_DEBOUNCE);
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    for row in [row!("c0"), row!("c1"), row!("c2"), row!("c3"), row!("c4"), row!("c5"), row!("c6"), row!("c7")] {
+        assert!(shown(cx, row), "{row} is listed");
+        assert!(y(cx, row) < y(cx, "search-section-Сообщения"), "{row} is above the server sections");
+    }
+}
+
 // ---- 6.3 timeline ----
 
 fn open_group(h: &Harness, cx: &mut VisualTestContext) {
