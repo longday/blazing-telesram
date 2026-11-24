@@ -3,15 +3,20 @@
 //! history requests (the server's snapshot is taken when a request starts and delivered when it
 //! ends), two reaction pushes, an edit that says nothing about reactions, and the user's own
 //! reaction (the request goes out, the answer arrives). After every step the cache is compared
-//! with what the invariant says, computed from the inputs delivered so far alone: the order they
-//! arrived in does not matter.
+//! with the reference below, which sees the inputs in the order they were delivered.
 //!
-//! The reference, with the cache starting at version 5:
-//! - the state with the highest version among the cache's start, the pushes delivered and the
-//!   snapshots delivered wins; an input without a version never counts (a versioned state is
-//!   held from the start, and nothing may lower it or lend it a version);
+//! The reference, with the cache starting at version 5 and the account's own reaction LIKE:
+//! - counts and version: the state with the highest version among the cache's start, the pushes
+//!   delivered and the snapshots delivered wins, whatever the order; an input without a version
+//!   never counts (a versioned state is held from the start, and nothing may lower it or lend it
+//!   a version);
 //! - the user's confirmed choice (the request went out over version `b`, the answer was `Ok`)
 //!   replaces it only while that winner is not above `b`;
+//! - `mine` is exact and, unlike counts, depends on delivery order: an accepted input that says
+//!   it (a push or a row naming FIRE, a push clearing it) sets it, one that does not say keeps
+//!   the held one while its code still has a count, and a rejected input changes nothing. So v6
+//!   saying FIRE then v7 saying nothing ends at FIRE, while v7 then v6 ends at the start's LIKE
+//!   (v6 is stale and ignored). The confirmed choice sets `mine` to its target;
 //! - the edit changes the body for good, whichever request delivers its older snapshot later.
 
 use super::*;
@@ -27,7 +32,10 @@ enum Snap {
     Absent,
     Bare,
     Versionless,
+    /// A row that does not say `mine`.
     At(i64),
+    /// A row whose recent list names FIRE as the account's reaction (only where FIRE has a count).
+    AtMine(i64),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -35,7 +43,12 @@ enum Push {
     /// The push does not take part.
     Absent,
     Versionless,
+    /// A push that does not say `mine`.
     At(i64),
+    /// A push saying the account's reaction is FIRE (only where FIRE has a count).
+    AtMine(i64),
+    /// A push saying the account has no reaction.
+    AtClear(i64),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,45 +91,79 @@ fn junk() -> Vec<ReactionCount> {
     counts(&[(FIRE, 9)])
 }
 
-/// The user's choice of FIRE over `counts`, the account having LIKE.
-fn with_fire_chosen(mut counts: Vec<ReactionCount>) -> Vec<ReactionCount> {
-    let like = counts.iter().position(|c| c.code == LIKE).unwrap();
-    counts[like].count -= 1;
-    if counts[like].count == 0 {
-        counts.remove(like);
+/// The user's choice of FIRE over `counts` when the account's reaction is `mine`: the overlay
+/// and what `mine` becomes (choosing FIRE again removes it).
+fn toggled_to_fire(mut counts: Vec<ReactionCount>, mine: Option<ReactionCode>) -> (Vec<ReactionCount>, Option<ReactionCode>) {
+    let lower = |counts: &mut Vec<ReactionCount>, code| {
+        if let Some(at) = counts.iter().position(|c| c.code == code) {
+            counts[at].count -= 1;
+            if counts[at].count == 0 {
+                counts.remove(at);
+            }
+        }
+    };
+    if let Some(old) = mine {
+        lower(&mut counts, old);
+    }
+    if mine == Some(FIRE) {
+        return (counts, None);
     }
     match counts.iter_mut().find(|c| c.code == FIRE) {
         Some(fire) => fire.count += 1,
         None => counts.push(ReactionCount { code: FIRE, count: 1 }),
     }
-    counts
+    (counts, Some(FIRE))
 }
 
-/// What the invariant says the cache holds after `trace`: counts, version, and whether the
-/// user's confirmed choice is what is held.
-fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, i64, bool) {
-    let (mut best, mut base, mut confirmed) = (START, None, false);
+/// What the invariant says the cache holds after `trace`: counts, version and `mine`.
+fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, i64, Option<ReactionCode>) {
+    struct Held {
+        version: i64,
+        mine: Option<ReactionCode>,
+        /// The user's confirmed overlay is what the counts are.
+        overlay: Option<Vec<ReactionCount>>,
+    }
+    let mut held = Held { version: START, mine: Some(LIKE), overlay: None };
+    let (mut base, mut started_with) = (None, None);
+    // An input of version `v` that says `says` about `mine` (`None`: does not say).
+    let offer = |held: &mut Held, v: i64, says: Option<Option<ReactionCode>>| {
+        if v > held.version {
+            held.version = v;
+            held.overlay = None;
+            if let Some(says) = says {
+                held.mine = says;
+            }
+            held.mine = held.mine.filter(|m| server_counts(v).iter().any(|c| c.code == *m));
+        }
+    };
     for step in trace {
         match *step {
-            Step::Push(i) => {
-                if let Push::At(v) = case.pushes[i] {
-                    best = best.max(v);
+            Step::Push(i) => match case.pushes[i] {
+                Push::At(v) => offer(&mut held, v, None),
+                Push::AtMine(v) => offer(&mut held, v, Some(Some(FIRE))),
+                Push::AtClear(v) => offer(&mut held, v, Some(None)),
+                Push::Absent | Push::Versionless => {}
+            },
+            Step::FetchEnd(k) => match case.snaps[k] {
+                Snap::At(v) => offer(&mut held, v, None),
+                Snap::AtMine(v) => offer(&mut held, v, Some(Some(FIRE))),
+                Snap::Absent | Snap::Bare | Snap::Versionless => {}
+            },
+            Step::ReactStart => {
+                base = Some(held.version);
+                started_with = Some(held.mine);
+            }
+            Step::ReactEnd => {
+                if case.own == Own::Confirmed && base == Some(held.version) {
+                    let (overlay, mine) = toggled_to_fire(server_counts(held.version), started_with.unwrap());
+                    held.overlay = Some(overlay);
+                    held.mine = mine;
                 }
             }
-            Step::FetchEnd(k) => {
-                if let Snap::At(v) = case.snaps[k] {
-                    best = best.max(v);
-                }
-            }
-            Step::ReactStart => base = Some(best),
-            Step::ReactEnd => confirmed = case.own == Own::Confirmed,
             Step::FetchStart(_) | Step::Edit => {}
         }
     }
-    match base {
-        Some(base) if confirmed && best <= base => (with_fire_chosen(server_counts(base)), base, true),
-        _ => (server_counts(best), best, false),
-    }
+    (held.overlay.unwrap_or_else(|| server_counts(held.version)), held.version, held.mine)
 }
 
 struct Pending {
@@ -155,6 +202,7 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                     Snap::Absent | Snap::Bare => Reactions::default(),
                     Snap::Versionless => Reactions { counts: junk(), mine: None, version: None },
                     Snap::At(v) => Reactions { counts: server_counts(v), mine: None, version: Some(v) },
+                    Snap::AtMine(v) => Reactions { counts: server_counts(v), mine: Some(FIRE), version: Some(v) },
                 };
                 let known_newest = engine.db(engine.cache.newest_ts(&id("a"))).flatten();
                 pending[k] = Some(Pending { mark: engine.live_seq, known_newest, snapshot });
@@ -175,6 +223,8 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                 let update = match case.pushes[i] {
                     Push::Absent | Push::Versionless => ReactionsUpdate { counts: junk(), version: None, mine: None },
                     Push::At(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: None },
+                    Push::AtMine(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: Some(Some(FIRE)) },
+                    Push::AtClear(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: Some(None) },
                 };
                 engine.handle_live(LiveEvent::ReactionsChanged { chat: id("a"), timestamp: TS, update });
             }
@@ -198,16 +248,15 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
             }
         }
         let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().unwrap();
-        let (want_counts, want_version, own_on) = expected(case, &order[..=at]);
+        let (want_counts, want_version, want_mine) = expected(case, &order[..=at]);
         let ok = held.reactions.counts == want_counts
             && held.reactions.version == Some(want_version)
-            && held.reactions.mine.is_none_or(|m| held.reactions.counts.iter().any(|c| c.code == m))
-            && (!own_on || held.reactions.mine == Some(FIRE))
+            && held.reactions.mine == want_mine
             && held.edited == edited
             && delivered.is_none_or(|()| chunk_row.as_ref().is_none_or(|row| row.reactions == held.reactions && row.body == held.body));
         if !ok {
             return Err(format!(
-                "{case:?}\nafter step {at} of {order:?}\nheld {:?} body {:?} edited {}\nwant counts {want_counts:?} version {want_version} own {own_on}\nchunk row {chunk_row:?}",
+                "{case:?}\nafter step {at} of {order:?}\nheld {:?} body {:?} edited {}\nwant counts {want_counts:?} version {want_version} mine {want_mine:?}\nchunk row {chunk_row:?}",
                 held.reactions, held.body, held.edited
             ));
         }
@@ -327,6 +376,30 @@ fn every_interleaving_without_the_users_own_reaction() {
     });
 }
 
+/// `mine` follows delivery order: v6 saying FIRE then v7 saying nothing keeps FIRE, v7 then v6
+/// keeps the start's LIKE; a push clearing it, and the user's choice over either, are exact too.
+#[test]
+fn every_interleaving_of_input_that_says_or_does_not_say_mine() {
+    check_every_interleaving(Case {
+        snaps: [Snap::Absent; 2],
+        pushes: [Push::AtMine(6), Push::At(7)],
+        edit: false,
+        own: Own::Off,
+    });
+    check_every_interleaving(Case {
+        snaps: [Snap::AtMine(6), Snap::Absent],
+        pushes: [Push::AtClear(6), Push::At(7)],
+        edit: true,
+        own: Own::Confirmed,
+    });
+    check_every_interleaving(Case {
+        snaps: [Snap::At(7), Snap::AtMine(6)],
+        pushes: [Push::AtMine(6), Push::AtClear(7)],
+        edit: false,
+        own: Own::Confirmed,
+    });
+}
+
 #[test]
 fn random_inputs_in_random_orders() {
     let mut state = 0x9E37_79B9_7F4A_7C15_u64;
@@ -336,14 +409,18 @@ fn random_inputs_in_random_orders() {
         state ^= state << 17;
         (state % n as u64) as usize
     };
-    let snap = |n: usize| [Snap::Bare, Snap::Versionless, Snap::At(4), Snap::At(5), Snap::At(6), Snap::At(7)][n];
-    let push = |n: usize| [Push::Versionless, Push::At(4), Push::At(5), Push::At(6), Push::At(7)][n];
+    let snap = |n: usize| {
+        [Snap::Bare, Snap::Versionless, Snap::At(4), Snap::At(5), Snap::At(6), Snap::At(7), Snap::AtMine(6), Snap::AtMine(7)][n]
+    };
+    let push = |n: usize| {
+        [Push::Versionless, Push::At(4), Push::At(5), Push::At(6), Push::At(7), Push::AtMine(6), Push::AtMine(7), Push::AtClear(6), Push::AtClear(7)][n]
+    };
     let rt = runtime();
     let _enter = rt.enter();
     for _ in 0..4000 {
         let case = Case {
-            snaps: [snap(next(6)), snap(next(6))],
-            pushes: [push(next(5)), push(next(5))],
+            snaps: [snap(next(8)), snap(next(8))],
+            pushes: [push(next(9)), push(next(9))],
             edit: next(2) == 1,
             own: [Own::Off, Own::Confirmed, Own::Refused][next(3)],
         };
