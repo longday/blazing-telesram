@@ -58,10 +58,10 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
 | 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
 | 1.4 | done (gs/1.4 merge; `WireSearchChat.kind` is only `Channel` or `Group`: no private-chat marker, so `PersonHit::chat` comes only from the guid map of 3.1) | 1.3 | GS-P3 |
-| 2.1 | done on `integ/gs` (5798ec9, withdrawn patch; re-apply on `main`) | — | GS-A |
-| 2.2 | blocked-by MD-C (core lane); unit GS-A | 2.1 | GS-A |
-| 3.1 | blocked-by MD-C (core lane) | 1.4, 2.1 | GS-A |
-| 3.2 | blocked-by MD-C (core lane) | 2.1 | GS-A |
+| 2.1 | done on `integ/gs` (323a61a: 2.1 re-applied on `main` ef9c32f); desktop intentionally does not compile on the branch until 3.1 and 3.2 | — | GS-A |
+| 2.2 | ready (from `integ/gs`; chat-core `client.rs`) | 2.1 | GS-A |
+| 3.1 | ready (from `integ/gs`; `yandex_backend.rs`) | 1.4, 2.1 | GS-A |
+| 3.2 | ready (from `integ/gs`; `store.rs`) | 2.1 | GS-A |
 | 3.3 | blocked-by 3.2 | 3.2 | GS-A |
 | 3.4 | blocked-by 3.3 | 3.2, 3.3 | GS-A |
 | 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
@@ -131,7 +131,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A (GS 2.1 re-applied from `integ/gs`, then 2.2, 3.1, 3.2, 3.3, 3.4, 3.5): all gates met (GS 1.4, MD-C and `md/4.3-fit` on `main`), core lane free. First `tests.rs` owner of the lane: it also fixes the pre-existing `reversed_empty_ranges` clippy error (task 3.5).
+- GS-A is in flight on `integ/gs` (head 323a61a: GS 2.1 on top of `main` ef9c32f; next 2.2, 3.1, 3.2, 3.5 in parallel on disjoint files, then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. It also fixes the pre-existing `reversed_empty_ranges` clippy error (task 3.5).
 - MD 5.2 [live, manual] (`main` build; owns no files).
 - CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
