@@ -43,10 +43,28 @@ fn backend_error(error: ProtoError) -> BackendError {
         ProtoError::Network(e) => BackendError::Network(e),
         ProtoError::Protocol(e) => BackendError::Protocol(e),
         ProtoError::NotFound => BackendError::NotFound,
-        // Placeholder until `BackendError::Storage` exists (tasks 2.1/3.1).
-        ProtoError::Storage(e) => BackendError::Protocol(format!("local write failed: {e}")),
+        ProtoError::Storage(e) => BackendError::Storage(e),
         ProtoError::Commit { status, name, permanent } => {
             BackendError::Rejected { reason: format!("{name} ({status})"), permanent }
+        }
+    }
+}
+
+/// What `fetch_media` loads into memory: avatars and previews. Originals are streamed by `download`.
+fn fetch_target(media: &MediaRef) -> Result<MediaTarget, BackendError> {
+    match media.kind {
+        MediaKind::Avatar => Ok(MediaTarget::Avatar { id: media.id.clone(), size: AvatarSize::Small }),
+        MediaKind::Thumbnail => Ok(MediaTarget::Thumbnail { file_id: media.id.clone() }),
+        MediaKind::File => Err(BackendError::Protocol("originals are not fetched into memory; they go through download".into())),
+    }
+}
+
+/// What `download` streams: only the original of a file or image (`MediaKind::File`).
+fn download_target(media: &MediaRef) -> Result<MediaTarget, BackendError> {
+    match media.kind {
+        MediaKind::File => Ok(MediaTarget::Original { file_id: media.id.clone() }),
+        MediaKind::Avatar | MediaKind::Thumbnail => {
+            Err(BackendError::Protocol("only originals (MediaKind::File) can be downloaded".into()))
         }
     }
 }
@@ -152,22 +170,20 @@ impl Backend for YandexBackend {
     }
 
     async fn fetch_media(&self, media: &MediaRef) -> Result<Vec<u8>, BackendError> {
+        let target = fetch_target(media)?;
         let (client, _) = self.client()?;
-        let target = match media.kind {
-            MediaKind::Avatar => MediaTarget::Avatar { id: media.id.clone(), size: AvatarSize::Small },
-            MediaKind::Thumbnail => MediaTarget::Thumbnail { file_id: media.id.clone() },
-            MediaKind::File => return Err(BackendError::Protocol("file download is not supported yet".into())),
-        };
         client.fetch_media(&target).await.map_err(backend_error)
     }
 
     async fn download(
         &self,
-        _media: &MediaRef,
-        _out: &mut (dyn Write + Send),
-        _progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+        media: &MediaRef,
+        out: &mut (dyn Write + Send),
+        progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     ) -> Result<u64, BackendError> {
-        Err(BackendError::Protocol("download is not wired yet".into()))
+        let target = download_target(media)?;
+        let (client, _) = self.client()?;
+        client.download_media(&target, out, progress).await.map_err(backend_error)
     }
 
     async fn subscribe(&self) -> Result<async_channel::Receiver<LiveEvent>, BackendError> {
@@ -701,6 +717,31 @@ mod tests {
         let Some(LiveEvent::Typing { timeout, .. }) = typing("u1", None, Some(0)) else { panic!("typing") };
         assert_eq!(timeout, TYPING_LIFETIME);
         assert!(typing("me", None, None).is_none());
+    }
+
+    #[test]
+    fn backend_error_maps_a_local_write_failure_to_storage() {
+        assert_eq!(backend_error(ProtoError::Storage("storage full".into())), BackendError::Storage("storage full".into()));
+        assert_eq!(backend_error(ProtoError::NotFound), BackendError::NotFound);
+    }
+
+    #[test]
+    fn download_targets_an_original_and_fetch_keeps_refusing_one() {
+        let media = |kind| MediaRef { id: "b/1".into(), kind };
+        assert_eq!(download_target(&media(MediaKind::File)), Ok(MediaTarget::Original { file_id: "b/1".into() }));
+        assert!(matches!(download_target(&media(MediaKind::Thumbnail)), Err(BackendError::Protocol(_))));
+        assert!(matches!(download_target(&media(MediaKind::Avatar)), Err(BackendError::Protocol(_))));
+
+        assert_eq!(
+            fetch_target(&media(MediaKind::Thumbnail)),
+            Ok(MediaTarget::Thumbnail { file_id: "b/1".into() })
+        );
+        assert_eq!(
+            fetch_target(&media(MediaKind::Avatar)),
+            Ok(MediaTarget::Avatar { id: "b/1".into(), size: AvatarSize::Small })
+        );
+        let Err(BackendError::Protocol(message)) = fetch_target(&media(MediaKind::File)) else { panic!("file must be refused") };
+        assert!(message.contains("download"), "{message}");
     }
 
     #[test]

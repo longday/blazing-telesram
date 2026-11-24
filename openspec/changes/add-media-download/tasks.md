@@ -21,7 +21,7 @@ Waves: **A** (parallel): 1.1, 2.1, 2.2, 5.1 · **B** (parallel, after A): 1.2, 2
 
 ## 3. Desktop backend (`crates/desktop/src/yandex_backend.rs`)
 
-- [ ] 3.1 `YandexBackend::download`. Owns the `download` hunk and `backend_error` in `yandex_backend.rs`. Map `MediaRef { kind: File }` to `MediaTarget::Original`, call `Client::download_media`, map `ProtoError::Storage` to `BackendError::Storage` in `backend_error`; `fetch_media` keeps refusing `MediaKind::File` with a message that says originals go through `download`. Tests: `backend_error(ProtoError::Storage(..))`, the `File` → `Original` target mapping (extract it as a small pure function), and `fetch_media` still refusing `File`. Depends on 1.1 and 2.1.
+- [x] 3.1 `YandexBackend::download`. Owns the `download` hunk and `backend_error` in `yandex_backend.rs`. Map `MediaRef { kind: File }` to `MediaTarget::Original`, call `Client::download_media`, map `ProtoError::Storage` to `BackendError::Storage` in `backend_error`; `fetch_media` keeps refusing `MediaKind::File` with a message that says originals go through `download`. Tests: `backend_error(ProtoError::Storage(..))`, the `File` → `Original` target mapping (extract it as a small pure function), and `fetch_media` still refusing `File`. Depends on 1.1 and 2.1.
 
 ## 4. Desktop UI (`crates/desktop`)
 
