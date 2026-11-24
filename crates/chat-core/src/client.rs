@@ -61,10 +61,6 @@ enum LiveChange {
     Upsert { message: Message, supplied: Reactions },
     Delete(MessageTs),
     Reactions(MessageTs, ReactionsUpdate),
-    /// The cache changed in a way it already holds (a reaction state it merged itself, or the
-    /// rows another history request stored). Nothing to replay: the request that started
-    /// earlier only learns that the chat moved on, so it keeps what is newer than its own rows.
-    Touched,
 }
 
 #[derive(Clone, Debug)]
@@ -218,6 +214,8 @@ struct Engine<B> {
     /// Counts live message events; `live_log` keeps each chat's recent changes with their count.
     live_seq: u64,
     live_log: HashMap<ChatId, VecDeque<(u64, LiveChange)>>,
+    /// The count of the last change to each chat's cache, replayable or not.
+    touched: HashMap<ChatId, u64>,
     media_inflight: HashSet<MediaRef>,
     /// Requested while we could not fetch; started once online.
     media_deferred: Vec<MediaRef>,
@@ -507,6 +505,7 @@ impl<B: Backend> Engine<B> {
             open_chat: None,
             live_seq: 0,
             live_log: HashMap::new(),
+            touched: HashMap::new(),
             media_inflight: HashSet::new(),
             media_deferred: Vec::new(),
             media_missing: HashMap::new(),
@@ -770,6 +769,7 @@ impl<B: Backend> Engine<B> {
         self.account = account;
         self.open_chat = None;
         self.live_log.clear();
+        self.touched.clear();
         self.reaction_inflight.clear();
         self.members_inflight.clear();
         self.profile_inflight = false;
@@ -820,14 +820,13 @@ impl<B: Backend> Engine<B> {
             LiveEvent::ReactionsChanged { chat, timestamp, update } => {
                 // The cache is where states are merged (`Reactions::apply`); a history request
                 // that started earlier merges its snapshot into it (`store_chunk`), so a cached
-                // message's update is only marked as a change (`LiveChange::Touched`: it bounds
-                // what such a request may replace, it replays nothing). An uncached message has
-                // no state to merge into: the update is logged for the request that will insert
-                // its row.
+                // message's update is only noted as a change (`touch`: it bounds what such a
+                // request may replace, it replays nothing). An uncached message has no state to
+                // merge into: the update is logged for the request that will insert its row.
                 let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
                     return self.record_live(&chat, LiveChange::Reactions(timestamp, update));
                 };
-                self.record_live(&chat, LiveChange::Touched);
+                self.touch(&chat);
                 if message.reactions.apply(&update) {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
@@ -880,13 +879,22 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    /// Journals a change a history request that started earlier must replay.
     fn record_live(&mut self, chat: &ChatId, change: LiveChange) {
-        self.live_seq += 1;
+        self.touch(chat);
         let log = self.live_log.entry(chat.clone()).or_default();
         if log.len() == LIVE_LOG_CAP {
             log.pop_front();
         }
         log.push_back((self.live_seq, change));
+    }
+
+    /// Notes that the chat's cache changed, for the bounds of requests that started earlier
+    /// (`store_chunk`). Kept apart from `live_log`: a change the cache already holds needs no
+    /// replay and must not push a real entry out of the capped log.
+    fn touch(&mut self, chat: &ChatId) {
+        self.live_seq += 1;
+        self.touched.insert(chat.clone(), self.live_seq);
     }
 
     /// Keeps the row preview and unread counter current even when the backend only forwards
@@ -1201,7 +1209,7 @@ impl<B: Backend> Engine<B> {
                     let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
                     if message.reactions.overlay_own(&overlay) {
                         self.db(self.cache.upsert_message(&message));
-                        self.record_live(&chat, LiveChange::Touched);
+                        self.touch(&chat);
                     }
                 }
                 Action::React { .. } => {}
@@ -1616,7 +1624,8 @@ impl<B: Backend> Engine<B> {
                 // after the chunk then. An empty snapshot vouches only for what was cached when
                 // the request started (`known_newest`); everything cached above that arrived
                 // live meanwhile and is kept, even when the capped live log forgot it.
-                let hi = if raced.is_empty() { None } else { max.or(known_newest).or(Some(MessageTs::MIN)) };
+                let moved = self.touched.get(chat).is_some_and(|seq| *seq > mark);
+                let hi = if raced.is_empty() && !moved { None } else { max.or(known_newest).or(Some(MessageTs::MIN)) };
                 if chunk.reached_start {
                     (None, hi, Some(true))
                 } else if known_newest.is_none_or(|newest| newest >= min.unwrap_or(MessageTs::MAX)) {
@@ -1650,7 +1659,7 @@ impl<B: Backend> Engine<B> {
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
         // Requests that started before this one must not take what it stored for stale.
-        self.record_live(chat, LiveChange::Touched);
+        self.touch(chat);
         chunk.replaces = Some((lo, hi));
         chunk
     }
@@ -3664,6 +3673,45 @@ mod tests {
         assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), expected.clone()));
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
         assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), expected));
+    }
+
+    /// Rejected pushes for a cached message replay nothing and must not push the edit, which does,
+    /// out of the capped live log.
+    #[test]
+    fn rejected_reaction_pushes_do_not_push_an_edit_out_of_the_replay_log() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let history = hold_next_history(&h, reacted());
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        h.upserted("edit");
+        for _ in 0..LIVE_LOG_CAP + 4 {
+            h.fake.push(reaction_push(3, &[(LIKE, 1)], 4));
+        }
+        h.quiet();
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = chunk.messages.iter().find(|m| m.timestamp == 3).expect("message 3");
+        assert_eq!(row.body, MessageBody::Text("hi!".into()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!(cached.body, MessageBody::Text("hi!".into()));
+    }
+
+    /// The same flood must not make a request forget that the chat moved on: what arrived live
+    /// above its rows stays even when the log no longer holds it.
+    #[test]
+    fn rejected_reaction_pushes_do_not_make_a_history_request_drop_a_newer_live_message() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let history = hold_next_history(&h, reacted());
+        h.fake.push(LiveEvent::MessageUpserted(msg("a", 4, "four")));
+        h.upserted("newer message");
+        for _ in 0..LIVE_LOG_CAP + 4 {
+            h.fake.push(reaction_push(3, &[(LIKE, 1)], 4));
+        }
+        h.quiet();
+        history.notify_one();
+        h.history("raced history");
+        assert!(h.cache().message(&id("a"), 4).unwrap().is_some(), "the live message must stay");
     }
 
     /// Opens chat "a" online with `snapshot` as the server's answer: the fetch takes it now and
