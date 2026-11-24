@@ -170,9 +170,11 @@ pub struct Message {
 
 impl Message {
     /// Keeps the reactions already known for this message when the incoming copy carries no
-    /// reaction state at all (an edit push, a history row without reactions).
+    /// reaction state at all (an edit push, a history row without reactions) or an older
+    /// version than the known one (a snapshot taken before the known state arrived).
     pub fn inherit_reactions(&mut self, cached: &Message) {
-        if self.reactions.counts.is_empty() && self.reactions.version.is_none() {
+        let bare = self.reactions.counts.is_empty() && self.reactions.version.is_none();
+        if bare || self.reactions.is_older_than(&cached.reactions) {
             self.reactions.clone_from(&cached.reactions);
         }
     }
@@ -460,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn inherit_reactions_copies_only_when_the_incoming_copy_has_no_reaction_state() {
+    fn inherit_reactions_copies_only_for_a_bare_or_older_incoming_copy() {
         let cached = reacted(&[(1, 2)], Some(1), Some(4));
         let mut bare = crate::fixtures::msg("0/0/c", 1, "edited");
         bare.inherit_reactions(&cached);
@@ -473,5 +475,13 @@ mod tests {
         let mut with_version = reacted(&[], None, Some(5));
         with_version.inherit_reactions(&cached);
         assert_eq!(with_version.reactions, reacted(&[], None, Some(5)).reactions);
+
+        // A copy older than the cached state is a stale snapshot; an equal or newer one wins.
+        let mut older = reacted(&[(2, 1)], None, Some(3));
+        older.inherit_reactions(&cached);
+        assert_eq!(older.reactions, cached.reactions);
+        let mut equal = reacted(&[(2, 1)], None, Some(4));
+        equal.inherit_reactions(&cached);
+        assert_eq!(equal.reactions, reacted(&[(2, 1)], None, Some(4)).reactions);
     }
 }

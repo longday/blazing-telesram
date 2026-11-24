@@ -87,6 +87,24 @@ impl Reactions {
         changed
     }
 
+    /// Whether both versions are known and this state's is the lower one. Versions order two
+    /// states only then; otherwise the later change wins, as in [`Reactions::apply`].
+    pub fn is_older_than(&self, other: &Reactions) -> bool {
+        matches!((self.version, other.version), (Some(mine), Some(theirs)) if mine < theirs)
+    }
+
+    /// Puts the user's own change `own` (built on the server state of its version) over `self`,
+    /// the state the server told since or before: the server's state stays when its version is
+    /// newer than the one the change was built on, so a change survives older and equal
+    /// snapshots only. Returns whether anything changed.
+    pub fn overlay_own(&mut self, own: &Reactions) -> bool {
+        if own.is_older_than(self) || self == own {
+            return false;
+        }
+        self.clone_from(own);
+        true
+    }
+
     /// The state the user's choice of `code` leads to, and the reaction to ask the server for
     /// (`None` removes). Choosing the own type again removes it; any other type replaces the
     /// own one. The version is kept, so a newer push overwrites the overlay.
@@ -190,6 +208,36 @@ mod tests {
         let mut r = state(&[(1, 1)], Some(1), Some(2));
         assert!(!r.apply(&update(&[(1, 1)], None, None)));
         assert!(!r.apply(&update(&[(1, 1)], None, Some(Some(1)))));
+    }
+
+    #[test]
+    fn versions_order_two_states_only_when_both_are_known() {
+        let at = |version| state(&[], None, version);
+        assert!(at(Some(4)).is_older_than(&at(Some(5))));
+        assert!(!at(Some(5)).is_older_than(&at(Some(5))));
+        assert!(!at(Some(6)).is_older_than(&at(Some(5))));
+        assert!(!at(None).is_older_than(&at(Some(5))));
+        assert!(!at(Some(4)).is_older_than(&at(None)));
+    }
+
+    #[test]
+    fn overlay_own_replaces_an_older_or_equal_server_state() {
+        let own = state(&[(1, 2), (2, 1)], Some(2), Some(5));
+        for held in [state(&[(1, 2)], None, Some(5)), state(&[(1, 1)], None, Some(4)), state(&[], None, None)] {
+            let mut r = held;
+            assert!(r.overlay_own(&own));
+            assert_eq!(r, own);
+        }
+        let mut same = own.clone();
+        assert!(!same.overlay_own(&own), "nothing changes for the same state");
+    }
+
+    #[test]
+    fn overlay_own_leaves_a_newer_server_state_alone() {
+        let newer = state(&[(1, 3)], None, Some(7));
+        let mut r = newer.clone();
+        assert!(!r.overlay_own(&state(&[(1, 2), (2, 1)], Some(2), Some(5))));
+        assert_eq!(r, newer);
     }
 
     #[test]

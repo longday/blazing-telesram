@@ -37,6 +37,11 @@ A message SHALL show the reactions the client has been told about: reaction upda
 - **WHEN** it is edited and the edit carries no reaction state
 - **THEN** the new text appears and the chips stay
 
+#### Scenario: Edit while history loads newer reactions
+- **GIVEN** a message shows reactions and a history request for its chat is in flight
+- **WHEN** it is edited, the edit carries no reaction state, and the history answer carries newer reactions for it
+- **THEN** the new text and the newer reactions are shown
+
 #### Scenario: Update for a message that is not loaded
 - **WHEN** a reaction update arrives for a message the client has not loaded or cached
 - **THEN** nothing is shown for it and no error appears
@@ -117,3 +122,16 @@ A reaction update SHALL replace the message's known reactions only when its vers
 - **GIVEN** the user's reaction on a message is unconfirmed
 - **WHEN** a newer update for that message arrives
 - **THEN** the chips show the update and the unconfirmed state is dropped
+
+### Requirement: History does not undo newer reaction state
+A history row SHALL NOT replace known reactions of a newer version. The user's confirmed choice SHALL survive a history row of the same or an older version and SHALL NOT replace a newer state, whichever of the two finishes first.
+
+#### Scenario: History snapshot older than a confirmed choice
+- **GIVEN** a history request was started before the user's reaction on a message was confirmed
+- **WHEN** its answer, which does not contain the choice, arrives after the confirmation
+- **THEN** the chips keep the confirmed choice
+
+#### Scenario: Newer history state during an own request
+- **GIVEN** the user's reaction on a message is unconfirmed and history delivers a newer version of its reactions
+- **WHEN** the request is confirmed
+- **THEN** the chips keep the newer state from history
