@@ -5,6 +5,7 @@ pub mod client;
 pub mod error;
 pub mod frame;
 pub mod log;
+pub mod manage;
 pub mod media;
 mod net;
 pub mod registry;
@@ -21,4 +22,5 @@ pub mod xiva;
 
 pub use client::{Client, ClientConfig};
 pub use error::ProtoError;
+pub use manage::{MANAGE_METHODS, ManageError, ManageRequest, created_chat_id};
 pub use net::HttpSettings;
