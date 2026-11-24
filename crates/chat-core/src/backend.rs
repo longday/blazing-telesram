@@ -3,6 +3,7 @@
 //! actions listed on the trait.
 
 use crate::model::{ChatId, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, ReplyTarget, UserId};
+use std::io::Write;
 use std::time::Duration;
 
 /// Error strings must never contain cookie or token values.
@@ -22,6 +23,9 @@ pub enum BackendError {
     /// permission, unknown chat); otherwise it may succeed later (throttling, overload).
     #[error("rejected: {reason}")]
     Rejected { reason: String, permanent: bool },
+    /// A local write failed while saving a download (disk full, folder gone).
+    #[error("storage error: {0}")]
+    Storage(String),
 }
 
 /// What a subscription delivers. The backend owns reconnection of its live connection and
@@ -62,6 +66,16 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<HistoryChunk, BackendError>> + Send;
 
     fn fetch_media(&self, media: &MediaRef) -> impl Future<Output = Result<Vec<u8>, BackendError>> + Send;
+
+    /// Streams the original file `media` (kind `File`) into `out` without buffering it and
+    /// returns the byte count. `progress(received, total)` is called as bytes arrive; `total`
+    /// is the announced length when there is one. A failed write on `out` is `Storage`.
+    fn download(
+        &self,
+        media: &MediaRef,
+        out: &mut (dyn Write + Send),
+        progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    ) -> impl Future<Output = Result<u64, BackendError>> + Send;
 
     /// Opens the live stream. The channel closing means the connection is gone for good.
     fn subscribe(&self) -> impl Future<Output = Result<async_channel::Receiver<LiveEvent>, BackendError>> + Send;

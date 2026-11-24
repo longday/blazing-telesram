@@ -3,6 +3,7 @@
 use bt_chat_core::model::*;
 use bt_chat_core::{Backend, BackendError, LiveEvent};
 use std::collections::HashMap;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use yandex_proto::bootstrap::bootstrap;
@@ -158,6 +159,15 @@ impl Backend for YandexBackend {
             MediaKind::File => return Err(BackendError::Protocol("file download is not supported yet".into())),
         };
         client.fetch_media(&target).await.map_err(backend_error)
+    }
+
+    async fn download(
+        &self,
+        _media: &MediaRef,
+        _out: &mut (dyn Write + Send),
+        _progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    ) -> Result<u64, BackendError> {
+        Err(BackendError::Protocol("download is not wired yet".into()))
     }
 
     async fn subscribe(&self) -> Result<async_channel::Receiver<LiveEvent>, BackendError> {
@@ -357,7 +367,9 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
 fn preview(body: &MessageBody) -> String {
     match body {
         MessageBody::Text(text) => text.clone(),
-        MessageBody::Image { caption, .. } => caption.clone().unwrap_or_else(|| "Фото".into()),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+            caption.clone().unwrap_or_else(|| "Фото".into())
+        }
         MessageBody::File { name, .. } => name.clone(),
         MessageBody::Deleted => "Сообщение удалено".into(),
         MessageBody::Unsupported(kind) => format!("[{kind}]"),
@@ -368,10 +380,10 @@ fn body(wire: &WireBody) -> MessageBody {
     match wire {
         WireBody::Text(text) => MessageBody::Text(text.clone()),
         WireBody::Image(image) => image_body(image, None),
-        WireBody::Gallery { items, text } => match items.first() {
-            Some(first) => image_body(first, text.clone()),
-            None => MessageBody::Text(text.clone().unwrap_or_default()),
-        },
+        WireBody::Gallery { items, text } if items.is_empty() => MessageBody::Text(text.clone().unwrap_or_default()),
+        WireBody::Gallery { items, text } => {
+            MessageBody::Gallery { items: items.iter().map(gallery_item).collect(), caption: text.clone() }
+        }
         WireBody::File(file) => MessageBody::File {
             media: MediaRef { id: file.id.clone(), kind: MediaKind::File },
             name: file.name.clone().unwrap_or_else(|| "Файл".into()),
@@ -388,12 +400,21 @@ fn body(wire: &WireBody) -> MessageBody {
     }
 }
 
+fn thumbnail_ref(image: &yandex_proto::wire::WireImage) -> MediaRef {
+    MediaRef { id: image.file.id.clone(), kind: MediaKind::Thumbnail }
+}
+
+fn gallery_item(image: &yandex_proto::wire::WireImage) -> GalleryItem {
+    GalleryItem { media: thumbnail_ref(image), width: image.width, height: image.height, name: image.file.name.clone() }
+}
+
 fn image_body(image: &yandex_proto::wire::WireImage, caption: Option<String>) -> MessageBody {
     MessageBody::Image {
-        media: MediaRef { id: image.file.id.clone(), kind: MediaKind::Thumbnail },
+        media: thumbnail_ref(image),
         width: image.width,
         height: image.height,
         caption,
+        name: image.file.name.clone(),
     }
 }
 
@@ -690,9 +711,47 @@ mod tests {
             MessageBody::File { media: MediaRef { id: "b/1".into(), kind: MediaKind::File }, name: "a.pdf".into(), size: 42 }
         );
         let image = yandex_proto::wire::WireImage { file, width: 4, height: 3, animated: false };
-        assert!(matches!(body(&WireBody::Image(image)), MessageBody::Image { width: 4, height: 3, .. }));
+        assert_eq!(
+            body(&WireBody::Image(image)),
+            MessageBody::Image {
+                media: MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail },
+                width: 4,
+                height: 3,
+                caption: None,
+                name: Some("a.pdf".into()),
+            }
+        );
         assert_eq!(body(&WireBody::Other("Foo".into())), MessageBody::Unsupported("Foo".into()));
         assert_eq!(body(&WireBody::Deleted), MessageBody::Deleted);
+    }
+
+    #[test]
+    fn a_wire_gallery_keeps_every_item_with_its_name_and_an_empty_one_is_text() {
+        let wire_image = |id: &str, name: Option<&str>, width| yandex_proto::wire::WireImage {
+            file: WireFile { id: id.into(), name: name.map(Into::into), size: None },
+            width,
+            height: 3,
+            animated: false,
+        };
+        let items = vec![wire_image("b/1", Some("a.jpg"), 4), wire_image("b/2", None, 5), wire_image("b/3", Some("c.png"), 6)];
+        let MessageBody::Gallery { items, caption } = body(&WireBody::Gallery { items, text: Some("отпуск".into()) }) else {
+            panic!("gallery")
+        };
+        assert_eq!(caption.as_deref(), Some("отпуск"));
+        let summary: Vec<_> = items.iter().map(|i| (i.media.id.as_str(), i.media.kind, i.width, i.name.as_deref())).collect();
+        assert_eq!(
+            summary,
+            [
+                ("b/1", MediaKind::Thumbnail, 4, Some("a.jpg")),
+                ("b/2", MediaKind::Thumbnail, 5, None),
+                ("b/3", MediaKind::Thumbnail, 6, Some("c.png")),
+            ]
+        );
+        assert_eq!(
+            body(&WireBody::Gallery { items: Vec::new(), text: Some("t".into()) }),
+            MessageBody::Text("t".into())
+        );
+        assert_eq!(body(&WireBody::Gallery { items: Vec::new(), text: None }), MessageBody::Text(String::new()));
     }
 
     #[test]

@@ -131,7 +131,7 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
 fn copy_text(m: &Message) -> Option<&str> {
     match &m.body {
         MessageBody::Text(text) => Some(text),
-        MessageBody::Image { caption, .. } => caption.as_deref(),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => caption.as_deref(),
         MessageBody::File { name, .. } => Some(name),
         MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
@@ -140,7 +140,7 @@ fn copy_text(m: &Message) -> Option<&str> {
 fn quote_text(m: &Message) -> String {
     let text = match &m.body {
         MessageBody::Text(text) => text.as_str(),
-        MessageBody::Image { caption, .. } => caption.as_deref().unwrap_or("Фото"),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => caption.as_deref().unwrap_or("Фото"),
         MessageBody::File { name, .. } => name,
         MessageBody::Deleted | MessageBody::Unsupported(_) => "",
     };
