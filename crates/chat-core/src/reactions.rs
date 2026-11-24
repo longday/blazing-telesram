@@ -62,29 +62,33 @@ pub fn emoji(code: ReactionCode) -> Option<&'static str> {
     KNOWN.iter().find(|known| known.code == code).map(|known| known.emoji)
 }
 
+// The reaction state of a message is kept by one rule (design D5, "Invariant"). States are
+// ordered by `version`, a missing version ranking below every version: the higher one wins and
+// a state never replaces a higher one. Input without a version is therefore applied only while
+// no version is held, and a state never takes a version its input did not carry. At the same
+// version two states are the same server state, so the held one stays, except for the user's own
+// confirmed choice, which is built on that version and survives it. Every way a state can enter
+// (push, history row, edit copy, confirmed own choice) goes through `accept`.
 impl Reactions {
-    /// Applies the server's state. An update whose version is not newer than the held one is
-    /// stale and ignored. Otherwise the counts are replaced, the version follows the update
-    /// (kept when it has none), `mine` follows the update when it says one, and `mine` is
-    /// dropped when its type has no count left. Returns whether anything changed.
+    /// Applies the server's state from a push (see the rule above). `mine` follows the update
+    /// when it says one and is dropped when its type has no count left. Returns whether
+    /// anything changed.
     pub fn apply(&mut self, update: &ReactionsUpdate) -> bool {
-        if let (Some(held), Some(new)) = (self.version, update.version)
-            && new <= held
-        {
-            return false;
-        }
-        let mine = update
-            .mine
-            .unwrap_or(self.mine)
-            .filter(|code| update.counts.iter().any(|count| count.code == *code));
-        let version = update.version.or(self.version);
-        let changed = self.counts != update.counts || self.mine != mine || self.version != version;
-        if changed {
-            self.counts.clone_from(&update.counts);
-            self.mine = mine;
-            self.version = version;
-        }
-        changed
+        self.accept(&update.counts, update.version, update.mine, false)
+    }
+
+    /// Merges a state read from the server or the cache (a history row, an edit copy): what
+    /// [`Reactions::apply`] does for a push that does not say `mine`. A state that carries no
+    /// reactions and no version ([`Reactions::is_unknown`]) says nothing and changes nothing.
+    pub fn merge(&mut self, incoming: &Reactions) -> bool {
+        !incoming.is_unknown() && self.accept(&incoming.counts, incoming.version, incoming.mine.map(Some), false)
+    }
+
+    /// Puts the user's own confirmed choice `own` (built on the server state of its version) over
+    /// `self`: it survives the state of its base version and any lower one, never a higher one.
+    /// Returns whether anything changed.
+    pub fn overlay_own(&mut self, own: &Reactions) -> bool {
+        self.accept(&own.counts, own.version, Some(own.mine), true)
     }
 
     /// Whether this carries no reaction state at all: no counts and no version (an edit push, a
@@ -93,35 +97,31 @@ impl Reactions {
         self.counts.is_empty() && self.version.is_none()
     }
 
-    /// Whether both versions are known and this state's is the lower one. Versions order two
-    /// states only then; otherwise the later change wins, as in [`Reactions::apply`].
-    pub fn is_older_than(&self, other: &Reactions) -> bool {
-        matches!((self.version, other.version), (Some(mine), Some(theirs)) if mine < theirs)
-    }
-
-    /// Fills in what a state rebuilt from the changes alone (a bare snapshot row with live
-    /// changes replayed onto it) could not learn, from `held`, the state the cache reached by
-    /// applying the same changes: the version when it has none, and, when both are then the same
-    /// server state, the own reaction, which updates need not say.
-    pub fn adopt_unsaid(&mut self, held: &Reactions) {
-        if self.version.is_none() {
-            self.version = held.version;
-        }
-        if self.mine.is_none() && self.version == held.version {
-            self.mine = held.mine.filter(|code| self.counts.iter().any(|count| count.code == *code));
-        }
-    }
-
-    /// Puts the user's own change `own` (built on the server state of its version) over `self`,
-    /// the state the server told since or before: the server's state stays when its version is
-    /// newer than the one the change was built on, so a change survives older and equal
-    /// snapshots only. Returns whether anything changed.
-    pub fn overlay_own(&mut self, own: &Reactions) -> bool {
-        if own.is_older_than(self) || self == own {
+    /// The one merge. `mine`: `None` when the input does not say, else the account's reaction.
+    fn accept(
+        &mut self,
+        counts: &[ReactionCount],
+        version: Option<i64>,
+        mine: Option<Option<ReactionCode>>,
+        own: bool,
+    ) -> bool {
+        let wins = match (self.version, version) {
+            (Some(held), Some(new)) => new > held || (new == held && own),
+            (None, Some(_)) => true,
+            (held, None) => held.is_none(),
+        };
+        if !wins {
             return false;
         }
-        self.clone_from(own);
-        true
+        let mine = mine.unwrap_or(self.mine).filter(|code| counts.iter().any(|count| count.code == *code));
+        let changed = self.counts != counts || self.mine != mine || self.version != version;
+        if changed {
+            self.counts.clear();
+            self.counts.extend_from_slice(counts);
+            self.mine = mine;
+            self.version = version;
+        }
+        changed
     }
 
     /// The state the user's choice of `code` leads to, and the reaction to ask the server for
@@ -187,13 +187,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_takes_a_versionless_update_and_keeps_the_held_version() {
-        let mut r = state(&[(1, 2)], None, Some(5));
-        assert!(r.apply(&update(&[(1, 3)], None, None)));
-        assert_eq!(r, state(&[(1, 3)], None, Some(5)));
+    fn apply_takes_the_version_of_the_update() {
         let mut unversioned = state(&[(1, 2)], None, None);
         assert!(unversioned.apply(&update(&[(1, 3)], Some(1), None)));
-        assert_eq!(unversioned.version, Some(1));
+        assert_eq!(unversioned, state(&[(1, 3)], None, Some(1)));
     }
 
     #[test]
@@ -224,23 +221,46 @@ mod tests {
 
     #[test]
     fn apply_reports_no_change_for_an_identical_state() {
-        let mut r = state(&[(1, 1)], Some(1), Some(2));
+        let mut r = state(&[(1, 1)], Some(1), None);
         assert!(!r.apply(&update(&[(1, 1)], None, None)));
         assert!(!r.apply(&update(&[(1, 1)], None, Some(Some(1)))));
     }
 
     #[test]
-    fn versions_order_two_states_only_when_both_are_known() {
-        let at = |version| state(&[], None, version);
-        assert!(at(Some(4)).is_older_than(&at(Some(5))));
-        assert!(!at(Some(5)).is_older_than(&at(Some(5))));
-        assert!(!at(Some(6)).is_older_than(&at(Some(5))));
-        assert!(!at(None).is_older_than(&at(Some(5))));
-        assert!(!at(Some(4)).is_older_than(&at(None)));
+    fn a_versionless_update_never_overrides_a_versioned_state_nor_gives_it_a_version() {
+        let held = state(&[(1, 2)], Some(1), Some(5));
+        let mut r = held.clone();
+        assert!(!r.apply(&update(&[(1, 3)], None, Some(Some(1)))));
+        assert_eq!(r, held);
+        let mut versionless = state(&[(1, 2)], None, None);
+        assert!(versionless.apply(&update(&[(1, 3)], None, None)));
+        assert_eq!(versionless, state(&[(1, 3)], None, None), "later wins among versionless states");
+        assert!(versionless.apply(&update(&[(1, 4)], Some(1), None)), "any version beats none");
+        assert_eq!(versionless.version, Some(1));
     }
 
     #[test]
-    fn overlay_own_replaces_an_older_or_equal_server_state() {
+    fn merge_follows_the_same_order_and_ignores_an_unknown_state() {
+        let held = state(&[(1, 2)], Some(1), Some(5));
+        for (incoming, expected) in [
+            (state(&[(1, 9)], None, Some(4)), held.clone()),
+            (state(&[(1, 9)], None, Some(5)), held.clone()),
+            (state(&[(1, 9)], None, None), held.clone()),
+            (state(&[], None, None), held.clone()),
+            (state(&[(1, 3)], None, Some(6)), state(&[(1, 3)], Some(1), Some(6))),
+            (state(&[(2, 1)], Some(2), Some(6)), state(&[(2, 1)], Some(2), Some(6))),
+        ] {
+            let mut r = held.clone();
+            r.merge(&incoming);
+            assert_eq!(r, expected, "incoming {incoming:?}");
+        }
+        let mut bare = state(&[], None, None);
+        assert!(bare.merge(&state(&[(1, 1)], None, None)));
+        assert_eq!(bare, state(&[(1, 1)], None, None));
+    }
+
+    #[test]
+    fn overlay_own_replaces_the_server_state_of_its_version_or_a_lower_one() {
         let own = state(&[(1, 2), (2, 1)], Some(2), Some(5));
         for held in [state(&[(1, 2)], None, Some(5)), state(&[(1, 1)], None, Some(4)), state(&[], None, None)] {
             let mut r = held;
@@ -252,36 +272,20 @@ mod tests {
     }
 
     #[test]
-    fn overlay_own_leaves_a_newer_server_state_alone() {
+    fn overlay_own_leaves_a_newer_state_alone_and_a_versionless_one_never_beats_a_version() {
         let newer = state(&[(1, 3)], None, Some(7));
         let mut r = newer.clone();
         assert!(!r.overlay_own(&state(&[(1, 2), (2, 1)], Some(2), Some(5))));
         assert_eq!(r, newer);
+        assert!(!r.overlay_own(&state(&[(1, 2), (2, 1)], Some(2), None)));
+        assert_eq!(r, newer);
     }
 
     #[test]
-    fn adopt_unsaid_takes_a_missing_version_and_the_own_reaction_of_the_same_state() {
-        let held = state(&[(1, 3)], Some(1), Some(6));
-        let mut versionless = state(&[(1, 3)], None, None);
-        versionless.adopt_unsaid(&held);
-        assert_eq!(versionless, held);
-        let mut same = state(&[(1, 3)], None, Some(6));
-        same.adopt_unsaid(&held);
-        assert_eq!(same, held);
-    }
-
-    #[test]
-    fn adopt_unsaid_leaves_another_state_and_an_unlisted_own_reaction_alone() {
-        let held = state(&[(1, 3)], Some(1), Some(6));
-        let mut newer = state(&[(1, 4)], None, Some(7));
-        newer.adopt_unsaid(&held);
-        assert_eq!(newer, state(&[(1, 4)], None, Some(7)));
-        let mut gone = state(&[(2, 1)], None, Some(6));
-        gone.adopt_unsaid(&held);
-        assert_eq!(gone, state(&[(2, 1)], None, Some(6)), "mine needs a count to stand on");
-        let mut says = state(&[(1, 3), (2, 1)], Some(2), Some(6));
-        says.adopt_unsaid(&held);
-        assert_eq!(says.mine, Some(code(2)));
+    fn the_held_state_stays_at_the_same_version_even_against_a_snapshot_that_says_mine() {
+        let mut held = state(&[(1, 2)], None, Some(5));
+        assert!(!held.merge(&state(&[(1, 2)], Some(1), Some(5))));
+        assert_eq!(held.mine, None);
     }
 
     #[test]

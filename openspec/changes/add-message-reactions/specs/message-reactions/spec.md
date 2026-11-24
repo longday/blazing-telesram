@@ -111,7 +111,7 @@ When the server refuses a reaction, the message SHALL return to the reactions it
 - **THEN** the chips do not change and an error says there is no connection
 
 ### Requirement: Stale reaction updates
-A reaction update SHALL replace the message's known reactions only when its version is newer than the known one; an update with an older or equal version SHALL be ignored. An update without a version SHALL be applied. While a reaction of the user is unconfirmed, an update for the same message SHALL replace the unconfirmed state.
+A reaction update SHALL replace the message's known reactions only when its version is newer than the known one; an update with an older or equal version SHALL be ignored (an update without a version is covered by "Reaction input without a version"). While a reaction of the user is unconfirmed, an update for the same message SHALL replace the unconfirmed state.
 
 #### Scenario: Older update
 - **GIVEN** a message shows reactions of version 5
@@ -135,3 +135,21 @@ A history row SHALL NOT replace known reactions of a newer version. The user's c
 - **GIVEN** the user's reaction on a message is unconfirmed and history delivers a newer version of its reactions
 - **WHEN** the request is confirmed
 - **THEN** the chips keep the newer state from history
+
+#### Scenario: Several history requests and an edit
+- **GIVEN** two history requests are out for a chat, and the second one has delivered a newer reaction version for a message
+- **WHEN** the message is edited and then the first request, taken before both, delivers its older snapshot
+- **THEN** the chips keep the newer reaction version and the message shows the edit
+
+### Requirement: Reaction input without a version
+Reaction input without a version SHALL NOT replace a state that has one and SHALL NOT give a state a version. While a message has no known version, such input SHALL be applied as it arrives. (Conservative rule: the reaction samples on record are all versioned, so a versionless input from the server is not expected; ignoring it can only leave an older versioned state in place until the next versioned update.)
+
+#### Scenario: Versionless update over a versioned state
+- **GIVEN** a message shows reactions of version 5
+- **WHEN** an update without a version arrives for it, and later a history row without reactions
+- **THEN** the chips keep version 5 and its counts
+
+#### Scenario: Versionless history row
+- **GIVEN** a message shows reactions of version 5 and its history row carries counts but no version
+- **WHEN** the row is stored
+- **THEN** the chips keep version 5 and its counts, and the row's other fields (an edit) apply
