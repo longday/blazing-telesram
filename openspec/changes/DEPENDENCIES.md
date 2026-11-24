@@ -49,7 +49,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 - **Core lane** (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`): MD-C → GS-A → MR-B → CM-C1 → CM-M → CM-N → CM-G (GS-A first if it is ready while MD-C is not yet started on the core lane; a unit only waits for units that are actually in flight). Desktop UI files (`desktop.rs`, `tests.rs`, `main.rs`, `timeline.rs`) now sit inside these units, so the UI lane has the same order.
 - GS 3.1 and CM 3.1 both derive "private chat of a person": whoever lands second reuses the first one's data (`ChatSummary.partner` or the guid map), not a second map.
 
-## add-global-search (GS)
+## add-global-search (GS) — archived (`openspec/changes/archive/2026-11-25-add-global-search`; main specs `message-search` created, `chat-list` updated)
 
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
@@ -63,7 +63,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 3.2 | done (bb34be8) | 2.1 | GS-A |
 | 3.3 | done (bb34be8) | 3.2 | GS-A |
 | 3.4 | done (bb34be8; `ChatStore::supersede_search`, documented in `tasks.md`) | 3.2, 3.3 | GS-A |
-| 4.1 | ready [live] manual run with the `main` build | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
+| 4.1 | done (ac517b5, merged 7fbc545; manual run in the VM passed) | 1.4, 2.2, 3.1, 3.4 | manual run |
 
 ## add-media-download (MD) — archived (`openspec/changes/archive/2026-11-25-add-media-download`; main specs `attachment-download` and `message-history` synced)
 
@@ -132,13 +132,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 - **CM-M on `integ/members`** (from `main` c31b7a0): CM 3.2 now (`model.rs`, chat-core `client.rs`, `store.rs`); 4.1 and 4.2 are sequential after it and after each other (shared `desktop.rs`, `tests.rs`, `main.rs`).
 - **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
-- GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; in progress on `gs/4.1`).
+- (GS 4.1 is done; GS is archived.)
 
-In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`), `integ/members` (CM-M, nothing started). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
+In flight: `cm/1.2-status` (one unmerged commit d5bfd78 on an old base: it moves the `whoami` status path in CM `design.md` D6/Observed shapes and `tasks.md` 1.3 to `UserStatusInfo.UserStatus.CustomStatus.Text`; it conflicts with newer CM text on `main`, so it must be re-applied by the CM owner; `wire.rs:85` and `design.md` D6 on `main` still say `UserStatus.text`), `integ/members` (CM-M, nothing started). Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
 - Decision on the MR 7.1 acceptance criterion: `cargo fmt --check` (1561 hunks, baseline), the two new clippy `large_enum_variant`. Blocks MR 7.1, 7.2 and 7.3.
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
-- Live session, reads only, no approval: GS 4.1, CM 5.2 (VM). Done: GS 1.3, MD 1.3, MD 5.2, CM 1.2.
+- Live session, reads only, no approval: CM 5.2 (VM). Done: GS 1.3, GS 4.1, MD 1.3, MD 5.2, CM 1.2.
