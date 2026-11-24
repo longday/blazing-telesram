@@ -46,6 +46,46 @@ pub struct WireUser {
     pub uid: Option<String>,
 }
 
+/// Role of a chat member as `get_chat_members` names it (`admin` and `member` observed).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WireMemberRole {
+    Admin,
+    /// Also the role of a user that carries none.
+    Member,
+    /// A role this client does not know, as the server spelled it.
+    Other(String),
+}
+
+/// A user of `get_chat_members`; the reply carries the display name, so no `get_users_data`
+/// round trip is needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMember {
+    pub guid: String,
+    pub display_name: Option<String>,
+    pub avatar_id: Option<String>,
+    pub role: WireMemberRole,
+    /// `account_deleted: true`.
+    pub deleted: bool,
+}
+
+/// One page of `get_chat_members`. The reply's `groups` and `departments` are not modelled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireMembers {
+    pub users: Vec<WireMember>,
+    /// Users without a guid, dropped from `users`.
+    pub skipped: usize,
+}
+
+/// What `whoami` says about the signed-in account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireProfile {
+    pub guid: Option<String>,
+    pub name: Option<String>,
+    pub avatar_id: Option<String>,
+    /// `UserStatusInfo.UserStatus.text`; `None` while the status is unset (`{}`).
+    pub status_text: Option<String>,
+}
+
 /// Author of a message (`ServerMessageInfo.From`, else `CustomFrom`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireSender {
@@ -552,6 +592,55 @@ pub fn parse_users(data: &Json) -> Result<Vec<WireUser>, ProtoError> {
         .collect())
 }
 
+/// Members of a chat from the `data` object of a `get_chat_members` reply
+/// (`{users, groups, departments}`; the server sends no paging marker and no total, so a page
+/// shorter than the requested `limit` is the last one). `users` is required. `groups` and
+/// `departments` are never read: their element shape was not observed (empty in every group
+/// probed), so whatever they hold is ignored. A user without a guid is dropped and counted in
+/// `skipped`.
+pub fn parse_members(data: &Json) -> Result<WireMembers, ProtoError> {
+    let users = data
+        .get("users")
+        .and_then(Json::as_array)
+        .ok_or_else(|| ProtoError::Protocol("get_chat_members reply has no users".into()))?;
+    let mut skipped = 0;
+    let mut members = Vec::with_capacity(users.len());
+    for user in users {
+        let Some(guid) = string(user, "guid") else {
+            skipped += 1;
+            continue;
+        };
+        members.push(WireMember {
+            guid,
+            display_name: string(user, "display_name").or_else(|| string(user, "public_name")),
+            avatar_id: string(user, "avatar_id"),
+            role: match string(user, "role").as_deref() {
+                Some("admin") => WireMemberRole::Admin,
+                None | Some("member") => WireMemberRole::Member,
+                Some(other) => WireMemberRole::Other(other.to_owned()),
+            },
+            deleted: user.get("account_deleted").and_then(Json::as_bool).unwrap_or(false),
+        });
+    }
+    Ok(WireMembers { users: members, skipped })
+}
+
+/// The signed-in account's profile from a `whoami` reply (`{UserInfo, UserStatusInfo,
+/// CurrentTime}`). `UserStatusInfo.UserStatus` is `{}` while no status is set; a status counts
+/// only when it holds a non-blank `text` (`Text` is accepted too: the populated shape is
+/// unobserved). No availability is inferred from the rest of it.
+pub fn parse_profile(body: &Json) -> Result<WireProfile, ProtoError> {
+    check_status(body)?;
+    let info = present(body, "UserInfo")
+        .filter(|v| v.is_object())
+        .ok_or_else(|| ProtoError::Protocol("whoami reply has no UserInfo".into()))?;
+    let status = body.pointer("/UserStatusInfo/UserStatus");
+    let status_text = status
+        .and_then(|s| string(s, "text").or_else(|| string(s, "Text")))
+        .filter(|text| !text.trim().is_empty());
+    Ok(WireProfile { guid: string(info, "Guid"), name: display_name(info), avatar_id: string(info, "AvatarId"), status_text })
+}
+
 /// Decodes a server push body: a flat `{ClientMessage, ServerMessageInfo, ...}`.
 /// Edits and deletions are `Plain` pushes distinguished by `LastEditTimestamp` and `Deleted`.
 pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
@@ -765,6 +854,64 @@ mod tests {
         assert_eq!(users[1].uid.as_deref(), Some("7"));
         assert_eq!(parse_users(&json!([{ "guid": "g" }])).unwrap().len(), 1);
         assert!(parse_users(&json!({})).is_err());
+    }
+
+    #[test]
+    fn members_default_to_the_member_role_and_keep_unknown_roles_and_ignore_groups_and_departments() {
+        let data = json!({
+            "users": [
+                { "guid": "g1", "display_name": "Ivan", "role": "admin", "avatar_id": "a1" },
+                { "guid": "g2", "public_name": "Olga" },
+                { "guid": "g3", "role": "subscriber", "account_deleted": true },
+                { "guid": "g4", "role": "member", "account_deleted": false },
+                { "display_name": "no guid" },
+                "not an object",
+            ],
+            "groups": [{ "anything": 1 }, "any shape"],
+            "departments": { "not": "an array" },
+        });
+        let members = parse_members(&data).unwrap();
+        assert_eq!(members.skipped, 2);
+        let roles: Vec<_> = members.users.iter().map(|u| (u.guid.as_str(), u.role.clone(), u.deleted)).collect();
+        assert_eq!(
+            roles,
+            [
+                ("g1", WireMemberRole::Admin, false),
+                ("g2", WireMemberRole::Member, false),
+                ("g3", WireMemberRole::Other("subscriber".into()), true),
+                ("g4", WireMemberRole::Member, false),
+            ]
+        );
+        assert_eq!(members.users[1].display_name.as_deref(), Some("Olga"));
+        assert_eq!(members.users[0].avatar_id.as_deref(), Some("a1"));
+        let bare = parse_members(&json!({ "users": [] })).unwrap();
+        assert_eq!((bare.users.len(), bare.skipped), (0, 0));
+        assert!(parse_members(&json!({})).is_err());
+        assert!(parse_members(&json!({ "users": 1 })).is_err());
+    }
+
+    #[test]
+    fn profile_reads_the_name_the_avatar_and_a_non_blank_status_text() {
+        let reply = |status: Json| json!({
+            "UserInfo": { "Guid": "g", "DisplayName": "Ivan", "PublicName": "ivan", "AvatarId": "av" },
+            "UserStatusInfo": { "Timestamp": 1, "UserStatus": status },
+        });
+        let unset = parse_profile(&reply(json!({}))).unwrap();
+        assert_eq!(
+            unset,
+            WireProfile { guid: Some("g".into()), name: Some("Ivan".into()), avatar_id: Some("av".into()), status_text: None }
+        );
+        let set = parse_profile(&reply(json!({ "availability": "away", "text": "On leave" }))).unwrap();
+        assert_eq!(set.status_text.as_deref(), Some("On leave"));
+        assert_eq!(parse_profile(&reply(json!({ "Text": "Pascal" }))).unwrap().status_text.as_deref(), Some("Pascal"));
+        assert_eq!(parse_profile(&reply(json!({ "text": "  " }))).unwrap().status_text, None);
+        assert_eq!(parse_profile(&reply(json!({ "text": 5 }))).unwrap().status_text, None);
+
+        let bare = parse_profile(&json!({ "UserInfo": { "PublicName": "ivan" } })).unwrap();
+        assert_eq!((bare.name.as_deref(), bare.guid, bare.avatar_id, bare.status_text), (Some("ivan"), None, None, None));
+        assert!(parse_profile(&json!({})).is_err());
+        assert!(parse_profile(&json!({ "UserInfo": null })).is_err());
+        assert_eq!(parse_profile(&json!({ "Status": 6 })), Err(ProtoError::SessionExpired));
     }
 
     #[test]
