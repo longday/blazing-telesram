@@ -22,7 +22,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
        bt-probe edit-self <micros> <text> [--reply <micros>] [--chat <self chat>]
        bt-probe delete-self <micros> [--chat <self chat>]
-       bt-probe typing-self [--chat <self chat>] | seen <chat> <micros>
+       bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
 the *-self commands refuse any chat but the account's own self chat
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -73,9 +73,10 @@ fn main() -> ExitCode {
             None => return usage(),
         },
         ["seen", chat, ts] => match ts.parse() {
-            Ok(ts) => block_on(seen(chat, ts)),
+            Ok(ts) => block_on(write_named(WriteRequest::Seen { chat: (*chat).to_owned(), timestamp: ts })),
             Err(_) => return usage(),
         },
+        ["typing", chat] => block_on(write_named(WriteRequest::Typing { chat: (*chat).to_owned() })),
         _ => return usage(),
     };
     match result {
@@ -245,11 +246,11 @@ async fn write_self(requested: Option<&str>, build: impl FnOnce(String) -> Write
     Ok(())
 }
 
-/// Moves the read position of any chat; the caller names the chat on purpose.
-async fn seen(chat: &str, timestamp: i64) -> Result<(), Failure> {
+/// Read marker or typing in any chat; the caller names the chat on purpose. Neither carries text.
+async fn write_named(request: WriteRequest) -> Result<(), Failure> {
     let session = load_session()?;
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
-    print_committed(&client.push(WriteRequest::Seen { chat: chat.to_owned(), timestamp }).await.map_err(fail)?);
+    print_committed(&client.push(request).await.map_err(fail)?);
     Ok(())
 }
 

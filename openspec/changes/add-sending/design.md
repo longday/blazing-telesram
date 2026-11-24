@@ -58,7 +58,7 @@ New table `drafts(chat PK, json)`; the store saves the composer of the chat bein
 Context menu: a right-click on a bubble opens an anchored popup with the items of the `message-editing` spec. Delete confirmation reuses the modal pattern of the sign-out confirmation. Reply and edit bars sit above the composer with an accent left border, an icon, the quoted author/text and a close button (`docs/mockups/1-main.svg`). Delivery marks: a clock for pending, one check for sent, a red "!" for failed, shown at the bubble's time.
 
 ### D11. Live verification only in the self chat
-`bt-probe` gains `send-self <text>`, `edit-self <ts> <text> [--reply <ts>]`, `delete-self <ts>`, `seen <chat> <ts>` and `typing-self`; the self-chat commands refuse any other chat id. The app reads `BT_WRITE_ONLY_CHAT` at startup: when set, `YandexBackend` rejects every write to any other chat before it reaches the connection and logs each write (kind and chat, no content). VM runs always set it to the self chat, because opening a chat in the app already writes a read marker.
+`bt-probe` gains `send-self <text>`, `edit-self <ts> <text> [--reply <ts>]`, `delete-self <ts>`, `seen <chat> <ts>`, `typing-self` and `typing <chat>`; the self-chat commands refuse any other chat id. `seen` and `typing` name their chat on purpose and carry no text; `typing <chat>` exists because the server does not echo the account's own typing to the self chat. The app reads `BT_WRITE_ONLY_CHAT` at startup: when set, `YandexBackend` rejects every write to any other chat before it reaches the connection and logs each write (kind and chat, no content). VM runs always set it to the self chat, because opening a chat in the app already writes a read marker.
 
 ## Risks / Trade-offs
 
@@ -74,4 +74,4 @@ Cache migration 2 adds `outbox` and `drafts`; existing caches upgrade in place. 
 
 ## Open Questions
 
-None blocking. The typing repeat interval (4 s) and lifetime are checked against the `timeout_seconds` of real typing pushes during live verification.
+None. Live typing pushes carry no `TimeoutSeconds`, so the 7 s fallback applies; the web client showed a single outgoing typing for about 5–9 s, which the 4 s repeat interval covers.
