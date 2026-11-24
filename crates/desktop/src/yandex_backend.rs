@@ -1,6 +1,7 @@
 //! `Backend` over the Yandex web protocol: maps wire types to the domain model.
 
 use bt_chat_core::model::*;
+use bt_chat_core::reactions::{ReactionCode, ReactionCount, Reactions, ReactionsUpdate};
 use bt_chat_core::{Backend, BackendError, LiveEvent};
 use std::collections::HashMap;
 use std::io::Write;
@@ -12,8 +13,10 @@ use yandex_proto::error::ProtoError;
 use yandex_proto::media::{AvatarSize, MediaTarget};
 use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
-use yandex_proto::wire::{PushEvent, Relation, WireBody, WireChat, WireChatKind, WireMessage, WireSender, WireUser};
-use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
+use yandex_proto::wire::{
+    PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMessage, WireReactions, WireSender, WireUser,
+};
+use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 
 /// How long bootstrap waits for the Xiva subscription before reporting a network error.
@@ -246,6 +249,9 @@ impl Backend for YandexBackend {
                         }
                         typing_event(chat, user, name, timeout_secs, &me, &users.lock().unwrap()).into_iter().collect()
                     }
+                    XivaEvent::Push(PushEvent::Reaction { chat, timestamp, actor, action, code, reactions }) => {
+                        vec![reactions_changed(chat, timestamp, actor.as_deref(), action, code, &reactions, &me)]
+                    }
                     XivaEvent::Push(PushEvent::Ignored { .. }) | XivaEvent::Connecting | XivaEvent::Warning(_) => vec![],
                 };
                 for event in live {
@@ -294,6 +300,10 @@ impl Backend for YandexBackend {
         self.push(chat, WriteRequest::Delete { chat: chat.0.clone(), timestamp }).await.map(drop)
     }
 
+    async fn react(&self, chat: &ChatId, timestamp: MessageTs, target: Option<ReactionCode>) -> Result<(), BackendError> {
+        self.push(chat, reaction_request(chat, timestamp, target)).await.map(drop)
+    }
+
     async fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
         self.push(chat, WriteRequest::Seen { chat: chat.0.clone(), timestamp }).await.map(drop)
     }
@@ -334,6 +344,12 @@ fn reply_ref(target: &ReplyTarget) -> ReplyRef {
 /// An edit rewrites the whole message, so a reply repeats its target.
 fn edit_request(chat: &ChatId, timestamp: MessageTs, text: &str, reply_to: Option<&ReplyTarget>) -> WriteRequest {
     WriteRequest::Edit { chat: chat.0.clone(), timestamp, text: text.to_owned(), reply: reply_to.map(reply_ref) }
+}
+
+/// `None` removes the account's reaction; `Some` sets it (the server replaces the previous one).
+fn reaction_request(chat: &ChatId, timestamp: MessageTs, target: Option<ReactionCode>) -> WriteRequest {
+    let change = target.map_or(ReactionChange::Remove, |code| ReactionChange::Set(code.0));
+    WriteRequest::Reaction { chat: chat.0.clone(), timestamp, change }
 }
 
 /// Resolves display names and avatars of users the wire left anonymous.
@@ -572,6 +588,45 @@ fn own_payloads(messages: &[WireMessage], me: &str) -> Vec<PayloadId> {
     messages.iter().filter(|m| is_own(m, me)).filter_map(|m| m.payload_id.clone().map(PayloadId)).collect()
 }
 
+/// The account's reaction according to `RecentUserReactions`: the newest entry of the account.
+/// The server truncates the list, so `None` means "not seen", not "none".
+fn recent_own(reactions: &WireReactions, me: &str) -> Option<ReactionCode> {
+    let own = reactions.recent.iter().filter(|r| r.user.as_deref() == Some(me));
+    own.max_by_key(|r| r.timestamp).map(|r| ReactionCode(r.code))
+}
+
+fn reaction_counts(reactions: &WireReactions) -> Vec<ReactionCount> {
+    reactions.counts.iter().map(|c| ReactionCount { code: ReactionCode(c.code), count: c.count }).collect()
+}
+
+/// Reaction state of a history row or push: counts and version one to one, `mine` from the
+/// newest recent entry of the account.
+fn message_reactions(wire: &WireReactions, me: &str) -> Reactions {
+    Reactions { counts: reaction_counts(wire), mine: recent_own(wire, me), version: wire.version }
+}
+
+/// A `Reaction` push as a live update. The actor tells the account's own reaction when it is the
+/// account (`Remove` clears it, `Replace` sets the pushed type); otherwise the recent list may
+/// still name it; otherwise the event does not say (`None`).
+fn reactions_changed(
+    chat: String,
+    timestamp: MessageTs,
+    actor: Option<&str>,
+    action: Option<ReactionAction>,
+    code: Option<i64>,
+    reactions: &WireReactions,
+    me: &str,
+) -> LiveEvent {
+    let from_actor = match (actor == Some(me), action, code) {
+        (true, Some(ReactionAction::Remove), _) => Some(None),
+        (true, Some(ReactionAction::Replace), Some(code)) => Some(Some(ReactionCode(code))),
+        _ => None,
+    };
+    let mine = from_actor.or_else(|| recent_own(reactions, me).map(Some));
+    let update = ReactionsUpdate { counts: reaction_counts(reactions), version: reactions.version, mine };
+    LiveEvent::ReactionsChanged { chat: ChatId(chat), timestamp, update }
+}
+
 fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> Message {
     let from = wire.from.as_ref();
     let mut message = Message {
@@ -586,6 +641,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
         reply_to: None,
         forwarded_from: None,
         delivery: Delivery::Sent,
+        reactions: wire.reactions.as_ref().map(|r| message_reactions(r, me)).unwrap_or_default(),
     };
     match &wire.relation {
         Relation::None => {}
@@ -647,7 +703,7 @@ fn typing_event(
 mod tests {
     use super::*;
     use yandex_proto::search::{WireSearchChat, WireSearchMessage, WireSearchUser};
-    use yandex_proto::wire::{WireFile, WireForwarded, WireRef};
+    use yandex_proto::wire::{WireFile, WireForwarded, WireReactionCount, WireReactor, WireRef};
 
     fn wire(body: WireBody, relation: Relation, from: &str) -> WireMessage {
         WireMessage {
@@ -660,6 +716,7 @@ mod tests {
             body,
             edited: false,
             relation,
+            reactions: None,
             raw: serde_json::Value::Null,
         }
     }
@@ -1135,5 +1192,116 @@ mod tests {
 
         let (_tx, mut events) = tokio::sync::mpsc::unbounded_channel();
         assert!(matches!(wait_connected(&mut events, Duration::from_secs(30)).await, Err(BackendError::Network(_))));
+    }
+
+    fn reactor(user: &str, code: i64, timestamp: i64) -> WireReactor {
+        WireReactor { user: Some(user.into()), code, timestamp: Some(timestamp) }
+    }
+
+    fn wire_reactions(recent: Vec<WireReactor>) -> WireReactions {
+        WireReactions {
+            counts: vec![WireReactionCount { code: 100101, count: 2 }, WireReactionCount { code: 7, count: 1 }],
+            version: Some(4),
+            recent,
+        }
+    }
+
+    fn code(value: i64) -> ReactionCode {
+        ReactionCode(value)
+    }
+
+    fn update_of(event: LiveEvent) -> ReactionsUpdate {
+        let LiveEvent::ReactionsChanged { chat, timestamp, update } = event else { panic!("not a reaction event: {event:?}") };
+        assert_eq!((chat, timestamp), (ChatId("0/0/a".into()), 10));
+        update
+    }
+
+    fn pushed(actor: Option<&str>, action: Option<ReactionAction>, code: Option<i64>, recent: Vec<WireReactor>) -> ReactionsUpdate {
+        update_of(reactions_changed("0/0/a".into(), 10, actor, action, code, &wire_reactions(recent), "me"))
+    }
+
+    #[test]
+    fn a_history_row_maps_counts_and_version_one_to_one() {
+        let mut row = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        row.reactions = Some(wire_reactions(Vec::new()));
+        let reactions = message(&row, "me", &HashMap::new()).reactions;
+        let counts = [ReactionCount { code: code(100101), count: 2 }, ReactionCount { code: code(7), count: 1 }];
+        assert_eq!((reactions.counts.as_slice(), reactions.version, reactions.mine), (counts.as_slice(), Some(4), None));
+    }
+
+    #[test]
+    fn a_row_without_reactions_carries_none() {
+        let row = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        assert_eq!(message(&row, "me", &HashMap::new()).reactions, Reactions::default());
+    }
+
+    #[test]
+    fn mine_is_the_newest_recent_entry_of_the_account() {
+        let mut row = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        row.reactions = Some(wire_reactions(vec![reactor("me", 1, 5), reactor("u2", 9, 30), reactor("me", 2, 20), reactor("me", 3, 10)]));
+        assert_eq!(message(&row, "me", &HashMap::new()).reactions.mine, Some(code(2)));
+        row.reactions = Some(wire_reactions(vec![reactor("u2", 9, 30)]));
+        assert_eq!(message(&row, "me", &HashMap::new()).reactions.mine, None);
+    }
+
+    #[test]
+    fn an_own_replace_names_the_pushed_type() {
+        let update = pushed(Some("me"), Some(ReactionAction::Replace), Some(100101), Vec::new());
+        assert_eq!(update.mine, Some(Some(code(100101))));
+        let counts = [ReactionCount { code: code(100101), count: 2 }, ReactionCount { code: code(7), count: 1 }];
+        assert_eq!((update.counts.as_slice(), update.version), (counts.as_slice(), Some(4)));
+    }
+
+    #[test]
+    fn an_own_remove_says_the_account_has_none_even_with_stale_recent_entries() {
+        let update = pushed(Some("me"), Some(ReactionAction::Remove), None, vec![reactor("me", 7, 5)]);
+        assert_eq!(update.mine, Some(None));
+    }
+
+    #[test]
+    fn another_actor_with_the_account_in_recent_gives_its_newest_type() {
+        let update = pushed(Some("u2"), Some(ReactionAction::Replace), Some(9), vec![reactor("me", 7, 5), reactor("me", 100101, 6)]);
+        assert_eq!(update.mine, Some(Some(code(100101))));
+    }
+
+    #[test]
+    fn another_actor_without_the_account_in_recent_leaves_mine_unknown() {
+        assert_eq!(pushed(Some("u2"), Some(ReactionAction::Replace), Some(9), vec![reactor("u3", 7, 5)]).mine, None);
+        assert_eq!(pushed(Some("u2"), Some(ReactionAction::Remove), None, Vec::new()).mine, None);
+        assert_eq!(pushed(None, None, None, Vec::new()).mine, None);
+    }
+
+    #[test]
+    fn an_own_push_without_a_usable_action_falls_back_to_recent() {
+        assert_eq!(pushed(Some("me"), Some(ReactionAction::Replace), None, vec![reactor("me", 7, 5)]).mine, Some(Some(code(7))));
+        assert_eq!(pushed(Some("me"), Some(ReactionAction::Other(3)), Some(7), Vec::new()).mine, None);
+    }
+
+    #[test]
+    fn react_builds_the_set_and_remove_requests() {
+        let chat = ChatId("0/0/a".into());
+        assert_eq!(
+            reaction_request(&chat, 10, Some(code(100101))),
+            WriteRequest::Reaction { chat: "0/0/a".into(), timestamp: 10, change: ReactionChange::Set(100101) }
+        );
+        assert_eq!(
+            reaction_request(&chat, 10, None),
+            WriteRequest::Reaction { chat: "0/0/a".into(), timestamp: 10, change: ReactionChange::Remove }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reaction_to_another_chat_is_blocked_by_the_write_only_chat() {
+        let backend = YandexBackend::new(test_session(), Some(ChatId("self".into())));
+        assert!(matches!(
+            backend.react(&ChatId("0/0/other".into()), 1, Some(code(1))).await,
+            Err(BackendError::Rejected { permanent: true, .. })
+        ));
+        assert!(matches!(
+            backend.react(&ChatId("0/0/other".into()), 1, None).await,
+            Err(BackendError::Rejected { permanent: true, .. })
+        ));
+        // Unbootstrapped: only a request that passed the guard reaches the connection check.
+        assert!(matches!(backend.react(&ChatId("self".into()), 1, Some(code(1))).await, Err(BackendError::Protocol(_))));
     }
 }
