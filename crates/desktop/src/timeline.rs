@@ -341,6 +341,7 @@ fn picture(
         .w(px(w))
         .h(px(h))
         .flex_none()
+        .overflow_hidden()
         .rounded(px(8.))
         .bg(rgb(PLACEHOLDER))
         .cursor_pointer()
