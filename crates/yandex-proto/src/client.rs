@@ -8,7 +8,8 @@ use crate::error::ProtoError;
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
 use crate::net::HttpSettings;
 use crate::registry::RegistryClient;
-use crate::request::HISTORY_CHUNK;
+use crate::request::{HISTORY_CHUNK, SEARCH_LIMIT, SearchEntity};
+use crate::search::SearchReply;
 use crate::session::Session;
 use crate::wire::{DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireUser};
 use crate::write::{Committed, WriteRequest};
@@ -91,6 +92,16 @@ impl Client {
 
     pub async fn users(&self, guids: &[String]) -> Result<Vec<WireUser>, ProtoError> {
         self.registry.users(guids).await
+    }
+
+    /// The app's search: first page of messages, users and chats matching `query`.
+    pub async fn search(&self, query: &str) -> Result<SearchReply, ProtoError> {
+        self.search_with(query, SEARCH_LIMIT, &[SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats]).await
+    }
+
+    /// `search` with an explicit page size and entity set (what `bt-probe search` exposes).
+    pub async fn search_with(&self, query: &str, limit: u32, entities: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
+        self.registry.search(query, limit, entities).await
     }
 
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
