@@ -136,9 +136,17 @@ fn open_sign_in(runtime: RuntimeDir, cx: &mut App) {
     }
 }
 
+/// `$HOME/Downloads`, the one place saved originals go. A missing, empty or relative `HOME` gives
+/// `None`, and every download then fails with a destination error.
+fn downloads_dir(home: Option<std::ffi::OsString>) -> Option<std::path::PathBuf> {
+    let home = std::path::PathBuf::from(home?);
+    home.is_absolute().then(|| home.join("Downloads"))
+}
+
 fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
     let account = UserId(session.identity.xiva_user().to_owned());
-    let config = ClientConfig::new(runtime.path(), runtime.session_file(), account);
+    let mut config = ClientConfig::new(runtime.path(), runtime.session_file(), account);
+    config.downloads_dir = downloads_dir(std::env::var_os("HOME"));
     let write_only = cx.global::<WriteOnly>().0.clone();
     let client = match ChatClient::spawn(YandexBackend::new(session, write_only), config) {
         Ok(client) => client,
@@ -228,5 +236,23 @@ mod session_tests {
         );
         assert_eq!((converted.expires_unix, converted.secure, converted.http_only), (Some(1_900_000_000), true, true));
         assert_eq!(yandex_proto::session::cookie_header(&[converted], "yandex.ru"), "Session_id=v");
+    }
+}
+
+#[cfg(test)]
+mod downloads_dir_tests {
+    use super::downloads_dir;
+    use std::path::PathBuf;
+
+    #[test]
+    fn the_downloads_folder_is_under_an_absolute_home() {
+        assert_eq!(downloads_dir(Some("/Users/me".into())), Some(PathBuf::from("/Users/me/Downloads")));
+    }
+
+    #[test]
+    fn no_usable_home_means_no_destination() {
+        assert_eq!(downloads_dir(None), None);
+        assert_eq!(downloads_dir(Some("".into())), None);
+        assert_eq!(downloads_dir(Some("relative/home".into())), None);
     }
 }
