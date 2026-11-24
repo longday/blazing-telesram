@@ -87,6 +87,12 @@ impl Reactions {
         changed
     }
 
+    /// Whether this carries no reaction state at all: no counts and no version (an edit push, a
+    /// history row without reactions).
+    pub fn is_unknown(&self) -> bool {
+        self.counts.is_empty() && self.version.is_none()
+    }
+
     /// Whether both versions are known and this state's is the lower one. Versions order two
     /// states only then; otherwise the later change wins, as in [`Reactions::apply`].
     pub fn is_older_than(&self, other: &Reactions) -> bool {

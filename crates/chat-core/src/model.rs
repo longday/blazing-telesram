@@ -173,8 +173,7 @@ impl Message {
     /// reaction state at all (an edit push, a history row without reactions) or an older
     /// version than the known one (a snapshot taken before the known state arrived).
     pub fn inherit_reactions(&mut self, cached: &Message) {
-        let bare = self.reactions.counts.is_empty() && self.reactions.version.is_none();
-        if bare || self.reactions.is_older_than(&cached.reactions) {
+        if self.reactions.is_unknown() || self.reactions.is_older_than(&cached.reactions) {
             self.reactions.clone_from(&cached.reactions);
         }
     }

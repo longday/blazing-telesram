@@ -56,7 +56,9 @@ const LIST_CHECK_FAILED_REASON: &str =
 
 /// A change that reached the cache while a history request was out; see `replay_live`.
 enum LiveChange {
-    Upsert(Message),
+    /// `message` as cached (reactions inherited when the copy had none); `supplied` tells whether
+    /// the pushed copy itself carried reaction state, so the inherited one is only a fallback.
+    Upsert { message: Message, supplied: bool },
     Delete(MessageTs),
     Reactions(MessageTs, ReactionsUpdate),
     /// The user's own reaction, confirmed by the server: the state it was built on, with the
@@ -314,14 +316,20 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
     let in_range = |ts: MessageTs| lo.is_none_or(|lo| ts >= lo) && hi.is_none_or(|hi| ts <= hi);
     for change in changes {
         match change {
-            LiveChange::Upsert(message) if in_range(message.timestamp) => {
+            LiveChange::Upsert { message, supplied } if in_range(message.timestamp) => {
                 match messages.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                     Ok(i) => {
-                        // A copy without reactions (an edit) or with an older version than the
-                        // row must keep what the snapshot or an earlier replayed change
-                        // established for it (`inherit_reactions`).
                         let mut replacement = message.clone();
-                        replacement.inherit_reactions(&messages[i]);
+                        if *supplied {
+                            // A copy with an older version than the row must keep what the
+                            // snapshot or an earlier replayed change established for it.
+                            replacement.inherit_reactions(&messages[i]);
+                        } else if !messages[i].reactions.is_unknown() {
+                            // An edit says nothing about reactions: whatever the row knows
+                            // stands, however the snapshot versions it (the copy's own were
+                            // inherited from the cache and are only the fallback).
+                            replacement.reactions.clone_from(&messages[i].reactions);
+                        }
                         messages[i] = replacement;
                     }
                     Err(i) => messages.insert(i, message.clone()),
@@ -804,10 +812,11 @@ impl<B: Backend> Engine<B> {
             LiveEvent::MessageUpserted(mut message) => {
                 // The copy of an edit push or a reaction-less history row says nothing about
                 // reactions, so it must not erase the ones already known.
+                let supplied = !message.reactions.is_unknown();
                 if let Some(cached) = self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
                     message.inherit_reactions(&cached);
                 }
-                self.record_live(&message.chat, LiveChange::Upsert(message.clone()));
+                self.record_live(&message.chat, LiveChange::Upsert { message: message.clone(), supplied });
                 self.db(self.cache.upsert_message(&message));
                 self.emit(ClientEvent::MessageUpserted(message.clone()));
                 self.update_preview(&message);
@@ -3784,6 +3793,24 @@ mod tests {
         assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), newer.clone()));
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
         assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), newer));
+    }
+
+    #[test]
+    fn an_edit_of_a_cached_message_during_a_history_fetch_keeps_the_counts_of_a_versionless_row() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let versionless = Reactions { counts: counts(&[(FIRE, 1)]), mine: None, version: None };
+        let history = hold_next_history(&h, with_reactions(versionless.clone()));
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        // The edit says nothing about reactions: the cache's version-5 state is only inherited.
+        assert_eq!(h.upserted("edit").reactions, reacted().reactions);
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = &chunk.messages[0];
+        assert_eq!((row.body.clone(), row.reactions.counts.clone()), (MessageBody::Text("hi!".into()), versionless.counts.clone()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions.counts), (MessageBody::Text("hi!".into()), versionless.counts));
     }
 
     #[test]
