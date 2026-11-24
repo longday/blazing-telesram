@@ -3,6 +3,7 @@ mod format;
 mod input;
 mod login;
 mod logging;
+mod search_results;
 mod store;
 mod theme;
 mod timeline;
