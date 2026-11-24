@@ -17,7 +17,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
 use yandex_proto::media::{MediaConfig, MediaTarget};
+use yandex_proto::request::{SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
+use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
 use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
@@ -30,10 +32,12 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
        bt-probe download <chat> <micros> [--item N] [--to <dir>]
+       bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
 the *-self commands refuse any chat but the account's own self chat
 download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
-log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace";
+log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
+search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -89,6 +93,10 @@ fn main() -> ExitCode {
         ["download", chat, ts, flags @ ..] => match (ts.parse(), download_flags(flags)) {
             (Ok(ts), Some(flags)) => block_on(download(chat, ts, flags)),
             _ => return usage(),
+        },
+        ["search", query, flags @ ..] => match search_flags(flags) {
+            Some(flags) => block_on(search(query, flags)),
+            None => return usage(),
         },
         _ => return usage(),
     };
@@ -322,6 +330,65 @@ async fn history(chat: &str, before: Option<i64>) -> Result<(), Failure> {
         println!("{}", describe(message));
     }
     println!("-- {} messages, reached_start={}, skipped={}", page.messages.len(), page.reached_start, page.skipped);
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SearchFlags {
+    entities: Vec<SearchEntity>,
+    limit: u32,
+}
+
+/// `[--entities messages,users,chats] [--limit <n>]` in any order, each at most once. `contacts`
+/// and every other name are refused (the request type cannot express them); a limit is at least 1.
+fn search_flags(mut flags: &[&str]) -> Option<SearchFlags> {
+    let (mut entities, mut limit) = (None, None);
+    while let [name, value, rest @ ..] = flags {
+        match *name {
+            "--entities" if entities.is_none() => entities = Some(search_entities(value)?),
+            "--limit" if limit.is_none() => limit = Some(value.parse::<u32>().ok().filter(|n| *n > 0)?),
+            _ => return None,
+        }
+        flags = rest;
+    }
+    flags.is_empty().then(|| SearchFlags {
+        entities: entities.unwrap_or_else(|| vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats]),
+        limit: limit.unwrap_or(SEARCH_LIMIT),
+    })
+}
+
+/// A comma-separated, duplicate-free list of entity names.
+fn search_entities(list: &str) -> Option<Vec<SearchEntity>> {
+    let mut entities = Vec::new();
+    for name in list.split(',') {
+        let entity = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats].into_iter().find(|e| e.wire_name() == name)?;
+        if entities.contains(&entity) {
+            return None;
+        }
+        entities.push(entity);
+    }
+    Some(entities)
+}
+
+fn print_search_set(entity: SearchEntity, set: &SearchSet) {
+    println!("{}: total={} limit={} page={} pages={}", entity.wire_name(), set.total, set.limit, set.page, set.pages);
+    for item in &set.items {
+        println!("{item}");
+    }
+}
+
+/// One registry `search` (HTTP, bare cookie): the first page of every requested entity.
+async fn search(query: &str, flags: SearchFlags) -> Result<(), Failure> {
+    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    let reply = client.search_with(query, flags.limit, &flags.entities).await.map_err(fail)?;
+    for entity in flags.entities {
+        let set = match entity {
+            SearchEntity::Messages => &reply.messages,
+            SearchEntity::Users => &reply.users,
+            SearchEntity::Chats => &reply.chats,
+        };
+        print_search_set(entity, set);
+    }
     Ok(())
 }
 
@@ -665,5 +732,47 @@ mod download_tests {
         assert_eq!(error_class(&ProtoError::SessionExpired), "session-expired");
         assert_eq!(error_class(&ProtoError::Network("n".into())), "network");
         assert_eq!(error_class(&ProtoError::Protocol("p".into())), "protocol");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    const ALL: [SearchEntity; 3] = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+
+    #[test]
+    fn search_defaults_to_every_entity_and_the_app_limit() {
+        assert_eq!(search_flags(&[]), Some(SearchFlags { entities: ALL.to_vec(), limit: SEARCH_LIMIT }));
+    }
+
+    #[test]
+    fn search_flags_parse_in_any_order() {
+        let expected = Some(SearchFlags { entities: vec![SearchEntity::Chats, SearchEntity::Messages], limit: 3 });
+        assert_eq!(search_flags(&["--entities", "chats,messages", "--limit", "3"]), expected);
+        assert_eq!(search_flags(&["--limit", "3", "--entities", "chats,messages"]), expected);
+        assert_eq!(search_flags(&["--limit", "25"]), Some(SearchFlags { entities: ALL.to_vec(), limit: 25 }));
+    }
+
+    #[test]
+    fn search_flags_reject_unknown_repeated_and_malformed_input() {
+        for bad in [
+            &["--entities", "contacts"][..],
+            &["--entities", "messages,contacts"],
+            &["--entities", "messages,messages"],
+            &["--entities", ""],
+            &["--entities", "messages,"],
+            &["--entities"],
+            &["--limit", "0"],
+            &["--limit", "-1"],
+            &["--limit", "x"],
+            &["--limit"],
+            &["--limit", "1", "--limit", "2"],
+            &["--entities", "users", "--entities", "chats"],
+            &["--page", "2"],
+            &["--limit", "1", "stray"],
+        ] {
+            assert_eq!(search_flags(bad), None, "{bad:?}");
+        }
     }
 }
