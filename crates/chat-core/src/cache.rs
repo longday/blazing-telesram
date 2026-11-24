@@ -193,6 +193,13 @@ impl Cache {
         Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
     }
 
+    /// Cached messages with `lo <= ts <= hi`, oldest first.
+    pub fn messages_between(&self, chat: &ChatId, lo: MessageTs, hi: MessageTs) -> Result<Vec<Message>, CacheError> {
+        let mut stmt = self.conn.prepare("SELECT json FROM messages WHERE chat = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts")?;
+        let rows = stmt.query_map(params![chat.0, lo, hi], |row| row.get::<_, String>(0))?;
+        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+    }
+
     pub fn message(&self, chat: &ChatId, ts: MessageTs) -> Result<Option<Message>, CacheError> {
         let json: Option<String> = self
             .conn
@@ -489,6 +496,29 @@ mod tests {
         assert!(cache.mark_deleted(&id("a"), 1).unwrap());
         assert_eq!(cache.message(&id("a"), 1).unwrap().unwrap().body, MessageBody::Deleted);
         assert!(!cache.mark_deleted(&id("a"), 2).unwrap());
+    }
+
+    #[test]
+    fn a_row_written_before_reactions_existed_loads_without_them() {
+        let cache = Cache::open_in_memory().unwrap();
+        let mut json: serde_json::Value = serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
+        assert!(json.as_object_mut().unwrap().remove("reactions").is_some(), "the field is serialized today");
+        cache.conn.execute("INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)", [json.to_string()]).unwrap();
+        let loaded = cache.message(&id("a"), 1).unwrap().unwrap();
+        assert_eq!(loaded.reactions, Default::default());
+        assert_eq!(cache.history(&id("a"), None, 50).unwrap().messages[0].reactions, Default::default());
+    }
+
+    #[test]
+    fn messages_between_is_inclusive_ordered_and_scoped_to_its_chat() {
+        let cache = Cache::open_in_memory().unwrap();
+        for ts in [4, 1, 3, 2] {
+            cache.upsert_message(&msg("a", ts, "x")).unwrap();
+        }
+        cache.upsert_message(&msg("b", 2, "other")).unwrap();
+        let stamps: Vec<_> = cache.messages_between(&id("a"), 2, 3).unwrap().iter().map(|m| m.timestamp).collect();
+        assert_eq!(stamps, [2, 3]);
+        assert!(cache.messages_between(&id("a"), 5, 9).unwrap().is_empty());
     }
 
     #[test]
