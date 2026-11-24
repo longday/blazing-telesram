@@ -23,7 +23,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
   - Tests: the live fixture decodes to the exact event (chat, timestamp `1795070677887127`, actor, `Replace`, code `100101`, counts, version 2, the recent entry); the removed fixture decodes with empty counts; `Reaction` without `ChatId`/`Timestamp` stays `Ignored`; a history row with the three siblings fills `WireMessage.reactions`, one without gives `None`; `Count` 0 and entries without `Type` are dropped; `live_push_fixtures` no longer expects `Ignored` for the reaction fixture (the heartbeat still does); the unit test that a bare `Reaction` body parses as `Other("Reaction")` is kept.
   - Done when: these tests exist and assert the above.
 
-- [ ] 2.2 Encode the reaction write (D2)
+- [x] 2.2 Encode the reaction write (D2)
   - Owns: `crates/yandex-proto/src/write.rs`, `crates/yandex-proto/src/request.rs` (module docs only).
   - Depends on: nothing.
   - Do: `ReactionChange`, `WriteRequest::Reaction`, `kind()` `"reaction"`, `client_message` arms, `CLIENT_MESSAGE_VARIANTS` with `"Reaction"`; rewrite the module docs of `write.rs` and `request.rs` that say reactions are unrepresentable (heartbeats, pins and every other mutating variant stay so).

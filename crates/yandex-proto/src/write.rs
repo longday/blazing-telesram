@@ -1,13 +1,15 @@
 //! The closed set of writes this client can express.
 //!
 //! Every write is the socket method `push` (the web client's only mutation channel) carrying one
-//! `ClientMessage` variant. [`WriteRequest`] is the only way to build such a frame, so reactions,
-//! presence heartbeats, pins and every other mutating variant stay unrepresentable;
+//! `ClientMessage` variant. [`WriteRequest`] is the only way to build such a frame, so presence
+//! heartbeats, pins and every other mutating variant stay unrepresentable;
 //! [`WRITE_METHODS`] and [`CLIENT_MESSAGE_VARIANTS`] state the whole surface and tests pin it.
 //!
 //! Wire forms: yandex-messenger-mcp `src/protocol/push.ts` and `src/protocol/mutations.ts`
 //! (send, edit, delete and `SeenMarker` confirmed live there; reply and `Typing` are checked
-//! live by `bt-probe`, see the change `add-sending`).
+//! live by `bt-probe`, see the change `add-sending`). A reaction is `Reaction {ChatId, Timestamp,
+//! Type, Action}`: `Type` is a JSON integer, `Action` 2 (`REPLACE`, also the add) or 1 (`REMOVE`,
+//! without `Type`); see the change `add-message-reactions`.
 
 use serde_json::{Value, json};
 
@@ -20,10 +22,15 @@ use crate::wire::int_field;
 pub const WRITE_METHODS: [&str; 1] = ["push"];
 
 /// Every `ClientMessage` variant `WriteRequest` can build.
-pub const CLIENT_MESSAGE_VARIANTS: [&str; 3] = ["Plain", "SeenMarker", "Typing"];
+pub const CLIENT_MESSAGE_VARIANTS: [&str; 4] = ["Plain", "SeenMarker", "Typing", "Reaction"];
 
 /// Longest quote of a reply, in characters (the reference's bound).
 pub const QUOTE_MAX_CHARS: usize = 200;
+
+/// `ReactionAction` of the wire: `REMOVE`.
+const REACTION_REMOVE: i64 = 1;
+/// `ReactionAction` of the wire: `REPLACE`.
+const REACTION_REPLACE: i64 = 2;
 
 /// The web client's `serviceId` (`X-Origin-Service-ID`), sent as `Meta.Origin`.
 const ORIGIN_SERVICE_ID: u32 = 27;
@@ -34,6 +41,15 @@ pub struct ReplyRef {
     pub timestamp: i64,
     /// Text of the original; cut to [`QUOTE_MAX_CHARS`] when encoded.
     pub quote: String,
+}
+
+/// What a [`WriteRequest::Reaction`] does to the account's reaction on a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReactionChange {
+    /// The reaction type becomes this code; `REPLACE` also adds when there is none yet.
+    Set(i64),
+    /// Takes the account's reaction away; the wire form carries no type.
+    Remove,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +64,8 @@ pub enum WriteRequest {
     /// Moves the read position of `chat` up to `timestamp` inclusive (`SeqNo` is optional).
     Seen { chat: String, timestamp: i64 },
     Typing { chat: String },
+    /// Sets, replaces or removes the account's reaction on a message of `chat`.
+    Reaction { chat: String, timestamp: i64, change: ReactionChange },
 }
 
 fn quote(text: &str) -> &str {
@@ -77,6 +95,7 @@ impl WriteRequest {
             Self::Delete { .. } => "delete",
             Self::Seen { .. } => "seen",
             Self::Typing { .. } => "typing",
+            Self::Reaction { .. } => "reaction",
         }
     }
 
@@ -100,6 +119,17 @@ impl WriteRequest {
             Self::Delete { chat, timestamp } => json!({ "Plain": { "ChatId": chat, "Timestamp": timestamp } }),
             Self::Seen { chat, timestamp } => json!({ "SeenMarker": { "ChatId": chat, "Timestamp": timestamp } }),
             Self::Typing { chat } => json!({ "Typing": { "ChatId": chat } }),
+            Self::Reaction { chat, timestamp, change } => {
+                let mut reaction = json!({ "ChatId": chat, "Timestamp": timestamp });
+                match change {
+                    ReactionChange::Set(code) => {
+                        reaction["Type"] = json!(code);
+                        reaction["Action"] = json!(REACTION_REPLACE);
+                    }
+                    ReactionChange::Remove => reaction["Action"] = json!(REACTION_REMOVE),
+                }
+                json!({ "Reaction": reaction })
+            }
         }
     }
 
@@ -227,6 +257,8 @@ mod tests {
             WriteRequest::Delete { chat: CHAT.into(), timestamp: 5 },
             WriteRequest::Seen { chat: CHAT.into(), timestamp: 5 },
             WriteRequest::Typing { chat: CHAT.into() },
+            WriteRequest::Reaction { chat: CHAT.into(), timestamp: 7, change: ReactionChange::Set(100_101) },
+            WriteRequest::Reaction { chat: CHAT.into(), timestamp: 7, change: ReactionChange::Remove },
         ];
         // An exhaustive `match`: adding a variant is a compile error until it is listed above.
         for request in &all {
@@ -235,7 +267,8 @@ mod tests {
                 | WriteRequest::Edit { .. }
                 | WriteRequest::Delete { .. }
                 | WriteRequest::Seen { .. }
-                | WriteRequest::Typing { .. } => {}
+                | WriteRequest::Typing { .. }
+                | WriteRequest::Reaction { .. } => {}
             }
         }
         all
@@ -355,6 +388,28 @@ mod tests {
         assert_eq!(frame(&request).body, envelope(json!({ "Typing": { "ChatId": CHAT } })));
     }
 
+    /// `REPLACE` (2) with an integer `Type`: also the add, when the user has no reaction yet.
+    #[test]
+    fn setting_a_reaction_is_a_replace_with_an_integer_type() {
+        let request = WriteRequest::Reaction { chat: CHAT.into(), timestamp: 1_795_070_677_887_127, change: ReactionChange::Set(100_101) };
+        let body = frame(&request).body;
+        assert_eq!(
+            body,
+            envelope(json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 1_795_070_677_887_127_i64, "Type": 100_101, "Action": 2 } }))
+        );
+        assert!(body["ClientMessage"]["Reaction"]["Type"].is_i64());
+        assert_eq!(request.kind(), "reaction");
+    }
+
+    /// `REMOVE` (1) names no `Type`: the server demands it only for add and replace.
+    #[test]
+    fn removing_a_reaction_is_a_remove_without_a_type() {
+        let request = WriteRequest::Reaction { chat: CHAT.into(), timestamp: 9, change: ReactionChange::Remove };
+        let body = frame(&request).body;
+        assert_eq!(body, envelope(json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 9, "Action": 1 } })));
+        assert!(body["ClientMessage"]["Reaction"].get("Type").is_none());
+    }
+
     #[test]
     fn push_is_the_only_write_method_and_the_variants_are_closed() {
         assert_eq!(WRITE_METHODS, ["push"]);
@@ -373,7 +428,7 @@ mod tests {
         let mut expected = CLIENT_MESSAGE_VARIANTS.to_vec();
         expected.sort_unstable();
         assert_eq!(seen.iter().map(String::as_str).collect::<Vec<_>>(), expected);
-        assert_eq!(CLIENT_MESSAGE_VARIANTS, ["Plain", "SeenMarker", "Typing"]);
+        assert_eq!(CLIENT_MESSAGE_VARIANTS, ["Plain", "SeenMarker", "Typing", "Reaction"]);
     }
 
     #[test]

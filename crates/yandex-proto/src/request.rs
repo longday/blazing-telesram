@@ -3,8 +3,9 @@
 //! There is deliberately no "call any method" entry point: every read is a variant of
 //! [`ReadRequest`], its wire method comes from [`ReadRequest::method`], and
 //! [`ALLOWED_METHODS`] lists every name it can put on the wire. Writes (messages, edits,
-//! deletions, read markers, typing; all the socket method `push`) are a separate closed set in
-//! [`crate::write`]; reactions and presence heartbeats are not representable at all.
+//! deletions, read markers, typing, reactions; all the socket method `push`) are a separate closed
+//! set in [`crate::write`]; presence heartbeats, pins and every other mutating variant are not
+//! representable at all.
 
 use serde_json::{Value, json};
 
