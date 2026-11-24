@@ -2,7 +2,9 @@
 //! implements [`Backend`], tests implement it with a fake. The only writes are the user's own
 //! actions listed on the trait.
 
-use crate::model::{ChatId, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, ReplyTarget, UserId};
+use crate::model::{
+    ChatId, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, ReplyTarget, SearchHits, UserId,
+};
 use std::io::Write;
 use std::time::Duration;
 
@@ -111,4 +113,9 @@ pub trait Backend: Send + Sync + 'static {
     fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     fn typing(&self, chat: &ChatId) -> impl Future<Output = Result<(), BackendError>> + Send;
+
+    /// Server search by name and text: at most `limit` hits per kind (chats, people,
+    /// messages), first page only. Read-only; the query is typed text and must not be logged
+    /// above `trace`.
+    fn search(&self, query: &str, limit: usize) -> impl Future<Output = Result<SearchHits, BackendError>> + Send;
 }

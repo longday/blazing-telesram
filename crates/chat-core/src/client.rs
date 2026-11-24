@@ -544,6 +544,8 @@ impl<B: Backend> Engine<B> {
             Command::MarkRead { chat, timestamp } => self.mark_read(chat, timestamp),
             Command::Typing(chat) => self.typing(chat),
             Command::SaveDraft(draft) => self.save_draft(draft),
+            // Handled by task 2.2 of add-global-search; the contract is fixed ahead of the engine.
+            Command::Search { .. } | Command::CancelSearch => {}
         }
         true
     }
@@ -1434,6 +1436,10 @@ mod tests {
         write_results: VecDeque<Result<(), BackendError>>,
         /// When set, `send_text` records its call, then waits here before answering.
         send_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Answer of `search`; empty hits when unset.
+        search_result: Option<Result<SearchHits, BackendError>>,
+        /// Every `search` call: query and limit.
+        search_calls: Vec<(String, usize)>,
     }
 
     #[derive(Clone, Default)]
@@ -1575,6 +1581,11 @@ mod tests {
         }
         async fn typing(&self, chat: &ChatId) -> Result<(), BackendError> {
             self.record(Call::Typing(chat.clone()))
+        }
+        async fn search(&self, query: &str, limit: usize) -> Result<SearchHits, BackendError> {
+            let mut s = self.state();
+            s.search_calls.push((query.into(), limit));
+            s.search_result.clone().unwrap_or_else(|| Ok(SearchHits::default()))
         }
     }
 

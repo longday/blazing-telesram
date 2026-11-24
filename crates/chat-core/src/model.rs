@@ -155,6 +155,41 @@ pub enum DownloadFailure {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConnectionState { Connecting, Online, Offline }
 
+/// Identifies one search request. Chosen by the store, increasing; a reply whose id is not
+/// the latest issued one is stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SearchId(pub u64);
+
+/// A chat found by name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatHit { pub id: ChatId, pub kind: ChatKind, pub title: String, pub avatar: Option<MediaRef> }
+
+/// A person found by name. `chat` is the existing private chat with them, when known.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PersonHit { pub user: UserId, pub name: String, pub avatar: Option<MediaRef>, pub chat: Option<ChatId> }
+
+/// A message found by text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MessageHit {
+    pub chat: ChatId,
+    pub chat_title: String,
+    pub timestamp: MessageTs,
+    pub author_name: Option<String>,
+    pub text: String,
+}
+
+/// The first page of server results per kind. Held in memory only, never cached.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SearchHits { pub chats: Vec<ChatHit>, pub people: Vec<PersonHit>, pub messages: Vec<MessageHit> }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchFailure {
+    /// No connection; the request was not made.
+    Offline,
+    /// The request failed; local filtering is unaffected.
+    Failed,
+}
+
 /// Core to UI.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientEvent {
@@ -188,6 +223,10 @@ pub enum ClientEvent {
     DownloadFailed { media: MediaRef, reason: DownloadFailure },
     /// A `CancelDownload` took effect; nothing was left on disk.
     DownloadCancelled(MediaRef),
+    /// Server results for the query `id` asked for.
+    SearchResults { id: SearchId, hits: SearchHits },
+    /// The search `id` asked for produced no results.
+    SearchFailed { id: SearchId, reason: SearchFailure },
 }
 
 /// UI to core. Writes are only the user's own actions: send, edit, delete, read, typing.
@@ -210,6 +249,10 @@ pub enum Command {
     /// (sanitized by the core); the user asked for it explicitly.
     Download { media: MediaRef, name: Option<String> },
     CancelDownload(MediaRef),
+    /// Server search by name and text; the reply is `SearchResults` or `SearchFailed` with `id`.
+    Search { id: SearchId, query: String },
+    /// The user no longer waits for a search: its reply is dropped.
+    CancelSearch,
 }
 
 #[cfg(test)]
@@ -258,5 +301,29 @@ mod tests {
         let old = r#"{"Image":{"media":{"id":"b/1","kind":"Thumbnail"},"width":4,"height":3,"caption":null}}"#;
         let MessageBody::Image { name, width, .. } = serde_json::from_str(old).unwrap() else { panic!("image") };
         assert_eq!((name, width), (None, 4));
+    }
+
+    #[test]
+    fn search_contract_types_compare_by_value() {
+        let hits = SearchHits {
+            chats: vec![ChatHit { id: ChatId("0/0/c".into()), kind: ChatKind::Group, title: "t".into(), avatar: None }],
+            people: vec![PersonHit { user: UserId("u".into()), name: "n".into(), avatar: None, chat: None }],
+            messages: vec![MessageHit {
+                chat: ChatId("0/0/c".into()),
+                chat_title: "t".into(),
+                timestamp: 1,
+                author_name: None,
+                text: "x".into(),
+            }],
+        };
+        assert_eq!(hits.clone(), hits);
+        assert_ne!(hits, SearchHits::default());
+        let event = ClientEvent::SearchResults { id: SearchId(1), hits };
+        assert_eq!(event.clone(), event);
+        let failed = |reason| ClientEvent::SearchFailed { id: SearchId(1), reason };
+        assert_ne!(failed(SearchFailure::Offline), failed(SearchFailure::Failed));
+        let search = Command::Search { id: SearchId(2), query: "q".into() };
+        assert_eq!(search.clone(), search);
+        assert_ne!(Command::CancelSearch, search);
     }
 }
