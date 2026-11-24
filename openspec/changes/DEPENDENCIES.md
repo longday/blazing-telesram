@@ -99,7 +99,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 4.2 | done (CM-M, 9a57c30; `profile.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `composer.rs`) | 3.2, 4.1 | CM-M |
 | 4.3 | done (CM-N, 026673c; `new_chat.rs`, `info_panel.rs`, `desktop.rs`, `main.rs`, `composer.rs`, `tests.rs`, design.md D5) | 3.3, 4.2 | CM-N |
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
-| 5.2 | **ready**; VM run of the read paths with `BT_WRITE_ONLY_CHAT` = self chat; reads only plus one refused creation attempt (the guard refuses before any request, the log must show no `create_private_chat`); no approval needed; build the app in the VM from `main` | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
+| 5.2 | **ready**; VM run of the read paths with `BT_WRITE_ONLY_CHAT` = self chat; reads only plus one refused creation attempt; no approval needed; build the app in the VM from `main`. Log criterion: the guarded line `creation blocked by BT_WRITE_ONLY_CHAT` (`kind=create_private_chat`) is expected; there must be no `registry exchange … call=create_private_chat` and no `create`/`created` line | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
 | 5.3 | blocked-by CM 5.1, 5.2 | 5.1, 5.2 | **[approval] [live]** |
 | 6.1 | done (07925ff; `bt-probe create-chat <title> <guid>... --confirm-create`, `Client::create_chat`, no live request made) | 2.2 | probe support only |
 | 6.2 | ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 (rebuild the main checkout `bt-probe` from `main` first) | 6.1 | **[approval] [live]** |
