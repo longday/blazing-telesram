@@ -1,6 +1,6 @@
 # Proposal
 
-> Context document for later work. Full research (verbatim): [`research.md`](research.md). Design, specs and tasks are not written yet: the Open Questions below need user decisions first.
+> Context document for later work. Full research (verbatim): [`research.md`](research.md). Design, delta specs and tasks are written; the former Open Questions are resolved below (Decisions).
 
 ## Why
 
@@ -11,7 +11,7 @@ Search in the client is local only: the search field filters the loaded chat lis
 - `yandex-proto`: a new typed, closed read operation `search` on the registry client (not an open "call any method"); typed response with result sets, `total`, `limit`, `page`, `pages`.
 - `chat-core`: a search command and result/error events through the backend; stale results for a superseded query are dropped.
 - `desktop`: server results for a typed query shown below the existing local name matches in sections for chats, people and messages, with loading, empty and error states; opening a message result opens its chat. Local filtering of the chat list keeps working offline and unchanged.
-- Only the first page of results is shown until the pagination parameter is confirmed (see Open Questions); the query text is sent to the server only after a debounce and a minimum length, never offline.
+- Only the first page of results is shown until the pagination parameter is confirmed (see Decisions, 3); the query text is sent to the server only after a debounce and a minimum length, never offline.
 - `bt-probe`: a `search <query>` command for live verification of the wire shape, including the next-page parameter, against a real account (read-only request).
 
 ## Capabilities
@@ -37,7 +37,7 @@ Search in the client is local only: the search field filters the loaded chat lis
 - "Mark as unread" (`UnseenMarker`) and any other read-state write.
 - Changing the automatic mark-read-on-visible behaviour of `read-markers`.
 - Searching inside the message history cache offline.
-- New composite local filters beyond the existing all/private/groups/channels/unread (see Open Questions).
+- New composite local filters beyond the existing all/private/groups/channels/unread (see Decisions, 5).
 
 ## Follow-ups
 
@@ -47,11 +47,13 @@ Search in the client is local only: the search field filters the loaded chat lis
 4. Search pagination ("show more"): after the next-page parameter is confirmed with `bt-probe`.
 5. In-chat search (`chat_id` scope), if wanted.
 
-## Open Questions
+## Decisions
 
-1. **Server-side message search or chats only?** Recommended: server-side search of messages is in scope, since the mockup shows it. Trade-off: new network/API surface and async UI states; local search already works and stays as is.
-2. **People and files/links?** Recommended: include people (and chats) as separate result types; leave files/links out until API support is confirmed. Trade-off: the mockup is implemented only partly, but we promise nothing unconfirmed.
-3. **Pagination.** Recommended: do not fix `page` in the contract until `bt-probe search` confirms the parameter on a safe query; ship first page only (`limit`). Trade-off: no "show more" until confirmed; avoids skipped/duplicated results from a guessed parameter.
-4. **When to send the query?** Recommended: debounce (about 300 ms), minimum 2 characters, no request while offline, and results of an older query are discarded. Trade-off: slight delay vs. fewer requests and less typed text leaving the machine.
-5. **Extend local filters in this change?** Recommended: no — the current spec already covers name search and kind filters, and no concrete new filter is requested; add only if the user names one. Trade-off: the research's "extend local filters" step stays empty unless specified.
-6. **Where do server results live in the UI?** Recommended: below the local name matches in the same sidebar list, grouped by section as in the mockup. Trade-off: reuses the existing field and list; a dedicated search view would be larger.
+Taken autonomously on the user's instruction to continue without questions: in every case the recommended option of the former Open Question was chosen. The user may revise any of them with `openspec-update-change`.
+
+1. **Server-side message search or chats only?** Decision: server-side search of messages is in scope. Why: the mockup shows it and it is the point of roadmap item 4; local name search already works and stays unchanged.
+2. **People and files/links?** Decision: people (`users`) and chats are separate result types; files/links are left out. Why: the described `search` does not confirm those categories, so nothing unconfirmed is promised. `contacts` is not requested either (it overlaps `users`; `bt-probe search` will show whether it adds anything).
+3. **Pagination.** Decision: `page` is not part of the contract; only the first page (`limit`) is requested and shown, and `bt-probe search` records the next-page parameter for the follow-up. Why: a guessed parameter could skip or duplicate results.
+4. **When to send the query?** Decision: debounce about 300 ms, minimum 2 characters (counted as Unicode scalar values after trimming), no request while offline, results of a superseded query discarded. Why: fewer requests and less typed text leaving the machine, at the price of a short delay.
+5. **Extend local filters in this change?** Decision: no. Why: the current `chat-list` spec already covers name search and kind filters and no concrete new filter was requested. The research step "extend local filters" therefore produces no work.
+6. **Where do server results live in the UI?** Decision: below the local name matches in the same sidebar list, grouped into sections (chats, people, messages) as in the mockup, independent of the kind chips (the chips describe the local list only). Why: reuses the existing field and list; a dedicated search view would be larger.
