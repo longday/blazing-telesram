@@ -14,7 +14,16 @@ use crate::frame::RequestFrame;
 pub const HISTORY_CHUNK: u32 = 50;
 
 /// Every method name `ReadRequest` can put on the wire.
-pub const ALLOWED_METHODS: [&str; 5] = ["request_user", "get_users_data", "history", "subscribe", "search"];
+pub const ALLOWED_METHODS: [&str; 8] = [
+    "request_user",
+    "get_users_data",
+    "history",
+    "subscribe",
+    "search",
+    "whoami",
+    "get_chat_members",
+    "get_group_members",
+];
 
 /// Rows per result set requested from `search` (the server default), the same for every entity.
 pub const SEARCH_LIMIT: u32 = 10;
@@ -39,6 +48,12 @@ pub enum ReadRequest {
     SubscribeChat { chat: String },
     /// Registry `search`; works on the bare cookie. One result set per requested entity.
     Search { query: String, limit: u32, entities: Vec<SearchEntity> },
+    /// Socket `whoami`: the profile of the signed-in account (`guid` is the session's own).
+    Whoami { guid: String },
+    /// Registry `get_chat_members`; works on the bare cookie. Used for private chats.
+    ChatMembers { chat: String },
+    /// Registry `get_group_members`; works on the bare cookie. Carries the member role.
+    GroupMembers { chat: String },
 }
 
 /// What a `search` can look for. `contacts` is deliberately not representable.
@@ -82,6 +97,9 @@ impl ReadRequest {
             Self::GetUsersData { .. } => "get_users_data",
             Self::ChatList | Self::History { .. } => "history",
             Self::Search { .. } => "search",
+            Self::Whoami { .. } => "whoami",
+            Self::ChatMembers { .. } => "get_chat_members",
+            Self::GroupMembers { .. } => "get_group_members",
             Self::SubscribeChat { .. } => "subscribe",
         }
     }
@@ -89,8 +107,11 @@ impl ReadRequest {
     pub fn route(&self) -> Route {
         match self {
             Self::RequestUser => Route::Registry { csrf: true },
-            Self::GetUsersData { .. } | Self::Search { .. } => Route::Registry { csrf: false },
-            Self::ChatList | Self::History { .. } | Self::SubscribeChat { .. } => Route::Socket,
+            Self::GetUsersData { .. }
+            | Self::Search { .. }
+            | Self::ChatMembers { .. }
+            | Self::GroupMembers { .. } => Route::Registry { csrf: false },
+            Self::ChatList | Self::History { .. } | Self::SubscribeChat { .. } | Self::Whoami { .. } => Route::Socket,
         }
     }
 
@@ -104,6 +125,7 @@ impl ReadRequest {
                 "limit": limit,
                 "entities": entities.iter().map(|e| e.wire_name()).collect::<Vec<_>>(),
             }),
+            Self::ChatMembers { chat } | Self::GroupMembers { chat } => json!({ "chat_id": chat }),
             _ => return None,
         };
         Some(json!({ "method": self.method(), "params": params }).to_string())
@@ -120,6 +142,7 @@ impl ReadRequest {
                 }
                 body
             }
+            Self::Whoami { guid } => json!({ "Guid": guid }),
             Self::SubscribeChat { chat } => json!({
                 "ChatId": chat,
                 "TtlMcs": SUBSCRIPTION_TTL_MCS,
@@ -127,7 +150,11 @@ impl ReadRequest {
                 "UserAgent": USER_AGENT,
                 "ClientSupportedFeatures": 0,
             }),
-            Self::RequestUser | Self::GetUsersData { .. } | Self::Search { .. } => return None,
+            Self::RequestUser
+            | Self::GetUsersData { .. }
+            | Self::Search { .. }
+            | Self::ChatMembers { .. }
+            | Self::GroupMembers { .. } => return None,
         };
         body["RequestId"] = Value::from(ctx.request_id);
         Some(RequestFrame {
@@ -158,6 +185,9 @@ mod tests {
                 limit: SEARCH_LIMIT,
                 entities: vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats],
             },
+            ReadRequest::Whoami { guid: "g-self".into() },
+            ReadRequest::ChatMembers { chat: "0/0/c".into() },
+            ReadRequest::GroupMembers { chat: "0/0/c".into() },
         ];
         for request in &all {
             match request {
@@ -166,7 +196,10 @@ mod tests {
                 | ReadRequest::ChatList
                 | ReadRequest::History { .. }
                 | ReadRequest::SubscribeChat { .. }
-                | ReadRequest::Search { .. } => {}
+                | ReadRequest::Search { .. }
+                | ReadRequest::Whoami { .. }
+                | ReadRequest::ChatMembers { .. }
+                | ReadRequest::GroupMembers { .. } => {}
             }
         }
         all
@@ -195,17 +228,73 @@ mod tests {
         }
     }
 
+    const MUTATING_MARKERS: [&str; 22] = [
+        "push", "send_message", "edit", "delete", "typing", "heartbeat", "seen", "read",
+        "reaction", "vote", "pin", "set_", "create_", "update_", "leave", "invite",
+        "change_", "add_", "remove_", "kick", "join", "ban",
+    ];
+
+    fn looks_mutating(method: &str) -> bool {
+        MUTATING_MARKERS.iter().any(|marker| method.contains(marker))
+    }
+
+    #[test]
+    fn the_marker_list_flags_mutating_names() {
+        for method in [
+            "create_private_chat", "create_chat", "change_chat_members", "change_chat_role", "change_chat_admins",
+            "leave_chat", "invite_users", "add_members", "remove_members", "kick_user", "join_chat", "set_status",
+            "update_chat", "push", "heartbeat",
+        ] {
+            assert!(looks_mutating(method), "{method} must be flagged");
+        }
+        for method in ["whoami", "get_chat_members", "get_group_members", "search"] {
+            assert!(!looks_mutating(method), "{method} must not be flagged");
+        }
+    }
+
     #[test]
     fn allowlist_has_no_mutating_or_presence_methods() {
-        for forbidden in [
-            "push", "send_message", "edit", "delete", "typing", "heartbeat", "seen", "read",
-            "reaction", "vote", "pin", "set_", "create_", "update_", "leave", "invite",
-        ] {
-            for method in ALLOWED_METHODS {
-                assert!(!method.contains(forbidden), "{method} looks like {forbidden}");
-            }
+        for method in ALLOWED_METHODS {
+            assert!(!looks_mutating(method), "{method} looks mutating");
         }
-        assert_eq!(ALLOWED_METHODS.len(), 5);
+        assert_eq!(
+            ALLOWED_METHODS,
+            [
+                "request_user", "get_users_data", "history", "subscribe", "search", "whoami", "get_chat_members",
+                "get_group_members",
+            ]
+        );
+        assert_eq!(ALLOWED_METHODS.len(), 8);
+    }
+
+    #[test]
+    fn whoami_is_a_socket_request_with_the_session_guid() {
+        let request = ReadRequest::Whoami { guid: "g-self".into() };
+        assert_eq!(request.method(), "whoami");
+        assert_eq!(request.route(), Route::Socket);
+        assert!(request.registry_body().is_none());
+        let ctx = SocketContext { req_id: 4, request_id: "rid", subscription_id: None };
+        let frame = request.socket_frame(&ctx).unwrap();
+        assert_eq!((frame.service_index, frame.req_id, frame.method.as_str()), (0, 4, "whoami"));
+        assert_eq!(frame.body, json!({ "Guid": "g-self", "RequestId": "rid" }));
+    }
+
+    #[test]
+    fn member_reads_are_cookie_only_registry_requests_with_the_chat_id() {
+        for (request, method) in [
+            (ReadRequest::ChatMembers { chat: "0/0/c".into() }, "get_chat_members"),
+            (ReadRequest::GroupMembers { chat: "0/0/c".into() }, "get_group_members"),
+        ] {
+            assert_eq!(request.method(), method);
+            assert!(ALLOWED_METHODS.contains(&method));
+            assert_eq!(request.route(), Route::Registry { csrf: false });
+            let body: Value = serde_json::from_str(&request.registry_body().unwrap()).unwrap();
+            let expected: Value =
+                serde_json::from_str(&format!(r#"{{"method":"{method}","params":{{"chat_id":"0/0/c"}}}}"#)).unwrap();
+            assert_eq!(body, expected);
+            let ctx = SocketContext { req_id: 1, request_id: "rid", subscription_id: Some("sub") };
+            assert!(request.socket_frame(&ctx).is_none());
+        }
     }
 
     #[test]

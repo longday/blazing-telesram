@@ -3,15 +3,17 @@
 
 use std::io::Write;
 
+use serde_json::Value;
+
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
 use crate::net::HttpSettings;
 use crate::registry::RegistryClient;
-use crate::request::{HISTORY_CHUNK, SEARCH_LIMIT, SearchEntity};
+use crate::request::{HISTORY_CHUNK, ReadRequest, SEARCH_LIMIT, SearchEntity};
 use crate::search::SearchReply;
 use crate::session::Session;
-use crate::wire::{DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireUser};
+use crate::wire::{DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireChatKind, WireHistory, WireUser};
 use crate::write::{Committed, WriteRequest};
 use crate::ws::TungsteniteConnector;
 use crate::xiva::{Connector, XivaConfig, XivaEvents, XivaHandle};
@@ -46,6 +48,7 @@ pub struct Client {
     media: MediaClient,
     excluded_namespaces: Vec<u32>,
     history_limit: u32,
+    guid: String,
 }
 
 impl Client {
@@ -70,6 +73,7 @@ impl Client {
             media,
             excluded_namespaces: config.excluded_namespaces,
             history_limit: config.history_limit,
+            guid: session.identity.guid.clone(),
         };
         Ok((client, events))
     }
@@ -102,6 +106,22 @@ impl Client {
     /// `search` with an explicit page size and entity set (what `bt-probe search` exposes).
     pub async fn search_with(&self, query: &str, limit: u32, entities: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
         self.registry.search(query, limit, entities).await
+    }
+
+    /// Raw `whoami` reply of the signed-in account (socket). Untyped until the shape is recorded.
+    pub async fn whoami_raw(&self) -> Result<Value, ProtoError> {
+        self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await
+    }
+
+    /// Raw member list of `chat`: `get_chat_members` for private chats, `get_group_members` for
+    /// groups and channels. Untyped until the shape is recorded.
+    pub async fn members_raw(&self, chat: &str, kind: &WireChatKind) -> Result<Value, ProtoError> {
+        let chat = chat.to_owned();
+        let request = match kind {
+            WireChatKind::Private => ReadRequest::ChatMembers { chat },
+            WireChatKind::Group | WireChatKind::Channel => ReadRequest::GroupMembers { chat },
+        };
+        self.registry.execute(&request).await
     }
 
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
@@ -140,5 +160,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(client.chat_list().await.is_err());
         assert_eq!(client.history_limit, 50);
+        assert_eq!(client.guid, "g");
+        assert!(client.whoami_raw().await.is_err());
     }
 }
