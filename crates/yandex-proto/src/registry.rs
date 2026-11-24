@@ -547,4 +547,62 @@ mod tests {
         }
         capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2", "g-target"]);
     }
+
+    fn group_creation() -> ManageRequest {
+        ManageRequest::CreateChat { title: "T1tle-VALUE".into(), users: vec!["g-p1".into(), "g-p2".into()] }
+    }
+
+    #[tokio::test]
+    async fn manage_create_chat_sends_the_csrf_header_and_returns_the_group_reply() {
+        let reply = r#"{"status":"ok","data":{"chat":{"chat_id":"0/0/g"},"errors":[{"code":"join_denied"}]}}"#;
+        let (base, seen) = serve(vec![csrf_ok(), json_response("200 OK", reply)]);
+        let data = client(&base, Duration::from_secs(5)).manage(&group_creation()).await.unwrap();
+        let created = crate::manage::parse_created_chat(&data);
+        assert_eq!(created.chat.as_deref(), Some("0/0/g"));
+        assert_eq!(created.refused, ["join_denied"]);
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].starts_with("POST /csrf/"));
+        let request = seen[1].to_lowercase();
+        assert!(request.starts_with("post /api/") && request.contains("x-csrf-token: t0k"), "{request}");
+        assert!(request.contains("create_chat") && request.contains("t1tle-value") && request.contains("g-p2"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn manage_create_chat_failures_keep_their_class() {
+        let (base, _) = serve(vec![
+            csrf_ok(),
+            json_response("200 OK", r#"{"status":"error","data":{"code":"validation_error"}}"#),
+            csrf_ok(),
+            json_response("502 Bad Gateway", "{}"),
+        ]);
+        let c = client(&base, Duration::from_secs(5));
+        assert!(matches!(c.manage(&group_creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("create_chat failed: validation_error")));
+        assert!(matches!(c.manage(&group_creation()).await, Err(ManageError::Unknown(_))));
+    }
+
+    #[tokio::test]
+    async fn manage_create_chat_log_has_neither_the_title_nor_the_participants() {
+        use crate::test_log::Capture;
+
+        let capture = Capture::default();
+        let _guard = capture.install();
+        // See `manage_log_shows_the_exchange_but_no_secrets` for the second dispatcher.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        let (base, _) = serve(vec![
+            json_response("200 OK", r#"{"token":"t0k-CSRF-VALUE"}"#),
+            json_response("200 OK", r#"{"status":"ok","data":{"chat":{"chat_id":"chat-reply"}}}"#),
+        ]);
+        let mut endpoints = RegistryEndpoints::production();
+        endpoints.api_url = format!("{base}/api/?uid=Q-VALUE-1");
+        endpoints.csrf_url = format!("{base}/csrf/?uid=Q-VALUE-2");
+        let cookie = SessionCookie { value: "c00kie-VALUE".into(), domain: "127.0.0.1".into(), ..cookie() };
+        let c = RegistryClient::new(&endpoints, &HttpSettings::default(), &[cookie]).unwrap();
+        c.manage(&group_creation()).await.unwrap();
+
+        let text = capture.text();
+        for needle in ["csrf-token exchange", "registry exchange", "127.0.0.1/api/", "status=200", "create_chat"] {
+            assert!(text.contains(needle), "{needle}: {text}");
+        }
+        capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2", "T1tle-VALUE", "g-p1", "g-p2"]);
+    }
 }

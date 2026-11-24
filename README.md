@@ -42,6 +42,17 @@ bt-probe members <chat>                          # get_chat_members, first page 
 
 `members` answers for group chats only: private chats, the self chat and (for the account it was recorded on) channels are refused with `no_permissions_for_this_chat_operation`. The client has no `get_group_members` call: it answers `bad_request` for every shape.
 
+One command changes the real account outside the self chat: `bt-probe create-private <guid> --confirm-create` opens (creating it when missing) the private chat with that user, through the CSRF-guarded `create_private_chat` call, once and never retried. Without `--confirm-create` it prints the target and exits with code 2 without any request. Exit codes: 0 created (the chat id is printed when the reply names one), 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating). The raw reply is logged only at `BT_LOG=yandex_proto::registry=trace`; share it with care.
+
+```sh
+bt-probe create-private <guid>                   # refuses: prints the target, sends nothing
+bt-probe create-private <guid> --confirm-create  # sends the one request
+bt-probe create-chat <title> <guid>...                   # refuses: prints title and participants, sends nothing
+bt-probe create-chat <title> <guid>... --confirm-create  # sends the one request
+```
+
+`create-chat` creates a group chat through the CSRF-guarded `create_chat` call with the payload the web client's own wizard sends (description empty, not a channel, `is_public: true`, your own guid not listed); that payload was read from the web client's code and has not been confirmed against the server yet. Same rules as `create-private`: once, never retried, no request without `--confirm-create`, the same exit codes; the title must be non-blank and at most 250 characters and at least one distinct guid is required. Participants the server could not add are printed by code; the group exists anyway.
+
 ## Diagnostics
 
 The app logs to three places at once: the terminal (stderr), the log window (⌘⇧L or the 🐞 button next to search; «Копировать» copies it) and a JSON Lines file `.runtime/logs/<UTC time>-<pid>.jsonl`, one object per record, written as it happens. The ten newest files are kept.

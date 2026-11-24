@@ -6,6 +6,8 @@ Order at a glance: 1.1, 2.1, 2.2, 3.1 start immediately. 3.2 follows 3.1; 3.3 fo
 
 Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `client.rs` tests until 3.2 and `YandexBackend` until 4.1; adding `WireMessage.reactions` (2.1) breaks the `WireMessage` literals in `bt-probe.rs` (fixed by 6.1) and `yandex_backend.rs` tests (fixed by 4.1); adding `Message.reactions` (3.1) breaks `Message` literals in `store.rs` tests (5.1), `tests.rs` (5.4) and `yandex_backend.rs` (4.1). The workspace compiles again only when all of them have landed; that is why nobody builds mid-flight and 7.1 builds once.
 
+Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is the only task here that touches `bt-probe.rs`, and `add-chat-members-and-creation` 2.2 and 6.1 edit that file first. 6.1 therefore starts only after those two are merged to `main`; every other task of this change is independent of them. Until 6.1 lands, the `yandex-proto` bin test target fails to compile on the `WireMessage` literal in `bt-probe.rs` (missing `reactions`); this is expected, so check the other targets only: `cargo test -p yandex-proto --lib --test wire_fixtures`, and the `chat-core` and `desktop` packages where they compile.
+
 ## 1. Reaction type table
 
 - [x] 1.1 Collect the confirmed (code, emoji) pairs, read-only (decision P1)
