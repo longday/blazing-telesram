@@ -92,25 +92,25 @@ Task 1.1, read-only, 2026-11-24. No account was used and nothing was written: ev
 
 ### Confirmed pairs, in picker order
 
-Order is the server's `default` / `private` list from C, `[100109, 100108, 100104, 100102, 100103, 100106, 100105, 100110, 100101]`: the web client's default picker for a private chat and for a group chat with no namespace entry. It is not the order of the extended list.
+Order is the server's `default` / `private` list from C, `[100109, 100108, 100104, 100102, 100103, 100106, 100105, 100110, 100101]`: the web client's default picker for a private chat and for a group chat with no namespace entry. It is not the order of the extended list. `100108` is in that list but not confirmed (see "Not in the table"); the table below is the list without it, order kept.
 
 | # | code | enum name | emoji (code points) | evidence |
 |---|------|-----------|---------------------|----------|
 | 1 | 100109 | `HEART` | ❤️ (U+2764 U+FE0F) | E, U, C, I; L: `UNICODE_HEART = 10084` (U+2764) |
-| 2 | 100108 | `SMILE` | 😆 (U+1F606) | E, U (`reaction-laugh-ext`), C, I; L: `UNICODE_SMILE = 128518` (U+1F606, slug `reaction-laugh`). The new artwork is a grin with arc eyes (closer to 😄); the legacy code fixes 😆 |
-| 3 | 100104 | `FIRE` | 🔥 (U+1F525) | E, U (`reaction-flame-ext`), C, I; L: `UNICODE_FIRE = 128293` |
-| 4 | 100102 | `LIKE` | 👍 (U+1F44D) | E, U, C, I; L: `UNICODE_LIKE = 128077` |
-| 5 | 100103 | `DISLIKE` | 👎 (U+1F44E) | E, U, C, I; L: `UNICODE_DISLIKE = 128078` |
-| 6 | 100106 | `SURPRISED` | 😲 (U+1F632) | E, U, C, I; L: `UNICODE_SURPRISED = 128562` |
-| 7 | 100105 | `CRYING` | 😭 (U+1F62D) | E, U, C, I; L: `UNICODE_CRYING = 128557` |
-| 8 | 100110 | `EYES` | 👀 (U+1F440) | E, U (`reaction-eyes-ext`), C, I; no legacy twin; the name designates 👀 and the artwork is a pair of eyes |
-| 9 | 100101 | `CHECK` | ✅ (U+2705) | E, U (`reaction-check-ext`), C, I, **F**; no legacy twin; the artwork is a white tick on a green disc, which is ✅ (✔️ and ☑️ rejected: not green) |
+| 2 | 100104 | `FIRE` | 🔥 (U+1F525) | E, U (`reaction-flame-ext`), C, I; L: `UNICODE_FIRE = 128293` |
+| 3 | 100102 | `LIKE` | 👍 (U+1F44D) | E, U, C, I; L: `UNICODE_LIKE = 128077` |
+| 4 | 100103 | `DISLIKE` | 👎 (U+1F44E) | E, U, C, I; L: `UNICODE_DISLIKE = 128078` |
+| 5 | 100106 | `SURPRISED` | 😲 (U+1F632) | E, U, C, I; L: `UNICODE_SURPRISED = 128562` |
+| 6 | 100105 | `CRYING` | 😭 (U+1F62D) | E, U, C, I; L: `UNICODE_CRYING = 128557` |
+| 7 | 100110 | `EYES` | 👀 (U+1F440) | E, U (`reaction-eyes-ext`), C, I; no legacy twin; the name designates 👀 and the artwork is a pair of eyes |
+| 8 | 100101 | `CHECK` | ✅ (U+2705) | E, U (`reaction-check-ext`), C, I, **F**; no legacy twin; the artwork is a white tick on a green disc, which is ✅ (✔️ and ☑️ rejected: not green) |
 
-`KNOWN` (task 3.3) is these nine rows, in this order. Every code is also in the `extended_reactions_by_namespace.private` list, so a server that offers the extended picker accepts them too.
+`KNOWN` (task 3.3) is these eight rows, in this order. Every code is also in the `extended_reactions_by_namespace.private` list, so a server that offers the extended picker accepts them too.
 
 ### Not in the table
 
-- Namespace 17 (`reactions_by_namespace["17"]`) offers only `100102` and `100103`; a group chat of that namespace may refuse the others (the server answer is an error that rolls the toggle back, D5). The client does not know the namespace, so the picker stays the nine.
+- Namespace 17 (`reactions_by_namespace["17"]`) offers only `100102` and `100103`; a group chat of that namespace may refuse the others (the server answer is an error that rolls the toggle back, D5). The client does not know the namespace, so the picker stays the eight.
+- `100108` `SMILE` is **unresolved**, not confirmed. It is in the default picker (slot 2). Its legacy twin `UNICODE_SMILE = 128518` is 😆 (U+1F606, `>` `<` eyes, slug `reaction-laugh`), and the current artwork (`reaction-laugh-ext`) is a grin with arc eyes, which is 😄 (U+1F604) in the usual emoji sets. Nothing in the bundle or config says that `100108` replaces `128518` or which of the two glyphs it designates; the matching enum name and slug stem are not a bridge. It renders as a `NEUTRAL_GLYPH` chip until a self-chat observation or another source settles it (task 7.2 may add one); adding it later is one `KNOWN` row.
 - `100107` `GOOSE` is in `default_team` only. Its legacy twin `UNICODE_GOOSE = 129442` is U+1F9A2 (a swan, 🦢) while the artwork is a goose: the enum's own code point is a placeholder, so no Unicode glyph is confirmed. It stays out; a chip for it shows `NEUTRAL_GLYPH`.
 - Codes `100111`-`100157` (extended picker, flag `web_enable_extended_reactions_picker`, `false` in the page config) and the seasonal `1000xx` / `110001` codes are not offered by the default picker. Several have an unambiguous Unicode name (💯 `HUNDRED_POINTS`, 🤡 `CLOWN`, 💩 `POOP`, 🤯 `EXPLODING_HEAD`, 💔 `BROKEN_HEART`, 🎉 `TADA`, 👏 `CLAP`, 🤔 `THINKING`, 😎 `SUNGLASSES`, 🙏 `PRAY`, 🤝 `HANDSHAKE`, 👌 `OK`), others are product art with no Unicode counterpart (`PLUS`, `MINUS`, `FOUR_PLUS`, `LOGO_360`, `ROWAN`, `CALENDAR`, `PIXEL_HEART`, `FLOWERS_*`). None has a second source beyond E, U, I, so none is confirmed; they render as `NEUTRAL_GLYPH` chips. A follow-up change that adds the extended picker can use this list as its starting point.
 
