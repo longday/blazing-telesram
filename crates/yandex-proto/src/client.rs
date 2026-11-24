@@ -5,6 +5,7 @@ use std::io::Write;
 
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
+use crate::manage::{ManageError, ManageRequest, created_chat_id};
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
 use crate::net::HttpSettings;
 use crate::registry::RegistryClient;
@@ -129,6 +130,16 @@ impl Client {
         parse_members(&self.registry.execute(&request).await?)
     }
 
+    /// Opens (creating it when missing) the private chat with the user `guid`: one CSRF-guarded
+    /// registry mutation, sent at most once and never retried. `Ok` is the server's `ok` answer;
+    /// its value is the id of the chat when the reply names one and `None` otherwise (a success
+    /// without an id is still a success; the caller refreshes the chat list). A failure says
+    /// whether a repeat could duplicate the chat, see [`ManageError`].
+    pub async fn create_private_chat(&self, guid: &str) -> Result<Option<String>, ManageError> {
+        let data = self.registry.manage(&ManageRequest::CreatePrivateChat { guid: guid.to_owned() }).await?;
+        Ok(created_chat_id(&data))
+    }
+
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
         self.media.fetch(target).await
     }
@@ -209,5 +220,39 @@ mod tests {
             matches!(&err, ProtoError::Protocol(m) if m.contains("no_permissions_for_this_chat_operation")),
             "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn create_private_chat_sends_one_guarded_request_and_returns_the_chat_id() {
+        use crate::registry::stub::{json_response, serve};
+        let (base, seen) = serve(vec![
+            json_response("200 OK", r#"{"token":"t0k"}"#),
+            json_response("200 OK", r#"{"status":"ok","data":{"chat_id":"a_b"}}"#),
+        ]);
+        let created = client_with_registry(&base).await.create_private_chat("g-target").await.unwrap();
+        assert_eq!(created.as_deref(), Some("a_b"));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one CSRF exchange and one creation");
+        let request = seen[1].to_lowercase();
+        assert!(request.contains("x-csrf-token: t0k"), "{request}");
+        assert!(request.contains("create_private_chat") && request.contains("g-target"), "{request}");
+    }
+
+    #[tokio::test]
+    async fn create_private_chat_success_without_an_id_is_none_and_failures_keep_their_class() {
+        use crate::registry::stub::{json_response, serve};
+        let csrf = || json_response("200 OK", r#"{"token":"t0k"}"#);
+        let (base, _) = serve(vec![
+            csrf(),
+            json_response("200 OK", r#"{"status":"ok"}"#),
+            csrf(),
+            json_response("200 OK", r#"{"status":"error","data":{"code":"no_permission"}}"#),
+            csrf(),
+            json_response("503 Service Unavailable", "{}"),
+        ]);
+        let client = client_with_registry(&base).await;
+        assert_eq!(client.create_private_chat("g").await, Ok(None));
+        assert!(matches!(client.create_private_chat("g").await, Err(ManageError::Rejected(_))));
+        assert!(matches!(client.create_private_chat("g").await, Err(ManageError::Unknown(_))));
     }
 }

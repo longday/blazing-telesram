@@ -1,7 +1,8 @@
 //! Developer probe for the Yandex protocol layer. Reads, plus a few writes that act on the
 //! account's self chat only; never prints cookie values. `download` saves one file or image
 //! of any chat into a local directory (never overwriting) and prints host and path of the
-//! request, never its query.
+//! request, never its query. `create-private` is the one command that changes the account
+//! outside the self chat, and it sends nothing without `--confirm-create`.
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::fs::{self, File, OpenOptions};
@@ -24,7 +25,7 @@ use yandex_proto::session::Session;
 use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
 use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
-use yandex_proto::{Client, ClientConfig, ProtoError};
+use yandex_proto::{Client, ClientConfig, ManageError, ProtoError};
 
 const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--watch <chat>]
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
@@ -34,12 +35,14 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe download <chat> <micros> [--item N] [--to <dir>]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
+       bt-probe create-private <guid> --confirm-create
 the *-self commands refuse any chat but the account's own self chat
 download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
-whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only";
+whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
+create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -102,6 +105,14 @@ fn main() -> ExitCode {
         },
         ["whoami"] => block_on(whoami()),
         ["members", chat] => block_on(members(chat)),
+        ["create-private", guid, flags @ ..] => match create_private_args(guid, flags) {
+            Some(CreatePrivate::Send(guid)) => block_on(create_private(guid)),
+            Some(CreatePrivate::Refuse(guid)) => {
+                eprintln!("{}", refusal(guid));
+                return ExitCode::from(2);
+            }
+            None => return usage(),
+        },
         _ => return usage(),
     };
     match result {
@@ -412,6 +423,56 @@ async fn members(chat: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+/// What `create-private <guid> [flags]` asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum CreatePrivate<'a> {
+    /// The confirmation flag is present: send the request.
+    Send(&'a str),
+    /// No flag: print the target and exit without a request.
+    Refuse(&'a str),
+}
+
+/// `<guid>` alone refuses, `<guid> --confirm-create` sends; a blank guid or any other flag is a
+/// usage error (`None`).
+fn create_private_args<'a>(guid: &'a str, flags: &[&str]) -> Option<CreatePrivate<'a>> {
+    if guid.trim().is_empty() {
+        return None;
+    }
+    match flags {
+        [] => Some(CreatePrivate::Refuse(guid)),
+        ["--confirm-create"] => Some(CreatePrivate::Send(guid)),
+        _ => None,
+    }
+}
+
+fn refusal(guid: &str) -> String {
+    format!(
+        "create-private would open (creating it when missing) the private chat with {guid} on the real account; nothing was sent. Repeat with --confirm-create to send it"
+    )
+}
+
+/// A creation that did not succeed, with the exit code that tells a safe repeat (1) from a
+/// possible duplicate (3).
+fn creation_failure(error: ManageError) -> Failure {
+    match error {
+        ManageError::NotSent(e) => (1, format!("not sent, nothing was created: {e}")),
+        ManageError::Rejected(e) => (1, format!("rejected by the server, nothing was created: {e}")),
+        ManageError::Unknown(e) => (3, format!("outcome unknown, the chat may exist: check the web client before repeating: {e}")),
+    }
+}
+
+/// One `create_private_chat` (registry mutation with CSRF, sent once, never retried). Reached
+/// only with `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
+async fn create_private(guid: &str) -> Result<(), Failure> {
+    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    eprintln!("creating the private chat with {guid}");
+    match client.create_private_chat(guid).await.map_err(creation_failure)? {
+        Some(chat) => println!("created: chat {chat}"),
+        None => println!("created: the reply names no chat id (look in the chat list)"),
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DownloadFlags<'a> {
     /// 1-based position inside a gallery.
@@ -664,6 +725,29 @@ mod tests {
         assert_eq!(chat_flag(&[]), Some(None));
         assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
         assert_eq!(chat_flag(&["c"]), None);
+    }
+
+    #[test]
+    fn create_private_refuses_without_the_flag_and_names_the_target() {
+        assert_eq!(create_private_args(GUID, &[]), Some(CreatePrivate::Refuse(GUID)));
+        assert_eq!(create_private_args(GUID, &["--confirm-create"]), Some(CreatePrivate::Send(GUID)));
+        for bad in [&["--confirm"][..], &["--confirm-create", "--confirm-create"], &["--confirm-create", "x"], &["yes"]] {
+            assert_eq!(create_private_args(GUID, bad), None, "{bad:?}");
+        }
+        assert_eq!(create_private_args("  ", &["--confirm-create"]), None);
+        assert_eq!(create_private_args("", &[]), None);
+        let message = refusal(GUID);
+        assert!(message.contains(GUID) && message.contains("nothing was sent") && message.contains("--confirm-create"), "{message}");
+    }
+
+    #[test]
+    fn only_an_unknown_outcome_warns_about_a_duplicate() {
+        let e = || ProtoError::Network("boom".into());
+        assert_eq!(creation_failure(ManageError::NotSent(e())).0, 1);
+        assert_eq!(creation_failure(ManageError::Rejected(e())).0, 1);
+        let (code, message) = creation_failure(ManageError::Unknown(e()));
+        assert_eq!(code, 3);
+        assert!(message.contains("may exist"), "{message}");
     }
 }
 
