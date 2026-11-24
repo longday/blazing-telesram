@@ -3,13 +3,19 @@
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::{
     ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, DownloadFailure, Draft,
-    HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, UserId,
+    HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, SearchFailure,
+    SearchHits, SearchId, UserId,
 };
 use gpui::{Context, EventEmitter};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// How long the search field must stay unchanged before its text is sent to the server.
+pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
+/// Shortest query (in `char`s, after `trim()`) that is sent to the server.
+pub const SEARCH_MIN_CHARS: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
@@ -81,6 +87,23 @@ pub enum DownloadState {
     Failed(DownloadFailure),
 }
 
+/// Where the server search of the sidebar stands. `hits` are those of the last successful reply and
+/// stay until the next one replaces them or the search is cancelled, so a new query never blanks the list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchState {
+    pub id: SearchId,
+    pub query: String,
+    pub status: SearchStatus,
+    pub hits: SearchHits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchStatus {
+    Loading,
+    Ready,
+    Failed(SearchFailure),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreEvent {
     Chats,
@@ -96,6 +119,8 @@ pub enum StoreEvent {
     ActionFailed { chat: ChatId, reason: String },
     /// A send was not queued; the UI puts the text and reply target back.
     SendRefused { draft: Draft, reason: String },
+    /// The server search state changed (issued, answered, failed or cancelled).
+    Search,
 }
 
 pub struct ChatStore {
@@ -111,6 +136,9 @@ pub struct ChatStore {
     session: SessionState,
     drafts: HashMap<ChatId, Draft>,
     typing: HashMap<ChatId, Vec<Typist>>,
+    search: Option<SearchState>,
+    /// The id of the last issued search; never reused, also after `cancel_search`.
+    last_search: SearchId,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -139,6 +167,8 @@ impl ChatStore {
             session: SessionState::Active,
             drafts: HashMap::new(),
             typing: HashMap::new(),
+            search: None,
+            last_search: SearchId(0),
         }
     }
 
@@ -187,6 +217,7 @@ impl ChatStore {
                 self.media.clear();
                 self.media_requested.clear();
                 self.downloads.clear();
+                self.search = None;
                 self.drafts.clear();
                 self.typing.clear();
                 self.session = SessionState::SignedOut;
@@ -208,6 +239,10 @@ impl ChatStore {
                 self.set_download(media, Some(DownloadState::Failed(reason)), cx);
             }
             ClientEvent::DownloadCancelled(media) => self.set_download(media, None, cx),
+            ClientEvent::SearchResults { id, hits } => self.finish_search(id, Some(hits), SearchStatus::Ready, cx),
+            ClientEvent::SearchFailed { id, reason } => {
+                self.finish_search(id, None, SearchStatus::Failed(reason), cx);
+            }
         }
         cx.notify();
     }
@@ -402,6 +437,50 @@ impl ChatStore {
 
     pub fn download_state(&self, original: &MediaRef) -> Option<&DownloadState> {
         self.downloads.get(original)
+    }
+
+    /// Asks the server for `query`: the previous hits stay while the state is `Loading`. The UI applies the
+    /// debounce, the minimum length and the offline rule before calling this.
+    pub fn search(&mut self, query: String, cx: &mut Context<Self>) {
+        self.last_search = SearchId(self.last_search.0 + 1);
+        let id = self.last_search;
+        let hits = self.search.take().map(|s| s.hits).unwrap_or_default();
+        self.search = Some(SearchState { id, query: query.clone(), status: SearchStatus::Loading, hits });
+        self.send(Command::Search { id, query });
+        cx.emit(StoreEvent::Search);
+        cx.notify();
+    }
+
+    /// Forgets the query and its hits; a reply still on its way is dropped here and in the core.
+    /// Nothing is sent when no search is active (the core has nothing to drop either).
+    pub fn cancel_search(&mut self, cx: &mut Context<Self>) {
+        if self.search.take().is_none() {
+            return;
+        }
+        self.send(Command::CancelSearch);
+        cx.emit(StoreEvent::Search);
+        cx.notify();
+    }
+
+    pub fn search_state(&self) -> Option<&SearchState> {
+        self.search.as_ref()
+    }
+
+    /// Stores the outcome of search `id`; an outcome of any other id (superseded or cancelled) is ignored.
+    /// A failure keeps the hits already shown.
+    fn finish_search(&mut self, id: SearchId, hits: Option<SearchHits>, status: SearchStatus, cx: &mut Context<Self>) {
+        let Some(state) = self.search.as_mut().filter(|s| s.id == id) else { return };
+        state.status = status;
+        if let Some(hits) = hits {
+            let avatars: Vec<MediaRef> = (hits.chats.iter().filter_map(|h| h.avatar.clone()))
+                .chain(hits.people.iter().filter_map(|h| h.avatar.clone()))
+                .collect();
+            state.hits = hits;
+            for avatar in &avatars {
+                self.want_media(Some(avatar));
+            }
+        }
+        cx.emit(StoreEvent::Search);
     }
 
     fn set_download(&mut self, media: MediaRef, state: Option<DownloadState>, cx: &mut Context<Self>) {
@@ -674,5 +753,219 @@ mod tests {
         let out = normalized(vec![msg(2, "x"), msg(1, "a"), msg(2, "b")]);
         assert_eq!(texts(&out), [1, 2]);
         assert_eq!(out[1].body, MessageBody::Text("b".into()));
+    }
+
+    mod search {
+        use super::*;
+        use bt_chat_core::model::{ChatHit, MessageHit, PersonHit};
+        use gpui::{AppContext, Entity, Subscription, TestAppContext};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            commands: Receiver<Command>,
+            events: Rc<RefCell<Vec<StoreEvent>>>,
+            // Keep the channel and the subscription alive for the whole test.
+            _client: Sender<ClientEvent>,
+            _subscription: Subscription,
+        }
+
+        impl Rig {
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let log = events.clone();
+                let subscription = cx.update(|cx| {
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                });
+                Self { store, commands, events, _client: client, _subscription: subscription }
+            }
+
+            fn search(&self, cx: &mut TestAppContext, query: &str) {
+                self.store.update(cx, |s, cx| s.search(query.into(), cx));
+            }
+
+            fn cancel(&self, cx: &mut TestAppContext) {
+                self.store.update(cx, |s, cx| s.cancel_search(cx));
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn state(&self, cx: &mut TestAppContext) -> Option<SearchState> {
+                self.store.read_with(cx, |s, _| s.search_state().cloned())
+            }
+
+            fn commands(&self) -> Vec<Command> {
+                std::iter::from_fn(|| self.commands.try_recv().ok()).collect()
+            }
+
+            fn take_events(&self) -> Vec<StoreEvent> {
+                std::mem::take(&mut *self.events.borrow_mut())
+            }
+        }
+
+        fn hits(tag: &str) -> SearchHits {
+            SearchHits {
+                chats: vec![ChatHit { id: ChatId(format!("c-{tag}")), kind: ChatKind::Group, title: tag.into(), avatar: None }],
+                people: vec![PersonHit { user: UserId(format!("u-{tag}")), name: tag.into(), avatar: None, chat: None }],
+                messages: vec![MessageHit {
+                    chat: ChatId(format!("c-{tag}")),
+                    chat_title: tag.into(),
+                    timestamp: 7,
+                    author_name: Some("A".into()),
+                    text: tag.into(),
+                }],
+            }
+        }
+
+        fn results(id: u64, tag: &str) -> ClientEvent {
+            ClientEvent::SearchResults { id: SearchId(id), hits: hits(tag) }
+        }
+
+        #[gpui::test]
+        fn a_result_with_the_current_id_is_stored_and_announced(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            assert_eq!(rig.state(cx), None);
+            rig.search(cx, "ab");
+            assert_eq!(rig.commands(), [Command::Search { id: SearchId(1), query: "ab".into() }]);
+            assert_eq!(rig.take_events(), [StoreEvent::Search]);
+            assert_eq!(
+                rig.state(cx),
+                Some(SearchState {
+                    id: SearchId(1),
+                    query: "ab".into(),
+                    status: SearchStatus::Loading,
+                    hits: SearchHits::default()
+                })
+            );
+
+            rig.apply(cx, results(1, "ab"));
+            assert_eq!(rig.take_events(), [StoreEvent::Search]);
+            let state = rig.state(cx).unwrap();
+            assert_eq!(state.status, SearchStatus::Ready);
+            assert_eq!(state.hits, hits("ab"));
+            assert!(rig.commands().is_empty(), "no hit has an avatar to fetch");
+        }
+
+        #[gpui::test]
+        fn a_stale_id_is_ignored(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.search(cx, "ab");
+            rig.search(cx, "abc");
+            rig.take_events();
+            rig.commands();
+
+            rig.apply(cx, results(1, "ab"));
+            rig.apply(cx, ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed });
+            assert!(rig.take_events().is_empty(), "a superseded reply announces nothing");
+            let state = rig.state(cx).unwrap();
+            assert_eq!((state.id, state.query.as_str(), state.status), (SearchId(2), "abc", SearchStatus::Loading));
+            assert_eq!(state.hits, SearchHits::default());
+
+            rig.apply(cx, results(2, "abc"));
+            let state = rig.state(cx).unwrap();
+            assert_eq!((state.status, state.hits), (SearchStatus::Ready, hits("abc")));
+        }
+
+        #[gpui::test]
+        fn a_new_query_keeps_the_old_hits_while_loading(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.search(cx, "ab");
+            rig.apply(cx, results(1, "ab"));
+            rig.search(cx, "abc");
+            let state = rig.state(cx).unwrap();
+            assert_eq!((state.id, state.status), (SearchId(2), SearchStatus::Loading));
+            assert_eq!(state.hits, hits("ab"));
+            assert_eq!(
+                rig.commands(),
+                [
+                    Command::Search { id: SearchId(1), query: "ab".into() },
+                    Command::Search { id: SearchId(2), query: "abc".into() }
+                ]
+            );
+
+            rig.apply(cx, results(2, "abc"));
+            assert_eq!(rig.state(cx).unwrap().hits, hits("abc"));
+        }
+
+        #[gpui::test]
+        fn a_failure_for_the_current_id_is_shown_and_keeps_the_hits(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.search(cx, "ab");
+            rig.apply(cx, results(1, "ab"));
+            rig.search(cx, "abc");
+            rig.take_events();
+
+            rig.apply(cx, ClientEvent::SearchFailed { id: SearchId(2), reason: SearchFailure::Offline });
+            assert_eq!(rig.take_events(), [StoreEvent::Search]);
+            let state = rig.state(cx).unwrap();
+            assert_eq!(state.status, SearchStatus::Failed(SearchFailure::Offline));
+            assert_eq!(state.hits, hits("ab"));
+        }
+
+        #[gpui::test]
+        fn cancelling_clears_the_state_sends_the_command_and_drops_late_replies(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.search(cx, "ab");
+            rig.apply(cx, results(1, "ab"));
+            rig.search(cx, "abc");
+            rig.commands();
+            rig.take_events();
+
+            rig.cancel(cx);
+            assert_eq!(rig.state(cx), None);
+            assert_eq!(rig.commands(), [Command::CancelSearch]);
+            assert_eq!(rig.take_events(), [StoreEvent::Search]);
+
+            rig.apply(cx, results(2, "abc"));
+            assert_eq!(rig.state(cx), None, "a reply after the cancel is dropped");
+            assert!(rig.take_events().is_empty());
+
+            rig.cancel(cx);
+            assert!(rig.commands().is_empty(), "nothing to cancel, nothing sent");
+            assert!(rig.take_events().is_empty());
+
+            rig.search(cx, "xy");
+            assert_eq!(rig.commands(), [Command::Search { id: SearchId(3), query: "xy".into() }], "ids never repeat");
+            rig.apply(cx, results(2, "abc"));
+            assert_eq!(rig.state(cx).unwrap().status, SearchStatus::Loading);
+        }
+
+        #[gpui::test]
+        fn avatars_of_chat_and_person_hits_are_requested_once(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            let avatar = |id: &str| Some(MediaRef { id: id.into(), kind: MediaKind::Avatar });
+            let mut found = hits("ab");
+            found.chats[0].avatar = avatar("chat-av");
+            found.people[0].avatar = avatar("person-av");
+            rig.search(cx, "ab");
+            rig.commands();
+
+            rig.apply(cx, ClientEvent::SearchResults { id: SearchId(1), hits: found.clone() });
+            rig.search(cx, "abc");
+            rig.apply(cx, ClientEvent::SearchResults { id: SearchId(2), hits: found });
+            let fetched: Vec<Command> = rig.commands().into_iter().filter(|c| matches!(c, Command::FetchMedia(_))).collect();
+            assert_eq!(
+                fetched,
+                [
+                    Command::FetchMedia(avatar("chat-av").unwrap()),
+                    Command::FetchMedia(avatar("person-av").unwrap())
+                ]
+            );
+        }
+
+        #[gpui::test]
+        fn signing_out_forgets_the_search(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.search(cx, "ab");
+            rig.apply(cx, results(1, "ab"));
+            rig.apply(cx, ClientEvent::SignedOut);
+            assert_eq!(rig.state(cx), None);
+        }
     }
 }
