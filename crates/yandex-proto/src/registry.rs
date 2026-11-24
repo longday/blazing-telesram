@@ -25,6 +25,9 @@ const COOKIE_ERROR_CODES: [&str; 4] = ["invalid_cookies", "not_authorized", "no_
 #[derive(Clone)]
 pub struct RegistryClient {
     http: reqwest::Client,
+    /// Same deadlines as `http` but never follows a redirect: a redirected mutation would be
+    /// sent again to a place we did not choose, and a failure there would look like "not sent".
+    mutation_http: reqwest::Client,
     api_url: String,
     csrf_url: String,
     cookie: HeaderValue,
@@ -34,6 +37,11 @@ impl RegistryClient {
     pub fn new(endpoints: &RegistryEndpoints, settings: &HttpSettings, cookies: &[SessionCookie]) -> Result<Self, ProtoError> {
         Ok(Self {
             http: http_client(settings)?,
+            mutation_http: reqwest::Client::builder()
+                .connect_timeout(settings.connect_timeout)
+                .timeout(settings.request_timeout)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             cookie: cookie_value(cookies, &host_of(&endpoints.api_url)?)?,
             api_url: endpoints.api_url.clone(),
             csrf_url: endpoints.csrf_url.clone(),
@@ -112,7 +120,7 @@ impl RegistryClient {
         let call = request.method();
         let token = self.csrf_token().await.map_err(ManageError::NotSent)?;
         let pending = self
-            .common(self.http.post(&self.api_url))
+            .common(self.mutation_http.post(&self.api_url))
             .header("X-CSRF-TOKEN", token)
             .multipart(Form::new().text("request", request.registry_body()));
         let started = Instant::now();
@@ -496,6 +504,19 @@ mod tests {
     async fn manage_to_an_unreachable_server_sends_nothing() {
         let err = client("http://127.0.0.1:1", Duration::from_secs(2)).manage(&creation()).await.unwrap_err();
         assert!(matches!(err, ManageError::NotSent(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn manage_never_follows_a_redirect_after_the_request_left() {
+        // The creation POST is answered with a redirect to a refused port. Following it would fail
+        // to connect and look like "not sent" although the server already got the request.
+        let redirect = Some("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned());
+        let (base, seen) = serve(vec![csrf_ok(), redirect]);
+        let err = client(&base, Duration::from_secs(2)).manage(&creation()).await.unwrap_err();
+        assert!(matches!(err, ManageError::Unknown(_)), "{err:?}");
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen[1].starts_with("POST /api/"));
     }
 
     #[tokio::test]
