@@ -5,6 +5,7 @@ mod composer;
 use crate::format::{chat_time, log_time, one_line, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::input::{InputEvent, TextInput};
+use crate::info_panel;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
     ChatFilter, ChatStore, SearchStatus, SessionState, StoreEvent, TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
@@ -79,6 +80,8 @@ pub struct Desktop {
     search_input: SearchInput,
     pub(crate) filter: ChatFilter,
     open: Option<OpenTimeline>,
+    /// The chat whose info panel is open; always the open chat, or `None`.
+    info: Option<ChatId>,
     pub(crate) menu: AccountMenu,
     compose: Compose,
     message_menu: Option<MessageMenu>,
@@ -107,6 +110,7 @@ impl Desktop {
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.sync_open(window, cx);
                 this.sync_viewer(cx);
+                this.sync_info();
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
@@ -130,6 +134,7 @@ impl Desktop {
             search_input: SearchInput { seen: SharedString::default(), generation: 0, settled: 0, timer: None },
             filter: ChatFilter::All,
             open: None,
+            info: None,
             menu: AccountMenu::Closed,
             compose,
             message_menu: None,
@@ -166,6 +171,51 @@ impl Desktop {
             window.focus(&self.focus);
         }
         cx.notify();
+    }
+
+    /// Opens the chat info panel for the open chat (it asks for the member list) or closes it. Opening is
+    /// ignored while something covers the chat or no chat is open.
+    pub(crate) fn toggle_info(&mut self, cx: &mut Context<Self>) {
+        if self.info.is_some() {
+            self.close_info(cx);
+            return;
+        }
+        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else { return };
+        if self.blocked(cx) {
+            return;
+        }
+        self.info = Some(chat.clone());
+        self.store.update(cx, |store, cx| store.load_members(chat, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_info(&mut self, cx: &mut Context<Self>) {
+        if self.info.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// The retry of a failed member load; the store ignores it while a load is running.
+    pub(crate) fn reload_info(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.info_chat() else { return };
+        self.store.update(cx, |store, cx| store.load_members(chat, cx));
+    }
+
+    /// The chat whose panel is open, if it is still the open chat.
+    fn info_chat(&self) -> Option<ChatId> {
+        self.info.clone().filter(|chat| self.open.as_ref().is_some_and(|o| &o.chat == chat))
+    }
+
+    /// The panel belongs to one chat: it closes when another chat (or none) is open.
+    fn sync_info(&mut self) {
+        if self.info_chat().is_none() {
+            self.info = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn info_is_open(&self) -> bool {
+        self.info.is_some()
     }
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
@@ -805,7 +855,10 @@ impl Desktop {
             .flex_col()
             .child(
                 div()
+                    .id("chat-header")
                     .debug_selector(|| "chat-header".into())
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_info(cx)))
                     .h(px(56.))
                     .flex_none()
                     .px(px(16.))
@@ -918,6 +971,7 @@ impl Render for Desktop {
         }
         let sidebar = self.sidebar(cx);
         let pane = self.chat_pane(cx);
+        let info = self.info_chat().map(|chat| info_panel::render(&chat, &self.store, cx));
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
@@ -944,6 +998,7 @@ impl Render for Desktop {
             .on_action(cx.listener(|this, _: &ViewerNext, _, cx| this.step_viewer(1, cx)))
             .child(sidebar)
             .child(pane)
+            .children(info)
             .children(viewer)
             .children(log)
             .children(toast)

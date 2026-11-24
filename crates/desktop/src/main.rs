@@ -1,5 +1,6 @@
 mod desktop;
 mod format;
+mod info_panel;
 mod input;
 mod login;
 mod logging;
