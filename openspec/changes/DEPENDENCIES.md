@@ -124,17 +124,17 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 5.3 | done (MR-B, 65204cb) | 3.1, 5.1 | MR-B |
 | 5.4 | done (MR-B, 65204cb) | | MR-B |
 | 6.1 | done (MR-B, 65204cb; `react-self`, `WireMessage` literal fix) | 2.1, 2.2 | MR-B |
-| 7.1 | done (65204cb; build 0 warnings, 232/163/178/20/13 green; clippy has two new `large_enum_variant` caused by `Message.reactions`, see tasks.md 7.1) | | |
-| 7.2 | ready; **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); needs the user's approval of the target message (P5); rebuild the main checkout `bt-probe` from `main` first | 1.1, 6.1, 7.1 | |
+| 7.1 | **open** (MR-B merged at 65204cb; tests and 0-warning build pass, but `cargo fmt --check` fails on the whole repository (baseline, 1561 hunks) and clippy has two new `large_enum_variant`; gate decision from Main pending, see tasks.md 7.1) | | |
+| 7.2 | blocked-by MR 7.1 gate decision; **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); needs the user's approval of the target message (P5); rebuild the main checkout `bt-probe` from `main` first | 1.1, 6.1, 7.1 | |
 | 7.3 | blocked-by MR 7.2 | | archive |
 
 ## Ready now (not started, nothing in flight touches their files)
 
 - **CM 3.1** (CM-C1: `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal): the core lane is free (GS-A, MD-C, MR-B merged). It unblocks CM-M (3.2, 4.1, 4.2).
-- **MR 7.2 [live, writes]** (self chat only, approval of the target, `BT_WRITE_ONLY_CHAT`), **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run.
+- **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the MR 7.1 gate decision.
 - GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; in progress on `gs/4.1`).
 
-In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–7.1).
+In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
