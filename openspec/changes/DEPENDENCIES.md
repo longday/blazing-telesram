@@ -31,7 +31,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | MD-D | MD 5.1 (merged, ad90cc4), 5.2 (manual) | `README.md` | 5.2 after MD-C |
 | MD-R1 / R3 | MD 1.2 (`bt-probe.rs`), MD 1.3 (`design.md`, maybe `media.rs`) | | MD-P; 1.2 after GS 1.3 on `bt-probe.rs` |
 | GS-P1..P3 | GS 1.2, 1.3, 1.4 | 1.2: `search.rs`, `registry.rs`, proto `client.rs`, `lib.rs`; 1.3: `bt-probe.rs`, fixture [live]; 1.4: `search.rs`, `wire_fixtures.rs` | 1.2 after MD-P (proto `client.rs`) |
-| GS-A | GS 2.1 (done, on `integ/gs`), 2.2, 3.1, 3.2, 3.3, 3.4, 3.5 (clippy error fix in `tests.rs`) | `model.rs`, `backend.rs`, chat-core `client.rs`, `yandex_backend.rs`, `store.rs`, `search_results.rs`, `main.rs`, `desktop.rs`, `tests.rs` | GS 1.4 and MD-C merged; core lane free (rule 6: `ChatStore::search`, `cancel_search`, `search_state` are first called by 3.4, so GS-C and GS-U are one unit) |
+| GS-A | GS 2.1, 2.2, 3.1, 3.2, 3.3, 3.4, 3.5 | merged to `main` (bb34be8) | done |
 | CM-P1.. | CM 1.1 (`request.rs`, `write.rs`, proto `client.rs`); 1.2 (`bt-probe.rs`, `README.md`, fixtures, `design.md`) [live]; 1.3 (`wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs`); 2.1 (`manage.rs`, `registry.rs`, `lib.rs`); 2.2 (`client.rs`, `bt-probe.rs`, `README.md`); 6.1 (`manage.rs`, `registry.rs`, `client.rs`, `bt-probe.rs`, `README.md`) | | see per-task table |
 | CM-C1 | CM 3.1 | `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` (literal) | CM 1.3, 2.2; core lane free (only trait methods and a pub field: no `dead_code`) |
 | CM-M | CM 3.2, 4.1, 4.2 | `model.rs`, chat-core `client.rs`, `store.rs`, `info_panel.rs`, `profile.rs`, `desktop.rs`, `tests.rs` | CM-C1 (rule 6: members state is first used by the info panel, profile state by the profile view) |
@@ -58,13 +58,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
 | 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
 | 1.4 | done (gs/1.4 merge; `WireSearchChat.kind` is only `Channel` or `Group`: no private-chat marker, so `PersonHit::chat` comes only from the guid map of 3.1) | 1.3 | GS-P3 |
-| 2.1 | done on `integ/gs` (323a61a) | — | GS-A |
-| 2.2 | done on `integ/gs` (8c76bcc) | 2.1 | GS-A |
-| 3.1 | done on `integ/gs` (050fb7f); `YandexBackend.known` map (`private`, `titles`) is what CM 3.1 reuses | 1.4, 2.1 | GS-A |
-| 3.2 | done on `integ/gs` (0f235d8) | 2.1 | GS-A |
-| 3.3 | done on `integ/gs` (8ebb9a4; `search_results.rs`, `main.rs` mod line) | 3.2 | GS-A |
-| 3.4 | in progress (from `integ/gs`; `desktop.rs`, `tests.rs`; the last caller of everything 3.2/3.3 added) | 3.2, 3.3 | GS-A |
-| 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
+| 2.1 | done (bb34be8, unit GS-A) | — | GS-A |
+| 2.2 | done (bb34be8) | 2.1 | GS-A |
+| 3.1 | done (bb34be8); `YandexBackend.known` map (`private`, `titles`) is what CM 3.1 reuses | 1.4, 2.1 | GS-A |
+| 3.2 | done (bb34be8) | 2.1 | GS-A |
+| 3.3 | done (bb34be8) | 3.2 | GS-A |
+| 3.4 | done (bb34be8; `ChatStore::supersede_search`, documented in `tasks.md`) | 3.2, 3.3 | GS-A |
+| 4.1 | ready [live] manual run with the `main` build | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
 ## add-media-download (MD)
 
@@ -131,11 +131,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A is in flight on `integ/gs` (head 8ebb9a4: GS 2.1, 2.2, 3.1, 3.2, 3.3, 3.5 done on top of `main` ef9c32f; 193/127/155/13/8 tests green; the 17 `dead_code` warnings are all things 3.4 consumes; last: 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait.
-- MD 5.2 [live, manual] (`main` build; owns no files).
-- CM 1.3 (`wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs`, `write.rs` pin; allowlist 8 → 7). Unblocks CM 2.2, which unblocks CM 3.1 (core lane) and CM 5.1/6.1.
+- MR-B (MR 2.1, 2.2, 3.1, 3.2, 4.1, 5.1, 3.3, 5.2, 5.3, 5.4; GS-A is merged, the core lane is free): **blocked on the proto files** `wire.rs`, `wire_fixtures.rs`, `request.rs`, `write.rs`, `client.rs`, `bt-probe.rs` held by CM 1.3 (in flight on `cm/1.3`); starts when CM 1.3 is merged. `integ/reactions` (origin) is stale (based on the first spec commit): recreate it from `main`, then re-apply `rx/2.1` (3e4f081).
+- GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; all GS code is on `main`).
+- MD 5.2 [live, manual] (`main` build; owns no files; worker `md/5.2`).
 
-In flight: GS-A (`integ/gs`, 3.4). Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`, aca841a), 5.1; CM 0.1, 1.1, 1.2, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
+In flight: `cm/1.3` (proto files), `cm/1.2-status` (CM `design.md`/`tasks.md`), `md/5.2`. Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`), 5.1; CM 0.1, 1.1, 1.2, 2.1, spec reconcile; MR 1.1. CM 2.2 waits for CM 1.3, CM 3.1 for CM 2.2.
 
 ## Needs the user
 
