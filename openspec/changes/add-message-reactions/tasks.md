@@ -32,7 +32,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
 
 ## 3. Core (`chat-core`)
 
-- [ ] 3.1 Domain types, rules and seam contracts (D3)
+- [x] 3.1 Domain types, rules and seam contracts (D3)
   - Owns: new `crates/chat-core/src/reactions.rs`, `crates/chat-core/src/model.rs`, `crates/chat-core/src/backend.rs`, `crates/chat-core/src/lib.rs`, `crates/chat-core/src/fixtures.rs`, and the `Message` literals in `crates/chat-core/src/client.rs` (non-test `outgoing_message` and test helpers: add `reactions: Default::default()` only).
   - Depends on: nothing.
   - Do: `ReactionCode`, `ReactionCount`, `Reactions` (with `apply`, `toggled`), `ReactionsUpdate`, `KnownReaction`, an empty `KNOWN`, `NEUTRAL_GLYPH`, `emoji`; `Message.reactions` with `serde(default)`; `Message::inherit_reactions`; `Command::ToggleReaction`; `ClientEvent::ReactionsChanged`; `LiveEvent::ReactionsChanged`; `Backend::react`; module and doc comments that list the writes now include reactions; export in `lib.rs`.
