@@ -572,6 +572,22 @@ mod tests {
         assert!(matches!(backend.mark_seen(&ChatId("self".into()), 1).await, Err(BackendError::Protocol(_))));
     }
 
+    #[tokio::test]
+    async fn fetch_media_refuses_an_original_before_touching_the_connection() {
+        let backend = YandexBackend::new(test_session(), None);
+        // Unbootstrapped: only the kind check can produce a message about `download`.
+        let file = MediaRef { id: "b/1".into(), kind: MediaKind::File };
+        let Err(BackendError::Protocol(message)) = backend.fetch_media(&file).await else { panic!("file must be refused") };
+        assert!(message.contains("download"), "{message}");
+        let mut sink = Vec::new();
+        let thumb = MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail };
+        let Err(BackendError::Protocol(message)) = backend.download(&thumb, &mut sink, &|_, _| {}).await else {
+            panic!("a thumbnail is not an original")
+        };
+        assert!(message.contains("originals"), "{message}");
+        assert!(sink.is_empty());
+    }
+
     #[test]
     fn maps_author_from_users_and_marks_own_messages() {
         let users = HashMap::from([user("u1", "Ann")]);
