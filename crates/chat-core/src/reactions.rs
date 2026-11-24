@@ -93,6 +93,19 @@ impl Reactions {
         matches!((self.version, other.version), (Some(mine), Some(theirs)) if mine < theirs)
     }
 
+    /// Fills in what a state rebuilt from the changes alone (a bare snapshot row with live
+    /// changes replayed onto it) could not learn, from `held`, the state the cache reached by
+    /// applying the same changes: the version when it has none, and, when both are then the same
+    /// server state, the own reaction, which updates need not say.
+    pub fn adopt_unsaid(&mut self, held: &Reactions) {
+        if self.version.is_none() {
+            self.version = held.version;
+        }
+        if self.mine.is_none() && self.version == held.version {
+            self.mine = held.mine.filter(|code| self.counts.iter().any(|count| count.code == *code));
+        }
+    }
+
     /// Puts the user's own change `own` (built on the server state of its version) over `self`,
     /// the state the server told since or before: the server's state stays when its version is
     /// newer than the one the change was built on, so a change survives older and equal
@@ -238,6 +251,31 @@ mod tests {
         let mut r = newer.clone();
         assert!(!r.overlay_own(&state(&[(1, 2), (2, 1)], Some(2), Some(5))));
         assert_eq!(r, newer);
+    }
+
+    #[test]
+    fn adopt_unsaid_takes_a_missing_version_and_the_own_reaction_of_the_same_state() {
+        let held = state(&[(1, 3)], Some(1), Some(6));
+        let mut versionless = state(&[(1, 3)], None, None);
+        versionless.adopt_unsaid(&held);
+        assert_eq!(versionless, held);
+        let mut same = state(&[(1, 3)], None, Some(6));
+        same.adopt_unsaid(&held);
+        assert_eq!(same, held);
+    }
+
+    #[test]
+    fn adopt_unsaid_leaves_another_state_and_an_unlisted_own_reaction_alone() {
+        let held = state(&[(1, 3)], Some(1), Some(6));
+        let mut newer = state(&[(1, 4)], None, Some(7));
+        newer.adopt_unsaid(&held);
+        assert_eq!(newer, state(&[(1, 4)], None, Some(7)));
+        let mut gone = state(&[(2, 1)], None, Some(6));
+        gone.adopt_unsaid(&held);
+        assert_eq!(gone, state(&[(2, 1)], None, Some(6)), "mine needs a count to stand on");
+        let mut says = state(&[(1, 3), (2, 1)], Some(2), Some(6));
+        says.adopt_unsaid(&held);
+        assert_eq!(says.mine, Some(code(2)));
     }
 
     #[test]

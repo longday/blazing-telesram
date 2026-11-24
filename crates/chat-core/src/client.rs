@@ -1633,13 +1633,12 @@ impl<B: Backend> Engine<B> {
         // comes after the replay on purpose: the cached state already includes the logged
         // changes, so inheriting it first would make a replayed update without a version, or with
         // the same one, look like a regression. Updates replayed onto a bare row leave it
-        // versionless, so the cached version, which they did not change, is carried over.
+        // without the cached version and without the own reaction, which they did not change or
+        // say, so these are carried over (`adopt_unsaid`).
         for message in &mut chunk.messages {
             if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                 message.inherit_reactions(&cached[i]);
-                if message.reactions.version.is_none() {
-                    message.reactions.version = cached[i].reactions.version;
-                }
+                message.reactions.adopt_unsaid(&cached[i].reactions);
             }
         }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
@@ -3837,6 +3836,21 @@ mod tests {
         h.fake.push(LiveEvent::ReactionsChanged { chat: id("a"), timestamp: 3, update: versionless });
         let expected = reactions(&[(LIKE, 3)], None, 5);
         assert_eq!(next_reactions(&h, "versionless push").1, expected);
+        history.notify_one();
+        assert_eq!(h.history("bare snapshot").messages[0].reactions, expected);
+        assert_eq!(cached_reactions(&h), expected);
+    }
+
+    #[test]
+    fn a_push_that_does_not_say_mine_replayed_onto_a_bare_snapshot_row_keeps_the_cached_mine() {
+        let mut cached = reacted();
+        cached.reactions = reactions(&[(LIKE, 2)], Some(LIKE), 5);
+        let h = start_reacting_online(cached, |_| {});
+        let history = hold_next_history(&h, msg("a", 3, "hi"));
+        h.fake.push(reaction_push(3, &[(LIKE, 3)], 6));
+        let expected = reactions(&[(LIKE, 3)], Some(LIKE), 6);
+        assert_eq!(next_reactions(&h, "push").1, expected);
+        assert_eq!(cached_reactions(&h), expected);
         history.notify_one();
         assert_eq!(h.history("bare snapshot").messages[0].reactions, expected);
         assert_eq!(cached_reactions(&h), expected);
