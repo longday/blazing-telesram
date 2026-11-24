@@ -1,4 +1,6 @@
 use serde_json::Value;
+use yandex_proto::request::SearchEntity;
+use yandex_proto::search::parse_search;
 use yandex_proto::wire::{
     DEFAULT_EXCLUDED_NAMESPACES, PushEvent, Relation, WireBody, WireChatKind, decode_push, parse_chat_list,
     parse_history, parse_users,
@@ -157,4 +159,79 @@ fn live_push_fixtures() {
 fn live_echo_fixture_carries_the_payload_id() {
     let Ok(PushEvent::MessageUpserted(message)) = decode_push(&fixture("live-push-message.json")) else { panic!("message") };
     assert_eq!(message.payload_id.as_deref(), Some("fake-payload-id"));
+}
+
+/// The `search` reply of a real account (2026-11-24, redacted: names, texts, titles, e-mail and
+/// organisation names are `<...>`, ids are `00000000-0000-4000-8000-0000000000NN`; keys, structure
+/// and numbers are kept). The three sets come from three queries: a common word (messages), a
+/// chat-title word (chats) and a name prefix (users); each set is complete as received.
+///
+/// Observed item shape. Every item is `{data, entity, matches, type}`; chats also carry a
+/// top-level `member_count`.
+/// - messages: `type: "messages"`, `entity: "message"`, `matches.text` = matched word forms
+///   (stemming: `всем` matched `всему`); `data` = `{ClientMessage: {Plain: {ChatId, PayloadId,
+///   Text: {MessageText}}}, ServerMessageInfo: {From: {AvatarId, DisplayName, Guid, PhoneId,
+///   Version}, PrevTimestamp?, SeqNo, Timestamp, Version}}`, i.e. a `ServerMessage`.
+///   `PrevTimestamp` is absent on a chat's first message. The hit carries no chat title. Only
+///   `Plain` bodies were observed, so decoding tolerates any `ClientMessage` shape.
+/// - users: `type: "users_pvp"`, `entity: "user"`, `matches: {}`, `data` = `{account_category,
+///   avatar_id, contacts[], display_name, employee_info{..}, employees_info[..], gender, guid,
+///   phone_id, public_name, registration_status, version}`. The set is not the chat partners
+///   (about 15 name queries matched one unrelated record), so it is usually empty.
+/// - chats: `type: "chats"`, `entity: "chat"`, `matches.name` (word prefix: `Dev` matched
+///   `DevOps`), `data` = `{avatar_id?, chat_id, create_timestamp, description, members[guid],
+///   members_count, name, public, rights[], role, role_version, roles{admin: [guid]}, version}`;
+///   `chat_id` has the chat-list format (`0/22/<guid>`), and a hit can be absent from the loaded
+///   chat list. Server matching is not the local substring filter.
+///
+/// Paging: `total` is the number of items in this reply (`total == min(limit, matches)`), `limit`
+/// echoes the request, `page` and `pages` were always 1, so the server never reports that more
+/// exists. An extra page parameter changes nothing: `page` (0, 1, 2, also next to `limit`),
+/// `page_num`, `pageNumber`, `page_number`, `offset`, `skip`, `start`, `from`, `after`, `cursor`
+/// and `next_page` all returned the first page unchanged, without an error code. Pagination is
+/// therefore unsupported and stays a follow-up.
+#[test]
+fn live_search_fixture() {
+    let raw = fixture("live-search.json");
+    let text = raw.to_string().to_lowercase();
+    for needle in ["session_id", "sessionid2", "csrf", "cookie", "@yandex"] {
+        assert!(!text.contains(needle), "live-search contains {needle}");
+    }
+
+    let all = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+    let reply = parse_search(&raw, &all).unwrap();
+    for set in [&reply.messages, &reply.users, &reply.chats] {
+        assert_eq!((set.limit, set.page, set.pages), (10, 1, 1));
+        assert_eq!(set.total as usize, set.items.len(), "every set is complete");
+    }
+    let hits = &reply.decoded;
+    assert_eq!(hits.skipped, 0, "every captured item has an address");
+
+    assert_eq!(hits.messages.len(), 7);
+    let first = &hits.messages[0];
+    assert_eq!(first.chat, "0/22/00000000-0000-4000-8000-000000000001");
+    assert_eq!(first.timestamp, 1_790_838_566_171_053);
+    assert!(matches!(&first.body, WireBody::Text(t) if t == "<message text>"));
+    let from = first.from.as_ref().unwrap();
+    assert_eq!(from.guid.as_deref(), Some("00000000-0000-4000-8000-000000000002"));
+    assert_eq!(from.display_name.as_deref(), Some("<name>"));
+    assert_eq!(from.avatar_id.as_deref(), Some("user_avatar/yapic/1/placeholder"));
+    assert_eq!(hits.messages.iter().filter(|m| m.chat.ends_with("0001")).count(), 5);
+    // The last hit has no `PrevTimestamp`: still decoded.
+    assert_eq!(hits.messages[6].timestamp, 1_769_608_744_339_002);
+
+    let [user] = hits.users.as_slice() else { panic!("{:?}", hits.users) };
+    assert_eq!(user.guid, "00000000-0000-4000-8000-000000000009");
+    assert_eq!(user.display_name.as_deref(), Some("<name>"));
+    assert_eq!(user.avatar_id.as_deref(), Some("user_avatar/yapic/1/placeholder"));
+
+    let [with_avatar, without_avatar] = hits.chats.as_slice() else { panic!("{:?}", hits.chats) };
+    assert_eq!(with_avatar.id, "0/22/00000000-0000-4000-8000-000000000011");
+    assert_eq!(with_avatar.kind, WireChatKind::Group);
+    assert_eq!(with_avatar.title.as_deref(), Some("<chat title>"));
+    assert!(with_avatar.avatar_id.as_deref().unwrap().starts_with("chat_avatar/"));
+    assert_eq!(with_avatar.members_count, Some(4));
+    assert_eq!(without_avatar.id, "0/22/00000000-0000-4000-8000-000000000017");
+    assert_eq!(without_avatar.avatar_id, None);
+    assert_eq!(without_avatar.members_count, Some(5));
 }
