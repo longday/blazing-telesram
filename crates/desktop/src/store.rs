@@ -621,6 +621,7 @@ impl ChatStore {
         }
         self.profile = Some(outcome);
         cx.emit(StoreEvent::Profile);
+        cx.notify();
     }
 
     /// Asks the core to start a private chat with `user`. The state becomes `InFlight` at once; while

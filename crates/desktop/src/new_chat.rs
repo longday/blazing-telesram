@@ -12,7 +12,7 @@ use crate::input::TextInput;
 use crate::store::{ChatFilter, ChatStore, CreationState, MembersState, ProfileState};
 use crate::theme::*;
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, MediaRef, UserId};
+use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, MediaRef, UserId};
 use gpui::{prelude::*, *};
 use std::collections::HashSet;
 use std::ops::Range;
@@ -43,22 +43,36 @@ impl NewChat {
     }
 }
 
-/// The people on offer, sorted by name: distinct, never the current user. The current user is known from
-/// the loaded profile and from the `me` flag of any loaded member list.
-pub fn candidates(store: &ChatStore, panel: Option<&ChatId>) -> Vec<Candidate> {
-    let chats = store.visible_chats("", ChatFilter::All);
+/// The ids of the current user as far as the store knows them: the loaded profile and the `me` flag of any
+/// loaded member list. Empty until one of them has loaded.
+fn own_ids<'a>(store: &'a ChatStore, chats: &[&'a ChatSummary]) -> HashSet<&'a UserId> {
     let mut me: HashSet<&UserId> = HashSet::new();
     if let Some(ProfileState::Ready(profile)) = store.profile_state() {
         me.insert(&profile.user);
     }
-    for chat in &chats {
+    for chat in chats {
         if let Some(MembersState::Ready(members)) = store.members_state(&chat.id) {
             me.extend(members.users.iter().filter(|m| m.me).map(|m| &m.user));
         }
     }
+    me
+}
+
+/// Whether the current user is known (see `own_ids`). Until then the partners of private chats are not
+/// offered: the self chat would show up as a person to write to. Members of the open panel carry their own
+/// `me` flag and do not wait for it.
+pub fn identity_known(store: &ChatStore) -> bool {
+    !own_ids(store, &store.visible_chats("", ChatFilter::All)).is_empty()
+}
+
+/// The people on offer, sorted by name: distinct, never the current user. The partners of private chats
+/// wait for the identity (`identity_known`).
+pub fn candidates(store: &ChatStore, panel: Option<&ChatId>) -> Vec<Candidate> {
+    let chats = store.visible_chats("", ChatFilter::All);
+    let me = own_ids(store, &chats);
     let mut seen: HashSet<UserId> = HashSet::new();
     let mut out = Vec::new();
-    for chat in &chats {
+    for chat in chats.iter().filter(|_| !me.is_empty()) {
         let Some(partner) = chat.partner.as_ref().filter(|_| chat.kind == ChatKind::Private) else { continue };
         if !me.contains(partner) && seen.insert(partner.clone()) {
             out.push(Candidate { user: partner.clone(), name: chat.title.clone(), avatar: chat.avatar.clone() });
@@ -147,20 +161,27 @@ fn note(selector: &'static str, text: impl Into<SharedString>) -> Div {
 }
 
 /// The modal. Debug selectors: `new-chat-view`, `new-chat-search`, `candidate-<guid>` (+ `-avatar`),
-/// `new-chat-empty`, `new-chat-nomatch`, `new-chat-participant` (+ `-avatar`), `new-chat-sending`,
-/// `new-chat-error`, `new-chat-unknown`, `new-chat-cancel`, `new-chat-create`.
+/// `new-chat-empty`, `new-chat-identity`, `new-chat-nomatch`, `new-chat-participant` (+ `-avatar`),
+/// `new-chat-sending`, `new-chat-error`, `new-chat-unknown`, `new-chat-cancel`, `new-chat-create`.
 pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
     let query = state.search.read(cx).content.to_string();
-    let (all, creation) = {
+    let (all, creation, identity) = {
         let store = store.read(cx);
-        (candidates(store, panel.as_ref()), store.creation_state().cloned())
+        let identity = match (identity_known(store), store.profile_state()) {
+            (true, _) => None,
+            (false, Some(ProfileState::Failed { .. })) => Some("Не удалось определить вашу учётную запись. Закройте окно и откройте его снова."),
+            (false, _) => Some("Загрузка…"),
+        };
+        (candidates(store, panel.as_ref()), store.creation_state().cloned(), identity)
     };
     let shown = matching(&all, &query).len();
     let notice = notice(creation.as_ref());
     let sending = notice == Notice::Sending;
     let enabled = can_create(state.chosen.is_some(), creation.as_ref());
 
-    let list = if all.is_empty() {
+    let list = if let (true, Some(text)) = (all.is_empty(), identity) {
+        note("new-chat-identity", text).into_any_element()
+    } else if all.is_empty() {
         note("new-chat-empty", "Нет известных людей").into_any_element()
     } else if shown == 0 {
         note("new-chat-nomatch", "Никого не найдено").into_any_element()

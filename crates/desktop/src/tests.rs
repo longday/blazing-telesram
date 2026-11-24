@@ -3751,8 +3751,43 @@ fn an_account_with_nobody_known_says_so(cx: &mut TestAppContext) {
         |_, _| {},
     );
     open_dialog(&h, cx);
-    assert!(shown(cx, "new-chat-empty"));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    assert!(shown(cx, "new-chat-empty"), "the identity is known now, and nobody else is");
     assert!(!shown(cx, "new-chat-participant"));
+}
+
+#[gpui::test]
+fn the_self_chat_is_not_offered_before_the_identity_is_known(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Online)],
+        |_, _| {},
+    );
+    // Cold start: no profile and no member list, so nobody can tell which partner is the current user.
+    open_dialog(&h, cx);
+    assert!(shown(cx, "new-chat-identity"), "the dialog says it is still loading");
+    for row in ["candidate-me", "candidate-anna"] {
+        assert!(!shown(cx, row), "{row} waits for the identity");
+    }
+    h.store.read_with(cx, |s, _| assert!(crate::new_chat::candidates(s, None).is_empty()));
+
+    // The profile fails: the self chat stays out and the dialog says why.
+    h.feed(cx, [ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true }]);
+    assert!(shown(cx, "new-chat-identity"));
+    assert!(!shown(cx, "candidate-me") && !shown(cx, "candidate-anna"));
+    h.store.read_with(cx, |s, _| {
+        assert!(matches!(s.profile_state(), Some(crate::store::ProfileState::Failed { .. })));
+        assert!(!crate::new_chat::identity_known(s));
+        assert!(crate::new_chat::candidates(s, None).is_empty(), "a failed profile leaves the self chat out");
+    });
+    assert_eq!(h.commands(), [], "nothing is created or retried by itself");
+
+    // The profile arrives on another try: the others are offered, the current user never.
+    h.store.update(cx, |s, cx| s.load_profile(cx));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    h.store.read_with(cx, |s, _| assert!(crate::new_chat::identity_known(s)));
+    assert!(shown(cx, "candidate-anna"));
+    assert!(!shown(cx, "candidate-me"));
 }
 
 #[gpui::test]
