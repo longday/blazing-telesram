@@ -62,8 +62,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 2.2 | done on `integ/gs` (8c76bcc) | 2.1 | GS-A |
 | 3.1 | done on `integ/gs` (050fb7f); `YandexBackend.known` map (`private`, `titles`) is what CM 3.1 reuses | 1.4, 2.1 | GS-A |
 | 3.2 | done on `integ/gs` (0f235d8) | 2.1 | GS-A |
-| 3.3 | in progress (`gs/3.3`, base `gs/3.2`; `search_results.rs`, `main.rs`) | 3.2 | GS-A |
-| 3.4 | blocked-by 3.3 (`desktop.rs`, `tests.rs`) | 3.2, 3.3 | GS-A |
+| 3.3 | done on `integ/gs` (8ebb9a4; `search_results.rs`, `main.rs` mod line) | 3.2 | GS-A |
+| 3.4 | in progress (from `integ/gs`; `desktop.rs`, `tests.rs`; the last caller of everything 3.2/3.3 added) | 3.2, 3.3 | GS-A |
 | 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
 ## add-media-download (MD)
@@ -131,7 +131,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A is in flight on `integ/gs` (head 050fb7f: GS 2.1, 2.2, 3.1, 3.2, 3.5 done on top of `main` ef9c32f; the workspace compiles, dead_code warnings only for what 3.3/3.4 consume; then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. GS 3.5 fixed the pre-existing `reversed_empty_ranges` clippy error.
+- GS-A is in flight on `integ/gs` (head 8ebb9a4: GS 2.1, 2.2, 3.1, 3.2, 3.3, 3.5 done on top of `main` ef9c32f; 193/127/155/13/8 tests green; the 17 `dead_code` warnings are all things 3.4 consumes; last: 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait.
 - MD 5.2 [live, manual] (`main` build; owns no files).
 - CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
