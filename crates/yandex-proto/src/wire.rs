@@ -157,6 +157,40 @@ pub enum Relation {
     Forward { originals: Vec<WireForwarded> },
 }
 
+/// One entry of `Reactions`: how many users chose the type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireReactionCount {
+    pub code: i64,
+    pub count: u32,
+}
+
+/// One entry of `RecentUserReactions`: a user who reacted lately (the server truncates the list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireReactor {
+    /// `UserInfo.Guid`.
+    pub user: Option<String>,
+    pub code: i64,
+    pub timestamp: Option<Micros>,
+}
+
+/// Reaction state of a message, read from the siblings of `ClientMessage` on a `ServerMessage`
+/// (`Reactions`, `ReactionsVersion`, `RecentUserReactions`). Entries without `Type` and counts
+/// of 0 are dropped; server order is kept. A missing `Reactions` key means no reactions.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WireReactions {
+    pub counts: Vec<WireReactionCount>,
+    pub version: Option<i64>,
+    pub recent: Vec<WireReactor>,
+}
+
+/// `Reaction.Action`: 1 removes, 2 replaces (also the first reaction); anything else is kept as is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReactionAction {
+    Remove,
+    Replace,
+    Other(i64),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct WireMessage {
     pub chat: String,
@@ -170,6 +204,8 @@ pub struct WireMessage {
     pub body: WireBody,
     pub edited: bool,
     pub relation: Relation,
+    /// `Some` when any of `Reactions`, `ReactionsVersion`, `RecentUserReactions` is present.
+    pub reactions: Option<WireReactions>,
     /// The `ServerMessage` object as received, for the cache's raw column.
     pub raw: Json,
 }
@@ -215,7 +251,18 @@ pub enum PushEvent {
     /// Someone is typing: `user` is the typist's guid. `timeout_secs` is the lifetime of the
     /// indicator when the push states one.
     Typing { chat: String, user: String, name: Option<String>, timeout_secs: Option<u32> },
-    /// Presence, reactions and other events this client does not act on.
+    /// A reaction was added, replaced or removed on a message. `actor` is who did it
+    /// (`ServerMessageInfo.From.Guid`); `action` and `code` come from the `Reaction` body;
+    /// `reactions` is the message's state after the change.
+    Reaction {
+        chat: String,
+        timestamp: Micros,
+        actor: Option<String>,
+        action: Option<ReactionAction>,
+        code: Option<i64>,
+        reactions: WireReactions,
+    },
+    /// Presence and other events this client does not act on.
     Ignored { kind: String },
 }
 
@@ -429,6 +476,38 @@ fn relation(plain: Option<&Json>, originals: Vec<WireForwarded>, has_own_content
     Relation::None
 }
 
+/// Reaction siblings of `ClientMessage`; `None` when none of the three keys is present.
+fn reactions(raw: &Json) -> Option<WireReactions> {
+    let counts = present(raw, "Reactions");
+    let recent = present(raw, "RecentUserReactions");
+    let version = int_field(raw, "ReactionsVersion");
+    if counts.is_none() && recent.is_none() && version.is_none() {
+        return None;
+    }
+    fn items(value: Option<&Json>) -> &[Json] {
+        value.and_then(Json::as_array).map_or(&[], Vec::as_slice)
+    }
+    Some(WireReactions {
+        counts: items(counts)
+            .iter()
+            .filter_map(|entry| {
+                let code = int_field(entry, "Type")?;
+                let count = u32::try_from(int_field(entry, "Count")?).ok().filter(|&c| c > 0)?;
+                Some(WireReactionCount { code, count })
+            })
+            .collect(),
+        version,
+        recent: items(recent)
+            .iter()
+            .filter_map(|entry| {
+                let code = int_field(entry, "Type")?;
+                let user = present(entry, "UserInfo").and_then(|u| string(u, "Guid"));
+                Some(WireReactor { user, code, timestamp: int_field(entry, "Timestamp") })
+            })
+            .collect(),
+    })
+}
+
 /// Parses a `ServerMessage`: `{ClientMessage, ServerMessageInfo, ForwardedMessages?, ...}`.
 /// History rows (`Messages[].ServerMessage`) and push bodies share this shape.
 pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireMessage, WireError> {
@@ -473,6 +552,7 @@ pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireM
         body,
         edited,
         relation,
+        reactions: reactions(raw),
         raw: raw.clone(),
     })
 }
@@ -661,6 +741,25 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
         if let (Some(chat), Some(WireSender { guid: Some(user), display_name: name, .. })) = (string(typing, "ChatId"), from) {
             let timeout_secs = int_field(typing, "TimeoutSeconds").and_then(|s| u32::try_from(s).ok());
             return Ok(PushEvent::Typing { chat, user, name, timeout_secs });
+        }
+    }
+    if let Some(reaction) = present(client, "Reaction") {
+        let info = present(body, "ServerMessageInfo");
+        let address = string(reaction, "ChatId")
+            .zip(int_field(reaction, "Timestamp").or_else(|| info.and_then(|i| int_field(i, "Timestamp"))));
+        if let Some((chat, timestamp)) = address {
+            return Ok(PushEvent::Reaction {
+                chat,
+                timestamp,
+                actor: info.and_then(sender).and_then(|s| s.guid),
+                action: int_field(reaction, "Action").map(|a| match a {
+                    1 => ReactionAction::Remove,
+                    2 => ReactionAction::Replace,
+                    other => ReactionAction::Other(other),
+                }),
+                code: int_field(reaction, "Type"),
+                reactions: reactions(body).unwrap_or_default(),
+            });
         }
     }
     // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
@@ -951,5 +1050,106 @@ mod tests {
         // Without a typist there is nobody to show.
         let anonymous = json!({ "ClientMessage": { "Typing": { "ChatId": "c" } }, "ServerMessageInfo": { "Timestamp": 7 } });
         assert_eq!(decode_push(&anonymous), Ok(PushEvent::Ignored { kind: "Typing".into() }));
+    }
+
+    #[test]
+    fn history_row_siblings_fill_the_reactions() {
+        let mut row = msg(json!({ "ChatId": "c", "Text": { "MessageText": "hi" } }), json!({ "Timestamp": 5 }));
+        assert_eq!(parse_server_message(&row, None).unwrap().reactions, None, "no sibling: no reaction state");
+
+        row["Reactions"] = json!([{ "Type": 100101, "Count": 2 }, { "Type": 7, "Count": 1 }]);
+        row["ReactionsVersion"] = json!(4);
+        row["RecentUserReactions"] = json!([{ "Timestamp": 9, "Type": 100101, "UserInfo": { "Guid": "g1" } }]);
+        let reactions = parse_server_message(&row, None).unwrap().reactions.unwrap();
+        assert_eq!(
+            reactions,
+            WireReactions {
+                counts: vec![WireReactionCount { code: 100101, count: 2 }, WireReactionCount { code: 7, count: 1 }],
+                version: Some(4),
+                recent: vec![WireReactor { user: Some("g1".into()), code: 100101, timestamp: Some(9) }],
+            }
+        );
+
+        // Any single sibling is enough to carry state; a version alone means "all removed".
+        let mut only_version = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
+        only_version["ReactionsVersion"] = json!(6);
+        let reactions = parse_server_message(&only_version, None).unwrap().reactions.unwrap();
+        assert_eq!((reactions.counts.len(), reactions.version, reactions.recent.len()), (0, Some(6), 0));
+
+        // The same rows come out of a history page.
+        let body = json!({ "Chats": [{ "ChatId": "c", "Messages": [{ "ServerMessage": row }] }] });
+        assert_eq!(parse_history(&body, "c", 50).unwrap().messages[0].reactions.as_ref().unwrap().version, Some(4));
+    }
+
+    #[test]
+    fn zero_counts_and_untyped_entries_are_dropped() {
+        let mut row = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
+        row["Reactions"] = json!([
+            { "Type": 1, "Count": 0 },
+            { "Count": 3 },
+            { "Type": 2 },
+            { "Type": 3, "Count": -1 },
+            { "Type": 4, "Count": 5 },
+        ]);
+        row["RecentUserReactions"] = json!([
+            { "Timestamp": 1, "UserInfo": { "Guid": "g" } },
+            { "Type": 4, "UserInfo": {} },
+        ]);
+        let reactions = parse_server_message(&row, None).unwrap().reactions.unwrap();
+        assert_eq!(reactions.counts, vec![WireReactionCount { code: 4, count: 5 }]);
+        assert_eq!(reactions.recent, vec![WireReactor { user: None, code: 4, timestamp: None }]);
+    }
+
+    #[test]
+    fn reaction_push_names_the_target_actor_and_action() {
+        let push = |reaction: Json, info: Json| {
+            json!({
+                "ClientMessage": { "Reaction": reaction },
+                "Reactions": [{ "Type": 9, "Count": 1 }],
+                "ReactionsVersion": 2,
+                "ServerMessageInfo": info,
+            })
+        };
+        let reactions = WireReactions { counts: vec![WireReactionCount { code: 9, count: 1 }], version: Some(2), recent: vec![] };
+        let event = |action, code| PushEvent::Reaction {
+            chat: "c".into(),
+            timestamp: 5,
+            actor: Some("g1".into()),
+            action,
+            code,
+            reactions: reactions.clone(),
+        };
+        let from = json!({ "From": { "Guid": "g1" }, "Timestamp": 8 });
+        assert_eq!(
+            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 2 }), from.clone())),
+            Ok(event(Some(ReactionAction::Replace), Some(9)))
+        );
+        assert_eq!(
+            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Action": 1 }), from.clone())),
+            Ok(event(Some(ReactionAction::Remove), None))
+        );
+        assert_eq!(
+            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 7 }), from.clone())),
+            Ok(event(Some(ReactionAction::Other(7)), Some(9)))
+        );
+        assert_eq!(decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5 }), from)), Ok(event(None, None)));
+
+        // The target falls back to the push's own timestamp; the actor may be unknown.
+        let anonymous = push(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
+        assert!(matches!(
+            decode_push(&anonymous),
+            Ok(PushEvent::Reaction { timestamp: 5, actor: None, .. })
+        ));
+    }
+
+    #[test]
+    fn reaction_push_without_an_address_is_ignored() {
+        let info = json!({ "From": { "Guid": "g1" } });
+        let ignored = || Ok(PushEvent::Ignored { kind: "Reaction".into() });
+        let no_chat = json!({ "ClientMessage": { "Reaction": { "Timestamp": 5, "Action": 2, "Type": 9 } }, "ServerMessageInfo": info });
+        assert_eq!(decode_push(&no_chat), ignored());
+        let no_timestamp = json!({ "ClientMessage": { "Reaction": { "ChatId": "c", "Action": 2, "Type": 9 } }, "ServerMessageInfo": info });
+        assert_eq!(decode_push(&no_timestamp), ignored());
+        assert_eq!(decode_push(&json!({ "ClientMessage": { "Reaction": {} } })), ignored());
     }
 }

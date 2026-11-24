@@ -16,7 +16,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
 
 ## 2. Protocol (`yandex-proto`)
 
-- [ ] 2.1 Decode reactions from pushes and `ServerMessage` siblings (D1)
+- [x] 2.1 Decode reactions from pushes and `ServerMessage` siblings (D1)
   - Owns: `crates/yandex-proto/src/wire.rs`, `crates/yandex-proto/src/xiva.rs` (`push_kind` only), `crates/yandex-proto/tests/wire_fixtures.rs`, new `crates/yandex-proto/tests/fixtures/research-push-reaction-removed.json` (synthetic: a `Reaction` push with `Action` 1 and no `Reactions` key, only a newer `ReactionsVersion`; add it to the credentials-check list in `wire_fixtures.rs`).
   - Depends on: nothing.
   - Do: `WireReactionCount`, `WireReactor`, `WireReactions`, `ReactionAction`, `WireMessage.reactions`, `PushEvent::Reaction`, `decode_push` branch, `push_kind` arm.

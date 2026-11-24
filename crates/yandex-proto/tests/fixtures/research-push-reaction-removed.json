@@ -1,0 +1,19 @@
+{
+  "ClientMessage": {
+    "Reaction": {
+      "Action": 1,
+      "ChatId": "0/0/00000003-0000-4000-8000-000000000003",
+      "Timestamp": 1795070677887127
+    }
+  },
+  "MessageAuthorGuid": "00000004-0000-4000-8000-000000000004",
+  "ReactionsVersion": 3,
+  "ServerMessageInfo": {
+    "From": {
+      "DisplayName": "Test User",
+      "Guid": "00000007-0000-4000-8000-000000000007"
+    },
+    "Timestamp": 1795070677887127,
+    "Version": 3
+  }
+}

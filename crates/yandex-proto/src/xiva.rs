@@ -237,6 +237,7 @@ fn push_kind(event: &PushEvent) -> (&'static str, &str) {
         PushEvent::MessageDeleted { chat, .. } => ("MessageDeleted", chat),
         PushEvent::ChatChanged { chat } => ("ChatChanged", chat),
         PushEvent::Typing { chat, .. } => ("Typing", chat),
+        PushEvent::Reaction { chat, .. } => ("Reaction", chat),
         PushEvent::Ignored { .. } => ("Ignored", ""),
     }
 }

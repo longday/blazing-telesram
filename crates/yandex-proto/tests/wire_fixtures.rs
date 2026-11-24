@@ -2,8 +2,9 @@ use serde_json::Value;
 use yandex_proto::request::SearchEntity;
 use yandex_proto::search::parse_search;
 use yandex_proto::wire::{
-    DEFAULT_EXCLUDED_NAMESPACES, PushEvent, Relation, WireBody, WireChatKind, WireMemberRole, decode_push,
-    parse_chat_list, parse_history, parse_members, parse_profile, parse_users,
+    DEFAULT_EXCLUDED_NAMESPACES, PushEvent, ReactionAction, Relation, WireBody, WireChatKind, WireMemberRole,
+    WireReactionCount, WireReactions, WireReactor, decode_push, parse_chat_list, parse_history, parse_members,
+    parse_profile, parse_users,
 };
 
 fn fixture(name: &str) -> Value {
@@ -13,7 +14,8 @@ fn fixture(name: &str) -> Value {
 
 #[test]
 fn fixtures_hold_no_credentials() {
-    let research = ["chat-list", "history-page", "users", "push-edit", "push-deleted"].map(|n| format!("research-{n}"));
+    let research = ["chat-list", "history-page", "users", "push-edit", "push-deleted", "push-reaction-removed"]
+        .map(|n| format!("research-{n}"));
     let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"].map(|n| format!("live-push-{n}"));
     let members = ["members-group", "members-private", "whoami"].map(|n| format!("live-{n}"));
     for name in research.iter().chain(&live).chain(&members) {
@@ -150,9 +152,50 @@ fn live_push_fixtures() {
             timeout_secs: None,
         })
     );
-    for (name, kind) in [("reaction", "Reaction"), ("heartbeat", "Heartbeat")] {
-        assert_eq!(decode_push(&fixture(&format!("live-push-{name}.json"))), Ok(PushEvent::Ignored { kind: kind.into() }), "{name}");
-    }
+    assert_eq!(
+        decode_push(&fixture("live-push-heartbeat.json")),
+        Ok(PushEvent::Ignored { kind: "Heartbeat".into() })
+    );
+}
+
+/// The reaction push captured live: a first reaction (`Replace`) with its counts and the actor's own entry.
+#[test]
+fn live_reaction_push_fixture() {
+    assert_eq!(
+        decode_push(&fixture("live-push-reaction.json")),
+        Ok(PushEvent::Reaction {
+            chat: "0/0/00000003-0000-4000-8000-000000000003".into(),
+            timestamp: 1_795_070_677_887_127,
+            actor: Some("00000007-0000-4000-8000-000000000007".into()),
+            action: Some(ReactionAction::Replace),
+            code: Some(100101),
+            reactions: WireReactions {
+                counts: vec![WireReactionCount { code: 100101, count: 1 }],
+                version: Some(2),
+                recent: vec![WireReactor {
+                    user: Some("00000007-0000-4000-8000-000000000007".into()),
+                    code: 100101,
+                    timestamp: Some(1_795_172_185_683_559),
+                }],
+            },
+        })
+    );
+}
+
+/// Removing the last reaction: no `Reactions` key, only a newer `ReactionsVersion` (synthetic).
+#[test]
+fn removed_reaction_push_fixture_decodes_with_empty_counts() {
+    assert_eq!(
+        decode_push(&fixture("research-push-reaction-removed.json")),
+        Ok(PushEvent::Reaction {
+            chat: "0/0/00000003-0000-4000-8000-000000000003".into(),
+            timestamp: 1_795_070_677_887_127,
+            actor: Some("00000007-0000-4000-8000-000000000007".into()),
+            action: Some(ReactionAction::Remove),
+            code: None,
+            reactions: WireReactions { counts: vec![], version: Some(3), recent: vec![] },
+        })
+    );
 }
 
 /// The echo of an own send carries the `PayloadId` the sender chose.
