@@ -1599,14 +1599,18 @@ impl<B: Backend> Engine<B> {
             return chunk;
         }
         let raced = raced(&self.live_log, chat, mark);
-        // A server row that carries no reactions must not erase the cached ones; the rows it
-        // replaces are read once, before they are overwritten.
-        if let (Some(min), Some(max)) = (min, max) {
-            let cached = self.db(self.cache.messages_between(chat, min, max)).unwrap_or_default();
-            for message in &mut chunk.messages {
-                if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
-                    message.inherit_reactions(&cached[i]);
-                }
+        // The rows this chunk replaces are read once, before they are overwritten. A server row
+        // that carries no reactions must not erase the cached ones, so it takes them before the
+        // live changes are replayed; a row with reactions is replayed as the snapshot has it,
+        // because the cached state already includes those changes and would make a replayed
+        // update that has no version (or the same one) look like a regression.
+        let cached = match (min, max) {
+            (Some(min), Some(max)) => self.db(self.cache.messages_between(chat, min, max)).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for message in &mut chunk.messages {
+            if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
+                message.fill_reactions(&cached[i]);
             }
         }
         let (lo, hi, history_start) = match before {
@@ -1632,6 +1636,14 @@ impl<B: Backend> Engine<B> {
             }
         };
         replay_live(&mut chunk.messages, &raced, lo, hi);
+        // What is left after the replay is the snapshot plus what the log knew; the cache may
+        // know more (a change older than the log, or one the capped log forgot): a row older
+        // than the cached state keeps that state.
+        for message in &mut chunk.messages {
+            if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
+                message.inherit_reactions(&cached[i]);
+            }
+        }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
         chunk.replaces = Some((lo, hi));
@@ -3783,6 +3795,24 @@ mod tests {
         h.online();
         assert_eq!(h.history("catch-up").messages[0].reactions, reacted().reactions);
         assert_eq!(cached_reactions(&h), reacted().reactions);
+    }
+
+    #[test]
+    fn replaying_a_versionless_then_a_versioned_push_onto_an_older_snapshot_ends_at_the_newest() {
+        let h = start_reacting_online(reacted(), |_| {});
+        // The snapshot (version 5, two LIKEs) is taken first; then a push without a version
+        // sets three, and a push of version 6 sets four. The cache ends at four, version 6.
+        let history = hold_next_history(&h, reacted());
+        let versionless = ReactionsUpdate { counts: counts(&[(LIKE, 3)]), version: None, mine: None };
+        h.fake.push(LiveEvent::ReactionsChanged { chat: id("a"), timestamp: 3, update: versionless });
+        assert_eq!(next_reactions(&h, "versionless push").1, reactions(&[(LIKE, 3)], None, 5));
+        h.fake.push(reaction_push(3, &[(LIKE, 4)], 6));
+        let newest = reactions(&[(LIKE, 4)], None, 6);
+        assert_eq!(next_reactions(&h, "versioned push").1, newest);
+        assert_eq!(cached_reactions(&h), newest);
+        history.notify_one();
+        assert_eq!(h.history("older snapshot").messages[0].reactions, newest);
+        assert_eq!(cached_reactions(&h), newest);
     }
 
     #[test]

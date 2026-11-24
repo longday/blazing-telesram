@@ -169,12 +169,25 @@ pub struct Message {
 }
 
 impl Message {
-    /// Keeps the reactions already known for this message when the incoming copy carries no
-    /// reaction state at all (an edit push, a history row without reactions) or an older
-    /// version than the known one (a snapshot taken before the known state arrived).
+    /// Whether the copy carries no reaction state at all (an edit push, a history row without
+    /// reactions).
+    fn reactions_bare(&self) -> bool {
+        self.reactions.counts.is_empty() && self.reactions.version.is_none()
+    }
+
+    /// Takes the reactions already known for this message when the incoming copy carries no
+    /// reaction state. A copy that has some is left alone, whatever its version: use this
+    /// before live changes are replayed onto it, which a newer known state would confuse.
+    pub fn fill_reactions(&mut self, cached: &Message) {
+        if self.reactions_bare() {
+            self.reactions.clone_from(&cached.reactions);
+        }
+    }
+
+    /// Like `fill_reactions`, and also takes the known reactions when the copy's version is
+    /// older than theirs (a snapshot taken before the known state arrived).
     pub fn inherit_reactions(&mut self, cached: &Message) {
-        let bare = self.reactions.counts.is_empty() && self.reactions.version.is_none();
-        if bare || self.reactions.is_older_than(&cached.reactions) {
+        if self.reactions_bare() || self.reactions.is_older_than(&cached.reactions) {
             self.reactions.clone_from(&cached.reactions);
         }
     }
@@ -483,5 +496,16 @@ mod tests {
         let mut equal = reacted(&[(2, 1)], None, Some(4));
         equal.inherit_reactions(&cached);
         assert_eq!(equal.reactions, reacted(&[(2, 1)], None, Some(4)).reactions);
+    }
+
+    #[test]
+    fn fill_reactions_copies_only_for_a_bare_incoming_copy() {
+        let cached = reacted(&[(1, 2)], Some(1), Some(4));
+        let mut bare = crate::fixtures::msg("0/0/c", 1, "edited");
+        bare.fill_reactions(&cached);
+        assert_eq!(bare.reactions, cached.reactions);
+        let mut older = reacted(&[(2, 1)], None, Some(3));
+        older.fill_reactions(&cached);
+        assert_eq!(older.reactions, reacted(&[(2, 1)], None, Some(3)).reactions);
     }
 }
