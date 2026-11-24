@@ -1,0 +1,122 @@
+{
+  "departments": [],
+  "groups": [],
+  "users": [
+    {
+      "account_category": 2,
+      "avatar_id": "user_avatar/yapic/1/placeholder",
+      "contacts": [
+        {
+          "default": true,
+          "organization_id": 1,
+          "type": "email",
+          "value": "<contact>"
+        }
+      ],
+      "display_name": "<name>",
+      "employee_info": {
+        "department": {
+          "id": "1",
+          "name": "<department>"
+        },
+        "display_name": "<name>",
+        "is_admin": true,
+        "organization_id": 1,
+        "position": "<position>"
+      },
+      "employees_info": [
+        {
+          "department": {
+            "id": "1",
+            "name": "<department>"
+          },
+          "display_name": "<name>",
+          "is_admin": true,
+          "organization_id": 1,
+          "organization_name": "<organization>",
+          "position": "<position>"
+        }
+      ],
+      "gender": "male",
+      "guid": "00000000-0000-4000-8000-000000000001",
+      "is_connect": true,
+      "public_name": "<name>",
+      "registration_status": "U",
+      "role": "admin",
+      "version": 1700000000000000
+    },
+    {
+      "account_category": 2,
+      "account_type": {
+        "found": true,
+        "value": "<value>"
+      },
+      "avatar_id": "user_avatar/yapic/1/placeholder",
+      "contacts": [
+        {
+          "default": true,
+          "organization_id": 1,
+          "type": "email",
+          "value": "<contact>"
+        }
+      ],
+      "display_name": "<name>",
+      "email": "<email>",
+      "employee_info": {
+        "department": {
+          "id": "1",
+          "name": "<department>"
+        },
+        "display_name": "<name>",
+        "is_admin": true,
+        "organization_id": 1,
+        "position": "<position>"
+      },
+      "employees_info": [
+        {
+          "department": {
+            "id": "1",
+            "name": "<department>"
+          },
+          "display_name": "<name>",
+          "is_admin": true,
+          "organization_id": 1,
+          "organization_name": "<organization>",
+          "position": "<position>"
+        }
+      ],
+      "gender": "male",
+      "guid": "00000000-0000-4000-8000-000000000002",
+      "is_connect": true,
+      "is_onboarded": true,
+      "mcrm_registration_ts": 1700000000000000,
+      "nickname": "<nickname>",
+      "public_name": "<name>",
+      "registration_status": "U",
+      "role": "member",
+      "uid": 1000000003,
+      "version": 1700000000000000
+    },
+    {
+      "account_category": 2,
+      "display_name": "<name>",
+      "guid": "00000000-0000-4000-8000-000000000003",
+      "public_name": "<name>",
+      "registration_status": "U",
+      "role": "member",
+      "version": 1700000000000000
+    },
+    {
+      "account_category": 2,
+      "account_deleted": true,
+      "avatar_id": "user_avatar/yapic/1/placeholder",
+      "contacts": [],
+      "display_name": "<name>",
+      "guid": "00000000-0000-4000-8000-000000000004",
+      "public_name": "<name>",
+      "registration_status": "Lu",
+      "role": "member",
+      "version": 1700000000000000
+    }
+  ]
+}

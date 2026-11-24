@@ -1,0 +1,8 @@
+{
+  "status": "error",
+  "data": {
+    "code": "no_permissions_for_this_chat_operation",
+    "text": "",
+    "source": "yamb"
+  }
+}

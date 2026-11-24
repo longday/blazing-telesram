@@ -44,7 +44,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 - **Proto `client.rs`:** MD-P (1.1) → GS 1.2 → CM 1.1 → CM 1.3 → CM 2.2 → CM 6.1. (CM 2.1 does not touch it.)
 - **`registry.rs`, `lib.rs`:** CM 2.1 (starts now, small) or GS 1.2, whichever has its other files free first; then CM 6.1.
-- **`request.rs`, `write.rs`:** GS 1.1 (done) → CM 1.1 → (CM 1.3 route flag) → MR-B1 (docs, variant-set test). CM 1.1 must raise the pinned allowlist to **8** names (4 + `search` + `whoami`, `get_chat_members`, `get_group_members`) and update `request.rs` (const, `len()` assertion) and `write.rs:384`.
+- **`request.rs`, `write.rs`:** GS 1.1 (done) → CM 1.1 (done, allowlist 8 names) → CM 1.3 (removes `GroupMembers`: allowlist **8 → 7** names: `request_user`, `get_users_data`, `history`, `subscribe`, `search`, `whoami`, `get_chat_members`; updates the const and `len()` assertion in `request.rs` and the pin `the_read_allowlist_does_not_gain_the_write_method` in `write.rs`; the member route stays `csrf: false`) → MR-B (docs, variant-set test; must count 7).
 - **`wire.rs`, `wire_fixtures.rs`:** GS 1.4 (fixtures) → CM 1.3 → MR-B1. MR 2.1 is parked until MR-B1 starts.
 - **`bt-probe.rs`, `README.md`:** GS 1.3 → MD 1.2 → CM 1.2 → CM 2.2 → CM 6.1 → MR-B1 (literal) → MR-P; README also MD-D last.
 - **Core lane** (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`): MD-C → GS-A → MR-B → CM-C1 → CM-M → CM-N → CM-G (GS-A first if it is ready while MD-C is not yet started on the core lane; a unit only waits for units that are actually in flight). Desktop UI files (`desktop.rs`, `tests.rs`, `main.rs`, `timeline.rs`) now sit inside these units, so the UI lane has the same order.
@@ -58,12 +58,12 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
 | 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
 | 1.4 | done (gs/1.4 merge; `WireSearchChat.kind` is only `Channel` or `Group`: no private-chat marker, so `PersonHit::chat` comes only from the guid map of 3.1) | 1.3 | GS-P3 |
-| 2.1 | done on `integ/gs` (5798ec9, withdrawn patch; re-apply on `main`) | — | GS-A |
-| 2.2 | blocked-by MD-C (core lane); unit GS-A | 2.1 | GS-A |
-| 3.1 | blocked-by MD-C (core lane) | 1.4, 2.1 | GS-A |
-| 3.2 | blocked-by MD-C (core lane) | 2.1 | GS-A |
-| 3.3 | blocked-by 3.2 | 3.2 | GS-A |
-| 3.4 | blocked-by 3.3 | 3.2, 3.3 | GS-A |
+| 2.1 | done on `integ/gs` (323a61a) | — | GS-A |
+| 2.2 | done on `integ/gs` (8c76bcc) | 2.1 | GS-A |
+| 3.1 | done on `integ/gs` (050fb7f); `YandexBackend.known` map (`private`, `titles`) is what CM 3.1 reuses | 1.4, 2.1 | GS-A |
+| 3.2 | done on `integ/gs` (0f235d8) | 2.1 | GS-A |
+| 3.3 | done on `integ/gs` (8ebb9a4; `search_results.rs`, `main.rs` mod line) | 3.2 | GS-A |
+| 3.4 | in progress (from `integ/gs`; `desktop.rs`, `tests.rs`; the last caller of everything 3.2/3.3 added) | 3.2, 3.3 | GS-A |
 | 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
 ## add-media-download (MD)
@@ -88,12 +88,12 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | done, static PASS (2a781dd; `create_chat` payload recorded in `design.md` D4) | — | gate for 6.1 passed |
-| 1.1 | done (5fce6ae; allowlist now 8 names, `write.rs` pin updated) | — | |
-| 1.2 | ready [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`); the live session is free | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
-| 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
+| 1.1 | done (5fce6ae; allowlist 8 names, `write.rs` pin updated; CM 1.3 lowers it to 7) | — | |
+| 1.2 | done (696177e; `bt-probe whoami`/`members`, redacted fixtures `live-members-group.json`, `live-members-private.json`, `live-whoami.json`; findings in `design.md`: `get_group_members` is `bad_request` for every shape, `get_chat_members` works for group chats only with `limit`/`guid_offset`/`roles`, private/self/channel chats answer 403) | 1.1 | |
+| 1.3 | ready (`wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs`, `write.rs` pin only; removes `GroupMembers`, allowlist 8 → 7; GS 1.4 and CM 1.2 are on `main`) | 1.2 | CM-P |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
-| 3.1 | blocked-by CM 1.3, 2.2 + core lane | 1.3, 2.2 | CM-C1 |
+| 3.1 | blocked-by CM 1.3, 2.2 + core lane (held by GS-A); notes: members only for group chats via paged `get_chat_members` (pages of 50, `guid_offset`), a private chat is answered from the chat row, a channel refusal is a failed load; reuses `YandexBackend.known.private` of GS 3.1 for the partner guid | 1.3, 2.2 | CM-C1 |
 | 3.2 | blocked-by CM 3.1 | 3.1 | CM-M (with 4.1, 4.2) |
 | 3.3 | blocked-by CM-M | 3.2 | CM-N (with 4.3) |
 | 4.1 | blocked-by CM 3.1 (unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
@@ -131,14 +131,14 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A (GS 2.1 re-applied from `integ/gs`, then 2.2, 3.1, 3.2, 3.3, 3.4, 3.5): all gates met (GS 1.4, MD-C and `md/4.3-fit` on `main`), core lane free. First `tests.rs` owner of the lane: it also fixes the pre-existing `reversed_empty_ranges` clippy error (task 3.5).
+- GS-A is in flight on `integ/gs` (head 8ebb9a4: GS 2.1, 2.2, 3.1, 3.2, 3.3, 3.5 done on top of `main` ef9c32f; 193/127/155/13/8 tests green; the 17 `dead_code` warnings are all things 3.4 consumes; last: 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait.
 - MD 5.2 [live, manual] (`main` build; owns no files).
-- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
+- CM 1.3 (`wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs`, `write.rs` pin; allowlist 8 → 7). Unblocks CM 2.2, which unblocks CM 3.1 (core lane) and CM 5.1/6.1.
 
-In flight: `cm/1.2`. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`, aca841a), 5.1; CM 0.1, 1.1, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
+In flight: GS-A (`integ/gs`, 3.4). Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`, aca841a), 5.1; CM 0.1, 1.1, 1.2, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
 
 ## Needs the user
 
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
-- Live session, reads only, no approval: GS 1.3, GS 4.1, CM 1.2, CM 5.2 (VM), MD 1.3 / 5.2 (may end "unverified" when the self chat holds no file).
+- Live session, reads only, no approval: GS 4.1, CM 5.2 (VM), MD 5.2 (may end "unverified" when the self chat holds no file). Done: GS 1.3, MD 1.3, CM 1.2.

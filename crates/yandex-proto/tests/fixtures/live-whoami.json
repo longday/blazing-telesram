@@ -1,0 +1,39 @@
+{
+  "CurrentTime": 1700000000000000,
+  "UserInfo": {
+    "AccountCategory": 2,
+    "AccountType": {
+      "Found": true,
+      "Value": "pdd"
+    },
+    "AvatarId": "user_avatar/yapic/1/placeholder",
+    "DiscoveryInfo": {
+      "Restriction": 1
+    },
+    "DisplayName": "<name>",
+    "Email": "<email>",
+    "Gender": "male",
+    "Guid": "00000000-0000-4000-8000-000000000001",
+    "IsConnect": true,
+    "IsLegal": true,
+    "IsOnboarded": true,
+    "Nickname": "<nickname>",
+    "OrganizationInfos": [
+      {
+        "AvatarId": "user_avatar/yapic/1/placeholder",
+        "OrganizationId": 1,
+        "OrganizationName": "<organization>",
+        "RegistrationStatus": 2,
+        "Rights": 3
+      }
+    ],
+    "PublicName": "<name>",
+    "RegistrationStatus": 2,
+    "Uid": 1000000002,
+    "Version": 1700000000000000
+  },
+  "UserStatusInfo": {
+    "Timestamp": 1700000000000000,
+    "UserStatus": {}
+  }
+}

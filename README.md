@@ -33,6 +33,15 @@ On first start a window with the Yandex sign-in page opens. Sign in as on `telem
 BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe -- me
 ```
 
+Two more read-only commands inspect the profile and chat member endpoints; both print the raw reply as pretty JSON on stdout (it carries names, emails and positions, so keep it out of commits and logs), a header line goes to stderr:
+
+```sh
+bt-probe whoami                                  # the signed-in account: UserInfo and UserStatusInfo
+bt-probe members <chat> [--method chat|group]    # get_chat_members (default) or get_group_members for one chat id
+```
+
+`members` answers for group chats only: private chats, the self chat and (for the account it was recorded on) channels are refused with `no_permissions_for_this_chat_operation`, and `get_group_members` currently answers `bad_request`. Without paging parameters the server returns the first 20 users.
+
 ## Diagnostics
 
 The app logs to three places at once: the terminal (stderr), the log window (⌘⇧L or the 🐞 button next to search; «Копировать» copies it) and a JSON Lines file `.runtime/logs/<UTC time>-<pid>.jsonl`, one object per record, written as it happens. The ten newest files are kept.

@@ -33,7 +33,7 @@ The user SHALL be able to start a private chat with a person the client knows. I
 - **THEN** that chat is opened and no create request is sent
 
 ### Requirement: Participants come from known people
-The dialog SHALL offer only people the client already knows: partners of the account's private chats and members of the chat whose info panel is open. It SHALL NOT offer the current user.
+The dialog SHALL offer only people the client already knows: the other participants of the account's private chats and the members of the group whose info panel is open (private chats and channels have no readable member list). It SHALL NOT offer the current user.
 
 #### Scenario: Pick participants
 - **WHEN** the user opens the new chat dialog
