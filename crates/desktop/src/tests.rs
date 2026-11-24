@@ -2176,6 +2176,52 @@ fn the_viewer_opens_at_the_chosen_picture_with_its_position(cx: &mut TestAppCont
     assert!(h.commands().is_empty(), "opening the viewer downloads nothing and asks for nothing");
 }
 
+fn inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
+    let slack = px(0.5);
+    inner.left() >= outer.left() - slack
+        && inner.right() <= outer.right() + slack
+        && inner.top() >= outer.top() - slack
+        && inner.bottom() <= outer.bottom() + slack
+}
+
+#[gpui::test]
+fn the_viewer_fits_the_smallest_window(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    cx.simulate_resize(size(px(850.), px(560.)));
+    let sized = |id: &str, width, height| GalleryItem { width, height, ..picture(id) };
+    let items = vec![sized("v/1", 3000, 4000), sized("v/2", 4000, 1000), sized("v/3", 4000, 4000)];
+    open_with(&h, cx, vec![message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })]);
+    open_viewer(&h, cx, ts(2), 0);
+
+    for index in 0..3 {
+        let overlay = bounds(cx, "viewer").expect("the viewer is on screen");
+        assert_eq!(overlay.size, size(px(850.), px(560.)), "the overlay covers the window");
+        let picture = bounds(cx, "viewer-image").unwrap();
+        for selector in ["viewer-image", "viewer-prev", "viewer-next", "viewer-close", "viewer-download"] {
+            let part = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+            assert!(inside(overlay, part), "picture {index}: {selector} {part:?} leaves the window {overlay:?}");
+        }
+        let (prev, next) = (bounds(cx, "viewer-prev").unwrap(), bounds(cx, "viewer-next").unwrap());
+        assert!(prev.right() <= picture.left() && picture.right() <= next.left(), "picture {index} overlaps an arrow");
+        let (close, download) = (bounds(cx, "viewer-close").unwrap(), bounds(cx, "viewer-download").unwrap());
+        assert!(close.bottom() <= picture.top() && picture.bottom() <= download.top(), "picture {index} overlaps a bar");
+        cx.simulate_keystrokes("right");
+    }
+}
+
+#[gpui::test]
+fn the_viewer_picture_follows_the_window_size(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    let width = |cx: &mut VisualTestContext| f32::from(bounds(cx, "viewer-image").unwrap().size.width);
+    assert!((width(cx) - 800.0).abs() < 0.5);
+    cx.simulate_resize(size(px(850.), px(560.)));
+    cx.run_until_parked();
+    let expected = 850.0 - 32.0 - 2.0 * 64.0; // what the padding and the two arrows leave
+    assert!((width(cx) - expected).abs() < 0.5, "{} != {expected}", width(cx));
+}
+
 #[gpui::test]
 fn the_viewer_ignores_what_it_cannot_show(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
