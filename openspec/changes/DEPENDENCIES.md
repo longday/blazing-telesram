@@ -58,7 +58,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | done (6fb4a72) | — | |
-| 1.2 | blocked-by MD-P (proto `client.rs`) | 1.1 | GS-P1 |
+| 1.2 | ready | 1.1 | GS-P1 |
 | 1.3 | blocked-by GS 1.2 | 1.2 | GS-P2 [live] |
 | 1.4 | blocked-by GS 1.3 | 1.3 | GS-P3 |
 | 2.1 | done on `integ/gs` (5798ec9, parked) | — | GS-C |
@@ -73,13 +73,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
-| 1.1 | in progress (md/1.1) | — | MD-P (+ `backend_error` arm) |
-| 1.2 | blocked-by MD 1.1, GS 1.3 (`bt-probe.rs`) | 1.1 | MD-R1 |
+| 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
+| 1.2 | ready (`bt-probe.rs` is free; yields to GS 1.3 if that has started) | 1.1 | MD-R1 |
 | 1.3 | blocked-by MD 1.2 | 1.2 | MD-R3 [live] re-check (URL already verified by plain GETs, see `design.md`) |
-| 2.1 | blocked-by MD 1.1 (yandex_backend.rs) | — | MD-C |
+| 2.1 | ready | — | MD-C |
 | 2.2 | ready | — | MD-K |
 | 2.3 | blocked-by MD 2.1, 2.2 | 2.1, 2.2 | MD-C |
-| 3.1 | blocked-by MD 1.1, 2.1 | 1.1, 2.1 | MD-C |
+| 3.1 | blocked-by MD 2.1 | 2.1 | MD-C |
 | 4.1 | blocked-by MD 2.1 | 2.1 | MD-C |
 | 4.3 | blocked-by MD-C | 2.1, 4.1 | MD-U1 |
 | 4.2 | blocked-by MD 4.3 | 4.1, 4.3 | MD-U2 |
@@ -91,10 +91,10 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | ready | — | `design.md` only; PASS/FAIL gates 6.1 |
-| 1.1 | blocked-by MD 1.1 (proto `client.rs`) | — | `request.rs`, `client.rs`, `write.rs`; allowlist becomes 8 names |
+| 1.1 | blocked-by GS 1.2 (proto `client.rs`) | — | `request.rs`, `client.rs`, `write.rs`; allowlist becomes 8 names |
 | 1.2 | blocked-by CM 1.1, GS 1.3, MD 1.2 (`bt-probe.rs`) | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
-| 2.1 | ready | — | `manage.rs`, `registry.rs`, `lib.rs` |
+| 2.1 | blocked-by GS 1.2 (`registry.rs`, `lib.rs`) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
 | 3.1 | blocked-by CM 1.3, 2.2 + core lane | 1.3, 2.2 | CM-C1 |
 | 3.2 | blocked-by CM 3.1 | 3.1 | CM-C2 |
@@ -117,7 +117,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | in progress (rx/1.1, `research.md` only; merges alone) | — | |
-| 2.1 | parked (rx/2.1 work in progress, must not merge alone) | — | MR-B1 |
+| 2.1 | done on `rx/2.1` (3e4f081, parked; does not compile alone: `WireMessage` literal in `bt-probe.rs`) | — | MR-B1 |
 | 2.2 | cancelled, restarts in MR-B1 | — | MR-B1 |
 | 3.1 | cancelled, restarts in MR-B1 | — | MR-B1 |
 | 3.2 | blocked-by MR-B1 start | 3.1 | MR-B1 |
@@ -134,11 +134,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (nothing in flight touches their files)
 
+- GS 1.2 (GS-P1, critical path of the live chain)
+- MD 2.1 (opens MD-C; then 2.3, 3.1, 4.1 in parallel, disjoint files)
 - MD 2.2 (MD-K)
+- MD 1.2 (`bt-probe.rs`)
 - CM 0.1
-- CM 2.1
 
-In flight: MD 1.1 (md/1.1), MR 1.1 (rx/1.1). Unblocks when MD 1.1 merges: GS 1.2, CM 1.1, MD 2.1 (then 2.3, 3.1, 4.1).
+In flight: MR 1.1 (`research.md` only). Merged: GS 1.1, MD 1.1. Blocked only by GS 1.2: CM 1.1, CM 2.1 (shared proto `client.rs`, `registry.rs`, `lib.rs`).
 
 ## Needs the user
 
