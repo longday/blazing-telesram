@@ -381,7 +381,10 @@ mod tests {
         for method in crate::request::ALLOWED_METHODS {
             assert!(!WRITE_METHODS.contains(&method));
         }
-        assert_eq!(crate::request::ALLOWED_METHODS, ["request_user", "get_users_data", "history", "subscribe"]);
+        assert_eq!(
+            crate::request::ALLOWED_METHODS,
+            ["request_user", "get_users_data", "history", "subscribe", "search"]
+        );
     }
 
     #[test]
