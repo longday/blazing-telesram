@@ -56,8 +56,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|------|
 | 1.1 | done (6fb4a72) | — | |
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
-| 1.3 | in progress (gs/1.3) [live] | 1.2 | GS-P2 |
-| 1.4 | blocked-by GS 1.3 | 1.3 | GS-P3 |
+| 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
+| 1.4 | ready (`search.rs`, `wire_fixtures.rs`; fixture from 1.3) | 1.3 | GS-P3 |
 | 2.1 | done on `integ/gs` (5798ec9, withdrawn patch) | — | GS-A |
 | 2.2 | blocked-by GS 1.4 (unit gate) | 2.1 | GS-A |
 | 3.1 | blocked-by GS 1.4 | 1.4, 2.1 | GS-A |
@@ -72,7 +72,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|------|
 | 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
 | 1.2 | done (e5f2dde) | 1.1 | MD-R1 |
-| 1.3 | ready [live] re-check, after GS 1.3 in the live order (`design.md`, maybe `media.rs`; URL already verified by plain GETs, see `design.md`) | 1.2 | MD-R3 |
+| 1.3 | in progress [live] (run by Main; `design.md`, maybe `media.rs`) | 1.2 | MD-R3 |
 | 2.1 | done on `integ/md` (772b224) | — | MD-C |
 | 2.2 | done (e8e533e) | — | MD-K |
 | 2.3 | done on `integ/md` (da5e226) | 2.1, 2.2 | MD-C |
@@ -89,7 +89,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |----|--------|-------|---------------|
 | 0.1 | done, static PASS (2a781dd; `create_chat` payload recorded in `design.md` D4) | — | gate for 6.1 passed |
 | 1.1 | done (5fce6ae; allowlist now 8 names, `write.rs` pin updated) | — | |
-| 1.2 | blocked-by GS 1.3 (`bt-probe.rs` and the live session); then ready | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
+| 1.2 | ready [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`); queues for the live session after MD 1.3 (the session is held by MD 1.3 now) | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
@@ -131,9 +131,10 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- MD 1.3 [live] re-check, queued after GS 1.3 in the live order (touches `design.md`, maybe `media.rs`).
+- GS 1.4 (`search.rs`, `wire_fixtures.rs`; unblocks GS-A and CM 1.3's `wire_fixtures.rs` slot).
+- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, waits only for the live session.
 
-In flight: GS 1.3 (gs/1.3), MD 4.3 (on `integ/md`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1 done, then 4.3, 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A, MR-B and CM-C1 wait for it (or for GS 1.4/CM 1.3 which gate them anyway). Queued behind GS 1.3 (`bt-probe.rs`, live session): CM 1.2. Merged so far: GS 1.1, 1.2; MD 1.1, 1.2, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
+In flight: MD 1.3 [live] (Main), MD 4.3 (on `integ/md`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1 done, then 4.3, 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A, MR-B and CM-C1 wait for it. Merged so far: GS 1.1, 1.2, 1.3; MD 1.1, 1.2, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
 
 ## Needs the user
 
