@@ -323,7 +323,8 @@ fn live_members_refusal_fixture() {
 }
 
 /// The `whoami` reply of a real account (2026-11-24, placeholders): no status set, so
-/// `UserStatus` is `{}`. The populated shape was not observed; the variant below is synthetic.
+/// `UserStatus` is `{}`. The populated shape was not observed live; the variants below are
+/// synthetic and follow the web client's `CustomStatus.Text` path.
 #[test]
 fn live_whoami_fixture() {
     let mut raw = fixture("live-whoami.json");
@@ -333,6 +334,8 @@ fn live_whoami_fixture() {
     assert_eq!(profile.avatar_id.as_deref(), Some("user_avatar/yapic/1/placeholder"));
     assert_eq!(profile.status_text, None, "an empty UserStatus is no status");
 
-    raw["UserStatusInfo"]["UserStatus"] = serde_json::json!({ "text": "Out of office" });
+    raw["UserStatusInfo"]["UserStatus"] = serde_json::json!({ "Availability": "Away", "CustomStatus": { "Emoji": "x", "Text": "Out of office" } });
     assert_eq!(parse_profile(&raw).unwrap().status_text.as_deref(), Some("Out of office"));
+    raw["UserStatusInfo"]["UserStatus"] = serde_json::json!({ "text": "Out of office" });
+    assert_eq!(parse_profile(&raw).unwrap().status_text, None, "the flat `text` key is not the server's shape");
 }

@@ -82,7 +82,7 @@ pub struct WireProfile {
     pub guid: Option<String>,
     pub name: Option<String>,
     pub avatar_id: Option<String>,
-    /// `UserStatusInfo.UserStatus.text`; `None` while the status is unset (`{}`).
+    /// `UserStatusInfo.UserStatus.CustomStatus.Text`; `None` while the status is unset (`{}`).
     pub status_text: Option<String>,
 }
 
@@ -707,16 +707,17 @@ pub fn parse_members(data: &Json) -> Result<WireMembers, ProtoError> {
 
 /// The signed-in account's profile from a `whoami` reply (`{UserInfo, UserStatusInfo,
 /// CurrentTime}`). `UserStatusInfo.UserStatus` is `{}` while no status is set; a status counts
-/// only when it holds a non-blank `text` (`Text` is accepted too: the populated shape is
-/// unobserved). No availability is inferred from the rest of it.
+/// only when `UserStatus.CustomStatus.Text` is a non-blank string (the PascalCase path the web
+/// client's `whoami` normalizer reads; the populated shape was never seen live). No
+/// availability is inferred from the rest of it.
 pub fn parse_profile(body: &Json) -> Result<WireProfile, ProtoError> {
     check_status(body)?;
     let info = present(body, "UserInfo")
         .filter(|v| v.is_object())
         .ok_or_else(|| ProtoError::Protocol("whoami reply has no UserInfo".into()))?;
-    let status = body.pointer("/UserStatusInfo/UserStatus");
-    let status_text = status
-        .and_then(|s| string(s, "text").or_else(|| string(s, "Text")))
+    let status_text = body
+        .pointer("/UserStatusInfo/UserStatus/CustomStatus")
+        .and_then(|custom| string(custom, "Text"))
         .filter(|text| !text.trim().is_empty());
     Ok(WireProfile { guid: string(info, "Guid"), name: display_name(info), avatar_id: string(info, "AvatarId"), status_text })
 }
@@ -1000,11 +1001,16 @@ mod tests {
             unset,
             WireProfile { guid: Some("g".into()), name: Some("Ivan".into()), avatar_id: Some("av".into()), status_text: None }
         );
-        let set = parse_profile(&reply(json!({ "availability": "away", "text": "On leave" }))).unwrap();
+        let custom = |text: Json| json!({ "Availability": "Away", "CustomStatus": { "Emoji": "x", "Text": text } });
+        let set = parse_profile(&reply(custom(json!("On leave")))).unwrap();
         assert_eq!(set.status_text.as_deref(), Some("On leave"));
-        assert_eq!(parse_profile(&reply(json!({ "Text": "Pascal" }))).unwrap().status_text.as_deref(), Some("Pascal"));
-        assert_eq!(parse_profile(&reply(json!({ "text": "  " }))).unwrap().status_text, None);
-        assert_eq!(parse_profile(&reply(json!({ "text": 5 }))).unwrap().status_text, None);
+        assert_eq!(parse_profile(&reply(custom(json!("  ")))).unwrap().status_text, None);
+        assert_eq!(parse_profile(&reply(custom(json!(5)))).unwrap().status_text, None);
+        assert_eq!(parse_profile(&reply(json!({ "Availability": "Away" }))).unwrap().status_text, None, "no CustomStatus is no status");
+        assert_eq!(parse_profile(&reply(json!({ "CustomStatus": "text" }))).unwrap().status_text, None);
+        for wrong in [json!({ "text": "On leave" }), json!({ "Text": "Pascal" }), json!({ "CustomStatus": { "text": "lower" } })] {
+            assert_eq!(parse_profile(&reply(wrong)).unwrap().status_text, None, "only CustomStatus.Text is a status");
+        }
 
         let bare = parse_profile(&json!({ "UserInfo": { "PublicName": "ivan" } })).unwrap();
         assert_eq!((bare.name.as_deref(), bare.guid, bare.avatar_id, bare.status_text), (Some("ivan"), None, None, None));
