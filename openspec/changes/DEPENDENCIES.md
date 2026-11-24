@@ -92,11 +92,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.3 | done (19cf57a; typed `Client::members`/`whoami`, `GroupMembers` removed, allowlist 7 names, `write.rs` pin updated) | 1.2 | CM-P |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | done (59d765b; `Client::create_private_chat`, `bt-probe create-private <guid> --confirm-create`, README) | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
-| 3.1 | **ready** (MR-B merged to `main` at 65204cb, core lane free; CM 1.3 and 2.2 are done; files `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal); notes: members only for group chats via paged `get_chat_members` (pages of 50, `guid_offset`), a private chat is answered from the chat row, a channel refusal is a failed load; reuses `YandexBackend.known.private` of GS 3.1 for the partner guid; `Message` now has `reactions` (add `Default::default()` in new literals) | 1.3, 2.2 | CM-C1 |
-| 3.2 | blocked-by CM 3.1 | 3.1 | CM-M (with 4.1, 4.2) |
+| 3.1 | done (c31b7a0 incl. 0e3283d; `Backend::{members, profile, create_private_chat}`, `ChatSummary.partner`; also touched a `search_results.rs` test helper and a `cache.rs` test, no in-flight work on them) | 1.3, 2.2 | CM-C1 |
+| 3.2 | ready on `integ/members` (`model.rs`, chat-core `client.rs`, `store.rs`) | 3.1 | CM-M (with 4.1, 4.2) |
 | 3.3 | blocked-by CM-M | 3.2 | CM-N (with 4.3) |
-| 4.1 | blocked-by CM 3.1 (unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
-| 4.2 | blocked-by CM 4.1 | 3.2, 4.1 | CM-M |
+| 4.1 | blocked-by CM 3.2 (`info_panel.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`; unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
+| 4.2 | blocked-by CM 4.1 (`profile.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`: same files as 4.1, so strictly after it) | 3.2, 4.1 | CM-M |
 | 4.3 | blocked-by CM-M, 3.3 | 3.3, 4.2 | CM-N |
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
 | 5.2 | blocked-by CM 4.3 | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
@@ -130,11 +130,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **CM 3.1** (CM-C1: `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal) has started from `main` 65204cb; the core lane is held by it. It unblocks CM-M (3.2, 4.1, 4.2).
+- **CM-M on `integ/members`** (from `main` c31b7a0): CM 3.2 now (`model.rs`, chat-core `client.rs`, `store.rs`); 4.1 and 4.2 are sequential after it and after each other (shared `desktop.rs`, `tests.rs`, `main.rs`).
 - **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
 - GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; in progress on `gs/4.1`).
 
-In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`), CM 3.1 (from `main` 65204cb). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
+In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`), `integ/members` (CM-M, nothing started). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
