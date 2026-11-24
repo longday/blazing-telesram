@@ -138,6 +138,7 @@ In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`), 
 
 ## Needs the user
 
+- Decision on the MR 7.1 acceptance criterion: `cargo fmt --check` (1561 hunks, baseline), the two new clippy `large_enum_variant`. Blocks MR 7.1, 7.2 and 7.3.
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
 - Live session, reads only, no approval: GS 4.1, CM 5.2 (VM). Done: GS 1.3, MD 1.3, MD 5.2, CM 1.2.
