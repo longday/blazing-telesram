@@ -6,16 +6,18 @@ use crate::format::{chat_time, log_time, one_line, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::input::{InputEvent, TextInput};
 use crate::info_panel;
+use crate::new_chat::{self, Candidate, NewChat};
 use crate::profile;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
-    ChatFilter, ChatStore, SearchStatus, SessionState, StoreEvent, TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
+    ChatFilter, ChatStore, CreationState, ProfileState, SearchStatus, SessionState, StoreEvent, TimelineChange,
+    SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
 };
 use crate::theme::*;
 use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs};
+use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs, UserId};
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
 use std::ops::Range;
@@ -85,6 +87,8 @@ pub struct Desktop {
     info: Option<ChatId>,
     /// Whether the read-only profile modal is open.
     profile: bool,
+    /// The new chat dialog, when open.
+    new_chat: Option<NewChat>,
     pub(crate) menu: AccountMenu,
     compose: Compose,
     message_menu: Option<MessageMenu>,
@@ -115,6 +119,7 @@ impl Desktop {
                 this.sync_viewer(cx);
                 this.sync_info();
                 this.sync_profile(cx);
+                this.sync_new_chat(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
@@ -123,6 +128,7 @@ impl Desktop {
                 StoreEvent::Connection => this.resume_search(cx),
                 StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
                 StoreEvent::SendRefused { draft, reason } => this.send_refused(draft.clone(), reason.clone(), cx),
+                StoreEvent::ChatCreated { chat, .. } => this.new_chat_created(chat.is_none(), cx),
                 _ => {}
             }),
             // Whether the window is active decides if the visible messages count as read.
@@ -140,6 +146,7 @@ impl Desktop {
             open: None,
             info: None,
             profile: false,
+            new_chat: None,
             menu: AccountMenu::Closed,
             compose,
             message_menu: None,
@@ -161,6 +168,7 @@ impl Desktop {
             || self.delete_pending.is_some()
             || self.menu == AccountMenu::ConfirmSignOut
             || self.profile
+            || self.new_chat.is_some()
             || self.store.read(cx).session() != SessionState::Active
     }
 
@@ -173,6 +181,8 @@ impl Desktop {
         self.covered = covered;
         if !covered && self.open.is_some() {
             window.focus(&self.compose.input.focus_handle(cx));
+        } else if let Some(dialog) = self.new_chat.as_ref() {
+            window.focus(&dialog.search.focus_handle(cx));
         } else {
             window.focus(&self.focus);
         }
@@ -208,7 +218,7 @@ impl Desktop {
     }
 
     /// The chat whose panel is open, if it is still the open chat.
-    fn info_chat(&self) -> Option<ChatId> {
+    pub(crate) fn info_chat(&self) -> Option<ChatId> {
         self.info.clone().filter(|chat| self.open.as_ref().is_some_and(|o| &o.chat == chat))
     }
 
@@ -257,6 +267,131 @@ impl Desktop {
         if self.store.read(cx).session() != SessionState::Active {
             self.profile = false;
         }
+    }
+
+    /// "Новый чат" is offered only while the client is online.
+    fn new_chat_available(&self, cx: &App) -> bool {
+        self.store.read(cx).connection() == ConnectionState::Online
+    }
+
+    /// Opens the new chat dialog, with `user` already chosen when it comes from "Написать". A person who
+    /// already has a private chat with the account gets that chat opened instead. Ignored while something
+    /// else covers the chat. The dialog needs the own guid to leave the current user out, so it asks for
+    /// the profile (a read) unless one is loaded.
+    pub(crate) fn open_new_chat(&mut self, user: Option<UserId>, cx: &mut Context<Self>) {
+        self.menu = AccountMenu::Closed;
+        if self.blocked(cx) || self.new_chat.is_some() {
+            cx.notify();
+            return;
+        }
+        if let Some(chat) = user.as_ref().and_then(|u| new_chat::existing_chat(self.store.read(cx), u)) {
+            self.select(chat, cx);
+            return;
+        }
+        // The message menu is drawn above the dialog; it must not outlive the cover's start.
+        self.message_menu = None;
+        self.store.update(cx, |store, cx| {
+            store.dismiss_creation(cx);
+            if !matches!(store.profile_state(), Some(ProfileState::Ready(_))) {
+                store.load_profile(cx);
+            }
+        });
+        let mut dialog = NewChat::new(cx);
+        dialog.chosen = user.and_then(|user| {
+            new_chat::candidates(self.store.read(cx), self.info_chat().as_ref()).into_iter().find(|c| c.user == user)
+        });
+        self.new_chat = Some(dialog);
+        cx.notify();
+    }
+
+    fn creation_in_flight(&self, cx: &App) -> bool {
+        self.store.read(cx).creation_state() == Some(&CreationState::InFlight)
+    }
+
+    /// "Отмена" and Escape. A creation in flight cannot be recalled, so the dialog stays until its
+    /// outcome is shown.
+    pub(crate) fn close_new_chat(&mut self, cx: &mut Context<Self>) {
+        if self.new_chat.is_none() || self.creation_in_flight(cx) {
+            return;
+        }
+        self.new_chat = None;
+        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        cx.notify();
+    }
+
+    /// Closes the dialog and opens the chat that already exists.
+    fn open_existing_chat(&mut self, chat: ChatId, cx: &mut Context<Self>) {
+        self.new_chat = None;
+        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        self.select(chat, cx);
+        cx.notify();
+    }
+
+    /// The user picked a person. Someone who has a private chat with the account opens that chat; anyone
+    /// else becomes the chosen participant (a failure from the earlier choice is forgotten).
+    pub(crate) fn choose_person(&mut self, user: UserId, cx: &mut Context<Self>) {
+        if self.new_chat.is_none() || self.creation_in_flight(cx) {
+            return;
+        }
+        if let Some(chat) = new_chat::existing_chat(self.store.read(cx), &user) {
+            self.open_existing_chat(chat, cx);
+            return;
+        }
+        let people = new_chat::candidates(self.store.read(cx), self.info_chat().as_ref());
+        let Some(person) = people.into_iter().find(|c| c.user == user) else { return };
+        if let Some(dialog) = self.new_chat.as_mut() {
+            dialog.chosen = Some(person);
+        }
+        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        cx.notify();
+    }
+
+    /// "Создать": the only call that creates a chat. A chat with the person that appeared meanwhile is
+    /// opened instead; while a creation is in flight nothing is sent again.
+    pub(crate) fn confirm_new_chat(&mut self, cx: &mut Context<Self>) {
+        let Some(user) = self.new_chat.as_ref().and_then(|d| d.chosen.as_ref()).map(|c| c.user.clone()) else { return };
+        if self.creation_in_flight(cx) {
+            return;
+        }
+        if let Some(chat) = new_chat::existing_chat(self.store.read(cx), &user) {
+            self.open_existing_chat(chat, cx);
+            return;
+        }
+        self.store.update(cx, |store, cx| store.create_private_chat(user, cx));
+    }
+
+    /// A creation ended in a chat (the store selects it): the dialog is done. A chat the answer and the
+    /// refreshed list do not name cannot be opened; the user is told it will show up in the list.
+    fn new_chat_created(&mut self, unopened: bool, cx: &mut Context<Self>) {
+        if self.new_chat.take().is_none() {
+            return;
+        }
+        if unopened {
+            self.show_toast("Чат создан, он появится в списке".into(), cx);
+        }
+        cx.notify();
+    }
+
+    /// The dialog has nothing to show once the session is no longer active (the session dialogs take over).
+    fn sync_new_chat(&mut self, cx: &App) {
+        if self.store.read(cx).session() != SessionState::Active {
+            self.new_chat = None;
+        }
+    }
+
+    /// The person chosen in the open dialog.
+    pub(crate) fn new_chat_choice(&self) -> Option<&Candidate> {
+        self.new_chat.as_ref()?.chosen.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_chat_is_open(&self) -> bool {
+        self.new_chat.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_chat_query(&self, cx: &App) -> Option<String> {
+        Some(self.new_chat.as_ref()?.search.read(cx).content.to_string())
     }
 
     #[cfg(test)]
@@ -609,6 +744,28 @@ impl Desktop {
                             .key_context("Search")
                             .child(self.search.clone()),
                     )
+                    .child({
+                        let online = connection == ConnectionState::Online;
+                        div()
+                            .id("new-chat-button")
+                            .debug_selector(|| "new-chat-button".into())
+                            .flex_none()
+                            .px(px(10.))
+                            .py(px(7.))
+                            .rounded(px(20.))
+                            .text_size(px(13.))
+                            .when(online, |d| {
+                                d.cursor_pointer().text_color(rgb(ACCENT)).hover(|s| s.bg(rgb(ROW_HOVER))).on_click(
+                                    cx.listener(|this, _, _, cx| {
+                                        if this.new_chat_available(cx) {
+                                            this.open_new_chat(None, cx);
+                                        }
+                                    }),
+                                )
+                            })
+                            .when(!online, |d| d.text_color(rgb(MUTED)))
+                            .child("Новый чат")
+                    })
                     .child(
                         div()
                             .id("log-button")
@@ -1024,6 +1181,7 @@ impl Render for Desktop {
         let pane = self.chat_pane(cx);
         let info = self.info_chat().map(|chat| info_panel::render(&chat, &self.store, cx));
         let profile = self.profile.then(|| profile::render(&self.store, cx));
+        let new_chat = self.new_chat.as_ref().map(|dialog| new_chat::render(dialog, self.info_chat(), &self.store, cx));
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
@@ -1052,6 +1210,7 @@ impl Render for Desktop {
             .child(pane)
             .children(info)
             .children(profile)
+            .children(new_chat)
             .children(viewer)
             .children(log)
             .children(toast)

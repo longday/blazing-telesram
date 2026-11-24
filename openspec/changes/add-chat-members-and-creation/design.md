@@ -90,7 +90,7 @@ New commands `CreatePrivateChat { user }` (and `CreateGroupChat { title, users }
 - offline (`!is_online()`): `CreationFailed { unknown: false }` without a request;
 - private chat that already exists in the cached list (`ChatSummary.partner == user`): `ChatCreated { chat: Some(id), existing: true }`, no request;
 - success: refresh the chat list (the path `become_online` uses), then emit `ChatCreated` with the id from the reply, else, for a private chat, the list entry whose `partner` is the user, else `None`; the store opens it once it is in `chats`;
-- `Failed`: `CreationFailed { unknown: false }`; `Unknown`: `CreationFailed { unknown: true }` and the same list refresh. Nothing re-sends by itself; the next attempt is the user pressing "Создать" again, and for a private chat the check above opens a chat that appeared in the meantime.
+- `Failed`: `CreationFailed { unknown: false }`; `Unknown`: the same list refresh, then, if the refreshed list holds a private chat whose `partner` is the user, `ChatCreated { chat: Some(id), existing: true }` (the chat appeared after all: the client cannot tell its own request created it), else `CreationFailed { unknown: true }`. Nothing re-sends by itself; the next attempt is the user pressing "Создать" again, and for a private chat the check above opens a chat that appeared in the meantime.
 `ChatSummary` gains `partner: Option<UserId>` (`#[serde(default)]`, so cached rows from before still load) filled from `WireChat.partner_guid` in `summary()` of `yandex_backend.rs`; the struct-literal sites (`chat-core/src/fixtures.rs`, `desktop/src/tests.rs`, `yandex_backend.rs`) follow; the `unread_chat` helper in `client.rs` tests uses struct update and needs no change.
 
 ### D6. Members and profile in the engine and store

@@ -57,14 +57,17 @@ fn retry(cx: &mut Context<Desktop>) -> Stateful<Div> {
         .on_click(cx.listener(|this, _, _, cx| this.reload_info(cx)))
 }
 
-/// One person: avatar (or initials), name and the administrator marker for the admin role only.
-/// Debug selectors: `member-<guid>`, `member-<guid>-avatar`, `member-<guid>-admin`.
-fn member_row(store: &ChatStore, member: &Member) -> Div {
+/// One person: avatar (or initials), name, the administrator marker for the admin role only and "Написать"
+/// (which starts the private chat flow) on every row but the current user's.
+/// Debug selectors: `member-<guid>`, `member-<guid>-avatar`, `member-<guid>-admin`, `member-<guid>-write`.
+fn member_row(store: &ChatStore, member: &Member, cx: &Context<Desktop>) -> Div {
     let tag = format!("member-{}", member.user.0);
     let name = member.name.clone().unwrap_or_else(|| "Без имени".into());
     let admin = member.role == MemberRole::Admin;
     let admin_tag = format!("{tag}-admin");
+    let write_tag = format!("{tag}-write");
     let row_tag = tag.clone();
+    let user = member.user.clone();
     div()
         .debug_selector(move || row_tag)
         .h(px(ROW_HEIGHT))
@@ -89,12 +92,24 @@ fn member_row(store: &ChatStore, member: &Member) -> Div {
                     .child("админ"),
             )
         })
+        .when(!member.me, |row| {
+            row.child(
+                button(SharedString::from(write_tag.clone()), "Написать")
+                    .debug_selector(move || write_tag)
+                    .flex_none()
+                    .px(px(8.))
+                    .py(px(3.))
+                    .text_size(px(12.))
+                    .text_color(rgb(ACCENT))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_new_chat(Some(user.clone()), cx))),
+            )
+        })
 }
 
 /// The rows of `range` of the loaded list of `chat`; nothing while there is no list.
-fn rows(store: &ChatStore, chat: &ChatId, range: Range<usize>) -> Vec<Div> {
+fn rows(store: &ChatStore, chat: &ChatId, range: Range<usize>, cx: &Context<Desktop>) -> Vec<Div> {
     let Some(MembersState::Ready(members)) = store.members_state(chat) else { return Vec::new() };
-    range.filter_map(|ix| members.users.get(ix)).map(|member| member_row(store, member)).collect()
+    range.filter_map(|ix| members.users.get(ix)).map(|member| member_row(store, member, cx)).collect()
 }
 
 /// The panel of `chat`. Debug selectors: `info-panel`, `info-close`, `info-loading`, `info-offline`,
@@ -155,7 +170,7 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
                             uniform_list(
                                 "info-members",
                                 shown,
-                                cx.processor(move |this, range: Range<usize>, _, cx| rows(this.store.read(cx), &chat, range)),
+                                cx.processor(move |this, range: Range<usize>, _, cx| rows(this.store.read(cx), &chat, range, cx)),
                             )
                             .size_full(),
                         ),

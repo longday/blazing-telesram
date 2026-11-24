@@ -4,6 +4,7 @@ mod info_panel;
 mod input;
 mod login;
 mod logging;
+mod new_chat;
 mod profile;
 mod search_results;
 mod store;

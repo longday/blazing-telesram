@@ -3563,3 +3563,505 @@ fn an_ended_session_closes_the_profile(cx: &mut TestAppContext) {
     assert!(!profile_open(&h, cx));
     assert!(shown(cx, "session-expired"));
 }
+
+// ---- new chat flow (CM 4.3) ----
+
+fn person_chat(id: &str, title: &str, partner: &str) -> ChatSummary {
+    let mut chat = chat(id, ChatKind::Private, title, Some(1));
+    chat.partner = Some(UserId(partner.into()));
+    chat
+}
+
+/// The group "g", a private chat with Анна (`anna`) and the self chat (partner `me`).
+fn people_chats() -> Vec<ChatSummary> {
+    vec![chat("g", ChatKind::Group, "Команда", Some(1)), person_chat("p", "Анна", "anna"), person_chat("s", "Избранное", "me")]
+}
+
+/// Online, the group "g" open with one message; the drained commands are the usual opening ones.
+fn open_people(h: &Harness, cx: &mut VisualTestContext) {
+    h.feed(cx, [ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Online)]);
+    click(cx, row!("g"));
+    h.feed(cx, [history("g", vec![text("g", 1)], true)]);
+    h.commands();
+}
+
+/// As `open_people`, with the info panel of "g" showing Алиса, Борис, Анна and the current user.
+fn open_people_panel(h: &Harness, cx: &mut VisualTestContext) {
+    open_people(h, cx);
+    click(cx, "chat-header");
+    h.commands();
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![
+                member("alice", "Алиса", MemberRole::Member, false),
+                member("boris", "Борис", MemberRole::Admin, false),
+                member("anna", "Анна", MemberRole::Member, false),
+                member("me", "Я", MemberRole::Member, true),
+            ],
+            false,
+        )],
+    );
+}
+
+fn dialog_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.new_chat_is_open())
+}
+
+/// Presses "Новый чат"; the dialog asks for the profile once (to know who "me" is), nothing else.
+fn open_dialog(h: &Harness, cx: &mut VisualTestContext) {
+    click(cx, "new-chat-button");
+    cx.run_until_parked();
+    assert!(dialog_open(h, cx));
+    assert_eq!(h.commands(), [Command::LoadProfile], "opening reads the profile, creates nothing");
+}
+
+fn chosen_person(h: &Harness, cx: &mut VisualTestContext) -> Option<String> {
+    h.desktop.read_with(cx, |d, _| d.new_chat_choice().map(|c| c.user.0.clone()))
+}
+
+fn creation(h: &Harness, cx: &mut VisualTestContext) -> Option<crate::store::CreationState> {
+    h.store.read_with(cx, |s, _| s.creation_state().cloned())
+}
+
+fn selected_chat(h: &Harness, cx: &mut VisualTestContext) -> Option<ChatId> {
+    h.store.read_with(cx, |s, _| s.selected().cloned())
+}
+
+fn create_alice() -> Command {
+    Command::CreatePrivateChat { user: UserId("alice".into()) }
+}
+
+fn creations(commands: &[Command]) -> usize {
+    commands.iter().filter(|c| matches!(c, Command::CreatePrivateChat { .. })).count()
+}
+
+/// The dialog with Алиса (no chat with her yet) chosen from the open panel, ready to confirm.
+fn choose_alice(h: &Harness, cx: &mut VisualTestContext) {
+    open_people_panel(h, cx);
+    open_dialog(h, cx);
+    click(cx, "candidate-alice");
+    assert_eq!(chosen_person(h, cx).as_deref(), Some("alice"));
+    assert!(h.commands().is_empty(), "choosing a person sends nothing");
+}
+
+#[gpui::test]
+fn new_chat_is_disabled_offline_and_opens_the_dialog_online(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Offline)],
+        |_, _| {},
+    );
+    assert!(shown(cx, "new-chat-button"), "the action is beside the search field");
+    let (search, button) = (bounds(cx, "search").unwrap(), bounds(cx, "new-chat-button").unwrap());
+    assert!(search.right() <= button.left(), "to the right of the search field");
+    assert!(button.center().y > search.top() && button.center().y < search.bottom(), "on its line");
+    click(cx, "new-chat-button");
+    cx.run_until_parked();
+    assert!(!dialog_open(&h, cx), "offline the action does nothing");
+    assert!(!shown(cx, "new-chat-view"));
+    assert!(h.commands().is_empty());
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_dialog(&h, cx);
+    assert!(shown(cx, "new-chat-view"));
+    assert!(shown(cx, "new-chat-search"));
+    assert!(shown(cx, row!("p")), "the chat list is unchanged");
+    assert_eq!(h.store.read_with(cx, |s, _| s.chat_count()), 3);
+}
+
+#[gpui::test]
+fn the_dialog_offers_known_people_without_the_current_user_or_duplicates(cx: &mut TestAppContext) {
+    use crate::new_chat::candidates;
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    let names = |h: &Harness, cx: &mut VisualTestContext, panel: Option<ChatId>| -> Vec<String> {
+        h.store.read_with(cx, |s, _| candidates(s, panel.as_ref()).into_iter().map(|c| c.name).collect())
+    };
+    assert_eq!(
+        names(&h, cx, Some(chat_g())),
+        ["Алиса", "Анна", "Борис"],
+        "private partners and the open panel's members, once each; not the self chat, not the `me` member"
+    );
+    assert_eq!(names(&h, cx, None), ["Анна"], "without the panel only the partners of private chats are known");
+    assert_eq!(names(&h, cx, Some(ChatId("p".into()))), ["Анна"], "a panel without a loaded list adds nobody");
+
+    open_dialog(&h, cx);
+    for row in ["candidate-alice", "candidate-boris", "candidate-anna"] {
+        assert!(shown(cx, row), "{row}");
+    }
+    assert!(!shown(cx, "candidate-me"), "never the current user");
+
+    // The loaded profile names the current user even when no member list does.
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    h.store.read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
+}
+
+#[gpui::test]
+fn a_closed_panel_adds_no_candidates(cx: &mut TestAppContext) {
+    use crate::new_chat::candidates;
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    click(cx, "info-close");
+    open_dialog(&h, cx);
+    assert!(shown(cx, "candidate-anna"));
+    assert!(!shown(cx, "candidate-alice"), "members of a chat whose panel is closed are not offered");
+    h.store.read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
+}
+
+#[gpui::test]
+fn typing_narrows_the_people_and_enter_creates_nothing(cx: &mut TestAppContext) {
+    use crate::new_chat::{candidates, matching};
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    cx.simulate_input("бор");
+    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("бор"));
+    h.store.read_with(cx, |s, _| {
+        let all = candidates(s, Some(&chat_g()));
+        assert_eq!(matching(&all, " БОР ").iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Борис"]);
+        assert_eq!(matching(&all, "").len(), 3);
+    });
+    assert_eq!(composer_text(&h, cx), "", "the text went to the dialog");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "Enter in the search field sends nothing");
+    assert!(dialog_open(&h, cx));
+    assert_eq!(creation(&h, cx), None);
+
+    // Also with a person chosen: only the button creates.
+    click(cx, "candidate-boris");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("boris"));
+    assert!(h.commands().is_empty());
+    assert_eq!(creation(&h, cx), None);
+
+    cx.simulate_input("яяя");
+    assert!(shown(cx, "new-chat-nomatch"), "a query nobody matches says so");
+}
+
+#[gpui::test]
+fn an_account_with_nobody_known_says_so(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]), ClientEvent::Connection(ConnectionState::Online)],
+        |_, _| {},
+    );
+    open_dialog(&h, cx);
+    assert!(shown(cx, "new-chat-empty"));
+    assert!(!shown(cx, "new-chat-participant"));
+}
+
+#[gpui::test]
+fn the_confirmation_lists_the_participant_and_one_confirm_sends_one_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    assert!(!shown(cx, "new-chat-participant"), "nobody is chosen yet");
+    assert!(shown(cx, "new-chat-create") && shown(cx, "new-chat-cancel"));
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty(), "nothing to create before a person is chosen");
+
+    click(cx, "candidate-alice");
+    assert!(shown(cx, "new-chat-participant"), "the participant is listed");
+    assert!(shown(cx, "new-chat-participant-avatar"));
+    assert_eq!(creation(&h, cx), None);
+    assert!(h.commands().is_empty());
+
+    click(cx, "new-chat-create");
+    click(cx, "new-chat-create");
+    cx.run_until_parked();
+    assert_eq!(h.commands(), [create_alice()], "one command per confirm, also on a double click");
+    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
+    assert!(shown(cx, "new-chat-sending"));
+    h.store.read_with(cx, |s, _| {
+        assert!(!crate::new_chat::can_create(true, s.creation_state()), "the button is disabled while in flight");
+    });
+    click(cx, "candidate-boris");
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"), "the choice is locked while in flight");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_created_chat_closes_the_dialog_and_is_opened(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_alice()]);
+    let mut chats = people_chats();
+    chats.push(person_chat("n", "Алиса", "alice"));
+    h.feed(
+        cx,
+        [ClientEvent::ChatsReplaced(chats), ClientEvent::ChatCreated { chat: Some(ChatId("n".into())), existing: false }],
+    );
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(creation(&h, cx), None);
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())), "the created chat is opened");
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("n".into()))], "nothing is created a second time");
+    assert!(shown(cx, row!("n")), "it is in the list");
+}
+
+#[gpui::test]
+fn a_created_chat_the_list_does_not_name_still_closes_the_dialog(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(cx, [ClientEvent::ChatCreated { chat: None, existing: false }]);
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(chat_g()), "nothing to open, the open chat stays");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_person_with_a_chat_opens_that_chat_without_a_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    click(cx, "candidate-anna");
+    assert!(!dialog_open(&h, cx), "no confirmation: nothing is created");
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("p".into())));
+    let commands = h.commands();
+    assert_eq!(creations(&commands), 0);
+    assert_eq!(commands, [Command::OpenChat(ChatId("p".into()))]);
+    assert_eq!(creation(&h, cx), None);
+}
+
+#[gpui::test]
+fn a_chat_that_appeared_meanwhile_is_opened_instead_of_created(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    let mut chats = people_chats();
+    chats.push(person_chat("n", "Алиса", "alice"));
+    h.feed(cx, [ClientEvent::ChatsReplaced(chats)]);
+    click(cx, "new-chat-create");
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
+    assert_eq!(creations(&h.commands()), 0, "the existing chat is opened, no request goes out");
+}
+
+#[gpui::test]
+fn a_rejection_shows_the_reason_keeps_the_data_and_never_retries(cx: &mut TestAppContext) {
+    use crate::new_chat::{notice, Notice};
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    cx.simulate_input("али");
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_alice()]);
+    h.feed(cx, [ClientEvent::CreationFailed { reason: "сервер отказал: нельзя создать чат".into(), unknown: false }]);
+    assert!(shown(cx, "new-chat-error"));
+    assert!(!shown(cx, "new-chat-unknown"));
+    assert!(dialog_open(&h, cx), "the dialog stays open");
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"), "the choice is kept");
+    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("али"), "so is the typed text");
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(notice(s.creation_state()), Notice::Failed("сервер отказал: нельзя создать чат".into()));
+        assert!(crate::new_chat::can_create(true, s.creation_state()), "another explicit attempt is possible");
+    });
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "nothing is sent by itself");
+
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_alice()], "only the user's press tries again");
+    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
+}
+
+#[gpui::test]
+fn an_unknown_result_is_said_honestly_and_not_retried(cx: &mut TestAppContext) {
+    use crate::new_chat::{notice, Notice};
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(people_chats()),
+            ClientEvent::CreationFailed { reason: "Результат неизвестен: чат мог быть создан".into(), unknown: true },
+        ],
+    );
+    assert!(shown(cx, "new-chat-unknown"));
+    assert!(!shown(cx, "new-chat-error"), "not presented as a plain failure");
+    assert!(dialog_open(&h, cx));
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(notice(s.creation_state()), Notice::Unknown("Результат неизвестен: чат мог быть создан".into()));
+    });
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "no second request");
+}
+
+#[gpui::test]
+fn a_chat_that_appeared_after_an_unknown_result_is_opened(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    let mut chats = people_chats();
+    chats.push(person_chat("n", "Алиса", "alice"));
+    h.feed(cx, [ClientEvent::ChatsReplaced(chats), ClientEvent::ChatCreated { chat: Some(ChatId("n".into())), existing: true }]);
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
+    assert_eq!(creations(&h.commands()), 0);
+}
+
+#[gpui::test]
+fn offline_the_refusal_is_shown_and_the_data_kept(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    cx.simulate_input("али");
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(dialog_open(&h, cx), "losing the connection does not close the dialog");
+    click(cx, "new-chat-create");
+    // The core refuses at once, without a request to the server; the dialog says so.
+    h.feed(cx, [ClientEvent::CreationFailed { reason: "Нет соединения".into(), unknown: false }]);
+    assert!(shown(cx, "new-chat-error"));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("али"));
+    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::Failed { reason: "Нет соединения".into(), unknown: false }));
+    assert_eq!(creations(&h.commands()), 1, "the one command of the press; the core answered it offline");
+}
+
+#[gpui::test]
+fn cancel_and_escape_close_the_dialog_without_sending(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-cancel");
+    assert!(!dialog_open(&h, cx));
+    assert!(h.commands().is_empty());
+    assert_eq!(creation(&h, cx), None);
+
+    open_dialog_again(&h, cx);
+    click(cx, "candidate-alice");
+    cx.simulate_keystrokes("escape");
+    assert!(!dialog_open(&h, cx), "Escape");
+    assert!(h.commands().is_empty());
+    assert!(info_open(&h, cx), "Escape closed the dialog, the panel under it stays");
+
+    // A failure is forgotten with the dialog.
+    open_dialog_again(&h, cx);
+    click(cx, "candidate-alice");
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(cx, [ClientEvent::CreationFailed { reason: "нельзя".into(), unknown: false }]);
+    click(cx, "new-chat-cancel");
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(creation(&h, cx), None);
+}
+
+/// A second opening in the same window: the profile is known by now, so nothing is requested.
+fn open_dialog_again(h: &Harness, cx: &mut VisualTestContext) {
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    click(cx, "new-chat-button");
+    cx.run_until_parked();
+    assert!(dialog_open(h, cx));
+}
+
+#[gpui::test]
+fn a_creation_in_flight_keeps_the_dialog_until_its_outcome_is_shown(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    click(cx, "new-chat-cancel");
+    cx.simulate_keystrokes("escape");
+    assert!(dialog_open(&h, cx), "a request that is out cannot be recalled; its outcome has to reach the user");
+    h.feed(cx, [ClientEvent::CreationFailed { reason: "нельзя".into(), unknown: false }]);
+    assert!(shown(cx, "new-chat-error"));
+    cx.simulate_keystrokes("escape");
+    assert!(!dialog_open(&h, cx));
+}
+
+#[gpui::test]
+fn the_dialog_blocks_the_chat_and_yields_to_nothing_under_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    assert!(h.desktop.read_with(cx, |d, cx| d.blocked(cx)), "blocks the chat like other overlays");
+    assert_eq!(composer_text(&h, cx), "");
+    cx.simulate_input("zzz");
+    assert_eq!(composer_text(&h, cx), "", "typing goes to the dialog, not the composer");
+    click(cx, "new-chat-cancel");
+    assert!(!h.desktop.read_with(cx, |d, cx| d.blocked(cx)));
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    open_profile(&h, cx);
+    h.desktop.update(cx, |d, cx| d.open_new_chat(None, cx));
+    assert!(!dialog_open(&h, cx), "the dialog does not open under another overlay");
+}
+
+#[gpui::test]
+fn an_ended_session_closes_the_dialog(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    choose_alice(&h, cx);
+    h.feed(cx, [ClientEvent::SessionExpired]);
+    assert!(!dialog_open(&h, cx));
+    assert!(shown(cx, "session-expired"));
+}
+
+#[gpui::test]
+fn write_on_a_member_row_opens_the_dialog_for_that_person(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    for row in ["member-alice-write", "member-boris-write", "member-anna-write"] {
+        assert!(shown(cx, row), "{row}");
+    }
+    assert!(shown(cx, "member-me"), "the own row is listed");
+    assert!(!shown(cx, "member-me-write"), "but offers no \"Написать\"");
+    assert!(h.commands().is_empty(), "showing the action starts nothing");
+    assert!(!dialog_open(&h, cx));
+
+    click(cx, "member-alice-write");
+    cx.run_until_parked();
+    assert!(dialog_open(&h, cx));
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    assert!(shown(cx, "new-chat-participant"), "the confirmation is for that person");
+    let commands = h.commands();
+    assert_eq!(commands, [Command::LoadProfile], "the dialog opens, nothing is created");
+
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_alice()]);
+}
+
+#[gpui::test]
+fn write_on_a_member_with_a_chat_opens_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    click(cx, "member-anna-write");
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("p".into())));
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("p".into()))], "no creation, no dialog");
+}
+
+#[gpui::test]
+fn escape_closes_the_dialog_before_the_panel_under_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    click(cx, "member-boris-write");
+    cx.run_until_parked();
+    h.commands();
+    assert!(dialog_open(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!dialog_open(&h, cx));
+    assert!(info_open(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!info_open(&h, cx));
+}
+
+#[test]
+fn the_dialog_notice_follows_the_creation_state() {
+    use crate::new_chat::{can_create, notice, Notice};
+    use crate::store::CreationState;
+    assert_eq!(notice(None), Notice::Nothing);
+    assert_eq!(notice(Some(&CreationState::InFlight)), Notice::Sending);
+    assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: false })), Notice::Failed("r".into()));
+    assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: true })), Notice::Unknown("r".into()));
+    assert!(!can_create(false, None), "nobody chosen");
+    assert!(can_create(true, None));
+    assert!(!can_create(true, Some(&CreationState::InFlight)));
+    assert!(can_create(true, Some(&CreationState::Failed { reason: "r".into(), unknown: true })));
+}
