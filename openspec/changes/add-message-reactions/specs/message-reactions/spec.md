@@ -141,6 +141,16 @@ A history row SHALL NOT replace known reactions of a newer version. The user's c
 - **WHEN** the message is edited and then the first request, taken before both, delivers its older snapshot
 - **THEN** the chips keep the newer reaction version and the message shows the edit
 
+#### Scenario: History page above the cache and a reaction update
+- **GIVEN** a history request is out whose page lies above every cached message, and a cached message is edited and then receives a newer reaction version while it is out
+- **WHEN** the page arrives
+- **THEN** the edited message is still shown, with the newer reaction version
+
+#### Scenario: Reaction update while another history request stores newer messages
+- **GIVEN** a history request started before the server got a newer message, and another request stored that message and a reaction update reached an older one meanwhile
+- **WHEN** the first request arrives, its rows ending below the newer message
+- **THEN** the newer message stays shown
+
 ### Requirement: Reaction input without a version
 Reaction input without a version SHALL NOT replace a state that has one and SHALL NOT give a state a version. While a message has no known version, such input SHALL be applied as it arrives. (Conservative rule: the reaction samples on record are all versioned, so a versionless input from the server is not expected; ignoring it can only leave an older versioned state in place until the next versioned update.)
 

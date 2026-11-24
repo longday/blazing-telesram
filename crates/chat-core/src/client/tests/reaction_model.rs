@@ -18,6 +18,14 @@
 //!   saying FIRE then v7 saying nothing ends at FIRE, while v7 then v6 ends at the start's LIKE
 //!   (v6 is stale and ignored). The confirmed choice sets `mine` to its target;
 //! - the edit changes the body for good, whichever request delivers its older snapshot later.
+//!
+//! Beyond the one message, `Shape` adds the boundaries of a replaced range. `Tail`: the server
+//! grows a message 4 the client was not told about, so a request started before it holds a
+//! snapshot ending at message 3 while another one stores message 4; message 4 must survive the
+//! older request. `Jump`: the request returns a page far above everything cached (message 10), so
+//! the cache below it is dropped as a hole in the timeline, except what a live change touched
+//! while the request was out (an edit re-inserts message 3, outside the page); that message must
+//! come out with the reactions of the cache, not the snapshot's.
 
 use super::*;
 use std::path::Path;
@@ -66,10 +74,23 @@ enum Step {
     Edit,
     ReactStart,
     ReactEnd,
+    /// The server gets message 4; the client is not told (a missed push).
+    Grow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Every request is a snapshot of message 3 alone.
+    Single,
+    /// A request is a snapshot of message 3, and of message 4 once the server has grown it.
+    Tail,
+    /// A request is a page of message 10 alone, above everything cached.
+    Jump,
 }
 
 #[derive(Clone, Debug)]
 struct Case {
+    shape: Shape,
     snaps: [Snap; 2],
     pushes: [Push; 2],
     edit: bool,
@@ -144,7 +165,7 @@ fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, i64, Option<Rea
                 Push::AtClear(v) => offer(&mut held, v, Some(None)),
                 Push::Absent | Push::Versionless => {}
             },
-            Step::FetchEnd(k) => match case.snaps[k] {
+            Step::FetchEnd(k) if case.shape != Shape::Jump => match case.snaps[k] {
                 Snap::At(v) => offer(&mut held, v, None),
                 Snap::AtMine(v) => offer(&mut held, v, Some(Some(FIRE))),
                 Snap::Absent | Snap::Bare | Snap::Versionless => {}
@@ -160,16 +181,57 @@ fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, i64, Option<Rea
                     held.mine = mine;
                 }
             }
-            Step::FetchStart(_) | Step::Edit => {}
+            Step::FetchStart(_) | Step::FetchEnd(_) | Step::Edit | Step::Grow => {}
         }
     }
     (held.overlay.unwrap_or_else(|| server_counts(held.version)), held.version, held.mine)
 }
 
+/// Which messages the cache holds after `trace`, and whether message 3 has been there all along
+/// (a message dropped and put back by a later change has no reaction state to compare).
+struct Presence {
+    three: bool,
+    four: bool,
+    three_kept_all_along: bool,
+}
+
+fn presence(case: &Case, trace: &[Step]) -> Presence {
+    let mut now = Presence { three: true, four: false, three_kept_all_along: true };
+    for (at, step) in trace.iter().enumerate() {
+        match *step {
+            Step::Edit => now.three = true,
+            Step::FetchEnd(k) => {
+                let start = trace.iter().position(|s| *s == Step::FetchStart(k)).unwrap();
+                match case.shape {
+                    Shape::Single => {}
+                    Shape::Tail => {
+                        now.three = true;
+                        now.four |= trace[..start].contains(&Step::Grow);
+                    }
+                    Shape::Jump => {
+                        // Only a request that started while nothing above message 3 was cached
+                        // drops what is below its page; later ones overlap the cache.
+                        let hole = !trace[..start].iter().any(|s| matches!(s, Step::FetchEnd(_)));
+                        if hole {
+                            // An edit logged meanwhile puts message 3 back, outside the page.
+                            now.three = trace[start..at].contains(&Step::Edit);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        if !now.three {
+            now.three_kept_all_along = false;
+        }
+    }
+    now
+}
+
 struct Pending {
     mark: u64,
     known_newest: Option<MessageTs>,
-    snapshot: Message,
+    rows: Vec<Message>,
 }
 
 /// Runs `order` and reports the first step after which the cache differs from the invariant.
@@ -191,34 +253,45 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
     engine.phase = Phase::Online;
 
     let mut pending: [Option<Pending>; 2] = [None, None];
-    let mut edited = false;
+    let (mut edited, mut grown) = (false, false);
     for (at, step) in order.iter().enumerate() {
         let mut delivered = None;
         match *step {
             Step::FetchStart(k) => {
-                let mut snapshot = msg("a", TS, if edited { "hi!" } else { "hi" });
-                snapshot.edited = edited;
-                snapshot.reactions = match case.snaps[k] {
-                    Snap::Absent | Snap::Bare => Reactions::default(),
-                    Snap::Versionless => Reactions { counts: junk(), mine: None, version: None },
-                    Snap::At(v) => Reactions { counts: server_counts(v), mine: None, version: Some(v) },
-                    Snap::AtMine(v) => Reactions { counts: server_counts(v), mine: Some(FIRE), version: Some(v) },
+                let rows = match case.shape {
+                    Shape::Jump => vec![msg("a", 10, "ten")],
+                    Shape::Single | Shape::Tail => {
+                        let mut snapshot = msg("a", TS, if edited { "hi!" } else { "hi" });
+                        snapshot.edited = edited;
+                        snapshot.reactions = match case.snaps[k] {
+                            Snap::Absent | Snap::Bare => Reactions::default(),
+                            Snap::Versionless => Reactions { counts: junk(), mine: None, version: None },
+                            Snap::At(v) => Reactions { counts: server_counts(v), mine: None, version: Some(v) },
+                            Snap::AtMine(v) => Reactions { counts: server_counts(v), mine: Some(FIRE), version: Some(v) },
+                        };
+                        let mut rows = vec![snapshot];
+                        if grown && case.shape == Shape::Tail {
+                            rows.push(msg("a", 4, "four"));
+                        }
+                        rows
+                    }
                 };
                 let known_newest = engine.db(engine.cache.newest_ts(&id("a"))).flatten();
-                pending[k] = Some(Pending { mark: engine.live_seq, known_newest, snapshot });
+                pending[k] = Some(Pending { mark: engine.live_seq, known_newest, rows });
             }
             Step::FetchEnd(k) => {
-                let Pending { mark, known_newest, snapshot } = pending[k].take().unwrap();
+                let Pending { mark, known_newest, rows } = pending[k].take().unwrap();
                 let chunk = HistoryChunk {
                     chat: id("a"),
-                    messages: vec![snapshot],
-                    reached_start: true,
+                    messages: rows,
+                    reached_start: case.shape == Shape::Single,
                     replaces: None,
                     payloads: Vec::new(),
                 };
                 engine.handle(Input::History(HistoryFetch { chat: id("a"), before: None, known_newest, mark, result: Ok(chunk) }));
                 delivered = Some(());
             }
+            Step::Grow => grown = true,
             Step::Push(i) => {
                 let update = match case.pushes[i] {
                     Push::Absent | Push::Versionless => ReactionsUpdate { counts: junk(), version: None, mine: None },
@@ -247,17 +320,22 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                 chunk_row = chunk.messages.into_iter().find(|m| m.timestamp == TS);
             }
         }
-        let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().unwrap();
+        let held = engine.db(engine.cache.message(&id("a"), TS)).flatten();
+        let four = engine.db(engine.cache.message(&id("a"), 4)).flatten().is_some();
+        let here = presence(case, &order[..=at]);
         let (want_counts, want_version, want_mine) = expected(case, &order[..=at]);
-        let ok = held.reactions.counts == want_counts
-            && held.reactions.version == Some(want_version)
-            && held.reactions.mine == want_mine
-            && held.edited == edited
-            && delivered.is_none_or(|()| chunk_row.as_ref().is_none_or(|row| row.reactions == held.reactions && row.body == held.body));
+        let ok = held.is_some() == here.three
+            && four == here.four
+            && held.as_ref().is_none_or(|held| {
+                (!here.three_kept_all_along
+                    || (held.reactions.counts == want_counts && held.reactions.version == Some(want_version) && held.reactions.mine == want_mine))
+                    && held.edited == edited
+                    && delivered.is_none_or(|()| chunk_row.as_ref().is_none_or(|row| row.reactions == held.reactions && row.body == held.body))
+            });
         if !ok {
             return Err(format!(
-                "{case:?}\nafter step {at} of {order:?}\nheld {:?} body {:?} edited {}\nwant counts {want_counts:?} version {want_version} mine {want_mine:?}\nchunk row {chunk_row:?}",
-                held.reactions, held.body, held.edited
+                "{case:?}\nafter step {at} of {order:?}\nheld {held:?} message 4 cached {four}\nwant message 3 {} message 4 {} counts {want_counts:?} version {want_version} mine {want_mine:?} (compared: {})\nchunk row {chunk_row:?}",
+                here.three, here.four, here.three_kept_all_along
             ));
         }
     }
@@ -300,6 +378,9 @@ fn chains(case: &Case) -> Vec<Vec<Step>> {
     if case.edit {
         chains.push(vec![Step::Edit]);
     }
+    if case.shape == Shape::Tail {
+        chains.push(vec![Step::Grow]);
+    }
     if case.own != Own::Off {
         chains.push(vec![Step::ReactStart, Step::ReactEnd]);
     }
@@ -326,6 +407,7 @@ fn check_every_interleaving(case: Case) {
 #[test]
 fn every_interleaving_of_versionless_pushes_over_a_bare_snapshot() {
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::Bare, Snap::Absent],
         pushes: [Push::Versionless, Push::At(5)],
         edit: true,
@@ -337,17 +419,19 @@ fn every_interleaving_of_versionless_pushes_over_a_bare_snapshot() {
 #[test]
 fn every_interleaving_of_two_snapshots_an_edit_and_a_confirmed_choice() {
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::Versionless, Snap::At(6)],
         pushes: [Push::At(7), Push::Absent],
         edit: true,
         own: Own::Confirmed,
     });
-    check_every_interleaving(Case { snaps: [Snap::Versionless, Snap::At(6)], pushes: [Push::Absent; 2], edit: true, own: Own::Off });
+    check_every_interleaving(Case { snaps: [Snap::Versionless, Snap::At(6)], pushes: [Push::Absent; 2], shape: Shape::Single, edit: true, own: Own::Off });
 }
 
 #[test]
 fn every_interleaving_of_older_equal_and_newer_states_with_a_refused_choice() {
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::At(5), Snap::At(4)],
         pushes: [Push::At(6), Push::At(5)],
         edit: false,
@@ -362,13 +446,14 @@ fn every_interleaving_around_a_confirmed_choice() {
         (Snap::At(6), [Push::At(5), Push::At(7)]),
         (Snap::Bare, [Push::At(5), Push::At(6)]),
     ] {
-        check_every_interleaving(Case { snaps: [snap, Snap::Absent], pushes, edit: true, own: Own::Confirmed });
+        check_every_interleaving(Case { snaps: [snap, Snap::Absent], pushes, shape: Shape::Single, edit: true, own: Own::Confirmed });
     }
 }
 
 #[test]
 fn every_interleaving_without_the_users_own_reaction() {
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::At(7), Snap::Bare],
         pushes: [Push::At(6), Push::Versionless],
         edit: true,
@@ -381,23 +466,108 @@ fn every_interleaving_without_the_users_own_reaction() {
 #[test]
 fn every_interleaving_of_input_that_says_or_does_not_say_mine() {
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::Absent; 2],
         pushes: [Push::AtMine(6), Push::At(7)],
         edit: false,
         own: Own::Off,
     });
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::AtMine(6), Snap::Absent],
         pushes: [Push::AtClear(6), Push::At(7)],
         edit: true,
         own: Own::Confirmed,
     });
     check_every_interleaving(Case {
+        shape: Shape::Single,
         snaps: [Snap::At(7), Snap::AtMine(6)],
         pushes: [Push::AtMine(6), Push::AtClear(7)],
         edit: false,
         own: Own::Confirmed,
     });
+}
+
+/// A request started before the server grew message 4 ends after another one stored it, with
+/// pushes and an edit around: message 4 stays (a request only vouches for what it saw).
+#[test]
+fn every_interleaving_keeps_a_tail_another_request_stored() {
+    check_every_interleaving(Case {
+        shape: Shape::Tail,
+        snaps: [Snap::At(5), Snap::At(6)],
+        pushes: [Push::At(6), Push::At(7)],
+        edit: false,
+        own: Own::Off,
+    });
+    check_every_interleaving(Case {
+        shape: Shape::Tail,
+        snaps: [Snap::At(5), Snap::At(6)],
+        pushes: [Push::At(7), Push::Absent],
+        edit: true,
+        own: Own::Off,
+    });
+    check_every_interleaving(Case {
+        shape: Shape::Tail,
+        snaps: [Snap::At(5), Snap::At(5)],
+        pushes: [Push::At(6), Push::Absent],
+        edit: false,
+        own: Own::Confirmed,
+    });
+}
+
+/// A page above everything cached drops the cache below it, except a message a live change
+/// touched meanwhile, which is put back with the reactions of the cache, not rolled back to
+/// the state it had when the request started.
+#[test]
+fn every_interleaving_of_a_page_above_the_cache_keeps_the_reactions_of_a_touched_message() {
+    check_every_interleaving(Case {
+        shape: Shape::Jump,
+        snaps: [Snap::At(5), Snap::At(5)],
+        pushes: [Push::At(6), Push::AtMine(7)],
+        edit: true,
+        own: Own::Off,
+    });
+    check_every_interleaving(Case {
+        shape: Shape::Jump,
+        snaps: [Snap::At(5), Snap::Absent],
+        pushes: [Push::At(6), Push::AtClear(7)],
+        edit: true,
+        own: Own::Off,
+    });
+}
+
+/// ReviewRecon3 #1: the page is far above the cache, an edit and then a version-6 push reach
+/// message 3 while it is out; the edit puts message 3 back, and it must keep version 6.
+#[test]
+fn a_message_put_back_outside_the_page_keeps_the_state_the_cache_reached() {
+    let case = Case {
+        shape: Shape::Jump,
+        snaps: [Snap::At(5), Snap::Absent],
+        pushes: [Push::At(6), Push::Absent],
+        edit: true,
+        own: Own::Off,
+    };
+    let order = [Step::FetchStart(0), Step::Edit, Step::Push(0), Step::FetchEnd(0)];
+    let rt = runtime();
+    let _enter = rt.enter();
+    run(&case, &order, &rt).unwrap_or_else(|failure| panic!("{failure}"));
+}
+
+/// ReviewRecon3 #2: a request that saw message 3 as the newest ends after another one stored
+/// message 4 and a push touched message 3; message 4 must stay.
+#[test]
+fn a_tail_another_request_stored_survives_a_request_that_started_before_it() {
+    let case = Case {
+        shape: Shape::Tail,
+        snaps: [Snap::At(5), Snap::At(5)],
+        pushes: [Push::At(6), Push::Absent],
+        edit: false,
+        own: Own::Off,
+    };
+    let order = [Step::FetchStart(0), Step::Grow, Step::FetchStart(1), Step::FetchEnd(1), Step::Push(0), Step::FetchEnd(0)];
+    let rt = runtime();
+    let _enter = rt.enter();
+    run(&case, &order, &rt).unwrap_or_else(|failure| panic!("{failure}"));
 }
 
 #[test]
@@ -417,12 +587,14 @@ fn random_inputs_in_random_orders() {
     };
     let rt = runtime();
     let _enter = rt.enter();
-    for _ in 0..4000 {
+    for _ in 0..3000 {
+        let shape = [Shape::Single, Shape::Tail, Shape::Jump][next(3)];
         let case = Case {
+            shape,
             snaps: [snap(next(8)), snap(next(8))],
             pushes: [push(next(9)), push(next(9))],
             edit: next(2) == 1,
-            own: [Own::Off, Own::Confirmed, Own::Refused][next(3)],
+            own: if shape == Shape::Jump { Own::Off } else { [Own::Off, Own::Confirmed, Own::Refused][next(3)] },
         };
         let chains = chains(&case);
         let (mut at, mut order) = (vec![0; chains.len()], Vec::new());

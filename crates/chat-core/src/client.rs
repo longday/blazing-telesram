@@ -61,6 +61,10 @@ enum LiveChange {
     Upsert { message: Message, supplied: Reactions },
     Delete(MessageTs),
     Reactions(MessageTs, ReactionsUpdate),
+    /// The cache changed in a way it already holds (a reaction state it merged itself, or the
+    /// rows another history request stored). Nothing to replay: the request that started
+    /// earlier only learns that the chat moved on, so it keeps what is newer than its own rows.
+    Touched,
 }
 
 #[derive(Clone, Debug)]
@@ -815,12 +819,15 @@ impl<B: Backend> Engine<B> {
             }
             LiveEvent::ReactionsChanged { chat, timestamp, update } => {
                 // The cache is where states are merged (`Reactions::apply`); a history request
-                // that started earlier merges its snapshot into it (`store_chunk`), so nothing
-                // is logged for a cached message. An uncached message has no state to merge
-                // into: the update is logged for the request that will insert its row.
+                // that started earlier merges its snapshot into it (`store_chunk`), so a cached
+                // message's update is only marked as a change (`LiveChange::Touched`: it bounds
+                // what such a request may replace, it replays nothing). An uncached message has
+                // no state to merge into: the update is logged for the request that will insert
+                // its row.
                 let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
                     return self.record_live(&chat, LiveChange::Reactions(timestamp, update));
                 };
+                self.record_live(&chat, LiveChange::Touched);
                 if message.reactions.apply(&update) {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
@@ -1194,6 +1201,7 @@ impl<B: Backend> Engine<B> {
                     let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
                     if message.reactions.overlay_own(&overlay) {
                         self.db(self.cache.upsert_message(&message));
+                        self.record_live(&chat, LiveChange::Touched);
                     }
                 }
                 Action::React { .. } => {}
@@ -1602,11 +1610,6 @@ impl<B: Backend> Engine<B> {
             return chunk;
         }
         let raced = raced(&self.live_log, chat, mark);
-        // The rows this chunk replaces are read once, before they are overwritten.
-        let cached = match (min, max) {
-            (Some(min), Some(max)) => self.db(self.cache.messages_between(chat, min, max)).unwrap_or_default(),
-            _ => Vec::new(),
-        };
         let (lo, hi, history_start) = match before {
             None => {
                 // Live messages newer than the server snapshot stay cached: keep everything
@@ -1630,10 +1633,15 @@ impl<B: Backend> Engine<B> {
             }
         };
         replay_live(&mut chunk.messages, &raced, lo, hi);
-        // The cache holds every state accepted so far, the log's included and whatever other
-        // history requests stored meanwhile; the replayed row is merged into it, never the other
-        // way round, so a state the cache rejected cannot come back through the snapshot
-        // (design D5, "Invariant").
+        // The cache holds every state accepted so far, whatever the live handlers and the other
+        // history requests stored meanwhile; every row about to be stored, replayed ones
+        // outside the snapshot's own range included, is merged into it, never the other way
+        // round, so a state the cache rejected cannot come back through the snapshot (design
+        // D5, "Invariant"). The rows are read once, before `replace_range` overwrites them.
+        let cached = match (chunk.messages.first(), chunk.messages.last()) {
+            (Some(first), Some(last)) => self.db(self.cache.messages_between(chat, first.timestamp, last.timestamp)).unwrap_or_default(),
+            _ => Vec::new(),
+        };
         for message in &mut chunk.messages {
             if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                 message.inherit_reactions(&cached[i]);
@@ -1641,6 +1649,8 @@ impl<B: Backend> Engine<B> {
         }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
+        // Requests that started before this one must not take what it stored for stale.
+        self.record_live(chat, LiveChange::Touched);
         chunk.replaces = Some((lo, hi));
         chunk
     }
