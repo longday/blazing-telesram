@@ -18,38 +18,6 @@
               "DisplayName": "<name>",
               "Guid": "00000000-0000-4000-8000-000000000002",
               "PhoneId": "00000000-0000-4000-8000-000000000003",
-              "Version": 1739637421826633
-            },
-            "SeqNo": 1,
-            "Timestamp": 1769608744339002,
-            "Version": 1
-          }
-        },
-        "entity": "message",
-        "matches": {
-          "text": [
-            "<match>"
-          ]
-        },
-        "type": "messages"
-      },
-      {
-        "data": {
-          "ClientMessage": {
-            "Plain": {
-              "ChatId": "0/22/00000000-0000-4000-8000-000000000004",
-              "PayloadId": "payload-2",
-              "Text": {
-                "MessageText": "<message text>"
-              }
-            }
-          },
-          "ServerMessageInfo": {
-            "From": {
-              "AvatarId": "user_avatar/yapic/1/placeholder",
-              "DisplayName": "<name>",
-              "Guid": "00000000-0000-4000-8000-000000000005",
-              "PhoneId": "00000000-0000-4000-8000-000000000006",
               "Version": 1790350305709435
             },
             "PrevTimestamp": 1790838528987053,
@@ -70,8 +38,140 @@
         "data": {
           "ClientMessage": {
             "Plain": {
-              "ChatId": "0/22/00000000-0000-4000-8000-000000000004",
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000001",
+              "PayloadId": "payload-2",
+              "Text": {
+                "MessageText": "<message text>"
+              }
+            }
+          },
+          "ServerMessageInfo": {
+            "From": {
+              "AvatarId": "user_avatar/yapic/1/placeholder",
+              "DisplayName": "<name>",
+              "Guid": "00000000-0000-4000-8000-000000000002",
+              "PhoneId": "00000000-0000-4000-8000-000000000003",
+              "Version": 1790350305709435
+            },
+            "PrevTimestamp": 1790838502875053,
+            "SeqNo": 8,
+            "Timestamp": 1790838528987053,
+            "Version": 1
+          }
+        },
+        "entity": "message",
+        "matches": {
+          "text": [
+            "<match>"
+          ]
+        },
+        "type": "messages"
+      },
+      {
+        "data": {
+          "ClientMessage": {
+            "Plain": {
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000001",
               "PayloadId": "payload-3",
+              "Text": {
+                "MessageText": "<message text>"
+              }
+            }
+          },
+          "ServerMessageInfo": {
+            "From": {
+              "AvatarId": "user_avatar/yapic/1/placeholder",
+              "DisplayName": "<name>",
+              "Guid": "00000000-0000-4000-8000-000000000002",
+              "PhoneId": "00000000-0000-4000-8000-000000000003",
+              "Version": 1790350305709435
+            },
+            "PrevTimestamp": 1790838484583053,
+            "SeqNo": 7,
+            "Timestamp": 1790838502875053,
+            "Version": 1
+          }
+        },
+        "entity": "message",
+        "matches": {
+          "text": [
+            "<match>"
+          ]
+        },
+        "type": "messages"
+      },
+      {
+        "data": {
+          "ClientMessage": {
+            "Plain": {
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000001",
+              "PayloadId": "payload-4",
+              "Text": {
+                "MessageText": "<message text>"
+              }
+            }
+          },
+          "ServerMessageInfo": {
+            "From": {
+              "AvatarId": "user_avatar/yapic/1/placeholder",
+              "DisplayName": "<name>",
+              "Guid": "00000000-0000-4000-8000-000000000002",
+              "PhoneId": "00000000-0000-4000-8000-000000000003",
+              "Version": 1790350305709435
+            },
+            "PrevTimestamp": 1790838436724053,
+            "SeqNo": 6,
+            "Timestamp": 1790838484583053,
+            "Version": 1
+          }
+        },
+        "entity": "message",
+        "matches": {
+          "text": [
+            "<match>"
+          ]
+        },
+        "type": "messages"
+      },
+      {
+        "data": {
+          "ClientMessage": {
+            "Plain": {
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000001",
+              "PayloadId": "payload-5",
+              "Text": {
+                "MessageText": "<message text>"
+              }
+            }
+          },
+          "ServerMessageInfo": {
+            "From": {
+              "AvatarId": "user_avatar/yapic/1/placeholder",
+              "DisplayName": "<name>",
+              "Guid": "00000000-0000-4000-8000-000000000002",
+              "PhoneId": "00000000-0000-4000-8000-000000000003",
+              "Version": 1790350305709435
+            },
+            "PrevTimestamp": 1782061893489086,
+            "SeqNo": 3,
+            "Timestamp": 1790838329793053,
+            "Version": 1
+          }
+        },
+        "entity": "message",
+        "matches": {
+          "text": [
+            "<match>"
+          ]
+        },
+        "type": "messages"
+      },
+      {
+        "data": {
+          "ClientMessage": {
+            "Plain": {
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000004",
+              "PayloadId": "payload-6",
               "Text": {
                 "MessageText": "<message text>"
               }
@@ -83,11 +183,43 @@
               "DisplayName": "<name>",
               "Guid": "00000000-0000-4000-8000-000000000005",
               "PhoneId": "00000000-0000-4000-8000-000000000006",
-              "Version": 1790350305709435
+              "Version": 1789448353970558
             },
-            "PrevTimestamp": 1790838502875053,
-            "SeqNo": 8,
-            "Timestamp": 1790838528987053,
+            "PrevTimestamp": 1784622277218044,
+            "SeqNo": 7,
+            "Timestamp": 1789456454325044,
+            "Version": 1
+          }
+        },
+        "entity": "message",
+        "matches": {
+          "text": [
+            "<match>"
+          ]
+        },
+        "type": "messages"
+      },
+      {
+        "data": {
+          "ClientMessage": {
+            "Plain": {
+              "ChatId": "0/22/00000000-0000-4000-8000-000000000004",
+              "PayloadId": "payload-7",
+              "Text": {
+                "MessageText": "<message text>"
+              }
+            }
+          },
+          "ServerMessageInfo": {
+            "From": {
+              "AvatarId": "user_avatar/yapic/1/placeholder",
+              "DisplayName": "<name>",
+              "Guid": "00000000-0000-4000-8000-000000000007",
+              "PhoneId": "00000000-0000-4000-8000-000000000008",
+              "Version": 1739637421826633
+            },
+            "SeqNo": 1,
+            "Timestamp": 1769608744339002,
             "Version": 1
           }
         },
@@ -146,8 +278,8 @@
             }
           ],
           "gender": "female",
-          "guid": "00000000-0000-4000-8000-000000000007",
-          "phone_id": "00000000-0000-4000-8000-000000000008",
+          "guid": "00000000-0000-4000-8000-000000000009",
+          "phone_id": "00000000-0000-4000-8000-000000000010",
           "public_name": "<name>",
           "registration_status": "U",
           "version": 1790002283019117
@@ -166,15 +298,15 @@
     "items": [
       {
         "data": {
-          "avatar_id": "chat_avatar/0/22/00000000-0000-4000-8000-000000000009/00000000-0000-4000-8000-0000000000a1",
-          "chat_id": "0/22/00000000-0000-4000-8000-000000000009",
+          "avatar_id": "chat_avatar/0/22/00000000-0000-4000-8000-000000000011/00000000-0000-4000-8000-0000000000a1",
+          "chat_id": "0/22/00000000-0000-4000-8000-000000000011",
           "create_timestamp": 1769760357,
           "description": "<chat description>",
           "members": [
-            "00000000-0000-4000-8000-000000000011",
-            "00000000-0000-4000-8000-000000000012",
             "00000000-0000-4000-8000-000000000013",
-            "00000000-0000-4000-8000-000000000014"
+            "00000000-0000-4000-8000-000000000014",
+            "00000000-0000-4000-8000-000000000015",
+            "00000000-0000-4000-8000-000000000016"
           ],
           "members_count": 4,
           "name": "<chat title>",
@@ -200,7 +332,7 @@
           "role_version": 1769760360712847,
           "roles": {
             "admin": [
-              "00000000-0000-4000-8000-000000000014"
+              "00000000-0000-4000-8000-000000000016"
             ]
           },
           "version": 1769760360712847
@@ -216,15 +348,15 @@
       },
       {
         "data": {
-          "chat_id": "0/22/00000000-0000-4000-8000-000000000015",
+          "chat_id": "0/22/00000000-0000-4000-8000-000000000017",
           "create_timestamp": 1757678764,
           "description": "<chat description>",
           "members": [
-            "00000000-0000-4000-8000-000000000012",
-            "00000000-0000-4000-8000-000000000013",
-            "00000000-0000-4000-8000-000000000016",
-            "00000000-0000-4000-8000-000000000017",
-            "00000000-0000-4000-8000-000000000014"
+            "00000000-0000-4000-8000-000000000014",
+            "00000000-0000-4000-8000-000000000015",
+            "00000000-0000-4000-8000-000000000018",
+            "00000000-0000-4000-8000-000000000019",
+            "00000000-0000-4000-8000-000000000016"
           ],
           "members_count": 5,
           "name": "<chat title>",
@@ -250,7 +382,7 @@
           "role_version": 1757678766390949,
           "roles": {
             "admin": [
-              "00000000-0000-4000-8000-000000000014"
+              "00000000-0000-4000-8000-000000000016"
             ]
           },
           "version": 1757678767064177
