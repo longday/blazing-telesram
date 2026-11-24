@@ -56,7 +56,7 @@ pub enum Action {
 }
 
 impl Action {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             Action::Download => "Скачать",
             Action::Cancel => "Отмена",

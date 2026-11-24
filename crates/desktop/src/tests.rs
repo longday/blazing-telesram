@@ -4,6 +4,7 @@ use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, Toggl
 use crate::format::{fit_thumbnail, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::store::{ChatFilter, ChatStore, DownloadState, SessionState};
+use crate::timeline::gallery_columns;
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
 use gpui::{
@@ -2379,4 +2380,175 @@ fn the_download_button_is_disabled_without_a_connection(cx: &mut TestAppContext)
     click(cx, "viewer-download");
     assert!(h.commands().is_empty());
     assert_eq!(download_state(&h, cx, &original("v/1")), None);
+}
+
+// ---- file card and gallery grid ----
+
+fn file_message(i: i64) -> Message {
+    message("g", i, "bob", false, MessageBody::File { media: original("doc"), name: "отчёт.pdf".into(), size: 3_500_000 })
+}
+
+fn dims(cx: &mut VisualTestContext, selector: &'static str) -> (f32, f32) {
+    let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    (f32::from(b.size.width), f32::from(b.size.height))
+}
+
+fn origin(cx: &mut VisualTestContext, selector: &'static str) -> (f32, f32) {
+    let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    (f32::from(b.origin.x), f32::from(b.origin.y))
+}
+
+/// Message 2 of chat "g": `n` pictures `v/1` … `v/n`.
+fn pictures(n: usize) -> Message {
+    let items = (1..=n).map(|i| picture(&format!("v/{i}"))).collect();
+    message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })
+}
+
+const CELLS: [&str; 5] = ["msg-2-image-0", "msg-2-image-1", "msg-2-image-2", "msg-2-image-3", "msg-2-image-4"];
+
+#[test]
+fn the_grid_has_one_two_or_three_columns() {
+    let columns: Vec<usize> = (1..=10).map(gallery_columns).collect();
+    assert_eq!(columns, [1, 2, 3, 2, 3, 3, 3, 3, 3, 3]);
+}
+
+#[gpui::test]
+fn the_file_card_offers_download_and_follows_the_transfer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, vec![file_message(5)]);
+    let file = original("doc");
+    assert!(shown(cx, msg!(5, "download")));
+    let idle = dims(cx, msg!(5, "file"));
+
+    click(cx, msg!(5, "download"));
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("отчёт.pdf".into()) }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    assert!(shown(cx, msg!(5, "cancel")), "a running download offers Cancel");
+
+    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
+    assert!(shown(cx, msg!(5, "status")), "the progress is written next to the button");
+    click(cx, msg!(5, "cancel"));
+    assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
+    h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
+    assert_eq!(download_state(&h, cx, &file), None);
+
+    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/Downloads/отчёт (1).pdf") }]);
+    assert!(shown(cx, msg!(5, "saved")), "the saved name is shown");
+    click(cx, msg!(5, "download"));
+    assert_eq!(h.commands().len(), 1, "a saved file can be fetched again");
+
+    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Network }]);
+    assert!(shown(cx, msg!(5, "retry")));
+    click(cx, msg!(5, "retry"));
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("отчёт.pdf".into()) }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+
+    assert_eq!(dims(cx, msg!(5, "file")), idle, "the card keeps its size in every state");
+}
+
+#[gpui::test]
+fn the_file_card_cannot_start_a_download_without_a_connection(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(cx, vec![ClientEvent::Connection(ConnectionState::Offline)], |_, _| {});
+    open_with(&h, cx, vec![file_message(5)]);
+    assert!(shown(cx, msg!(5, "download")));
+    assert!(shown(cx, msg!(5, "status")), "the reason is written next to the button");
+    click(cx, msg!(5, "download"));
+    assert!(h.commands().is_empty());
+    assert_eq!(download_state(&h, cx, &original("doc")), None);
+}
+
+#[gpui::test]
+fn the_file_card_shows_the_reason_a_download_failed(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, vec![file_message(5)]);
+    h.feed(cx, [ClientEvent::DownloadFailed { media: original("doc"), reason: DownloadFailure::NotFound }]);
+    assert!(shown(cx, msg!(5, "retry")));
+    assert!(shown(cx, msg!(5, "status")));
+    assert!(!shown(cx, msg!(5, "saved")));
+}
+
+#[gpui::test]
+fn a_gallery_renders_square_cells_in_order_and_keeps_its_height(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![pictures(4)]);
+    assert!(!shown(cx, msg!(2, "image")), "a gallery is not a single image");
+    let side = (456.0 - 4.0) / 2.0;
+    for cell in &CELLS[..4] {
+        assert_eq!(dims(cx, cell), (side, side), "{cell}");
+    }
+    let at: Vec<_> = CELLS[..4].iter().map(|c| origin(cx, c)).collect();
+    assert_eq!(at[0].1, at[1].1, "first row");
+    assert!(at[0].0 < at[1].0, "reading order");
+    assert_eq!(at[2].1, at[3].1, "second row");
+    assert!(at[2].1 > at[0].1);
+    assert_eq!((at[2].0, at[3].0), (at[0].0, at[1].0), "two columns");
+    assert!(!shown(cx, CELLS[4]));
+
+    let before = dims(cx, msg!(2));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.png");
+    std::fs::write(&path, PNG_1X1).unwrap();
+    h.feed(cx, [ClientEvent::MediaReady { media: media("v/2", MediaKind::Thumbnail), path }]);
+    assert!(shown(cx, "msg-2-image-1-loaded"));
+    assert!(!shown(cx, "msg-2-image-0-loaded"));
+    assert_eq!(dims(cx, msg!(2)), before, "the row height does not change when a preview arrives");
+    assert_eq!(dims(cx, CELLS[1]), (side, side));
+}
+
+#[gpui::test]
+fn the_last_row_of_a_grid_is_left_aligned(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![pictures(5)]);
+    let side = (456.0 - 8.0) / 3.0;
+    for cell in &CELLS {
+        let (w, h) = dims(cx, cell);
+        assert!((w - side).abs() < 1.0 && (h - side).abs() < 1.0, "{cell}: {w}x{h}");
+    }
+    let at: Vec<_> = CELLS.iter().map(|c| origin(cx, c)).collect();
+    assert_eq!((at[1].1, at[2].1), (at[0].1, at[0].1), "first row");
+    assert_eq!(at[4].1, at[3].1, "second row");
+    assert!(at[3].1 > at[0].1);
+    assert_eq!((at[3].0, at[4].0), (at[0].0, at[1].0), "the short row starts at the left edge");
+}
+
+#[gpui::test]
+fn a_lone_picture_keeps_its_aspect_ratio_and_the_caption_goes_below(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let one = MessageBody::Gallery { items: vec![picture("v/1")], caption: Some("подпись".into()) };
+    open_with(&h, cx, vec![message("g", 2, "alice", false, one)]);
+    assert_eq!(dims(cx, msg!(2, "image")), fit_thumbnail(1600, 800, 320.0));
+    assert!(!shown(cx, CELLS[0]));
+    assert!(y(cx, msg!(2, "caption")) >= y(cx, msg!(2, "image")) + 160.0, "the caption sits below the picture");
+}
+
+#[gpui::test]
+fn the_caption_of_a_gallery_sits_below_the_last_row(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let items = ["v/1", "v/2", "v/3", "v/4"].map(picture).to_vec();
+    let captioned = MessageBody::Gallery { items, caption: Some("подпись".into()) };
+    open_with(&h, cx, vec![message("g", 2, "alice", false, captioned)]);
+    assert!(y(cx, msg!(2, "caption")) >= y(cx, CELLS[2]) + 226.0, "the caption sits below the last row");
+}
+
+#[gpui::test]
+fn clicking_a_cell_or_the_single_image_opens_the_viewer_at_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 600, height: 1200, caption: None, name: None };
+    open_with(&h, cx, vec![message("g", 1, "alice", false, single), pictures(4)]);
+    assert_eq!(viewer_at(&h, cx), None);
+
+    click(cx, CELLS[2]);
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 2)));
+    assert!(shown(cx, "viewer-pos-3-4"));
+    cx.simulate_keystrokes("escape");
+    click(cx, CELLS[0]);
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)));
+    cx.simulate_keystrokes("escape");
+
+    click(cx, msg!(1, "image"));
+    assert_eq!(viewer_at(&h, cx), Some((ts(1), 0)));
+    assert!(shown(cx, "viewer-pos-1-1"));
+    assert!(h.commands().is_empty(), "opening the viewer asks for nothing");
 }

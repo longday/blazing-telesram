@@ -4,8 +4,11 @@ use crate::desktop::Desktop;
 use crate::format::{avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size, Clock};
 use crate::store::ChatStore;
 use crate::theme::*;
+use crate::viewer::{action_line, Action, ActionLine};
 use crate::widgets::avatar;
-use bt_chat_core::model::{ChatId, ChatKind, Delivery, MediaRef, Message, MessageBody, MessageTs, ReplyQuote};
+use bt_chat_core::model::{
+    ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody, MessageTs, ReplyQuote,
+};
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +18,9 @@ const BUBBLE_MAX: f32 = 480.;
 const BUBBLE_PAD_X: f32 = 12.;
 const THUMB_MAX: f32 = 320.;
 const AVATAR: f32 = 36.;
+/// Width available to the content of a bubble.
+const CONTENT_W: f32 = BUBBLE_MAX - 2. * BUBBLE_PAD_X;
+const GRID_GAP: f32 = 4.;
 
 /// Consecutive messages by one author within a few minutes of each other on the same day share a group.
 pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
@@ -144,7 +150,7 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
             )
         })
         .when_some(m.reply_to.as_ref(), |d, quote| d.child(reply_quote(ts, quote)))
-        .child(body(store, m))
+        .child(body(ctx, store, m))
         .when_some(failure(ctx, m), |d, failure| d.child(failure))
         .child(
             div()
@@ -223,18 +229,22 @@ fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {
         .child(div().truncate().text_size(px(13.)).text_color(rgb(MUTED)).child(quote.text.clone()))
 }
 
-fn body(store: &ChatStore, m: &Message) -> AnyElement {
+fn body(ctx: &RowContext, store: &ChatStore, m: &Message) -> AnyElement {
     let ts = m.timestamp;
     match &m.body {
         MessageBody::Text(text) => text_block(text.clone()).into_any_element(),
         MessageBody::Image { media, width, height, caption, .. } => {
-            image_block(store, ts, Some((media, *width, *height)), caption.as_deref())
+            attachment(ts, Some(single_image(ctx, store, ts, media, *width, *height)), caption.as_deref())
         }
-        // Until the grid (4.2) a gallery shows its first picture, as before.
         MessageBody::Gallery { items, caption } => {
-            image_block(store, ts, items.first().map(|i| (&i.media, i.width, i.height)), caption.as_deref())
+            let pictures = match items.as_slice() {
+                [] => None,
+                [one] => Some(single_image(ctx, store, ts, &one.media, one.width, one.height)),
+                many => Some(grid(ctx, store, ts, many)),
+            };
+            attachment(ts, pictures, caption.as_deref())
         }
-        MessageBody::File { name, size, .. } => file_card(ts, name, *size).into_any_element(),
+        MessageBody::File { media, name, size } => file_card(ctx, store, ts, media, name, *size).into_any_element(),
         MessageBody::Deleted => div()
             .debug_selector(move || format!("msg-{ts}-deleted"))
             .italic()
@@ -252,57 +262,121 @@ fn body(store: &ChatStore, m: &Message) -> AnyElement {
     }
 }
 
-fn image_block(store: &ChatStore, ts: i64, image: Option<(&MediaRef, u32, u32)>, caption: Option<&str>) -> AnyElement {
+/// Pictures with their caption (`msg-{ts}-caption`) below.
+fn attachment(ts: i64, pictures: Option<AnyElement>, caption: Option<&str>) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(4.))
-        .children(image.map(|(media, width, height)| thumbnail(store, ts, media, width, height)))
-        .when_some(caption, |d, caption| d.child(text_block(caption.to_owned())))
+        .children(pictures)
+        .when_some(caption, |d, caption| {
+            d.child(text_block(caption.to_owned()).debug_selector(move || format!("msg-{ts}-caption")))
+        })
         .into_any_element()
 }
 
 /// The bubble is content-sized, so gpui measures its text at max-content width and keeps that single-line
 /// height even after the bubble is clamped; a max width on the text itself makes the measurement wrap.
 fn text_block(text: String) -> Div {
-    div().max_w(px(BUBBLE_MAX - 2. * BUBBLE_PAD_X)).text_size(px(15.)).line_height(px(21.)).child(text)
+    div().max_w(px(CONTENT_W)).text_size(px(15.)).line_height(px(21.)).child(text)
 }
 
-/// Fixed-size box at the image's aspect ratio, so the row height does not change when the file arrives.
-fn thumbnail(store: &ChatStore, ts: i64, media: &MediaRef, width: u32, height: u32) -> Div {
-    let (w, h) = fit_thumbnail(width, height, THUMB_MAX);
+/// Columns of the picture grid: one picture on its own, two or four in two columns, otherwise three.
+pub fn gallery_columns(n: usize) -> usize {
+    match n {
+        0 | 1 => 1,
+        2 | 4 => 2,
+        _ => 3,
+    }
+}
+
+/// Side of a square grid cell: the columns and their gaps fill the bubble's content width.
+fn cell_side(columns: usize) -> f32 {
+    (CONTENT_W - GRID_GAP * (columns - 1) as f32) / columns as f32
+}
+
+/// Square cells in reading order, rows of `gallery_columns(len)`, the last row left-aligned. Every
+/// cell has its size from the start, so the row height does not change when a preview arrives.
+fn grid(ctx: &RowContext, store: &ChatStore, ts: i64, items: &[GalleryItem]) -> AnyElement {
+    let columns = gallery_columns(items.len());
+    let side = cell_side(columns);
     div()
-        .debug_selector(move || format!("msg-{ts}-image"))
+        .flex()
+        .flex_col()
+        .gap(px(GRID_GAP))
+        .children(items.chunks(columns).enumerate().map(|(row, cells)| {
+            div().flex().gap(px(GRID_GAP)).children(cells.iter().enumerate().map(|(column, item)| {
+                let index = row * columns + column;
+                picture(ctx, store, ts, index, &item.media, side, side, format!("image-{index}"))
+            }))
+        }))
+        .into_any_element()
+}
+
+/// One picture at its aspect ratio.
+fn single_image(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, width: u32, height: u32) -> AnyElement {
+    let (w, h) = fit_thumbnail(width, height, THUMB_MAX);
+    picture(ctx, store, ts, 0, media, w, h, "image".into()).into_any_element()
+}
+
+/// Fixed-size box with the placeholder colour until the preview arrives, cropped to fill; a click opens
+/// the viewer at picture `index`. Debug selectors: `msg-{ts}-{tag}`, plus `-loaded` once the preview shows.
+#[allow(clippy::too_many_arguments)]
+fn picture(
+    ctx: &RowContext,
+    store: &ChatStore,
+    ts: i64,
+    index: usize,
+    media: &MediaRef,
+    w: f32,
+    h: f32,
+    tag: String,
+) -> Stateful<Div> {
+    let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+    let loaded = format!("msg-{ts}-{tag}-loaded");
+    div()
+        .id(SharedString::from(format!("picture-{ts}-{index}")))
+        .debug_selector(move || format!("msg-{ts}-{tag}"))
         .relative()
         .w(px(w))
         .h(px(h))
         .flex_none()
         .rounded(px(8.))
         .bg(rgb(PLACEHOLDER))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            desktop.update(cx, |desktop, cx| desktop.open_viewer(chat.clone(), ts, index, cx)).ok();
+        })
         .when_some(store.media_path(media), |d, path| {
             d.child(
                 img(path.to_path_buf())
                     .object_fit(ObjectFit::Cover)
                     .size_full()
                     .rounded(px(8.))
-                    .debug_selector(move || format!("msg-{ts}-image-loaded")),
+                    .debug_selector(move || loaded),
             )
         })
 }
 
-fn file_card(ts: i64, name: &str, size: u64) -> Div {
+/// The file's name, size and one action line that follows its download state (design Decision 7).
+/// Debug selectors: `msg-{ts}-file`, and in the action line `-download`, `-cancel`, `-retry` for the
+/// button, `-saved` for the "saved as" text and `-status` for any other text.
+fn file_card(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, name: &str, size: u64) -> Div {
     let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
     let badge: String = if extension.is_empty() || extension.chars().count() > 4 {
         "FILE".into()
     } else {
         extension.to_uppercase()
     };
+    let original = media.original();
+    let online = store.connection() == ConnectionState::Online;
+    let line = action_line(store.download_state(&original), online);
     div()
         .debug_selector(move || format!("msg-{ts}-file"))
         .flex()
         .items_center()
         .gap(px(10.))
-        .w(px(260.))
+        .w(px(300.))
         .child(
             div()
                 .size(px(44.))
@@ -323,6 +397,52 @@ fn file_card(ts: i64, name: &str, size: u64) -> Div {
                 .flex()
                 .flex_col()
                 .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(name.to_string()))
-                .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(human_size(size))),
+                .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(human_size(size)))
+                .child(action_row(ctx, ts, original, name, line)),
         )
+}
+
+/// Status text and the button of a file card. The row has one height in every state, so the message
+/// does not change size while a download runs.
+fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: ActionLine) -> Div {
+    let ActionLine { status, action, enabled } = line;
+    let suffix = match action {
+        Action::Download | Action::DownloadAgain => "download",
+        Action::Cancel => "cancel",
+        Action::Retry => "retry",
+    };
+    let saved = action == Action::DownloadAgain;
+    let button = div()
+        .id(SharedString::from(format!("file-{suffix}-{ts}")))
+        .debug_selector(move || format!("msg-{ts}-{suffix}"))
+        .flex_none()
+        .child(action.label());
+    let button = if enabled {
+        let (store, name) = (ctx.store.clone(), name.to_owned());
+        button.text_color(rgb(ACCENT)).cursor_pointer().on_click(move |_, _, cx| match action {
+            Action::Cancel => store.read(cx).cancel_download(&original),
+            Action::Download | Action::Retry | Action::DownloadAgain => {
+                store.update(cx, |store, cx| store.download(original.clone(), Some(name.clone()), cx));
+            }
+        })
+    } else {
+        button.text_color(rgb(MUTED)).cursor_default()
+    };
+    let kind = if saved { "saved" } else { "status" };
+    div()
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_size(px(12.))
+        .children(status.map(|text| {
+            div()
+                .debug_selector(move || format!("msg-{ts}-{kind}"))
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(rgb(MUTED))
+                .child(text)
+        }))
+        .child(button)
 }
