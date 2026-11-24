@@ -131,7 +131,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A is in flight on `integ/gs` (head 323a61a: GS 2.1 on top of `main` ef9c32f; next 2.2, 3.1, 3.2, 3.5 in parallel on disjoint files, then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. It also fixes the pre-existing `reversed_empty_ranges` clippy error (task 3.5).
+- GS-A is in flight on `integ/gs` (head d207a7d: GS 2.1 and 3.5 done on top of `main` ef9c32f; 2.2, 3.1, 3.2 in progress on disjoint files, then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. GS 3.5 fixed the pre-existing `reversed_empty_ranges` clippy error (clippy no longer stops at the `desktop` test target).
 - MD 5.2 [live, manual] (`main` build; owns no files).
 - CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
