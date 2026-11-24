@@ -106,11 +106,12 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
 
 ## 7. Verification and close-out
 
-- [ ] 7.1 Build and test the workspace once
+- [x] 7.1 Build and test the workspace once
   - Owns: nothing; fixes only compile breaks that cross task boundaries.
   - Depends on: 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 5.1, 5.2, 5.3, 5.4, 6.1.
   - Do: `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --check`; run `openspec validate add-message-reactions --strict`.
   - Done when: all pass.
+  - Outcome (Integrator, `integ/reactions` after merging `main` 07925ff + md/5.2): `cargo build --workspace --all-targets` 0 warnings; `cargo test --workspace --locked` green twice (232 + 163 + 178 + 20 + 13); `openspec validate add-message-reactions --strict` valid; `cargo clippy --workspace --all-targets --locked` has no errors and the same warnings as `main` except two `large_enum_variant` that this change causes (`Message` grew by the 48-byte `reactions` field of D3, which pushes `ClientEvent` in `model.rs` and `Input` in chat-core `client.rs` over the 200-byte threshold; boxing `Message` in the events would touch about 30 sites and tests of other tasks, so it is left as a follow-up); the two new `collapsible_if` in `reactions.rs` are fixed. `cargo fmt --check` reports 1561 hunks on `main` as well (repository baseline, not this change). `timeline.rs` (chips, 5.2) compiles and is exercised by the 5.4 harness tests.
 
 - [ ] 7.2 Live check in the self chat (P5)
   - Owns: `openspec/changes/add-message-reactions/research.md` (append "Live verification"), and, if findings require it, `design.md`, `proposal.md` and `specs/**` of this change; optionally a sanitized fixture under `crates/yandex-proto/tests/fixtures/` with its assertion in `tests/wire_fixtures.rs`.
