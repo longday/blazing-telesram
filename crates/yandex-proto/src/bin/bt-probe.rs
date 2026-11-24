@@ -21,7 +21,7 @@ use yandex_proto::request::{SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
-use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
+use yandex_proto::wire::{Relation, WireBody, WireChatKind, WireFile, WireMessage};
 use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, ProtoError};
@@ -33,11 +33,13 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
        bt-probe download <chat> <micros> [--item N] [--to <dir>]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
+       bt-probe whoami | members <chat> [--method chat|group]
 the *-self commands refuse any chat but the account's own self chat
 download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
-search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)";
+search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
+whoami and members are read-only and print the raw reply as pretty JSON on stdout (it carries names, emails and positions; the header line goes to stderr). members asks get_chat_members, which is what the web client uses for every chat kind; --method group asks get_group_members instead, to compare";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -96,6 +98,11 @@ fn main() -> ExitCode {
         },
         ["search", query, flags @ ..] => match search_flags(flags) {
             Some(flags) => block_on(search(query, flags)),
+            None => return usage(),
+        },
+        ["whoami"] => block_on(whoami()),
+        ["members", chat, flags @ ..] => match members_flags(flags) {
+            Some(kind) => block_on(members(chat, kind)),
             None => return usage(),
         },
         _ => return usage(),
@@ -390,6 +397,35 @@ async fn search(query: &str, flags: SearchFlags) -> Result<(), Failure> {
         print_search_set(entity, set);
     }
     Ok(())
+}
+
+fn print_json(value: &serde_json::Value) -> Result<(), Failure> {
+    println!("{}", serde_json::to_string_pretty(value).map_err(|e| (1, e.to_string()))?);
+    Ok(())
+}
+
+/// The signed-in account's own `whoami` reply (socket), untyped.
+async fn whoami() -> Result<(), Failure> {
+    let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
+    print_json(&client.whoami_raw().await.map_err(fail)?)
+}
+
+/// `[--method chat|group]` or nothing: the member method (`chat` = `get_chat_members`, the default).
+/// The facade picks the method by chat kind (`Private` = `get_chat_members`, `Group` =
+/// `get_group_members`), so the probe names the kind that selects the method it wants.
+fn members_flags(flags: &[&str]) -> Option<WireChatKind> {
+    match flags {
+        [] | ["--method", "chat"] => Some(WireChatKind::Private),
+        ["--method", "group"] => Some(WireChatKind::Group),
+        _ => None,
+    }
+}
+
+/// The raw member list of one chat (registry, bare cookie), untyped.
+async fn members(chat: &str, method: WireChatKind) -> Result<(), Failure> {
+    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    eprintln!("members of {chat} via {}", if method == WireChatKind::Group { "get_group_members" } else { "get_chat_members" });
+    print_json(&client.members_raw(chat, &method).await.map_err(fail)?)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -773,6 +809,32 @@ mod search_tests {
             &["--limit", "1", "stray"],
         ] {
             assert_eq!(search_flags(bad), None, "{bad:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod members_tests {
+    use super::*;
+
+    #[test]
+    fn members_asks_get_chat_members_unless_told_otherwise() {
+        assert_eq!(members_flags(&[]), Some(WireChatKind::Private));
+        assert_eq!(members_flags(&["--method", "chat"]), Some(WireChatKind::Private));
+        assert_eq!(members_flags(&["--method", "group"]), Some(WireChatKind::Group));
+    }
+
+    #[test]
+    fn members_flags_reject_everything_else() {
+        for bad in [
+            &["--method"][..],
+            &["--method", "channel"],
+            &["--method", "group", "stray"],
+            &["--method", "chat", "--method", "group"],
+            &["group"],
+            &["--as", "group"],
+        ] {
+            assert_eq!(members_flags(bad), None, "{bad:?}");
         }
     }
 }
