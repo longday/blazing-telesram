@@ -581,7 +581,7 @@ fn short_history_asks_for_more_until_the_start(cx: &mut TestAppContext) {
         "everything fits on screen, so the top is already in view"
     );
     // An empty page means there is nothing older.
-    h.feed(cx, [chunk("g", 1..=0, false)]);
+    h.feed(cx, [history("g", Vec::new(), false)]);
     assert!(h.commands().is_empty());
     assert!(!shown(cx, "timeline-loading"));
 }
