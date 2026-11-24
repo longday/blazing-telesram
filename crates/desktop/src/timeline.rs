@@ -1,4 +1,4 @@
-//! One timeline row: day separator, grouped bubble, attachments.
+//! One timeline row: day separator, grouped bubble, attachments, reaction chips.
 
 use crate::desktop::Desktop;
 use crate::format::{avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size, Clock};
@@ -9,6 +9,7 @@ use crate::widgets::avatar;
 use bt_chat_core::model::{
     ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody, MessageTs, ReplyQuote,
 };
+use bt_chat_core::reactions::{emoji, ReactionCount, NEUTRAL_GLYPH};
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -152,6 +153,7 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
         .when_some(m.reply_to.as_ref(), |d, quote| d.child(reply_quote(ts, quote)))
         .child(body(ctx, store, m))
         .when_some(failure(ctx, m), |d, failure| d.child(failure))
+        .when_some(reaction_chips(ctx, m), |d, chips| d.child(chips))
         .child(
             div()
                 .justify_end()
@@ -205,6 +207,37 @@ fn failure(ctx: &RowContext, m: &Message) -> Option<Div> {
                     .on_click(move |_, _, cx| store.update(cx, |store, _| store.retry(payload.clone()))),
             ),
     )
+}
+
+/// The reaction chips of a sent, non-deleted message: a wrapping row below the body. A chip shows the
+/// type's emoji (the neutral glyph for a code outside the table) and its count, the account's own
+/// type is highlighted, and a left click toggles that type. Debug selectors: `msg-{ts}-reaction-{code}`.
+fn reaction_chips(ctx: &RowContext, m: &Message) -> Option<Div> {
+    if !matches!(m.delivery, Delivery::Sent) || matches!(m.body, MessageBody::Deleted) || m.reactions.counts.is_empty() {
+        return None;
+    }
+    let ts = m.timestamp;
+    let chips = m.reactions.counts.iter().map(|&ReactionCount { code, count }| {
+        let own = m.reactions.mine == Some(code);
+        let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+        div()
+            .id(SharedString::from(format!("reaction-{ts}-{}", code.0)))
+            .debug_selector(move || format!("msg-{ts}-reaction-{}", code.0))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px(px(8.))
+            .py(px(2.))
+            .rounded_full()
+            .bg(rgb(if own { REACTION_OWN } else { REACTION_CHIP }))
+            .cursor_pointer()
+            .child(div().text_size(px(14.)).child(emoji(code).unwrap_or(NEUTRAL_GLYPH)))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(INK)).child(count.to_string()))
+            .on_click(move |_, _, cx| {
+                desktop.update(cx, |desktop, cx| desktop.toggle_reaction(chat.clone(), ts, code, cx)).ok();
+            })
+    });
+    Some(div().flex().flex_wrap().gap(px(4.)).pt(px(2.)).children(chips))
 }
 
 fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {

@@ -23,3 +23,5 @@ pub const SEND_BUTTON: u32 = 0x5288c1;
 pub const MENU_HOVER: u32 = 0x232e3c;
 pub const MENU_SEPARATOR: u32 = 0x232f39;
 pub const MENU_ICON: u32 = 0x6c7883;
+pub const REACTION_CHIP: u32 = 0x203449;
+pub const REACTION_OWN: u32 = 0x4f95d6;

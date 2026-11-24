@@ -70,7 +70,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
   - Tests: the update changes only the reactions of that message; an equal update emits nothing; an unloaded timeline or unknown message is a no-op; the author's typing indicator survives an update; `toggle_reaction` sends `Command::ToggleReaction`.
   - Done when: these tests exist.
 
-- [ ] 5.2 Reaction chips in the bubble (D8)
+- [x] 5.2 Reaction chips in the bubble (D8)
   - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
   - Depends on: 3.1. Lands together with 5.3 (it calls `Desktop::toggle_reaction`).
   - Do: the chip row below the body and failure line for `Sent`, non-deleted messages; `emoji(code)` or `NEUTRAL_GLYPH` plus count; highlighted own chip with new theme colors; selectors `msg-{ts}-reaction-{code}`; left click calls `Desktop::toggle_reaction(chat, ts, code, cx)`.
