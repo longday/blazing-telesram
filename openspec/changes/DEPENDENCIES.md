@@ -58,12 +58,12 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.2 | done (f8bd206) | 1.1 | GS-P1 |
 | 1.3 | done (gs/1.3 merge; `bt-probe search`, redacted `live-search.json`, no real strings: all text is placeholders) | 1.2 | GS-P2 |
 | 1.4 | done (gs/1.4 merge; `WireSearchChat.kind` is only `Channel` or `Group`: no private-chat marker, so `PersonHit::chat` comes only from the guid map of 3.1) | 1.3 | GS-P3 |
-| 2.1 | done on `integ/gs` (323a61a: 2.1 re-applied on `main` ef9c32f); desktop intentionally does not compile on the branch until 3.1 and 3.2 | — | GS-A |
-| 2.2 | ready (from `integ/gs`; chat-core `client.rs`) | 2.1 | GS-A |
-| 3.1 | ready (from `integ/gs`; `yandex_backend.rs`) | 1.4, 2.1 | GS-A |
-| 3.2 | ready (from `integ/gs`; `store.rs`) | 2.1 | GS-A |
-| 3.3 | blocked-by 3.2 | 3.2 | GS-A |
-| 3.4 | blocked-by 3.3 | 3.2, 3.3 | GS-A |
+| 2.1 | done on `integ/gs` (323a61a) | — | GS-A |
+| 2.2 | done on `integ/gs` (8c76bcc) | 2.1 | GS-A |
+| 3.1 | done on `integ/gs` (050fb7f); `YandexBackend.known` map (`private`, `titles`) is what CM 3.1 reuses | 1.4, 2.1 | GS-A |
+| 3.2 | done on `integ/gs` (0f235d8) | 2.1 | GS-A |
+| 3.3 | in progress (`gs/3.3`, base `gs/3.2`; `search_results.rs`, `main.rs`) | 3.2 | GS-A |
+| 3.4 | blocked-by 3.3 (`desktop.rs`, `tests.rs`) | 3.2, 3.3 | GS-A |
 | 4.1 | blocked-by all | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
 ## add-media-download (MD)
@@ -131,7 +131,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- GS-A is in flight on `integ/gs` (head d207a7d: GS 2.1 and 3.5 done on top of `main` ef9c32f; 2.2, 3.1, 3.2 in progress on disjoint files, then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. GS 3.5 fixed the pre-existing `reversed_empty_ranges` clippy error (clippy no longer stops at the `desktop` test target).
+- GS-A is in flight on `integ/gs` (head 050fb7f: GS 2.1, 2.2, 3.1, 3.2, 3.5 done on top of `main` ef9c32f; the workspace compiles, dead_code warnings only for what 3.3/3.4 consume; then 3.3, 3.4). The core lane is held by GS-A; MR-B and CM-C1 wait. GS 3.5 fixed the pre-existing `reversed_empty_ranges` clippy error.
 - MD 5.2 [live, manual] (`main` build; owns no files).
 - CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
