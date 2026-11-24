@@ -3,7 +3,7 @@
 use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, ToggleLog};
 use crate::format::{fit_thumbnail, Clock};
 use crate::logging::{LogBuffer, LogLine};
-use crate::store::{ChatFilter, ChatStore, SessionState};
+use crate::store::{ChatFilter, ChatStore, DownloadState, SessionState};
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
 use gpui::{
@@ -646,6 +646,7 @@ fn long_text_wraps_inside_its_own_row(cx: &mut TestAppContext) {
         width: 800,
         height: 600,
         caption: Some(words.clone()),
+        name: None,
     };
     h.feed(
         cx,
@@ -753,14 +754,14 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
                     1,
                     "bob",
                     false,
-                    MessageBody::Image { media: landscape.clone(), width: 1600, height: 800, caption: Some("подпись".into()) },
+                    MessageBody::Image { media: landscape.clone(), width: 1600, height: 800, caption: Some("подпись".into()), name: None },
                 ),
                 message(
                     "g",
                     2,
                     "bob",
                     true,
-                    MessageBody::Image { media: portrait.clone(), width: 600, height: 1200, caption: None },
+                    MessageBody::Image { media: portrait.clone(), width: 600, height: 1200, caption: None, name: None },
                 ),
                 with_avatar,
                 message(
@@ -2007,4 +2008,127 @@ fn up_skips_own_messages_that_cannot_be_edited(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("up");
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
     assert_eq!(composer_text(&h, cx), "первое");
+}
+
+// ---- download (store) ----
+
+fn original(id: &str) -> MediaRef {
+    media(id, MediaKind::File)
+}
+
+fn download_state(h: &Harness, cx: &mut VisualTestContext, original: &MediaRef) -> Option<DownloadState> {
+    h.store.read_with(cx, |s, _| s.download_state(original).cloned())
+}
+
+#[gpui::test]
+fn download_sends_one_command_and_shows_running(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let file = original("disk/1");
+    h.store.update(cx, |s, cx| s.download(file.clone(), Some("report.pdf".into()), cx));
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("report.pdf".into()) }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+
+    h.store.update(cx, |s, cx| s.download(file.clone(), Some("report.pdf".into()), cx));
+    assert!(h.commands().is_empty(), "a running download is not started twice");
+}
+
+#[gpui::test]
+fn download_events_update_the_state(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let file = original("disk/1");
+    let other = original("disk/2");
+    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.commands();
+
+    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 10, total: Some(40) }));
+    assert_eq!(download_state(&h, cx, &other), None, "other files are untouched");
+
+    let saved = PathBuf::from("/tmp/Downloads/report (1).pdf");
+    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: saved.clone() }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Saved(saved)));
+
+    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Disk }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Failed(DownloadFailure::Disk)));
+
+    // A retry after a failure starts again from zero.
+    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: None }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    // Saved files can be fetched again.
+    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/a") }]);
+    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    assert_eq!(h.commands().len(), 1);
+}
+
+#[gpui::test]
+fn download_while_not_online_fails_without_a_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let file = original("disk/1");
+    for state in [ConnectionState::Connecting, ConnectionState::Offline] {
+        h.feed(cx, [ClientEvent::Connection(state)]);
+        h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+        assert!(h.commands().is_empty(), "{state:?}: nothing is sent");
+        assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Failed(DownloadFailure::Offline)));
+        h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
+    }
+}
+
+#[gpui::test]
+fn cancel_download_asks_the_core_and_waits_for_its_answer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let file = original("disk/1");
+    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.commands();
+
+    h.store.read_with(cx, |s, _| s.cancel_download(&file));
+    assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }), "cleared by the answer");
+    h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
+    assert_eq!(download_state(&h, cx, &file), None);
+
+    h.store.read_with(cx, |s, _| s.cancel_download(&file));
+    assert!(h.commands().is_empty(), "nothing runs, nothing to cancel");
+}
+
+#[gpui::test]
+fn sign_out_clears_download_states(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let file = original("disk/1");
+    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.feed(cx, [ClientEvent::Downloaded { media: original("disk/2"), path: PathBuf::from("/tmp/b") }, ClientEvent::SignedOut]);
+    assert_eq!(download_state(&h, cx, &file), None);
+    assert_eq!(download_state(&h, cx, &original("disk/2")), None);
+}
+
+#[gpui::test]
+fn a_gallery_requests_every_thumbnail_once_and_never_an_original(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let item = |id: &str| GalleryItem { media: media(id, MediaKind::Thumbnail), width: 4, height: 3, name: Some(format!("{id}.jpg")) };
+    let gallery = MessageBody::Gallery { items: vec![item("g/1"), item("g/2"), item("g/3")], caption: None };
+    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 4, height: 3, caption: None, name: None };
+    let file = MessageBody::File { media: original("f/1"), name: "a.zip".into(), size: 5 };
+    let messages = vec![
+        message("a", 1, "alice", false, gallery.clone()),
+        message("a", 2, "alice", false, single),
+        message("a", 3, "alice", false, file),
+    ];
+    h.feed(cx, [history("a", messages, true)]);
+    assert_eq!(
+        h.commands(),
+        [
+            Command::FetchMedia(media("g/1", MediaKind::Thumbnail)),
+            Command::FetchMedia(media("g/2", MediaKind::Thumbnail)),
+            Command::FetchMedia(media("g/3", MediaKind::Thumbnail)),
+            Command::FetchMedia(media("s/1", MediaKind::Thumbnail)),
+        ]
+    );
+
+    // The same gallery arriving again (a live edit or a refresh) asks for nothing new.
+    h.feed(cx, [ClientEvent::MessageUpserted(message("a", 1, "alice", false, gallery))]);
+    assert!(h.commands().is_empty());
 }

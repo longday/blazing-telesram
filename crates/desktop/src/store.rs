@@ -2,8 +2,8 @@
 
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, Draft, HistoryChunk,
-    MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, UserId,
+    ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, DownloadFailure, Draft,
+    HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, UserId,
 };
 use gpui::{Context, EventEmitter};
 use std::cmp::Reverse;
@@ -71,11 +71,23 @@ pub enum TimelineChange {
     Status,
 }
 
+/// Where a download of an original stands, keyed by the original's `MediaRef` (kind `File`).
+/// No entry means "not started" (or cancelled).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownloadState {
+    Running { received: u64, total: Option<u64> },
+    /// Saved at this final path.
+    Saved(PathBuf),
+    Failed(DownloadFailure),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreEvent {
     Chats,
     Timeline { chat: ChatId, change: TimelineChange },
     Media(MediaRef),
+    /// The download state of this original changed (or was cleared).
+    Download(MediaRef),
     Connection,
     Session,
     /// The persisted drafts arrived.
@@ -94,6 +106,7 @@ pub struct ChatStore {
     timelines: HashMap<ChatId, Timeline>,
     media: HashMap<MediaRef, PathBuf>,
     media_requested: HashSet<MediaRef>,
+    downloads: HashMap<MediaRef, DownloadState>,
     connection: ConnectionState,
     session: SessionState,
     drafts: HashMap<ChatId, Draft>,
@@ -121,6 +134,7 @@ impl ChatStore {
             timelines: HashMap::new(),
             media: HashMap::new(),
             media_requested: HashSet::new(),
+            downloads: HashMap::new(),
             connection: ConnectionState::Connecting,
             session: SessionState::Active,
             drafts: HashMap::new(),
@@ -172,6 +186,7 @@ impl ChatStore {
                 self.timelines.clear();
                 self.media.clear();
                 self.media_requested.clear();
+                self.downloads.clear();
                 self.drafts.clear();
                 self.typing.clear();
                 self.session = SessionState::SignedOut;
@@ -185,6 +200,14 @@ impl ChatStore {
             ClientEvent::SendRefused { draft, reason } => cx.emit(StoreEvent::SendRefused { draft, reason }),
             ClientEvent::Typing { chat, user, name, until } => self.typing_started(chat, user, name, until, cx),
             ClientEvent::ActionFailed { chat, reason } => cx.emit(StoreEvent::ActionFailed { chat, reason }),
+            ClientEvent::DownloadProgress { media, received, total } => {
+                self.set_download(media, Some(DownloadState::Running { received, total }), cx);
+            }
+            ClientEvent::Downloaded { media, path } => self.set_download(media, Some(DownloadState::Saved(path)), cx),
+            ClientEvent::DownloadFailed { media, reason } => {
+                self.set_download(media, Some(DownloadState::Failed(reason)), cx);
+            }
+            ClientEvent::DownloadCancelled(media) => self.set_download(media, None, cx),
         }
         cx.notify();
     }
@@ -353,6 +376,42 @@ impl ChatStore {
         self.media.get(media).map(PathBuf::as_path)
     }
 
+    /// Starts saving the original `original` (kind `File`) under `name`. The card shows `Running` at once;
+    /// when the connection is not online nothing is sent and the state is `Failed(Offline)`. A download
+    /// already running for the same file is not started twice.
+    pub fn download(&mut self, original: MediaRef, name: Option<String>, cx: &mut Context<Self>) {
+        if matches!(self.downloads.get(&original), Some(DownloadState::Running { .. })) {
+            return;
+        }
+        if self.connection != ConnectionState::Online {
+            self.set_download(original, Some(DownloadState::Failed(DownloadFailure::Offline)), cx);
+            cx.notify();
+            return;
+        }
+        self.set_download(original.clone(), Some(DownloadState::Running { received: 0, total: None }), cx);
+        self.send(Command::Download { media: original, name });
+        cx.notify();
+    }
+
+    /// Asks the core to stop a running download; the state clears when `DownloadCancelled` arrives.
+    pub fn cancel_download(&self, original: &MediaRef) {
+        if matches!(self.downloads.get(original), Some(DownloadState::Running { .. })) {
+            self.send(Command::CancelDownload(original.clone()));
+        }
+    }
+
+    pub fn download_state(&self, original: &MediaRef) -> Option<&DownloadState> {
+        self.downloads.get(original)
+    }
+
+    fn set_download(&mut self, media: MediaRef, state: Option<DownloadState>, cx: &mut Context<Self>) {
+        match state {
+            Some(state) => self.downloads.insert(media.clone(), state),
+            None => self.downloads.remove(&media),
+        };
+        cx.emit(StoreEvent::Download(media));
+    }
+
     pub fn connection(&self) -> ConnectionState {
         self.connection
     }
@@ -394,10 +453,17 @@ impl ChatStore {
         }
     }
 
+    /// Thumbnails of every picture of the message; originals are never requested here.
     fn want_message_media(&mut self, message: &Message) {
         self.want_media(message.author_avatar.as_ref());
-        if let MessageBody::Image { media, .. } = &message.body {
-            self.want_media(Some(media));
+        match &message.body {
+            MessageBody::Image { media, .. } => self.want_media(Some(media)),
+            MessageBody::Gallery { items, .. } => {
+                for item in items {
+                    self.want_media(Some(&item.media));
+                }
+            }
+            _ => {}
         }
     }
 
