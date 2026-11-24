@@ -6,6 +6,7 @@ use bt_chat_core::model::{
     HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, SearchFailure,
     SearchHits, SearchId, UserId,
 };
+use bt_chat_core::reactions::{ReactionCode, Reactions};
 use gpui::{Context, EventEmitter};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -192,6 +193,7 @@ impl ChatStore {
             }
             ClientEvent::History(chunk) => self.apply_history(chunk, cx),
             ClientEvent::MessageUpserted(message) => self.upsert(message, cx),
+            ClientEvent::ReactionsChanged { chat, timestamp, reactions } => self.set_reactions(&chat, timestamp, reactions, cx),
             ClientEvent::MessageDeleted { chat, timestamp } => self.delete(&chat, timestamp, cx),
             ClientEvent::MediaReady { media, path } => {
                 self.media.insert(media.clone(), path);
@@ -294,6 +296,11 @@ impl ChatStore {
 
     pub fn delete_message(&self, chat: ChatId, timestamp: MessageTs) {
         self.send(Command::Delete { chat, timestamp });
+    }
+
+    /// The user chose `code` on a message: the core decides between add, replace and remove.
+    pub fn toggle_reaction(&self, chat: ChatId, timestamp: MessageTs, code: ReactionCode) {
+        self.send(Command::ToggleReaction { chat, timestamp, code });
     }
 
     pub fn mark_read(&self, chat: ChatId, timestamp: MessageTs) {
@@ -638,6 +645,22 @@ impl ChatStore {
             change: TimelineChange::Delta { prepended: 0, appended: 0, touched: vec![i] },
         });
     }
+
+    /// Replaces the reactions of a loaded message in place. Unlike `upsert` this leaves the author's
+    /// typing indicator and the media requests alone: a reaction update carries no message body.
+    fn set_reactions(&mut self, chat: &ChatId, ts: MessageTs, reactions: Reactions, cx: &mut Context<Self>) {
+        let Some(timeline) = self.timelines.get_mut(chat).filter(|t| t.loaded) else { return };
+        let Ok(i) = timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) else { return };
+        let message = &mut timeline.messages[i];
+        if message.reactions == reactions {
+            return;
+        }
+        message.reactions = reactions;
+        cx.emit(StoreEvent::Timeline {
+            chat: chat.clone(),
+            change: TimelineChange::Delta { prepended: 0, appended: 0, touched: vec![i] },
+        });
+    }
 }
 
 /// Sorted by timestamp, duplicates keep the last occurrence.
@@ -721,6 +744,7 @@ mod tests {
             reply_to: None,
             forwarded_from: None,
             delivery: bt_chat_core::model::Delivery::Sent,
+            reactions: Default::default(),
         }
     }
 
@@ -764,6 +788,150 @@ mod tests {
         let out = normalized(vec![msg(2, "x"), msg(1, "a"), msg(2, "b")]);
         assert_eq!(texts(&out), [1, 2]);
         assert_eq!(out[1].body, MessageBody::Text("b".into()));
+    }
+
+    mod reactions {
+        use super::*;
+        use bt_chat_core::reactions::ReactionCount;
+        use gpui::{AppContext, Entity, Subscription, TestAppContext};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            commands: Receiver<Command>,
+            events: Rc<RefCell<Vec<StoreEvent>>>,
+            _client: Sender<ClientEvent>,
+            _subscription: Subscription,
+        }
+
+        impl Rig {
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let log = events.clone();
+                let subscription = cx.update(|cx| {
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                });
+                Self { store, commands, events, _client: client, _subscription: subscription }
+            }
+
+            /// A rig whose chat `c` holds the messages 1 and 2, loaded.
+            fn loaded(cx: &mut TestAppContext) -> Self {
+                let rig = Self::new(cx);
+                let chunk = HistoryChunk {
+                    chat: chat(),
+                    messages: vec![msg(1, "a"), msg(2, "b")],
+                    reached_start: true,
+                    replaces: None,
+                    payloads: vec![],
+                };
+                rig.apply(cx, ClientEvent::History(chunk));
+                rig.take_events();
+                rig
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn messages(&self, cx: &mut TestAppContext) -> Vec<Message> {
+                self.store.read_with(cx, |s, _| s.timeline(&chat()).map(|t| t.messages.clone()).unwrap_or_default())
+            }
+
+            fn commands(&self) -> Vec<Command> {
+                std::iter::from_fn(|| self.commands.try_recv().ok()).collect()
+            }
+
+            fn take_events(&self) -> Vec<StoreEvent> {
+                std::mem::take(&mut *self.events.borrow_mut())
+            }
+        }
+
+        fn chat() -> ChatId {
+            ChatId("c".into())
+        }
+
+        fn reactions(pairs: &[(i64, u32)], mine: Option<i64>, version: i64) -> Reactions {
+            Reactions {
+                counts: pairs.iter().map(|&(c, count)| ReactionCount { code: ReactionCode(c), count }).collect(),
+                mine: mine.map(ReactionCode),
+                version: Some(version),
+            }
+        }
+
+        fn changed(ts: i64, reactions: Reactions) -> ClientEvent {
+            ClientEvent::ReactionsChanged { chat: chat(), timestamp: ts, reactions }
+        }
+
+        fn delta(touched: Vec<usize>) -> StoreEvent {
+            StoreEvent::Timeline { chat: chat(), change: TimelineChange::Delta { prepended: 0, appended: 0, touched } }
+        }
+
+        #[gpui::test]
+        fn an_update_changes_only_the_reactions_of_that_message(cx: &mut TestAppContext) {
+            let rig = Rig::loaded(cx);
+            let before = rig.messages(cx);
+
+            rig.apply(cx, changed(2, reactions(&[(7, 2)], Some(7), 3)));
+            assert_eq!(rig.take_events(), [delta(vec![1])]);
+            let after = rig.messages(cx);
+            assert_eq!(after[0], before[0], "the other message is untouched");
+            assert_eq!(after[1].reactions, reactions(&[(7, 2)], Some(7), 3));
+            let mut rest = after[1].clone();
+            rest.reactions = Reactions::default();
+            assert_eq!(rest, before[1], "nothing but the reactions changed");
+        }
+
+        #[gpui::test]
+        fn an_equal_update_emits_nothing(cx: &mut TestAppContext) {
+            let rig = Rig::loaded(cx);
+            rig.apply(cx, changed(2, reactions(&[(7, 2)], None, 3)));
+            rig.take_events();
+
+            rig.apply(cx, changed(2, reactions(&[(7, 2)], None, 3)));
+            assert!(rig.take_events().is_empty());
+            assert_eq!(rig.messages(cx)[1].reactions, reactions(&[(7, 2)], None, 3));
+        }
+
+        #[gpui::test]
+        fn an_unloaded_timeline_or_unknown_message_is_a_no_op(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.apply(cx, changed(2, reactions(&[(7, 1)], None, 1)));
+            assert!(rig.take_events().is_empty());
+            assert!(rig.store.read_with(cx, |s, _| s.timeline(&chat()).is_none()), "no timeline is made up");
+
+            let rig = Rig::loaded(cx);
+            rig.apply(cx, changed(99, reactions(&[(7, 1)], None, 1)));
+            rig.apply(
+                cx,
+                ClientEvent::ReactionsChanged { chat: ChatId("other".into()), timestamp: 2, reactions: reactions(&[(7, 1)], None, 1) },
+            );
+            assert!(rig.take_events().is_empty());
+            assert!(rig.messages(cx).iter().all(|m| m.reactions == Reactions::default()));
+        }
+
+        #[gpui::test]
+        fn the_authors_typing_indicator_survives_an_update(cx: &mut TestAppContext) {
+            let rig = Rig::loaded(cx);
+            let until = cx.executor().now() + Duration::from_secs(60);
+            rig.apply(cx, ClientEvent::Typing { chat: chat(), user: UserId("u".into()), name: None, until });
+            let typing = |cx: &mut TestAppContext| rig.store.read_with(cx, |s, _| s.typing_text(&chat()));
+            assert!(typing(cx).is_some());
+
+            rig.apply(cx, changed(1, reactions(&[(7, 1)], None, 1)));
+            assert!(typing(cx).is_some(), "an upsert of the author's message would have cleared it");
+        }
+
+        #[gpui::test]
+        fn toggling_sends_the_command_without_touching_the_timeline(cx: &mut TestAppContext) {
+            let rig = Rig::loaded(cx);
+            rig.store.update(cx, |s, _| s.toggle_reaction(chat(), 2, ReactionCode(7)));
+            assert_eq!(rig.commands(), [Command::ToggleReaction { chat: chat(), timestamp: 2, code: ReactionCode(7) }]);
+            assert!(rig.take_events().is_empty(), "the overlay arrives from the core as an event");
+        }
     }
 
     mod search {
