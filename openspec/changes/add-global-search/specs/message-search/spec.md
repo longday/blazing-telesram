@@ -67,7 +67,7 @@ A chat or person result SHALL show the avatar (or initials) and the name; a mess
 - **THEN** its row shows initials on a colored circle
 
 ### Requirement: Opening a result
-Choosing a chat result or a message result SHALL open that chat. Choosing a person result SHALL open the private chat with that person when it is in the loaded chat list; a person without such a chat SHALL be shown but not openable. Opening a result SHALL NOT mark anything as read.
+Choosing a chat result or a message result SHALL open that chat. Choosing a person result SHALL open the private chat with that person when it is in the loaded chat list; a person without such a chat SHALL be shown but not openable. Searching and choosing a result SHALL NOT themselves report anything as read; an opened chat is marked read only as `read-markers` requires.
 
 #### Scenario: Message result opens its chat
 - **WHEN** the user clicks a message result
