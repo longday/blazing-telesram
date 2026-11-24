@@ -7,20 +7,24 @@
 use crate::backend::{Backend, BackendError, LiveEvent};
 use crate::cache::{self, Cache, CacheError, OutboxEntry};
 use crate::model::*;
-use crate::paths::{escape_component, media_dir};
+use crate::paths::{commit_partial, create_partial, escape_component, media_dir, sanitize_file_name};
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 
 /// Concurrent media downloads.
 const MEDIA_SLOTS: usize = 4;
+/// Concurrent original downloads; separate from `MEDIA_SLOTS` so a large file never starves previews.
+const DOWNLOAD_SLOTS: usize = 3;
+/// Minimum gap between progress events of one download, so the event channel does not fill with one event per chunk.
+const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Live changes remembered per chat to replay over history snapshots that raced them.
 const LIVE_LOG_CAP: usize = 256;
 /// Minimum gap between typing reports for one chat.
@@ -129,6 +133,9 @@ enum Input {
     Chats(Result<Vec<ChatSummary>, BackendError>),
     History(HistoryFetch),
     Media { media: MediaRef, result: Result<Vec<u8>, BackendError> },
+    /// `bytes` of the saved file, or why the transfer of generation `seq` produced no file.
+    Download { media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError> },
+    DownloadProgress { media: MediaRef, seq: u64, received: u64, total: Option<u64> },
     Sent { payload: PayloadId, result: Result<Option<MessageTs>, BackendError> },
     /// The send queue's backoff of generation `.0` ended.
     OutboxResume(u64),
@@ -176,6 +183,11 @@ struct Engine<B> {
     /// Media the server answered 404 for, with the time of that answer.
     media_missing: HashMap<MediaRef, Instant>,
     media_slots: Arc<Semaphore>,
+    /// Running or waiting original downloads, one per file id.
+    downloads: HashMap<MediaRef, Transfer>,
+    /// Generation of the next `Transfer`; lets a late result tell its own transfer from a newer one.
+    download_seq: u64,
+    download_slots: Arc<Semaphore>,
     /// Unconfirmed sends in queue order, mirrored in the cache.
     outbox: Vec<OutboxEntry>,
     outbox_inflight: Option<PayloadId>,
@@ -295,6 +307,99 @@ fn remove_ignoring_missing(result: io::Result<()>) {
     }
 }
 
+/// A running or waiting download task; `seq` tells its late results from those of a newer transfer of the same file.
+struct Transfer {
+    seq: u64,
+    handle: JoinHandle<()>,
+}
+
+/// Why a transfer produced no file, before it is worded for the UI.
+#[derive(Debug)]
+enum DownloadError {
+    Backend(BackendError),
+    /// The partial file could not be created in the Downloads folder.
+    Destination(io::Error),
+    /// Flushing or finishing the file failed.
+    Disk(io::Error),
+}
+
+fn download_failure(error: &BackendError) -> DownloadFailure {
+    match error {
+        BackendError::NotFound => DownloadFailure::NotFound,
+        BackendError::Storage(_) => DownloadFailure::Disk,
+        BackendError::Network(_) => DownloadFailure::Network,
+        // `SessionExpired` ends the session before this mapping is asked for.
+        BackendError::SessionExpired | BackendError::Protocol(_) | BackendError::Rejected { .. } => DownloadFailure::Other,
+    }
+}
+
+/// Lets a download's progress through at most once per [`DOWNLOAD_PROGRESS_INTERVAL`] and remembers
+/// what was last let through, so the final report can complete it.
+#[derive(Default)]
+struct Throttle(Mutex<ThrottleState>);
+
+#[derive(Default)]
+struct ThrottleState {
+    passed_at: Option<Instant>,
+    passed: Option<u64>,
+    /// The latest announced total, whether or not that report passed.
+    total: Option<u64>,
+}
+
+impl Throttle {
+    fn admit(&self, now: Instant, received: u64, total: Option<u64>) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if total.is_some() {
+            state.total = total;
+        }
+        if state.passed_at.is_some_and(|at| now.duration_since(at) < DOWNLOAD_PROGRESS_INTERVAL) {
+            return false;
+        }
+        state.passed_at = Some(now);
+        state.passed = Some(received);
+        true
+    }
+
+    /// The report that closes the stream, unless the last one let through already said `received`.
+    fn last(&self, received: u64) -> Option<(u64, Option<u64>)> {
+        let state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        (state.passed != Some(received)).then_some((received, state.total))
+    }
+}
+
+/// One transfer: wait for a slot, stream into `<name>.part` in `dir`, then give the file its final
+/// name. Every early return drops the `Partial`, which removes the unfinished file; so does aborting
+/// the task.
+async fn run_download<B: Backend>(
+    backend: &B,
+    slots: &Semaphore,
+    dir: &Path,
+    media: &MediaRef,
+    name: Option<&str>,
+    inputs: &Sender<Input>,
+    seq: u64,
+) -> Result<(PathBuf, u64), DownloadError> {
+    let Ok(_slot) = slots.acquire().await else {
+        return Err(DownloadError::Backend(BackendError::Protocol("download slots closed".into())));
+    };
+    let name = sanitize_file_name(name);
+    let (mut file, partial) = create_partial(dir, &name).map_err(DownloadError::Destination)?;
+    let throttle = Throttle::default();
+    let report = |received: u64, total: Option<u64>| {
+        if throttle.admit(Instant::now(), received, total) {
+            post(inputs, Input::DownloadProgress { media: media.clone(), seq, received, total });
+        }
+    };
+    let bytes = backend.download(media, &mut file, &report).await.map_err(DownloadError::Backend)?;
+    file.flush().map_err(DownloadError::Disk)?;
+    drop(file);
+    if let Some((received, total)) = throttle.last(bytes) {
+        post(inputs, Input::DownloadProgress { media: media.clone(), seq, received, total });
+    }
+    let path = commit_partial(partial, dir, &name).map_err(DownloadError::Disk)?;
+    Ok((path, bytes))
+}
+
 impl<B: Backend> Engine<B> {
     async fn run(backend: Arc<B>, config: ClientConfig, commands: Receiver<Command>, events: Sender<ClientEvent>) {
         let (inputs, input_rx) = async_channel::unbounded();
@@ -318,6 +423,9 @@ impl<B: Backend> Engine<B> {
             media_deferred: Vec::new(),
             media_missing: HashMap::new(),
             media_slots: Arc::new(Semaphore::new(MEDIA_SLOTS)),
+            downloads: HashMap::new(),
+            download_seq: 0,
+            download_slots: Arc::new(Semaphore::new(DOWNLOAD_SLOTS)),
             outbox: Vec::new(),
             outbox_inflight: None,
             outbox_failures: 0,
@@ -378,6 +486,8 @@ impl<B: Backend> Engine<B> {
             Input::Chats(result) => self.handle_chats(result),
             Input::History(fetch) => self.handle_history(fetch),
             Input::Media { media, result } => self.handle_media_result(media, result),
+            Input::Download { media, seq, result } => self.handle_download_result(media, seq, result),
+            Input::DownloadProgress { media, seq, received, total } => self.handle_download_progress(&media, seq, received, total),
             Input::Sent { payload, result } => self.handle_sent(payload, result),
             Input::OutboxResume(hold) if hold == self.outbox_hold => {
                 self.outbox_held = false;
@@ -421,6 +531,8 @@ impl<B: Backend> Engine<B> {
                 }
             }
             Command::FetchMedia(media) => self.fetch_media(media),
+            Command::Download { media, name } => self.start_download(media, name),
+            Command::CancelDownload(media) => self.cancel_download(&media),
             Command::SignOut => {
                 self.sign_out();
                 return false;
@@ -536,6 +648,7 @@ impl<B: Backend> Engine<B> {
         tracing::warn!("session expired");
         self.epoch += 1;
         self.media_deferred.clear();
+        self.abort_downloads();
         remove_ignoring_missing(fs::remove_file(&self.config.session_file));
         self.emit(ClientEvent::SessionExpired);
     }
@@ -561,6 +674,7 @@ impl<B: Backend> Engine<B> {
         self.phase = Phase::Expired;
         tracing::info!("signing out");
         self.epoch += 1;
+        self.abort_downloads();
         remove_ignoring_missing(fs::remove_file(&self.config.session_file));
         // Release the database file before deleting it.
         self.cache = Cache::open_in_memory().expect("in-memory sqlite always opens");
@@ -1110,6 +1224,11 @@ impl<B: Backend> Engine<B> {
     // -- media ----------------------------------------------------------------------------
 
     fn fetch_media(&mut self, media: MediaRef) {
+        // Originals go through `Command::Download`; this path is for previews only.
+        if media.kind == MediaKind::File {
+            tracing::warn!("fetch_media ignores originals");
+            return;
+        }
         if let Some((file, _)) = self.db(self.cache.media(&media)).flatten() {
             let path = media_dir(&self.config.runtime_dir, &self.account).join(file);
             if path.is_file() {
@@ -1177,6 +1296,88 @@ impl<B: Backend> Engine<B> {
         fs::rename(&partial, &path)?;
         self.db(self.cache.put_media(media, &name, bytes.len() as u64));
         Ok(path)
+    }
+
+    // -- downloads ------------------------------------------------------------------------
+
+    fn start_download(&mut self, media: MediaRef, name: Option<String>) {
+        if media.kind != MediaKind::File {
+            tracing::warn!("download ignored: not an original");
+            return;
+        }
+        // One transfer per file id, however many messages show it.
+        if self.downloads.contains_key(&media) || self.phase == Phase::Expired {
+            return;
+        }
+        // An explicit action is refused, never queued: a hidden queue would start a transfer much later.
+        if !self.is_online() {
+            return self.emit(ClientEvent::DownloadFailed { media, reason: DownloadFailure::Offline });
+        }
+        let Some(dir) = self.config.downloads_dir.clone().filter(|dir| dir.is_dir()) else {
+            return self.emit(ClientEvent::DownloadFailed { media, reason: DownloadFailure::Destination });
+        };
+        self.download_seq += 1;
+        let seq = self.download_seq;
+        let (backend, inputs, slots) = (self.backend.clone(), self.inputs.clone(), self.download_slots.clone());
+        let task_media = media.clone();
+        let handle = tokio::spawn(async move {
+            let result = run_download(&*backend, &slots, &dir, &task_media, name.as_deref(), &inputs, seq).await;
+            post(&inputs, Input::Download { media: task_media, seq, result });
+        });
+        self.downloads.insert(media, Transfer { seq, handle });
+    }
+
+    fn cancel_download(&mut self, media: &MediaRef) {
+        if let Some(transfer) = self.downloads.remove(media) {
+            // The task's `Partial` removes the unfinished file when the aborted future drops.
+            transfer.handle.abort();
+            self.emit(ClientEvent::DownloadCancelled(media.clone()));
+        }
+    }
+
+    /// Sign-out and expiry: every unfinished file goes, saved ones stay.
+    fn abort_downloads(&mut self) {
+        for (_, transfer) in self.downloads.drain() {
+            transfer.handle.abort();
+        }
+    }
+
+    fn handle_download_progress(&mut self, media: &MediaRef, seq: u64, received: u64, total: Option<u64>) {
+        if self.downloads.get(media).is_some_and(|transfer| transfer.seq == seq) {
+            self.emit(ClientEvent::DownloadProgress { media: media.clone(), received, total });
+        }
+    }
+
+    fn handle_download_result(&mut self, media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError>) {
+        match self.downloads.get(&media) {
+            // A newer transfer of the same file owns the state now; this one was cancelled meanwhile.
+            Some(transfer) if transfer.seq != seq => return,
+            Some(_) => {
+                self.downloads.remove(&media);
+            }
+            // Cancelled, but the result was already on its way: reported as it happened.
+            None => {}
+        }
+        let reason = match result {
+            Ok((path, bytes)) => {
+                tracing::info!(bytes, "download saved");
+                return self.emit(ClientEvent::Downloaded { media, path });
+            }
+            Err(DownloadError::Backend(BackendError::SessionExpired)) => return self.expire(),
+            Err(DownloadError::Backend(error)) => {
+                tracing::warn!(%error, "download failed");
+                download_failure(&error)
+            }
+            Err(DownloadError::Destination(error)) => {
+                tracing::warn!(%error, "download destination unusable");
+                DownloadFailure::Destination
+            }
+            Err(DownloadError::Disk(error)) => {
+                tracing::warn!(%error, "download could not be written");
+                DownloadFailure::Disk
+            }
+        };
+        self.emit(ClientEvent::DownloadFailed { media, reason });
     }
 }
 
@@ -1405,6 +1606,7 @@ mod tests {
         }
         let mut config = ClientConfig::new(dir.path(), dir.path().join("session.json"), account());
         config.history_limit = limit;
+        config.downloads_dir = Some(dir.path().join("Downloads"));
         config.reconnect_base = Duration::from_millis(5);
         config.reconnect_max = Duration::from_millis(20);
         config.media_missing_ttl = Duration::from_millis(300);
@@ -3066,5 +3268,348 @@ mod tests {
         let missing = MediaRef { id: "b/2".into(), kind: MediaKind::File };
         assert_eq!(run(&missing).0, Err(BackendError::NotFound));
         assert_eq!(fake.state().download_calls, [original.clone(), original, missing]);
+    }
+
+    // -- downloads ------------------------------------------------------------------------
+
+    fn original(id: &str) -> MediaRef {
+        MediaRef { id: id.into(), kind: MediaKind::File }
+    }
+
+    /// A started client whose Downloads folder exists and whose server holds `files`.
+    fn start_downloads(files: &[(&str, &[u8])], configure: impl FnOnce(&mut FakeState)) -> Harness {
+        start(
+            |s, dir| {
+                fs::create_dir(dir.join("Downloads")).unwrap();
+                for (id, bytes) in files {
+                    s.files.insert((*id).into(), bytes.to_vec());
+                }
+                configure(s);
+            },
+            50,
+        )
+    }
+
+    impl Harness {
+        fn downloads(&self) -> PathBuf {
+            self.dir.path().join("Downloads")
+        }
+
+        /// Names in the Downloads folder, sorted; empty when the folder does not exist.
+        fn listing(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.downloads())
+                .map(|entries| entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect())
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+
+        fn download(&self, media: &MediaRef, name: &str) {
+            self.client.send(Command::Download { media: media.clone(), name: Some(name.into()) });
+        }
+
+        fn downloaded(&self) -> PathBuf {
+            match self.next("downloaded", |e| matches!(e, ClientEvent::Downloaded { .. })) {
+                ClientEvent::Downloaded { path, .. } => path,
+                _ => unreachable!(),
+            }
+        }
+
+        /// Waits until `cond` holds for something the engine does asynchronously.
+        fn eventually(&self, what: &str, cond: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !cond() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Releases the transfers parked on `gate` until `done`. `notify_one` keeps a permit when
+        /// nobody waits yet, so a release is never lost to the race with the engine thread.
+        fn open_gate(&self, gate: &tokio::sync::Notify, what: &str, done: impl Fn() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out waiting for {what}");
+                gate.notify_one();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+    }
+
+    fn is_download_event(event: &ClientEvent) -> bool {
+        matches!(
+            event,
+            ClientEvent::DownloadProgress { .. }
+                | ClientEvent::Downloaded { .. }
+                | ClientEvent::DownloadFailed { .. }
+                | ClientEvent::DownloadCancelled(_)
+        )
+    }
+
+    #[test]
+    fn a_download_saves_the_exact_bytes_and_reports_the_final_path() {
+        let h = start_downloads(&[("b/1", b"hello world")], |_| {});
+        h.online();
+        h.download(&original("b/1"), "report.pdf");
+        let events = h.until("saved", |e| matches!(e, ClientEvent::Downloaded { .. }));
+        let Some(ClientEvent::Downloaded { media, path }) = events.last() else { unreachable!() };
+        assert_eq!(*media, original("b/1"));
+        assert_eq!(*path, h.downloads().join("report.pdf"));
+        assert_eq!(fs::read(path).unwrap(), b"hello world");
+        assert_eq!(h.listing(), ["report.pdf"], "no partial file is left behind");
+        assert!(events.iter().any(|e| matches!(e, ClientEvent::DownloadProgress { .. })));
+    }
+
+    #[test]
+    fn a_hostile_or_missing_name_becomes_one_harmless_name_inside_the_folder() {
+        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two")], |_| {});
+        h.online();
+        h.download(&original("b/1"), "../../.ssh/authorized_keys");
+        assert_eq!(h.downloaded(), h.downloads().join("authorized_keys"));
+        h.client.send(Command::Download { media: original("b/2"), name: None });
+        assert_eq!(h.downloaded(), h.downloads().join("Файл"));
+        assert!(!h.dir.path().join(".ssh").exists());
+        assert_eq!(h.listing().len(), 2);
+    }
+
+    #[test]
+    fn downloading_again_saves_a_new_copy_and_changes_no_existing_file() {
+        let h = start_downloads(&[("b/1", b"hello")], |_| {});
+        h.online();
+        fs::write(h.downloads().join("other.txt"), "mine").unwrap();
+        h.download(&original("b/1"), "report.pdf");
+        assert_eq!(h.downloaded(), h.downloads().join("report.pdf"));
+        h.download(&original("b/1"), "report.pdf");
+        assert_eq!(h.downloaded(), h.downloads().join("report (1).pdf"));
+        h.download(&original("b/1"), "other.txt");
+        assert_eq!(h.downloaded(), h.downloads().join("other (1).txt"));
+        assert_eq!(fs::read(h.downloads().join("report.pdf")).unwrap(), b"hello");
+        assert_eq!(fs::read(h.downloads().join("report (1).pdf")).unwrap(), b"hello");
+        assert_eq!(fs::read(h.downloads().join("other.txt")).unwrap(), b"mine");
+    }
+
+    #[test]
+    fn cancel_stops_the_transfer_and_removes_the_partial() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        h.download(&original("b/1"), "report.pdf");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        assert_eq!(h.listing(), ["report.pdf.part"]);
+        h.client.send(Command::CancelDownload(original("b/1")));
+        h.next("cancelled", |e| *e == ClientEvent::DownloadCancelled(original("b/1")));
+        h.eventually("the partial to go", || h.listing().is_empty());
+        gate.notify_one();
+        h.quiet();
+        let seen = h.drain();
+        assert!(!seen.iter().any(|e| matches!(e, ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. })), "{seen:?}");
+        assert!(h.listing().is_empty());
+    }
+
+    #[test]
+    fn a_download_started_after_a_cancel_is_its_own_transfer() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        h.download(&original("b/1"), "report.pdf");
+        h.wait_for("the first transfer", |s| s.download_calls.len() == 1);
+        h.client.send(Command::CancelDownload(original("b/1")));
+        h.next("cancelled", |e| *e == ClientEvent::DownloadCancelled(original("b/1")));
+        h.download(&original("b/1"), "report.pdf");
+        h.wait_for("the second transfer", |s| s.download_calls.len() == 2);
+        h.open_gate(&gate, "the file", || h.listing() == ["report.pdf"]);
+        assert_eq!(h.downloaded(), h.downloads().join("report.pdf"));
+        h.quiet();
+        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. })));
+    }
+
+    #[test]
+    fn backend_errors_remove_the_partial_and_map_to_one_reason_each() {
+        let h = start_downloads(&[], |s| {
+            s.download_errors = VecDeque::from([
+                BackendError::NotFound,
+                BackendError::Storage("StorageFull".into()),
+                BackendError::Network("reset".into()),
+                BackendError::Protocol("odd".into()),
+            ]);
+        });
+        h.online();
+        let media = original("b/1");
+        for expected in [DownloadFailure::NotFound, DownloadFailure::Disk, DownloadFailure::Network, DownloadFailure::Other] {
+            h.download(&media, "a.bin");
+            h.next("failure", |e| *e == ClientEvent::DownloadFailed { media: media.clone(), reason: expected });
+            assert!(h.listing().is_empty(), "{expected:?} left a file");
+        }
+        // Nothing scripted and no such file on the server: a 404.
+        h.download(&media, "a.bin");
+        h.next("not found", |e| *e == ClientEvent::DownloadFailed { media: media.clone(), reason: DownloadFailure::NotFound });
+        assert!(h.listing().is_empty());
+    }
+
+    #[test]
+    fn offline_fails_fast_without_asking_the_backend() {
+        let h = start(
+            |s, dir| {
+                fs::create_dir(dir.join("Downloads")).unwrap();
+                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+            },
+            50,
+        );
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.download(&original("b/1"), "a.bin");
+        h.next("refusal", |e| *e == ClientEvent::DownloadFailed { media: original("b/1"), reason: DownloadFailure::Offline });
+        h.quiet();
+        assert!(h.fake.state().download_calls.is_empty());
+        assert!(h.listing().is_empty());
+    }
+
+    #[test]
+    fn a_missing_or_unusable_folder_fails_fast_without_asking_the_backend() {
+        let missing = start(|s, _| { s.files.insert("b/1".into(), b"x".to_vec()); }, 50);
+        let not_a_folder = start(
+            |s, dir| {
+                fs::write(dir.join("Downloads"), "a file, not a folder").unwrap();
+                s.files.insert("b/1".into(), b"x".to_vec());
+            },
+            50,
+        );
+        for h in [&missing, &not_a_folder] {
+            h.online();
+            h.download(&original("b/1"), "a.bin");
+            h.next("refusal", |e| *e == ClientEvent::DownloadFailed { media: original("b/1"), reason: DownloadFailure::Destination });
+            h.quiet();
+            assert!(h.fake.state().download_calls.is_empty());
+        }
+        assert!(!missing.downloads().exists(), "a missing folder is not created");
+        assert!(fs::metadata(not_a_folder.downloads()).unwrap().is_file());
+    }
+
+    #[test]
+    fn a_second_download_of_a_running_file_starts_no_second_transfer() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        h.download(&original("b/1"), "a.bin");
+        h.download(&original("b/1"), "b.bin");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        h.quiet();
+        assert_eq!(h.fake.state().download_calls.len(), 1);
+        h.open_gate(&gate, "the file", || h.listing() == ["a.bin"]);
+        h.downloaded();
+        h.quiet();
+        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. })), "reported twice");
+        assert_eq!(h.fake.state().download_calls.len(), 1);
+    }
+
+    #[test]
+    fn the_fourth_concurrent_download_waits_for_a_slot() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let files: Vec<(String, Vec<u8>)> = (1..=4).map(|i| (format!("f/{i}"), vec![i as u8; 8])).collect();
+        let listed: Vec<(&str, &[u8])> = files.iter().map(|(id, bytes)| (id.as_str(), bytes.as_slice())).collect();
+        let h = start_downloads(&listed, |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        for i in 1..=4 {
+            h.download(&original(&format!("f/{i}")), &format!("f{i}.bin"));
+        }
+        h.wait_for("three transfers", |s| s.download_calls.len() == 3);
+        h.quiet();
+        assert_eq!(h.fake.state().download_calls.len(), 3, "the fourth must wait");
+        assert_eq!(h.listing().len(), 3, "the fourth has no partial yet");
+        gate.notify_one();
+        h.wait_for("the fourth transfer", |s| s.download_calls.len() == 4);
+        h.open_gate(&gate, "all four files", || h.listing().iter().filter(|name| !name.ends_with(".part")).count() == 4);
+        for _ in 0..4 {
+            h.downloaded();
+        }
+    }
+
+    #[test]
+    fn progress_is_throttled_and_the_last_report_is_the_full_size() {
+        let h = start_downloads(&[("b/1", b"hello")], |_| {});
+        h.online();
+        h.download(&original("b/1"), "a.bin");
+        let events = h.until("saved", |e| matches!(e, ClientEvent::Downloaded { .. }));
+        let progress: Vec<(u64, Option<u64>)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::DownloadProgress { received, total, .. } => Some((*received, *total)),
+                _ => None,
+            })
+            .collect();
+        // The Fake reports twice, back to back: the second is held back, and the engine's closing
+        // report brings the full size exactly once.
+        assert_eq!(progress, [(2, Some(5)), (5, Some(5))]);
+    }
+
+    #[test]
+    fn the_throttle_passes_one_report_per_interval_and_completes_the_stream() {
+        let throttle = Throttle::default();
+        let t0 = Instant::now();
+        assert!(throttle.admit(t0, 10, Some(100)));
+        assert!(!throttle.admit(t0 + Duration::from_millis(50), 20, Some(100)));
+        assert!(throttle.admit(t0 + DOWNLOAD_PROGRESS_INTERVAL, 30, None));
+        assert_eq!(throttle.last(30), None, "already said");
+        assert_eq!(throttle.last(100), Some((100, Some(100))));
+    }
+
+    #[test]
+    fn sign_out_stops_running_downloads_and_keeps_saved_files() {
+        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two")], |_| {});
+        h.online();
+        h.download(&original("b/1"), "a.bin");
+        h.downloaded();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        h.fake.state().download_gate = Some(gate);
+        h.download(&original("b/2"), "b.bin");
+        h.wait_for("the running transfer", |s| s.download_calls.len() == 2);
+        assert_eq!(h.listing(), ["a.bin", "b.bin.part"]);
+        h.client.send(Command::SignOut);
+        h.next("signed out", |e| *e == ClientEvent::SignedOut);
+        h.eventually("the partial to go", || h.listing() == ["a.bin"]);
+        assert_eq!(fs::read(h.downloads().join("a.bin")).unwrap(), b"one");
+    }
+
+    #[test]
+    fn session_expiry_during_a_download_ends_the_session_and_removes_the_partial() {
+        let h = start_downloads(&[], |s| s.download_errors = VecDeque::from([BackendError::SessionExpired]));
+        h.online();
+        h.download(&original("b/1"), "a.bin");
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        assert!(h.listing().is_empty());
+        assert!(!h.dir.path().join("session.json").exists());
+        h.quiet();
+        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::DownloadFailed { .. })), "expiry is not a download failure");
+    }
+
+    #[test]
+    fn expiry_aborts_every_running_download() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two")], |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        h.download(&original("b/1"), "a.bin");
+        h.download(&original("b/2"), "b.bin");
+        h.wait_for("both transfers", |s| s.download_calls.len() == 2);
+        assert_eq!(h.listing(), ["a.bin.part", "b.bin.part"]);
+        h.fake.push(LiveEvent::Failed(BackendError::SessionExpired));
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.eventually("the partials to go", || h.listing().is_empty());
+        gate.notify_one();
+        h.quiet();
+        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. })));
+        assert!(h.listing().is_empty());
+    }
+
+    #[test]
+    fn originals_never_go_through_the_preview_path_and_previews_never_download() {
+        let h = start_downloads(&[("b/1", b"one")], |s| { s.media.insert("b/1".into(), b"preview".to_vec()); });
+        h.online();
+        h.client.send(Command::FetchMedia(original("b/1")));
+        h.client.send(Command::Download { media: MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail }, name: Some("a.bin".into()) });
+        h.quiet();
+        assert_eq!(h.fake.state().media_calls, 0);
+        assert!(h.fake.state().download_calls.is_empty());
+        let seen = h.drain();
+        assert!(!seen.iter().any(|e| is_download_event(e) || matches!(e, ClientEvent::MediaReady { .. } | ClientEvent::MediaUnavailable(_))), "{seen:?}");
+        assert!(h.listing().is_empty());
     }
 }
