@@ -1,8 +1,8 @@
 //! Developer probe for the Yandex protocol layer. Reads, plus a few writes that act on the
 //! account's self chat only; never prints cookie values. `download` saves one file or image
 //! of any chat into a local directory (never overwriting) and prints host and path of the
-//! request, never its query. `create-private` is the one command that changes the account
-//! outside the self chat, and it sends nothing without `--confirm-create`.
+//! request, never its query. `create-private` and `create-chat` are the commands that change the
+//! account outside the self chat, and they send nothing without `--confirm-create`.
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::fs::{self, File, OpenOptions};
@@ -25,7 +25,7 @@ use yandex_proto::session::Session;
 use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
 use yandex_proto::write::{Committed, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
-use yandex_proto::{Client, ClientConfig, ManageError, ProtoError};
+use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError};
 
 const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--watch <chat>]
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
@@ -36,13 +36,15 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
        bt-probe create-private <guid> --confirm-create
+       bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
 download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
 whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
-create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)";
+create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
+create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -109,6 +111,14 @@ fn main() -> ExitCode {
             Some(CreatePrivate::Send(guid)) => block_on(create_private(guid)),
             Some(CreatePrivate::Refuse(guid)) => {
                 eprintln!("{}", refusal(guid));
+                return ExitCode::from(2);
+            }
+            None => return usage(),
+        },
+        ["create-chat", title, rest @ ..] => match create_chat_args(title, rest) {
+            Some(plan) if plan.confirmed => block_on(create_chat(plan)),
+            Some(plan) => {
+                eprintln!("{}", group_refusal(&plan));
                 return ExitCode::from(2);
             }
             None => return usage(),
@@ -473,6 +483,71 @@ async fn create_private(guid: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+/// What `create-chat <title> <guid>... [--confirm-create]` asks for.
+#[derive(Debug, PartialEq, Eq)]
+struct GroupPlan<'a> {
+    title: &'a str,
+    users: Vec<&'a str>,
+    /// `--confirm-create` was given: send the request.
+    confirmed: bool,
+}
+
+/// A blank or over-long title, no participant, a blank, repeated or flag-looking guid, or a
+/// repeated `--confirm-create` is a usage error (`None`). `--confirm-create` may stand anywhere
+/// among the guids.
+fn create_chat_args<'a>(title: &'a str, rest: &[&'a str]) -> Option<GroupPlan<'a>> {
+    if title.trim().is_empty() || title.chars().count() > MAX_CHAT_TITLE {
+        return None;
+    }
+    let mut users: Vec<&str> = Vec::new();
+    let mut confirmed = false;
+    for arg in rest {
+        if *arg == "--confirm-create" {
+            if confirmed {
+                return None;
+            }
+            confirmed = true;
+        } else if arg.trim().is_empty() || arg.starts_with('-') || users.contains(arg) {
+            return None;
+        } else {
+            users.push(*arg);
+        }
+    }
+    (!users.is_empty()).then_some(GroupPlan { title, users, confirmed })
+}
+
+/// The refusal printed without `--confirm-create`: everything that would be sent.
+fn group_refusal(plan: &GroupPlan<'_>) -> String {
+    let mut text = format!(
+        "create-chat would create a group chat on the real account; nothing was sent.\n  title: {:?}\n  description: \"\"\n  channel: false\n  is_public: true\n  participants ({}):",
+        plan.title,
+        plan.users.len()
+    );
+    for user in &plan.users {
+        text.push_str("\n    ");
+        text.push_str(user);
+    }
+    text.push_str("\nRepeat with --confirm-create to send it");
+    text
+}
+
+/// One `create_chat` (registry mutation with CSRF, sent once, never retried). Reached only with
+/// `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
+async fn create_chat(plan: GroupPlan<'_>) -> Result<(), Failure> {
+    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    eprintln!("creating the group chat with {} participant(s)", plan.users.len());
+    let users: Vec<String> = plan.users.iter().map(|user| (*user).to_owned()).collect();
+    let created = client.create_chat(plan.title, &users).await.map_err(creation_failure)?;
+    match created.chat {
+        Some(chat) => println!("created: chat {chat}"),
+        None => println!("created: the reply names no chat id (look in the chat list)"),
+    }
+    if !created.refused.is_empty() {
+        println!("not added by the server ({}): {}", created.refused.len(), created.refused.join(", "));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DownloadFlags<'a> {
     /// 1-based position inside a gallery.
@@ -738,6 +813,39 @@ mod tests {
         assert_eq!(create_private_args("", &[]), None);
         let message = refusal(GUID);
         assert!(message.contains(GUID) && message.contains("nothing was sent") && message.contains("--confirm-create"), "{message}");
+    }
+
+    #[test]
+    fn create_chat_refuses_without_the_flag_and_prints_what_it_would_send() {
+        let plan = create_chat_args("Team A", &[GUID, "g-2"]).unwrap();
+        assert_eq!(plan, GroupPlan { title: "Team A", users: vec![GUID, "g-2"], confirmed: false });
+        let message = group_refusal(&plan);
+        for needle in ["\"Team A\"", GUID, "g-2", "is_public: true", "channel: false", "nothing was sent", "--confirm-create"] {
+            assert!(message.contains(needle), "{needle}: {message}");
+        }
+        // The flag may stand anywhere among the guids.
+        for rest in [&[GUID, "g-2", "--confirm-create"][..], &["--confirm-create", GUID, "g-2"], &[GUID, "--confirm-create", "g-2"]] {
+            assert_eq!(create_chat_args("Team A", rest), Some(GroupPlan { title: "Team A", users: vec![GUID, "g-2"], confirmed: true }));
+        }
+    }
+
+    #[test]
+    fn create_chat_rejects_what_the_web_client_would_not_send() {
+        let long = "x".repeat(MAX_CHAT_TITLE + 1);
+        assert!(create_chat_args(&"x".repeat(MAX_CHAT_TITLE), &[GUID]).is_some());
+        for (title, rest) in [
+            ("", &[GUID][..]),
+            ("  ", &[GUID]),
+            (long.as_str(), &[GUID]),
+            ("T", &[]),
+            ("T", &["--confirm-create"]),
+            ("T", &[GUID, GUID]),
+            ("T", &[GUID, " "]),
+            ("T", &[GUID, "--confirm"]),
+            ("T", &[GUID, "--confirm-create", "--confirm-create"]),
+        ] {
+            assert_eq!(create_chat_args(title, rest), None, "{title:?} {rest:?}");
+        }
     }
 
     #[test]

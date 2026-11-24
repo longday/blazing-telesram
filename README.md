@@ -47,7 +47,11 @@ One command changes the real account outside the self chat: `bt-probe create-pri
 ```sh
 bt-probe create-private <guid>                   # refuses: prints the target, sends nothing
 bt-probe create-private <guid> --confirm-create  # sends the one request
+bt-probe create-chat <title> <guid>...                   # refuses: prints title and participants, sends nothing
+bt-probe create-chat <title> <guid>... --confirm-create  # sends the one request
 ```
+
+`create-chat` creates a group chat through the CSRF-guarded `create_chat` call with the payload the web client's own wizard sends (description empty, not a channel, `is_public: true`, your own guid not listed); that payload was read from the web client's code and has not been confirmed against the server yet. Same rules as `create-private`: once, never retried, no request without `--confirm-create`, the same exit codes; the title must be non-blank and at most 250 characters and at least one distinct guid is required. Participants the server could not add are printed by code; the group exists anyway.
 
 ## Diagnostics
 
