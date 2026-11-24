@@ -99,8 +99,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 4.2 | done (CM-M, 9a57c30; `profile.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `composer.rs`) | 3.2, 4.1 | CM-M |
 | 4.3 | done (CM-N, 026673c; `new_chat.rs`, `info_panel.rs`, `desktop.rs`, `main.rs`, `composer.rs`, `tests.rs`, design.md D5) | 3.3, 4.2 | CM-N |
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
-| 5.2 | **ready**; VM run of the read paths with `BT_WRITE_ONLY_CHAT` = self chat; reads only plus one refused creation attempt; no approval needed; build the app in the VM from `main`. Log criterion: the guarded line `creation blocked by BT_WRITE_ONLY_CHAT` (`kind=create_private_chat`) is expected; there must be no `registry exchange … call=create_private_chat` and no `create`/`created` line | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
-| 5.3 | blocked-by CM 5.1, 5.2 | 5.1, 5.2 | **[approval] [live]** |
+| 5.2 | done (6e740cf; VM run of the read paths, guarded creation refusal, no account writes) | 4.3 | VM run |
+| 5.3 | blocked-by CM 5.1 (approval); 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
 | 6.1 | done (07925ff; `bt-probe create-chat <title> <guid>... --confirm-create`, `Client::create_chat`, no live request made) | 2.2 | probe support only |
 | 6.2 | ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 (rebuild the main checkout `bt-probe` from `main` first) | 6.1 | **[approval] [live]** |
 | 6.3 | blocked-by CM 6.2 (live PASS); 3.3 is merged | 6.2, 3.3 | CM-G (with 6.4) |
@@ -130,7 +130,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **CM 5.2** (VM, reads only, `BT_WRITE_ONLY_CHAT` = self chat): ready, no approval. Needs the Tart VM `bt-vm` and a release build of `main` (026673c) inside it.
+- Nothing is ready without the user: every open task needs an approval or a decision (see below). CM 7.1 needs 6.4 (or 6.F) first; its archive step needs 5.1, 5.3 and 6.2.
 - **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
 - (GS 4.1 is done; GS is archived.)
 
@@ -141,4 +141,4 @@ In flight: nothing. Merged so far: GS all (archived 2026-11-25); MD all (archive
 - Decision on the MR 7.1 acceptance criterion: `cargo fmt --check` (1561 hunks, baseline), the two new clippy `large_enum_variant`. Blocks MR 7.1, 7.2 and 7.3.
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
-- Live session, reads only, no approval: CM 5.2 (VM). Done: GS 1.3, GS 4.1, MD 1.3, MD 5.2, CM 1.2.
+- Done without approval: GS 1.3, GS 4.1, MD 1.3, MD 5.2, CM 1.2, CM 5.2.
