@@ -510,6 +510,20 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_row_written_before_partner_existed_loads_without_one() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let with_partner = ChatSummary { partner: Some(UserId("u1".into())), ..chat("a", Some(5), None) };
+        cache.replace_chats(&[with_partner.clone()]).unwrap();
+        assert_eq!(cache.chat(&id("a")).unwrap(), Some(with_partner.clone()), "the field round-trips");
+        let mut json: serde_json::Value = serde_json::from_str(&encode(&with_partner)).unwrap();
+        assert!(json.as_object_mut().unwrap().remove("partner").is_some(), "the field is serialized today");
+        cache.conn.execute("UPDATE chats SET json = ?1 WHERE id = 'a'", [json.to_string()]).unwrap();
+        let loaded = cache.chat(&id("a")).unwrap().unwrap();
+        assert_eq!(loaded, ChatSummary { partner: None, ..with_partner });
+        assert_eq!(cache.chats().unwrap().len(), 1, "the list still shows the row");
+    }
+
+    #[test]
     fn messages_between_is_inclusive_ordered_and_scoped_to_its_chat() {
         let cache = Cache::open_in_memory().unwrap();
         for ts in [4, 1, 3, 2] {

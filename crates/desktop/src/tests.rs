@@ -60,6 +60,7 @@ fn chat(id: &str, kind: ChatKind, title: &str, last: Option<i64>) -> ChatSummary
         unread: 0,
         muted: false,
         pinned_rank: None,
+        partner: None,
     }
 }
 

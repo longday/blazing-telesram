@@ -12,6 +12,7 @@ pub fn chat(id: &str, last: Option<MessageTs>, pinned: Option<u32>) -> ChatSumma
         unread: 0,
         muted: false,
         pinned_rank: pinned,
+        partner: None,
     }
 }
 

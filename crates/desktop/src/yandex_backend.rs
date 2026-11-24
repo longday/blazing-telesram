@@ -2,19 +2,21 @@
 
 use bt_chat_core::model::*;
 use bt_chat_core::reactions::{ReactionCode, ReactionCount, Reactions, ReactionsUpdate};
-use bt_chat_core::{Backend, BackendError, LiveEvent};
-use std::collections::HashMap;
+use bt_chat_core::{Backend, BackendError, CreateError, LiveEvent};
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use yandex_proto::bootstrap::bootstrap;
 use yandex_proto::client::{Client, ClientConfig};
 use yandex_proto::error::ProtoError;
+use yandex_proto::manage::ManageError;
 use yandex_proto::media::{AvatarSize, MediaTarget};
 use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{
-    PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMessage, WireReactions, WireSender, WireUser,
+    PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember, WireMemberRole, WireMembers, WireMessage,
+    WireProfile, WireReactions, WireSender, WireUser,
 };
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
@@ -25,6 +27,16 @@ const CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 /// How long a typing indicator lives when the push does not say. Peers repeat their typing
 /// push every 3-5 s while they type (observed in live logs), so a bit more than that.
 const TYPING_LIFETIME: Duration = Duration::from_secs(7);
+
+/// Members asked per `get_chat_members` page (what the web client asks).
+const MEMBER_PAGE: usize = 50;
+/// Page requests per member load: 20 pages of 50, so at most 1000 members are listed.
+const MEMBER_PAGE_BOUND: usize = 20;
+/// The code `get_chat_members` answers for a chat whose list the account may not read (private
+/// chats, the self chat, channels the account does not administer).
+const MEMBERS_REFUSED_CODE: &str = "no_permissions_for_this_chat_operation";
+/// Why a refused member list is not shown.
+const MEMBERS_UNAVAILABLE: &str = "список участников недоступен для этой учётной записи";
 
 pub struct YandexBackend {
     session: Session,
@@ -111,6 +123,18 @@ fn write_guard(allowed: Option<&ChatId>, chat: &ChatId) -> Result<(), BackendErr
     }
 }
 
+/// Creating a chat writes outside any one chat, so `BT_WRITE_ONLY_CHAT` (which limits writes to
+/// one existing chat) refuses it whatever the target.
+fn creation_guard(allowed: Option<&ChatId>) -> Result<(), BackendError> {
+    match allowed {
+        Some(_) => Err(BackendError::Rejected {
+            reason: "создание чатов запрещено BT_WRITE_ONLY_CHAT".into(),
+            permanent: true,
+        }),
+        None => Ok(()),
+    }
+}
+
 impl YandexBackend {
     pub fn new(session: Session, write_only: Option<ChatId>) -> Self {
         Self {
@@ -169,7 +193,7 @@ impl Backend for YandexBackend {
             let users = self.users.lock().unwrap();
             chats.iter().map(|c| summary(c, &me, &users)).collect()
         };
-        *self.known.lock().unwrap() = KnownChats::of(&chats, &summaries);
+        *self.known.lock().unwrap() = KnownChats::of(&summaries);
         Ok(summaries)
     }
 
@@ -334,6 +358,160 @@ impl Backend for YandexBackend {
         );
         Ok(hits)
     }
+
+    async fn members(&self, chat: &ChatSummary) -> Result<ChatMembers, BackendError> {
+        let (client, me) = self.client()?;
+        if chat.kind == ChatKind::Private {
+            return Ok(private_members(chat, &me));
+        }
+        let id = chat.id.0.as_str();
+        let listed = list_members(|offset| {
+            let client = &client;
+            async move { client.members(id, MEMBER_PAGE as u32, offset.as_deref()).await.map_err(members_error) }
+        })
+        .await?;
+        // The member reply names almost everyone; the user cache fills only the rows it left blank.
+        let nameless = listed.users.iter().filter(|u| blank(u.display_name.as_deref())).map(|u| u.guid.clone());
+        Users { client: &client, cache: &self.users }.load(nameless.collect()).await?;
+        let users = {
+            let cache = self.users.lock().unwrap();
+            listed.users.iter().map(|u| member(u, &me, &cache)).collect::<Vec<_>>()
+        };
+        // Counts only: no name, guid or chat id reaches the log.
+        tracing::debug!(count = users.len(), partial = listed.partial, skipped = listed.skipped, "members mapped");
+        Ok(ChatMembers { chat: chat.id.clone(), users, partial: listed.partial })
+    }
+
+    async fn profile(&self) -> Result<Profile, BackendError> {
+        let (client, me) = self.client()?;
+        let wire = client.whoami().await.map_err(backend_error)?;
+        Ok(profile_of(wire, &me))
+    }
+
+    async fn create_private_chat(&self, user: &UserId) -> Result<Option<ChatId>, CreateError> {
+        const KIND: &str = "create_private_chat";
+        if let Err(error) = creation_guard(self.write_only.as_ref()) {
+            tracing::warn!(kind = KIND, "creation blocked by BT_WRITE_ONLY_CHAT");
+            return Err(CreateError::Failed(error));
+        }
+        let (client, _) = self.client().map_err(CreateError::Failed)?;
+        // The kind and the outcome only: the person stays out of the log.
+        tracing::info!(kind = KIND, "create");
+        match client.create_private_chat(&user.0).await {
+            Ok(created) => {
+                tracing::info!(kind = KIND, named = created.is_some(), "created");
+                Ok(created.map(ChatId))
+            }
+            Err(error) => {
+                let error = create_error(error);
+                tracing::warn!(kind = KIND, unknown = matches!(error, CreateError::Unknown(_)), "creation did not succeed");
+                Err(error)
+            }
+        }
+    }
+}
+
+/// A refused member list is not an error of the protocol but a fact about the account: say so
+/// in words the panel can show, permanent because asking again cannot help.
+fn members_error(error: ProtoError) -> BackendError {
+    match error {
+        ProtoError::Protocol(reason) if reason.contains(MEMBERS_REFUSED_CODE) => {
+            BackendError::Rejected { reason: MEMBERS_UNAVAILABLE.into(), permanent: true }
+        }
+        other => backend_error(other),
+    }
+}
+
+/// `NotSent` and `Rejected` mean nothing was created; `Unknown` means the chat may exist.
+fn create_error(error: ManageError) -> CreateError {
+    match error {
+        ManageError::NotSent(e) | ManageError::Rejected(e) => CreateError::Failed(backend_error(e)),
+        ManageError::Unknown(e) => CreateError::Unknown(e.to_string()),
+    }
+}
+
+fn blank(text: Option<&str>) -> bool {
+    text.is_none_or(|t| t.trim().is_empty())
+}
+
+/// Every member of a group or channel as far as the paging bound allows.
+struct Listed {
+    users: Vec<WireMember>,
+    /// The bound was reached, or the server stopped advancing, with a full last page.
+    partial: bool,
+    /// Users the pages carried without a guid.
+    skipped: usize,
+}
+
+/// Pages through `page(guid_offset)` until a page holds fewer than `MEMBER_PAGE` users: the
+/// server sends no total and no "more" flag. A failing page fails the whole load, so a cut
+/// list is never delivered as complete. A full page that adds nobody new (the server ignored
+/// the offset) cannot be continued and counts as partial rather than looping.
+async fn list_members<F, Fut>(mut page: F) -> Result<Listed, BackendError>
+where
+    F: FnMut(Option<String>) -> Fut,
+    Fut: Future<Output = Result<WireMembers, BackendError>>,
+{
+    let mut listed = Listed { users: Vec::new(), partial: false, skipped: 0 };
+    let mut seen = HashSet::new();
+    let mut offset = None;
+    for _ in 0..MEMBER_PAGE_BOUND {
+        let reply = page(offset.take()).await?;
+        listed.skipped += reply.skipped;
+        let full = reply.users.len() + reply.skipped >= MEMBER_PAGE;
+        let last = reply.users.last().map(|u| u.guid.clone());
+        let before = listed.users.len();
+        listed.users.extend(reply.users.into_iter().filter(|u| seen.insert(u.guid.clone())));
+        if !full {
+            return Ok(listed);
+        }
+        match last {
+            Some(last) if listed.users.len() > before => offset = Some(last),
+            _ => break,
+        }
+    }
+    listed.partial = true;
+    Ok(listed)
+}
+
+fn member(wire: &WireMember, me: &str, users: &HashMap<String, WireUser>) -> Member {
+    let cached = users.get(&wire.guid);
+    let name = wire.display_name.clone().filter(|n| !blank(Some(n))).or_else(|| cached?.display_name.clone());
+    let avatar = wire.avatar_id.clone().or_else(|| cached?.avatar_id.clone());
+    Member {
+        user: UserId(wire.guid.clone()),
+        name,
+        avatar: avatar.map(|id| MediaRef { id, kind: MediaKind::Avatar }),
+        role: if wire.role == WireMemberRole::Admin { MemberRole::Admin } else { MemberRole::Member },
+        me: wire.guid == me,
+    }
+}
+
+/// A private chat has no member list on the server: the partner is the chat row itself, with
+/// the name and avatar the row carries. A row without a partner has nobody to show.
+fn private_members(chat: &ChatSummary, me: &str) -> ChatMembers {
+    let users = chat
+        .partner
+        .iter()
+        .map(|partner| Member {
+            user: partner.clone(),
+            name: Some(chat.title.clone()),
+            avatar: chat.avatar.clone(),
+            role: MemberRole::Member,
+            me: partner.0 == me,
+        })
+        .collect();
+    ChatMembers { chat: chat.id.clone(), users, partial: false }
+}
+
+/// `whoami` leaves the guid out only in odd replies; the session's own guid stands in.
+fn profile_of(wire: WireProfile, me: &str) -> Profile {
+    Profile {
+        user: UserId(wire.guid.unwrap_or_else(|| me.to_owned())),
+        name: wire.name,
+        avatar: wire.avatar_id.map(|id| MediaRef { id, kind: MediaKind::Avatar }),
+        status_text: wire.status_text,
+    }
 }
 
 /// The quote is cut to the protocol's bound when the request is encoded.
@@ -395,11 +573,12 @@ struct KnownChats {
 }
 
 impl KnownChats {
-    fn of(chats: &[WireChat], summaries: &[ChatSummary]) -> Self {
-        let private = chats
+    /// Private chats by partner come from the summaries' `partner`, so the guid of a person's
+    /// chat is derived once, in `summary()`.
+    fn of(summaries: &[ChatSummary]) -> Self {
+        let private = summaries
             .iter()
-            .filter(|c| c.kind == WireChatKind::Private)
-            .filter_map(|c| Some((c.partner_guid.clone()?, ChatId(c.id.clone()))))
+            .filter_map(|s| Some((s.partner.as_ref()?.0.clone(), s.id.clone())))
             .collect();
         let titles = summaries.iter().map(|s| (s.id.0.clone(), s.title.clone())).collect();
         Self { private, titles }
@@ -521,6 +700,7 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
         unread: chat.unread,
         muted: chat.muted,
         pinned_rank: None,
+        partner: chat.partner_guid.clone().map(UserId),
     }
 }
 
@@ -1151,7 +1331,7 @@ mod tests {
             chat("0/0/zz", WireChatKind::Private, None),
         ];
         let summaries: Vec<_> = chats.iter().map(|c| summary(c, "me", &users)).collect();
-        let known = KnownChats::of(&chats, &summaries);
+        let known = KnownChats::of(&summaries);
         assert_eq!(known.private, HashMap::from([("u1".to_owned(), ChatId("0/0/u1".into()))]));
         assert_eq!(known.titles.get("0/0/u1").map(String::as_str), Some("Ann"));
         assert_eq!(known.titles.get("0/1/g").map(String::as_str), Some("Без названия"));
@@ -1303,5 +1483,269 @@ mod tests {
         ));
         // Unbootstrapped: only a request that passed the guard reaches the connection check.
         assert!(matches!(backend.react(&ChatId("self".into()), 1, Some(code(1))).await, Err(BackendError::Protocol(_))));
+    }
+
+    fn wire_member(guid: &str, name: Option<&str>, role: WireMemberRole) -> WireMember {
+        WireMember { guid: guid.into(), display_name: name.map(Into::into), avatar_id: None, role, deleted: false }
+    }
+
+    fn members_page(from: usize, count: usize) -> WireMembers {
+        let users = (from..from + count).map(|i| wire_member(&format!("u{i}"), Some("n"), WireMemberRole::Member)).collect();
+        WireMembers { users, skipped: 0 }
+    }
+
+    /// Runs `list_members` against scripted pages; returns the result and the offsets asked.
+    async fn list_scripted(
+        pages: Vec<Result<WireMembers, BackendError>>,
+    ) -> (Result<Listed, BackendError>, Vec<Option<String>>) {
+        let script = std::cell::RefCell::new(std::collections::VecDeque::from(pages));
+        let offsets = std::cell::RefCell::new(Vec::new());
+        let listed = list_members(|offset| {
+            offsets.borrow_mut().push(offset);
+            let reply = script.borrow_mut().pop_front().expect("no page left in the script");
+            async move { reply }
+        })
+        .await;
+        (listed, offsets.into_inner())
+    }
+
+    #[test]
+    fn a_member_maps_role_name_avatar_and_the_me_flag() {
+        let users = HashMap::from([user("u3", "Cached")]);
+        let mut admin = wire_member("u1", Some("Ann"), WireMemberRole::Admin);
+        admin.avatar_id = Some("av1".into());
+        let ann = member(&admin, "me", &users);
+        assert_eq!(
+            ann,
+            Member {
+                user: UserId("u1".into()),
+                name: Some("Ann".into()),
+                avatar: Some(MediaRef { id: "av1".into(), kind: MediaKind::Avatar }),
+                role: MemberRole::Admin,
+                me: false,
+            }
+        );
+        // Any role but "admin", including one this client does not know, is a plain member.
+        for role in [WireMemberRole::Member, WireMemberRole::Other("subscriber".into())] {
+            assert_eq!(member(&wire_member("u2", Some("Bob"), role), "me", &users).role, MemberRole::Member);
+        }
+        assert!(member(&wire_member("me", Some("Me"), WireMemberRole::Member), "me", &users).me);
+        // A row the member reply left blank takes the cached name and avatar; a blank name counts as none.
+        let filled = member(&wire_member("u3", Some("  "), WireMemberRole::Member), "me", &users);
+        assert_eq!(filled.name.as_deref(), Some("Cached"));
+        assert_eq!(filled.avatar, Some(MediaRef { id: "av-u3".into(), kind: MediaKind::Avatar }));
+        assert_eq!(member(&wire_member("u9", None, WireMemberRole::Member), "me", &users).name, None);
+    }
+
+    #[tokio::test]
+    async fn a_short_first_page_is_the_whole_list() {
+        let (listed, offsets) = list_scripted(vec![Ok(members_page(0, 49))]).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.partial), (49, false));
+        assert_eq!(offsets, [None]);
+    }
+
+    #[tokio::test]
+    async fn full_pages_continue_from_the_last_guid_until_a_short_one() {
+        let (listed, offsets) =
+            list_scripted(vec![Ok(members_page(0, 50)), Ok(members_page(50, 50)), Ok(members_page(100, 7))]).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.partial), (107, false));
+        assert_eq!(offsets, [None, Some("u49".to_owned()), Some("u99".to_owned())]);
+        assert_eq!(listed.users[0].guid, "u0");
+        assert_eq!(listed.users[106].guid, "u106");
+    }
+
+    #[tokio::test]
+    async fn an_empty_page_after_a_full_one_ends_the_list_as_complete() {
+        let (listed, offsets) = list_scripted(vec![Ok(members_page(0, 50)), Ok(members_page(50, 0))]).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.partial), (50, false));
+        assert_eq!(offsets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_paging_bound_makes_the_list_partial() {
+        let pages = (0..MEMBER_PAGE_BOUND + 5).map(|i| Ok(members_page(i * 50, 50))).collect();
+        let (listed, offsets) = list_scripted(pages).await;
+        let listed = listed.unwrap();
+        assert_eq!(offsets.len(), 20, "at most 20 requests");
+        assert_eq!((listed.users.len(), listed.partial), (1000, true));
+    }
+
+    #[tokio::test]
+    async fn the_last_allowed_page_being_short_is_not_partial() {
+        let mut pages: Vec<_> = (0..MEMBER_PAGE_BOUND - 1).map(|i| Ok(members_page(i * 50, 50))).collect();
+        pages.push(Ok(members_page(950, 3)));
+        let (listed, offsets) = list_scripted(pages).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.partial, offsets.len()), (953, false, 20));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_ignores_the_offset_does_not_loop_and_the_list_is_partial() {
+        let (listed, offsets) = list_scripted(vec![Ok(members_page(0, 50)), Ok(members_page(0, 50))]).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.partial), (50, true));
+        assert_eq!(offsets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failing_later_page_fails_the_whole_load() {
+        let pages = vec![Ok(members_page(0, 50)), Err(BackendError::Network("down".into()))];
+        let (listed, _) = list_scripted(pages).await;
+        assert!(matches!(listed, Err(BackendError::Network(_))));
+    }
+
+    #[tokio::test]
+    async fn users_without_a_guid_count_toward_a_full_page() {
+        let mut first = members_page(0, 49);
+        first.skipped = 1;
+        let (listed, offsets) = list_scripted(vec![Ok(first), Ok(members_page(49, 2))]).await;
+        let listed = listed.unwrap();
+        assert_eq!((listed.users.len(), listed.skipped, listed.partial), (51, 1, false));
+        assert_eq!(offsets, [None, Some("u48".to_owned())]);
+    }
+
+    #[test]
+    fn a_refused_member_list_is_a_permanent_rejection_in_words() {
+        let refused = ProtoError::Protocol("get_chat_members failed: no_permissions_for_this_chat_operation".into());
+        assert_eq!(
+            members_error(refused),
+            BackendError::Rejected { reason: MEMBERS_UNAVAILABLE.into(), permanent: true }
+        );
+        // Anything else keeps the ordinary mapping.
+        assert_eq!(members_error(ProtoError::SessionExpired), BackendError::SessionExpired);
+        assert_eq!(members_error(ProtoError::Network("down".into())), BackendError::Network("down".into()));
+        assert_eq!(
+            members_error(ProtoError::Protocol("get_chat_members failed: bad_request".into())),
+            BackendError::Protocol("get_chat_members failed: bad_request".into())
+        );
+    }
+
+    fn private_row(partner: Option<&str>) -> ChatSummary {
+        ChatSummary {
+            id: ChatId("0/0/u1".into()),
+            kind: ChatKind::Private,
+            title: "Ann".into(),
+            avatar: Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }),
+            last_message: None,
+            unread: 0,
+            muted: false,
+            pinned_rank: None,
+            partner: partner.map(|p| UserId(p.into())),
+        }
+    }
+
+    #[test]
+    fn a_private_chat_is_one_row_from_the_chat_row() {
+        let members = private_members(&private_row(Some("u1")), "me");
+        assert_eq!(members.chat, ChatId("0/0/u1".into()));
+        assert!(!members.partial);
+        assert_eq!(
+            members.users,
+            [Member {
+                user: UserId("u1".into()),
+                name: Some("Ann".into()),
+                avatar: Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }),
+                role: MemberRole::Member,
+                me: false,
+            }]
+        );
+        assert!(private_members(&private_row(Some("me")), "me").users[0].me);
+        assert!(private_members(&private_row(None), "me").users.is_empty());
+    }
+
+    #[test]
+    fn the_summary_carries_the_partner_of_a_private_chat_only() {
+        let chat = |kind, partner: Option<&str>| WireChat {
+            id: "0/0/x".into(),
+            kind,
+            title: None,
+            avatar_id: None,
+            partner_guid: partner.map(Into::into),
+            last_activity: None,
+            unread: 0,
+            muted: false,
+            last_message: None,
+            raw: serde_json::Value::Null,
+        };
+        let users = HashMap::new();
+        assert_eq!(summary(&chat(WireChatKind::Private, Some("u1")), "me", &users).partner, Some(UserId("u1".into())));
+        assert_eq!(summary(&chat(WireChatKind::Private, None), "me", &users).partner, None);
+        assert_eq!(summary(&chat(WireChatKind::Group, None), "me", &users).partner, None);
+    }
+
+    #[test]
+    fn the_profile_takes_name_avatar_and_status_and_falls_back_to_the_session_guid() {
+        let wire = WireProfile {
+            guid: Some("g".into()),
+            name: Some("Me Myself".into()),
+            avatar_id: Some("av".into()),
+            status_text: Some("busy".into()),
+        };
+        assert_eq!(
+            profile_of(wire, "me"),
+            Profile {
+                user: UserId("g".into()),
+                name: Some("Me Myself".into()),
+                avatar: Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }),
+                status_text: Some("busy".into()),
+            }
+        );
+        let bare = WireProfile { guid: None, name: None, avatar_id: None, status_text: None };
+        assert_eq!(
+            profile_of(bare, "me"),
+            Profile { user: UserId("me".into()), name: None, avatar: None, status_text: None }
+        );
+    }
+
+    #[test]
+    fn each_manage_error_maps_to_failed_or_unknown() {
+        assert_eq!(
+            create_error(ManageError::NotSent(ProtoError::Network("no route".into()))),
+            CreateError::Failed(BackendError::Network("no route".into()))
+        );
+        assert_eq!(
+            create_error(ManageError::Rejected(ProtoError::Protocol("create_private_chat failed: nope".into()))),
+            CreateError::Failed(BackendError::Protocol("create_private_chat failed: nope".into()))
+        );
+        assert_eq!(
+            create_error(ManageError::Rejected(ProtoError::SessionExpired)),
+            CreateError::Failed(BackendError::SessionExpired)
+        );
+        assert_eq!(
+            create_error(ManageError::Unknown(ProtoError::Network("timed out".into()))),
+            CreateError::Unknown("network error: timed out".into())
+        );
+    }
+
+    #[test]
+    fn write_only_chat_refuses_creation_whatever_the_chat() {
+        assert_eq!(creation_guard(None), Ok(()));
+        assert!(matches!(
+            creation_guard(Some(&ChatId("self".into()))),
+            Err(BackendError::Rejected { permanent: true, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_guarded_creation_never_reaches_the_connection() {
+        let user = UserId("u1".into());
+        let guarded = YandexBackend::new(test_session(), Some(ChatId("self".into())));
+        // Unbootstrapped: anything that got past the guard would fail with "not bootstrapped".
+        assert!(matches!(
+            guarded.create_private_chat(&user).await,
+            Err(CreateError::Failed(BackendError::Rejected { permanent: true, .. }))
+        ));
+        let open = YandexBackend::new(test_session(), None);
+        assert!(matches!(open.create_private_chat(&user).await, Err(CreateError::Failed(BackendError::Protocol(_)))));
+    }
+
+    #[tokio::test]
+    async fn members_and_profile_need_a_connection() {
+        let backend = YandexBackend::new(test_session(), None);
+        assert!(matches!(backend.members(&private_row(Some("u1"))).await, Err(BackendError::Protocol(_))));
+        assert!(matches!(backend.profile().await, Err(BackendError::Protocol(_))));
     }
 }

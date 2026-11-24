@@ -11,5 +11,5 @@ pub mod reactions;
 #[cfg(test)]
 mod fixtures;
 
-pub use backend::{Backend, BackendError, LiveEvent};
+pub use backend::{Backend, BackendError, CreateError, LiveEvent};
 pub use client::{ChatClient, ClientConfig};
