@@ -8,6 +8,7 @@ use crate::backend::{Backend, BackendError, LiveEvent};
 use crate::cache::{self, Cache, CacheError, OutboxEntry};
 use crate::model::*;
 use crate::paths::{commit_partial, create_partial, escape_component, media_dir, sanitize_file_name};
+use crate::reactions::{ReactionCode, Reactions, ReactionsUpdate};
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, DirBuilder, OpenOptions};
@@ -33,6 +34,8 @@ const TYPING_INTERVAL: Duration = Duration::from_secs(4);
 const OFFLINE_REASON: &str = "Нет соединения";
 /// Why an edit was refused: the message is unknown, forwarded, or a reply that cannot be repeated.
 const EDIT_REFUSED_REASON: &str = "Это сообщение нельзя изменить";
+/// Why a reaction was not even attempted: the message is unknown, still unconfirmed or deleted.
+const REACTION_REFUSED_REASON: &str = "На это сообщение нельзя отреагировать";
 /// Row preview of a deleted last message, as the backend's chat summaries word it.
 const DELETED_PREVIEW: &str = "Сообщение удалено";
 /// Why a send was refused: it could not be stored, so it would not survive a restart.
@@ -43,6 +46,7 @@ const SEARCH_LIMIT: usize = 10;
 enum LiveChange {
     Upsert(Message),
     Delete(MessageTs),
+    Reactions(MessageTs, ReactionsUpdate),
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +154,8 @@ enum Input {
 enum Action {
     Edit { timestamp: MessageTs, text: String, reply: Option<ReplyTarget> },
     Delete(MessageTs),
+    /// `overlay` is the state the user was shown; its `mine` is the reaction asked for.
+    React { timestamp: MessageTs, overlay: Reactions },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -208,6 +214,9 @@ struct Engine<B> {
     typing_sent: HashMap<ChatId, tokio::time::Instant>,
     /// The newest search asked for and still awaited; an answer for any other id is dropped.
     search_latest: Option<SearchId>,
+    /// Reaction requests not yet answered, per message; `true` once a server update replaced the
+    /// overlay (the request's own result then no longer decides what is shown).
+    reaction_inflight: HashMap<(ChatId, MessageTs), bool>,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -269,13 +278,24 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
         match change {
             LiveChange::Upsert(message) if in_range(message.timestamp) => {
                 match messages.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
-                    Ok(i) => messages[i] = message.clone(),
+                    Ok(i) => {
+                        // A reaction-less copy (an edit) must keep what the snapshot or an
+                        // earlier replayed event established for this row.
+                        let mut replacement = message.clone();
+                        replacement.inherit_reactions(&messages[i]);
+                        messages[i] = replacement;
+                    }
                     Err(i) => messages.insert(i, message.clone()),
                 }
             }
             LiveChange::Delete(ts) if in_range(*ts) => {
                 if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
                     messages[i].body = MessageBody::Deleted;
+                }
+            }
+            LiveChange::Reactions(ts, update) if in_range(*ts) => {
+                if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
+                    messages[i].reactions.apply(update);
                 }
             }
             _ => {}
@@ -453,6 +473,7 @@ impl<B: Backend> Engine<B> {
             read_deferred: HashMap::new(),
             typing_sent: HashMap::new(),
             search_latest: None,
+            reaction_inflight: HashMap::new(),
         };
         tokio::spawn(pump_commands(commands, inputs));
 
@@ -561,6 +582,7 @@ impl<B: Backend> Engine<B> {
             Command::Retry(payload) => self.retry(&payload),
             Command::Edit { chat, timestamp, text } => self.edit(chat, timestamp, text),
             Command::Delete { chat, timestamp } => self.run_action(chat, Action::Delete(timestamp)),
+            Command::ToggleReaction { chat, timestamp, code } => self.toggle_reaction(chat, timestamp, code),
             Command::MarkRead { chat, timestamp } => self.mark_read(chat, timestamp),
             Command::Typing(chat) => self.typing(chat),
             Command::SaveDraft(draft) => self.save_draft(draft),
@@ -681,6 +703,7 @@ impl<B: Backend> Engine<B> {
         self.account = account;
         self.open_chat = None;
         self.live_log.clear();
+        self.reaction_inflight.clear();
         self.outbox = self.db(self.cache.outbox()).unwrap_or_default();
         self.outbox_inflight = None;
         self.read_marks.clear();
@@ -709,11 +732,31 @@ impl<B: Backend> Engine<B> {
 
     fn handle_live(&mut self, event: LiveEvent) {
         match event {
-            LiveEvent::MessageUpserted(message) => {
+            LiveEvent::MessageUpserted(mut message) => {
+                // The copy of an edit push or a reaction-less history row says nothing about
+                // reactions, so it must not erase the ones already known.
+                if let Some(cached) = self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
+                    message.inherit_reactions(&cached);
+                }
                 self.record_live(&message.chat, LiveChange::Upsert(message.clone()));
                 self.db(self.cache.upsert_message(&message));
                 self.emit(ClientEvent::MessageUpserted(message.clone()));
                 self.update_preview(&message);
+            }
+            LiveEvent::ReactionsChanged { chat, timestamp, update } => {
+                // Recorded even for an uncached message: a history chunk requested before this
+                // event must not undo it (see `replay_live`).
+                self.record_live(&chat, LiveChange::Reactions(timestamp, update.clone()));
+                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
+                if message.reactions.apply(&update) {
+                    self.db(self.cache.upsert_message(&message));
+                    // The server's state replaces the user's overlay, so the result of their own
+                    // request no longer decides what is shown.
+                    if let Some(superseded) = self.reaction_inflight.get_mut(&(chat.clone(), timestamp)) {
+                        *superseded = true;
+                    }
+                    self.emit(ClientEvent::ReactionsChanged { chat, timestamp, reactions: message.reactions });
+                }
             }
             LiveEvent::MessageDeleted { chat, timestamp } => {
                 self.record_live(&chat, LiveChange::Delete(timestamp));
@@ -1011,8 +1054,34 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    /// Edits and deletions target a message by timestamp, so they are never queued: a replay
-    /// could undo a later change.
+    /// The user chose `code` on a message. The cached, server-confirmed state decides whether
+    /// that adds, replaces or removes their reaction; the UI is shown the result at once (an
+    /// overlay that is not cached) and the request is attempted once, never queued: a replay
+    /// could undo a later choice of the same user.
+    fn toggle_reaction(&mut self, chat: ChatId, timestamp: MessageTs, code: ReactionCode) {
+        let cached = self
+            .db(self.cache.message(&chat, timestamp))
+            .flatten()
+            .filter(|m| m.delivery == Delivery::Sent && m.body != MessageBody::Deleted);
+        let Some(cached) = cached else {
+            return self.emit(ClientEvent::ActionFailed { chat, reason: REACTION_REFUSED_REASON.into() });
+        };
+        if !self.is_online() {
+            return self.emit(ClientEvent::ActionFailed { chat, reason: OFFLINE_REASON.into() });
+        }
+        // A request is unconfirmed: the cached state is not what the user sees, so a second
+        // choice has nothing sound to toggle.
+        if self.reaction_inflight.contains_key(&(chat.clone(), timestamp)) {
+            return;
+        }
+        let (overlay, _) = cached.reactions.toggled(code);
+        self.reaction_inflight.insert((chat.clone(), timestamp), false);
+        self.emit(ClientEvent::ReactionsChanged { chat: chat.clone(), timestamp, reactions: overlay.clone() });
+        self.run_action(chat, Action::React { timestamp, overlay });
+    }
+
+    /// Edits, deletions and reactions target a message by timestamp, so they are never queued:
+    /// a replay could undo a later change.
     fn run_action(&mut self, chat: ChatId, action: Action) {
         if !self.is_online() {
             return self.emit(ClientEvent::ActionFailed { chat, reason: OFFLINE_REASON.into() });
@@ -1022,12 +1091,18 @@ impl<B: Backend> Engine<B> {
             let result = match &action {
                 Action::Edit { timestamp, text, reply } => backend.edit(&chat, *timestamp, text, reply.as_ref()).await,
                 Action::Delete(timestamp) => backend.delete(&chat, *timestamp).await,
+                Action::React { timestamp, overlay } => backend.react(&chat, *timestamp, overlay.mine).await,
             };
             post(&inputs, Input::Action { chat, action, result });
         });
     }
 
     fn handle_action(&mut self, chat: ChatId, action: Action, result: Result<(), BackendError>) {
+        // Whether a server update replaced the overlay while the request was out.
+        let superseded = match &action {
+            Action::React { timestamp, .. } => self.reaction_inflight.remove(&(chat.clone(), *timestamp)),
+            _ => None,
+        };
         match result {
             Ok(()) => match action {
                 Action::Edit { timestamp, text, .. } => {
@@ -1037,10 +1112,28 @@ impl<B: Backend> Engine<B> {
                     self.handle_live(LiveEvent::MessageUpserted(message));
                 }
                 Action::Delete(timestamp) => self.handle_live(LiveEvent::MessageDeleted { chat, timestamp }),
+                // Only now does the cache learn the choice (the version stays, so any later
+                // push overwrites it); a restart mid-request must not show an unseen reaction.
+                Action::React { timestamp, overlay } if superseded != Some(true) => {
+                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
+                    message.reactions = overlay;
+                    self.db(self.cache.upsert_message(&message));
+                }
+                Action::React { .. } => {}
             },
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
-                tracing::warn!(chat = %chat.0, %error, "edit or deletion failed");
+                tracing::warn!(chat = %chat.0, %error, "edit, deletion or reaction failed");
+                if let Action::React { timestamp, .. } = &action
+                    && superseded == Some(false)
+                    && let Some(message) = self.db(self.cache.message(&chat, *timestamp)).flatten()
+                {
+                    self.emit(ClientEvent::ReactionsChanged {
+                        chat: chat.clone(),
+                        timestamp: *timestamp,
+                        reactions: message.reactions,
+                    });
+                }
                 let reason = match error {
                     BackendError::Rejected { reason, .. } => reason,
                     BackendError::Network(_) => OFFLINE_REASON.into(),
@@ -1245,6 +1338,16 @@ impl<B: Backend> Engine<B> {
             return chunk;
         }
         let raced = raced(&self.live_log, chat, mark);
+        // A server row that carries no reactions must not erase the cached ones; the rows it
+        // replaces are read once, before they are overwritten.
+        if let (Some(min), Some(max)) = (min, max) {
+            let cached = self.db(self.cache.messages_between(chat, min, max)).unwrap_or_default();
+            for message in &mut chunk.messages {
+                if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
+                    message.inherit_reactions(&cached[i]);
+                }
+            }
+        }
         let (lo, hi, history_start) = match before {
             None => {
                 // Live messages newer than the server snapshot stay cached: keep everything
@@ -1438,6 +1541,7 @@ impl<B: Backend> Engine<B> {
 mod tests {
     use super::*;
     use crate::fixtures::{chat, id, msg};
+    use crate::reactions::ReactionCount;
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::Instant;
@@ -1450,6 +1554,7 @@ mod tests {
         Delete(ChatId, MessageTs),
         Seen(ChatId, MessageTs),
         Typing(ChatId),
+        React(ChatId, MessageTs, Option<ReactionCode>),
     }
 
     /// Server timestamp `send_text` answers with when no result is scripted.
@@ -1495,6 +1600,8 @@ mod tests {
         search_gate: Option<Arc<tokio::sync::Notify>>,
         /// Searches answered so far (after the gate).
         search_done: usize,
+        /// When set, `react` records its call, then waits here before answering.
+        react_gate: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[derive(Clone, Default)]
@@ -1630,6 +1737,19 @@ mod tests {
         }
         async fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
             self.record(Call::Delete(chat.clone(), timestamp))
+        }
+        async fn react(
+            &self,
+            chat: &ChatId,
+            timestamp: MessageTs,
+            target: Option<ReactionCode>,
+        ) -> Result<(), BackendError> {
+            let result = self.record(Call::React(chat.clone(), timestamp, target));
+            let gate = self.state().react_gate.clone();
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            result
         }
         async fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
             self.record(Call::Seen(chat.clone(), timestamp))
@@ -2922,6 +3042,339 @@ mod tests {
     #[test]
     fn editing_an_uncached_message_is_refused() {
         assert_edit_refused(&start_with_own_message(|_| {}), 99);
+    }
+
+    // -- reactions --------------------------------------------------------------------------
+
+    const LIKE: ReactionCode = ReactionCode(100101);
+    const FIRE: ReactionCode = ReactionCode(100102);
+
+    fn counts(pairs: &[(ReactionCode, u32)]) -> Vec<ReactionCount> {
+        pairs.iter().map(|&(code, count)| ReactionCount { code, count }).collect()
+    }
+
+    fn reactions(pairs: &[(ReactionCode, u32)], mine: Option<ReactionCode>, version: i64) -> Reactions {
+        Reactions { counts: counts(pairs), mine, version: Some(version) }
+    }
+
+    /// Message 3 of chat "a" with two LIKEs of others and the server's version 5.
+    fn reacted() -> Message {
+        let mut message = msg("a", 3, "hi");
+        message.reactions = reactions(&[(LIKE, 2)], None, 5);
+        message
+    }
+
+    /// `cached` is in the cache at startup, `server` is what the server's history answers.
+    fn start_reacting(cached: Message, server: Message, configure: impl FnOnce(&mut FakeState)) -> Harness {
+        start(
+            |s, dir| {
+                seed_cache(dir, &[chat("a", Some(3), None)], "a", std::slice::from_ref(&cached), true);
+                s.chats = vec![chat("a", Some(3), None)];
+                s.history.insert(id("a"), vec![server]);
+                configure(s);
+            },
+            50,
+        )
+    }
+
+    /// Online, catch-up done and its events consumed.
+    fn start_reacting_online(cached: Message, configure: impl FnOnce(&mut FakeState)) -> Harness {
+        let h = start_reacting(cached.clone(), cached, configure);
+        h.online();
+        h.history("catch-up");
+        h.quiet();
+        h.drain();
+        h
+    }
+
+    fn toggle(h: &Harness, timestamp: MessageTs, code: ReactionCode) {
+        h.client.send(Command::ToggleReaction { chat: id("a"), timestamp, code });
+    }
+
+    fn next_reactions(h: &Harness, what: &str) -> (MessageTs, Reactions) {
+        match h.next(what, |e| matches!(e, ClientEvent::ReactionsChanged { .. })) {
+            ClientEvent::ReactionsChanged { chat, timestamp, reactions } => {
+                assert_eq!(chat, id("a"));
+                (timestamp, reactions)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn shown(events: &[ClientEvent]) -> Vec<Reactions> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ClientEvent::ReactionsChanged { reactions, .. } => Some(reactions.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn reaction_push(timestamp: MessageTs, pairs: &[(ReactionCode, u32)], version: i64) -> LiveEvent {
+        let update = ReactionsUpdate { counts: counts(pairs), version: Some(version), mine: None };
+        LiveEvent::ReactionsChanged { chat: id("a"), timestamp, update }
+    }
+
+    fn cached_reactions(h: &Harness) -> Reactions {
+        h.cache().message(&id("a"), 3).unwrap().unwrap().reactions
+    }
+
+    fn react_gate() -> Arc<tokio::sync::Notify> {
+        Arc::new(tokio::sync::Notify::new())
+    }
+
+    #[test]
+    fn a_choice_shows_the_overlay_at_once_and_the_confirmed_request_writes_the_cache() {
+        let gate = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(gate.clone()));
+        toggle(&h, 3, FIRE);
+        let overlay = reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5);
+        assert_eq!(next_reactions(&h, "overlay"), (3, overlay.clone()));
+        h.wait_for("the request", |s| !s.calls.is_empty());
+        assert_eq!(cached_reactions(&h), reacted().reactions, "an unconfirmed choice is not cached");
+        gate.notify_one();
+        h.quiet();
+        assert_eq!(cached_reactions(&h), overlay);
+        assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, Some(FIRE))]);
+        assert_eq!(h.drain(), [], "the confirmation emits nothing and touches no preview");
+    }
+
+    #[test]
+    fn choosing_the_own_type_again_removes_it_and_another_type_replaces_it() {
+        let mut message = reacted();
+        message.reactions = reactions(&[(LIKE, 2)], Some(LIKE), 5);
+        let h = start_reacting_online(message, |_| {});
+        toggle(&h, 3, LIKE);
+        assert_eq!(next_reactions(&h, "removal"), (3, reactions(&[(LIKE, 1)], None, 5)));
+        h.wait_for("the removal", |s| s.calls.len() == 1);
+        h.quiet();
+        toggle(&h, 3, FIRE);
+        assert_eq!(next_reactions(&h, "choice"), (3, reactions(&[(LIKE, 1), (FIRE, 1)], Some(FIRE), 5)));
+        h.wait_for("the choice", |s| s.calls.len() == 2);
+        assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, None), Call::React(id("a"), 3, Some(FIRE))]);
+    }
+
+    #[test]
+    fn a_rejected_request_rolls_the_overlay_back_and_reports_the_reason() {
+        let h = start_reacting_online(reacted(), |s| s.write_results = VecDeque::from([Err(rejected("NO_PERMISSION", true))]));
+        toggle(&h, 3, FIRE);
+        let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
+        assert_eq!(shown(&events), [reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5), reacted().reactions]);
+        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason: "NO_PERMISSION".into() }));
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+        // The entry is gone: the user may choose again.
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "second attempt");
+    }
+
+    #[test]
+    fn a_choice_while_offline_is_refused_at_once_without_an_overlay() {
+        let h = start_reacting(reacted(), reacted(), |s| {
+            s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+        });
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        toggle(&h, 3, FIRE);
+        let events = h.until("refusal", |e| matches!(e, ClientEvent::ActionFailed { .. }));
+        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason: "Нет соединения".into() }));
+        assert!(shown(&events).is_empty());
+        h.quiet();
+        assert!(h.fake.calls().is_empty());
+        assert!(shown(&h.drain()).is_empty());
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+    }
+
+    #[test]
+    fn a_second_choice_while_one_is_unconfirmed_sends_nothing() {
+        let gate = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(gate.clone()));
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "overlay");
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        toggle(&h, 3, LIKE);
+        h.quiet();
+        assert_eq!(h.fake.calls().len(), 1);
+        assert_eq!(h.drain(), [], "the second choice shows nothing");
+        gate.notify_one();
+        h.quiet();
+        assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, Some(FIRE))]);
+        // Confirmed: the next choice is asked for again, from the confirmed state.
+        toggle(&h, 3, FIRE);
+        assert_eq!(next_reactions(&h, "removal").1, reactions(&[(LIKE, 2)], None, 5));
+        gate.notify_one();
+        h.wait_for("the removal", |s| s.calls.len() == 2);
+    }
+
+    fn assert_reaction_refused(h: &Harness, timestamp: MessageTs) {
+        toggle(h, timestamp, FIRE);
+        let events = h.until("refusal", |e| matches!(e, ClientEvent::ActionFailed { .. }));
+        let reason = "На это сообщение нельзя отреагировать".to_owned();
+        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason }));
+        assert!(shown(&events).is_empty());
+        h.quiet();
+        assert!(h.fake.calls().is_empty(), "no backend call: {:?}", h.fake.calls());
+        assert!(shown(&h.drain()).is_empty());
+    }
+
+    #[test]
+    fn a_pending_failed_deleted_or_unknown_message_takes_no_reaction() {
+        let mut pending = reacted();
+        pending.delivery = Delivery::Pending(PayloadId("p".into()));
+        let mut failed = reacted();
+        failed.delivery = Delivery::Failed { payload: PayloadId("p".into()), reason: "no".into() };
+        let mut deleted = reacted();
+        deleted.body = MessageBody::Deleted;
+        for message in [pending, failed, deleted] {
+            assert_reaction_refused(&start_reacting_online(message, |_| {}), 3);
+        }
+        assert_reaction_refused(&start_reacting_online(reacted(), |_| {}), 99);
+    }
+
+    #[test]
+    fn a_stale_reaction_event_changes_nothing_and_a_newer_one_replaces_the_state() {
+        let h = start_reacting_online(reacted(), |_| {});
+        h.fake.push(reaction_push(3, &[(FIRE, 9)], 5));
+        h.fake.push(reaction_push(3, &[(FIRE, 9)], 4));
+        h.fake.push(reaction_push(3, &[(FIRE, 1)], 6));
+        // The first event shown is the newer one: the stale two emitted nothing.
+        assert_eq!(next_reactions(&h, "newer event"), (3, reactions(&[(FIRE, 1)], None, 6)));
+        assert_eq!(cached_reactions(&h), reactions(&[(FIRE, 1)], None, 6));
+    }
+
+    #[test]
+    fn a_newer_event_replaces_the_overlay_and_a_later_failure_rolls_nothing_back() {
+        let gate = react_gate();
+        let h = start_reacting_online(reacted(), |s| {
+            s.react_gate = Some(gate.clone());
+            s.write_results = VecDeque::from([Err(rejected("NO_PERMISSION", true))]);
+        });
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "overlay");
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 2)], 6));
+        let server = reactions(&[(LIKE, 2), (FIRE, 2)], None, 6);
+        assert_eq!(next_reactions(&h, "server state"), (3, server.clone()));
+        gate.notify_one();
+        let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
+        assert!(shown(&events).is_empty(), "the pushed state is the truth: {events:?}");
+        assert_eq!(cached_reactions(&h), server);
+    }
+
+    #[test]
+    fn a_newer_event_wins_over_a_request_that_is_confirmed_later() {
+        let gate = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(gate.clone()));
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "overlay");
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 2)], 6));
+        let server = reactions(&[(LIKE, 2), (FIRE, 2)], None, 6);
+        assert_eq!(next_reactions(&h, "server state"), (3, server.clone()));
+        gate.notify_one();
+        h.quiet();
+        assert_eq!(cached_reactions(&h), server, "the confirmation must not write the overlay over it");
+        assert_eq!(h.drain(), []);
+    }
+
+    #[test]
+    fn a_reaction_event_during_a_history_fetch_survives_its_snapshot() {
+        let gate = react_gate();
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(3), None)];
+                s.history.insert(id("a"), vec![reacted()]);
+                s.history_gate = Some(gate.clone());
+            },
+            50,
+        );
+        h.online();
+        h.client.send(Command::OpenChat(id("a")));
+        h.wait_for("the history request", |s| !s.history_calls.is_empty());
+        // The server snapshot is taken (version 5); the event is newer and arrives before it.
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 1)], 6));
+        h.quiet();
+        gate.notify_one();
+        let chunk = h.history("raced history");
+        let expected = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
+        assert_eq!(chunk.messages[0].reactions, expected);
+        assert_eq!(cached_reactions(&h), expected);
+    }
+
+    #[test]
+    fn a_reaction_event_then_an_edit_during_a_history_fetch_both_survive_its_snapshot() {
+        let gate = react_gate();
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(3), None)];
+                s.history.insert(id("a"), vec![reacted()]);
+                s.history_gate = Some(gate.clone());
+            },
+            50,
+        );
+        h.online();
+        h.client.send(Command::OpenChat(id("a")));
+        h.wait_for("the history request", |s| !s.history_calls.is_empty());
+        // Nothing is cached, so neither event can inherit from the cache: only the replay can.
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 1)], 6));
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        h.upserted("edit");
+        gate.notify_one();
+        let chunk = h.history("raced history");
+        let expected = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
+        let row = &chunk.messages[0];
+        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), expected.clone()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), expected));
+    }
+
+    #[test]
+    fn an_edit_push_and_a_history_chunk_without_reactions_keep_the_cached_ones() {
+        let h = start_reacting(reacted(), msg("a", 3, "hi"), |_| {});
+        h.online();
+        let chunk = h.history("catch-up");
+        assert_eq!(chunk.messages[0].reactions, reacted().reactions);
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        let upserted = h.upserted("edit");
+        assert_eq!((upserted.body, upserted.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+    }
+
+    #[test]
+    fn a_history_row_with_reactions_replaces_the_cached_ones() {
+        let mut server = reacted();
+        server.reactions = reactions(&[(FIRE, 1)], None, 7);
+        let h = start_reacting(reacted(), server.clone(), |_| {});
+        h.online();
+        assert_eq!(h.history("catch-up").messages[0].reactions, server.reactions);
+        assert_eq!(cached_reactions(&h), server.reactions);
+    }
+
+    #[test]
+    fn a_reaction_event_for_an_uncached_message_is_ignored() {
+        let h = start_reacting_online(reacted(), |_| {});
+        h.fake.push(reaction_push(99, &[(FIRE, 1)], 1));
+        h.fake.push(reaction_push(3, &[(FIRE, 1)], 6));
+        assert_eq!(next_reactions(&h, "event for the cached message").0, 3);
+        assert_eq!(h.cache().message(&id("a"), 99).unwrap(), None);
+        assert_eq!(h.drain(), []);
+    }
+
+    #[test]
+    fn a_reaction_event_touches_neither_the_preview_nor_typing() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let row = h.cache().chat(&id("a")).unwrap().unwrap();
+        h.fake.push(reaction_push(3, &[(LIKE, 3)], 6));
+        next_reactions(&h, "event");
+        h.quiet();
+        assert_eq!(h.drain(), [], "no upsert, row update or typing event");
+        assert_eq!(h.cache().chat(&id("a")).unwrap().unwrap(), row);
     }
 
     // -- read markers -----------------------------------------------------------------------
