@@ -27,8 +27,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 |------|-------|------------|------|
 | MD-P | MD 1.1 (+ `backend_error` arm) | proto `media.rs`, `net.rs`, `error.rs`, `client.rs`; `yandex_backend.rs` (one hunk) | in progress (md/1.1) |
 | MD-K | MD 2.2 | chat-core `paths.rs`, `lib.rs` (one `mod` line) | none |
-| MD-C | MD 2.1 (done), 3.1 (done), 4.1 (done), 2.3 (in progress), then 4.3, then 4.2 | `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `composer.rs`, `timeline.rs`, `yandex_backend.rs`, `store.rs`, `main.rs`, `tests.rs`, `viewer.rs`, `desktop.rs` | MD-P, MD-K merged; merges to `main` after 4.2 |
-| MD-D | MD 5.1, 5.2 | `README.md` | all MD units |
+| MD-C | MD 2.1, 2.3, 3.1, 4.1, 4.3, 4.2 | merged to `main` (86dd403) | done |
+| MD-D | MD 5.1 (merged, ad90cc4), 5.2 (manual) | `README.md` | 5.2 after MD-C |
 | MD-R1 / R3 | MD 1.2 (`bt-probe.rs`), MD 1.3 (`design.md`, maybe `media.rs`) | | MD-P; 1.2 after GS 1.3 on `bt-probe.rs` |
 | GS-P1..P3 | GS 1.2, 1.3, 1.4 | 1.2: `search.rs`, `registry.rs`, proto `client.rs`, `lib.rs`; 1.3: `bt-probe.rs`, fixture [live]; 1.4: `search.rs`, `wire_fixtures.rs` | 1.2 after MD-P (proto `client.rs`) |
 | GS-A | GS 2.1 (done, on `integ/gs`), 2.2, 3.1, 3.2, 3.3, 3.4 | `model.rs`, `backend.rs`, chat-core `client.rs`, `yandex_backend.rs`, `store.rs`, `search_results.rs`, `main.rs`, `desktop.rs`, `tests.rs` | GS 1.4 merged; core lane free (rule 6: `ChatStore::search`, `cancel_search`, `search_state` are first called by 3.4, so GS-C and GS-U are one unit) |
@@ -73,15 +73,15 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
 | 1.2 | done (e5f2dde) | 1.1 | MD-R1 |
 | 1.3 | done (merge of `md/1.3`, docs only; live re-check: a 57.5 MiB `MiscFile` and two images saved in full, sizes match, no change to `media.rs`) | 1.2 | MD-R3 |
-| 2.1 | done on `integ/md` (772b224) | — | MD-C |
+| 2.1 | done (86dd403, unit MD-C) | — | MD-C |
 | 2.2 | done (e8e533e) | — | MD-K |
-| 2.3 | done on `integ/md` (da5e226) | 2.1, 2.2 | MD-C |
-| 3.1 | done on `integ/md` (f24ea97); the "download is not wired yet" placeholder is gone | 2.1 | MD-C |
-| 4.1 | done on `integ/md` (1447dbf); `ChatStore::download`/`cancel_download`/`download_state` have no caller until 4.3 and 4.2 (unit MD-C) | 2.1 | MD-C |
-| 4.3 | done on `integ/md` (9d28a4b); only warning left: `Desktop::open_viewer` unused, consumed by 4.2 | 2.1, 4.1, 2.3 | MD-C |
-| 4.2 | in progress (`md/4.2`, base `md/4.3`); merges into `integ/md`, then MD-C goes to `main` | 4.1, 4.3 | MD-C |
-| 5.1 | done on `md/5.1` (7e9858a, parked); merges to `main` right after MD-C (README only, describes a feature that is then on `main`) | — | MD-D |
-| 5.2 | blocked-by MD-C on `main` | all | MD-D [live] manual run with the `main` build |
+| 2.3 | done (86dd403) | 2.1, 2.2 | MD-C |
+| 3.1 | done (86dd403); the "download is not wired yet" placeholder is gone | 2.1 | MD-C |
+| 4.1 | done (86dd403) | 2.1 | MD-C |
+| 4.3 | done (86dd403); follow-up `md/4.3-fit` (viewer picture fits the window; `desktop.rs`, `tests.rs`, `viewer.rs`) in flight, not merged | 2.1, 4.1, 2.3 | MD-C |
+| 4.2 | done (86dd403; valid PNG test fixture) | 4.1, 4.3 | MD-C |
+| 5.1 | done (ad90cc4, README) | — | MD-D |
+| 5.2 | ready [live] manual run with the `main` build | all | MD-D |
 
 ## add-chat-members-and-creation (CM)
 
@@ -131,9 +131,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`): files free, live session free. It also unblocks CM 1.3, then CM 2.2.
+- GS-A (GS 2.1 re-applied from `integ/gs`, then 2.2, 3.1, 3.2, 3.3, 3.4): all gates met (GS 1.4 on `main`, MD-C on `main`); **but** `md/4.3-fit` (in flight) edits `desktop.rs`, `tests.rs`, `viewer.rs`, which GS-A's core-lane and UI files include, so GS-A starts when `md/4.3-fit` is merged (or is declared withdrawn).
+- MD 5.2 [live, manual] (`main` build; owns no files).
+- CM 1.2 [live] (`bt-probe.rs`, `README.md`, fixtures, `design.md`; started on `cm/1.2`, no commits yet). It also unblocks CM 1.3, then CM 2.2.
 
-In flight: MD 4.2 (`md/4.2`). MD-C (on `integ/md`: 2.1, 2.3, 3.1, 4.1, 4.3 done, then 4.2) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`, `viewer.rs`, `desktop.rs`), so GS-A (all its gates except the lane are met), MR-B and CM-C1 wait for it. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2; CM 0.1, 1.1, 2.1; MR 1.1.
+In flight: `md/4.3-fit`, `cm/1.2`. Merged so far: GS 1.1–1.4; MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3), 5.1; CM 0.1, 1.1, 2.1; MR 1.1. MR-B and CM-C1 wait for GS-A on the core lane.
 
 ## Needs the user
 
