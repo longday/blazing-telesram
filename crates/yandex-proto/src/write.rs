@@ -383,7 +383,10 @@ mod tests {
         }
         assert_eq!(
             crate::request::ALLOWED_METHODS,
-            ["request_user", "get_users_data", "history", "subscribe", "search"]
+            [
+                "request_user", "get_users_data", "history", "subscribe", "search", "whoami", "get_chat_members",
+                "get_group_members",
+            ]
         );
     }
 
