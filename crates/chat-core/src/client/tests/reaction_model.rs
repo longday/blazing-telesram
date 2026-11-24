@@ -136,67 +136,144 @@ fn toggled_to_fire(mut counts: Vec<ReactionCount>, mine: Option<ReactionCode>) -
     (counts, Some(FIRE))
 }
 
-/// What the invariant says the cache holds after `trace`: counts, version and `mine`.
-fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, i64, Option<ReactionCode>) {
-    struct Held {
-        version: i64,
-        mine: Option<ReactionCode>,
-        /// The user's confirmed overlay is what the counts are.
-        overlay: Option<Vec<ReactionCount>>,
+/// The reaction state of message 3 as the reference tracks it.
+#[derive(Clone)]
+struct Held {
+    version: Option<i64>,
+    mine: Option<ReactionCode>,
+    /// The user's confirmed overlay is what the counts are.
+    overlay: Option<Vec<ReactionCount>>,
+}
+
+impl Held {
+    /// A message the cache gets without reaction state (a live copy of a message it dropped).
+    fn fresh() -> Held {
+        Held { version: None, mine: None, overlay: None }
     }
-    let mut held = Held { version: START, mine: Some(LIKE), overlay: None };
-    let (mut base, mut started_with) = (None, None);
-    // An input of version `v` that says `says` about `mine` (`None`: does not say).
-    let offer = |held: &mut Held, v: i64, says: Option<Option<ReactionCode>>| {
-        if v > held.version {
-            held.version = v;
-            held.overlay = None;
-            if let Some(says) = says {
-                held.mine = says;
+
+    /// An input of version `v` (`None`: without one) that says `says` about `mine` (`None`: does
+    /// not say). Without a version it counts only while no version is held.
+    fn offer(&mut self, v: Option<i64>, says: Option<Option<ReactionCode>>) {
+        let counts = match v {
+            Some(v) if self.version.is_none_or(|held| v > held) => {
+                self.version = Some(v);
+                self.overlay = None;
+                server_counts(v)
             }
-            held.mine = held.mine.filter(|m| server_counts(v).iter().any(|c| c.code == *m));
+            None if self.version.is_none() => {
+                self.overlay = Some(junk());
+                junk()
+            }
+            _ => return,
+        };
+        if let Some(says) = says {
+            self.mine = says;
         }
-    };
-    for step in trace {
+        self.mine = self.mine.filter(|m| counts.iter().any(|c| c.code == *m));
+    }
+}
+
+/// What a push or a snapshot row offers: its version and what it says about `mine`; `None` for
+/// one that does not take part or carries no reactions.
+fn push_offer(push: Push) -> Option<(Option<i64>, Option<Option<ReactionCode>>)> {
+    match push {
+        Push::At(v) => Some((Some(v), None)),
+        Push::AtMine(v) => Some((Some(v), Some(Some(FIRE)))),
+        Push::AtClear(v) => Some((Some(v), Some(None))),
+        Push::Versionless => Some((None, None)),
+        Push::Absent => None,
+    }
+}
+
+fn snap_offer(snap: Snap) -> Option<(Option<i64>, Option<Option<ReactionCode>>)> {
+    match snap {
+        Snap::At(v) => Some((Some(v), None)),
+        Snap::AtMine(v) => Some((Some(v), Some(Some(FIRE)))),
+        Snap::Versionless => Some((None, None)),
+        Snap::Absent | Snap::Bare => None,
+    }
+}
+
+/// What the invariant says the cache holds for message 3 after `trace`, whenever it is cached:
+/// counts, version and `mine`. A message the cache dropped has no state; one that comes back
+/// (an edit pushed meanwhile, or put back by the replay of an edit over a page above the cache)
+/// starts from what the copy carried and takes the pushes that reached it while it was away.
+fn expected(case: &Case, trace: &[Step]) -> (Vec<ReactionCount>, Option<i64>, Option<ReactionCode>) {
+    let mut held = Held { version: Some(START), mine: Some(LIKE), overlay: None };
+    let mut alive = true;
+    let (mut base, mut started_with) = (None, None);
+    // Per step: was message 3 cached when it happened, and the state an edit's copy carried.
+    let mut alive_before = Vec::new();
+    let mut edit_copy: Vec<Option<Held>> = Vec::new();
+    for (at, step) in trace.iter().enumerate() {
+        alive_before.push(alive);
+        let mut copy = None;
         match *step {
-            Step::Push(i) => match case.pushes[i] {
-                Push::At(v) => offer(&mut held, v, None),
-                Push::AtMine(v) => offer(&mut held, v, Some(Some(FIRE))),
-                Push::AtClear(v) => offer(&mut held, v, Some(None)),
-                Push::Absent | Push::Versionless => {}
-            },
-            Step::FetchEnd(k) if case.shape != Shape::Jump => match case.snaps[k] {
-                Snap::At(v) => offer(&mut held, v, None),
-                Snap::AtMine(v) => offer(&mut held, v, Some(Some(FIRE))),
-                Snap::Absent | Snap::Bare | Snap::Versionless => {}
-            },
+            Step::Push(i) => {
+                if let (true, Some((v, says))) = (alive, push_offer(case.pushes[i])) {
+                    held.offer(v, says);
+                }
+            }
+            Step::Edit => {
+                if !alive {
+                    held = Held::fresh();
+                    alive = true;
+                }
+                copy = Some(held.clone());
+            }
+            Step::FetchEnd(k) if case.shape == Shape::Jump => {
+                let start = trace.iter().position(|s| *s == Step::FetchStart(k)).unwrap();
+                let hole = !trace[..start].iter().any(|s| matches!(s, Step::FetchEnd(_)));
+                let first_edit = (start..at).find(|j| trace[*j] == Step::Edit);
+                match (hole, first_edit) {
+                    // The replay puts an edited message back, outside the page.
+                    (true, Some(e)) if !alive => {
+                        held = edit_copy[e].clone().unwrap();
+                        for j in e + 1..at {
+                            if let (Step::Push(i), false) = (trace[j], alive_before[j]) {
+                                if let Some((v, says)) = push_offer(case.pushes[i]) {
+                                    held.offer(v, says);
+                                }
+                            }
+                        }
+                        alive = true;
+                    }
+                    (true, None) => alive = false,
+                    _ => {}
+                }
+            }
+            Step::FetchEnd(k) => {
+                if let Some((v, says)) = snap_offer(case.snaps[k]) {
+                    held.offer(v, says);
+                }
+            }
             Step::ReactStart => {
                 base = Some(held.version);
                 started_with = Some(held.mine);
             }
             Step::ReactEnd => {
                 if case.own == Own::Confirmed && base == Some(held.version) {
-                    let (overlay, mine) = toggled_to_fire(server_counts(held.version), started_with.unwrap());
+                    let (overlay, mine) = toggled_to_fire(server_counts(held.version.unwrap()), started_with.unwrap());
                     held.overlay = Some(overlay);
                     held.mine = mine;
                 }
             }
-            Step::FetchStart(_) | Step::FetchEnd(_) | Step::Edit | Step::Grow => {}
+            Step::FetchStart(_) | Step::Grow => {}
         }
+        edit_copy.push(copy);
     }
-    (held.overlay.unwrap_or_else(|| server_counts(held.version)), held.version, held.mine)
+    let counts = held.overlay.unwrap_or_else(|| held.version.map_or_else(Vec::new, server_counts));
+    (counts, held.version, held.mine)
 }
 
-/// Which messages the cache holds after `trace`, and whether message 3 has been there all along
-/// (a message dropped and put back by a later change has no reaction state to compare).
+/// Which messages the cache holds after `trace`.
 struct Presence {
     three: bool,
     four: bool,
-    three_kept_all_along: bool,
 }
 
 fn presence(case: &Case, trace: &[Step]) -> Presence {
-    let mut now = Presence { three: true, four: false, three_kept_all_along: true };
+    let mut now = Presence { three: true, four: false };
     for (at, step) in trace.iter().enumerate() {
         match *step {
             Step::Edit => now.three = true,
@@ -210,19 +287,16 @@ fn presence(case: &Case, trace: &[Step]) -> Presence {
                     }
                     Shape::Jump => {
                         // Only a request that started while nothing above message 3 was cached
-                        // drops what is below its page; later ones overlap the cache.
+                        // drops what is below its page; later ones overlap the cache. An edit
+                        // logged meanwhile puts message 3 back, outside the page.
                         let hole = !trace[..start].iter().any(|s| matches!(s, Step::FetchEnd(_)));
                         if hole {
-                            // An edit logged meanwhile puts message 3 back, outside the page.
                             now.three = trace[start..at].contains(&Step::Edit);
                         }
                     }
                 }
             }
             _ => {}
-        }
-        if !now.three {
-            now.three_kept_all_along = false;
         }
     }
     now
@@ -327,15 +401,16 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
         let ok = held.is_some() == here.three
             && four == here.four
             && held.as_ref().is_none_or(|held| {
-                (!here.three_kept_all_along
-                    || (held.reactions.counts == want_counts && held.reactions.version == Some(want_version) && held.reactions.mine == want_mine))
+                held.reactions.counts == want_counts
+                    && held.reactions.version == want_version
+                    && held.reactions.mine == want_mine
                     && held.edited == edited
                     && delivered.is_none_or(|()| chunk_row.as_ref().is_none_or(|row| row.reactions == held.reactions && row.body == held.body))
             });
         if !ok {
             return Err(format!(
-                "{case:?}\nafter step {at} of {order:?}\nheld {held:?} message 4 cached {four}\nwant message 3 {} message 4 {} counts {want_counts:?} version {want_version} mine {want_mine:?} (compared: {})\nchunk row {chunk_row:?}",
-                here.three, here.four, here.three_kept_all_along
+                "{case:?}\nafter step {at} of {order:?}\nheld {held:?} message 4 cached {four}\nwant message 3 {} message 4 {} counts {want_counts:?} version {want_version:?} mine {want_mine:?}\nchunk row {chunk_row:?}",
+                here.three, here.four
             ));
         }
     }
@@ -608,4 +683,54 @@ fn random_inputs_in_random_orders() {
             panic!("{failure}");
         }
     }
+}
+
+/// More page fetches than the replay log holds finish while a snapshot is held: the edit of
+/// message 3 and the deletion of message 2 that arrived after the snapshot was taken must still
+/// be replayed onto it. The pages change nothing the snapshot could undo, so they are noted as
+/// "the chat was touched" (the bounds of the replacement) apart from the capped replay log.
+#[test]
+fn a_flood_of_page_fetches_does_not_push_an_edit_and_a_deletion_out_of_the_replay() {
+    let (events, _event_rx) = async_channel::unbounded();
+    let (inputs, _input_rx) = async_channel::unbounded();
+    let mut cache = Cache::open_in_memory().unwrap();
+    cache.replace_chats(&[chat("a", Some(TS), None)]).unwrap();
+    let two = msg("a", 2, "two");
+    cache.replace_range(&id("a"), None, None, &[two.clone(), reacted()], Some(true)).unwrap();
+    let config = ClientConfig::new(Path::new("/nonexistent"), Path::new("/nonexistent").join("session.json"), account());
+    let mut engine = Engine::new(Arc::new(Fake::default()), config, events, inputs, cache);
+    engine.phase = Phase::Online;
+    let rt = runtime();
+    let _enter = rt.enter();
+
+    // The held snapshot: both messages as they were, taken before the changes below.
+    let mark = engine.live_seq;
+    let snapshot = HistoryChunk {
+        chat: id("a"),
+        messages: vec![two, reacted()],
+        reached_start: true,
+        replaces: None,
+        payloads: Vec::new(),
+    };
+    let mut edited = msg("a", TS, "hi!");
+    edited.edited = true;
+    engine.handle_live(LiveEvent::MessageUpserted(edited));
+    engine.handle_live(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 2 });
+    for _ in 0..LIVE_LOG_CAP + 4 {
+        let page = HistoryChunk {
+            chat: id("a"),
+            messages: vec![msg("a", 1, "one")],
+            reached_start: false,
+            replaces: None,
+            payloads: Vec::new(),
+        };
+        let fetch = HistoryFetch { chat: id("a"), before: Some(2), known_newest: Some(TS), mark: engine.live_seq, result: Ok(page) };
+        engine.handle(Input::History(fetch));
+    }
+    let fetch = HistoryFetch { chat: id("a"), before: None, known_newest: Some(TS), mark, result: Ok(snapshot) };
+    engine.handle(Input::History(fetch));
+
+    let body = |ts| engine.db(engine.cache.message(&id("a"), ts)).flatten().map(|m| m.body);
+    assert_eq!(body(3), Some(MessageBody::Text("hi!".into())), "the edit must be replayed");
+    assert_eq!(body(2), Some(MessageBody::Deleted), "the deletion must be replayed");
 }
