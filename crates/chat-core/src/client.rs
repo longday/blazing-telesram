@@ -42,6 +42,8 @@ const DELETED_PREVIEW: &str = "Сообщение удалено";
 const STORE_FAILED_REASON: &str = "Не удалось сохранить сообщение";
 /// Results asked of the backend per kind: the first page only.
 const SEARCH_LIMIT: usize = 10;
+/// Shown when a member list is asked for a chat the cache does not know.
+const UNKNOWN_CHAT_REASON: &str = "Чат не найден";
 
 enum LiveChange {
     Upsert(Message),
@@ -148,6 +150,10 @@ enum Input {
     Action { chat: ChatId, action: Action, result: Result<(), BackendError> },
     /// The answer to the search `id`, which may have been superseded since.
     Search { id: SearchId, result: Result<SearchHits, BackendError> },
+    /// The answer to a `LoadMembers` for `chat`.
+    Members { chat: ChatId, result: Result<ChatMembers, BackendError> },
+    /// The answer to a `LoadProfile`.
+    Profile(Result<Profile, BackendError>),
 }
 
 /// A server write that is attempted once and not queued.
@@ -217,6 +223,11 @@ struct Engine<B> {
     /// Reaction requests not yet answered, per message; `true` once a server update replaced the
     /// overlay (the request's own result then no longer decides what is shown).
     reaction_inflight: HashMap<(ChatId, MessageTs), bool>,
+    /// Chats whose member list is being read; a request for one of them is dropped, and an answer
+    /// for a chat not in here (the account changed meanwhile) is ignored.
+    members_inflight: HashSet<ChatId>,
+    /// A profile read is running.
+    profile_inflight: bool,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -371,6 +382,16 @@ fn error_kind(error: &BackendError) -> &'static str {
     }
 }
 
+/// What the user is told when a plain read failed: the server's own reason, or the offline text
+/// for a network failure, else the error's text (which never holds cookies or tokens).
+fn read_failure_reason(error: BackendError) -> String {
+    match error {
+        BackendError::Rejected { reason, .. } => reason,
+        BackendError::Network(_) => OFFLINE_REASON.into(),
+        other => other.to_string(),
+    }
+}
+
 /// Lets a download's progress through at most once per [`DOWNLOAD_PROGRESS_INTERVAL`] and remembers
 /// what was last let through, so the final report can complete it.
 #[derive(Default)]
@@ -474,6 +495,8 @@ impl<B: Backend> Engine<B> {
             typing_sent: HashMap::new(),
             search_latest: None,
             reaction_inflight: HashMap::new(),
+            members_inflight: HashSet::new(),
+            profile_inflight: false,
         };
         tokio::spawn(pump_commands(commands, inputs));
 
@@ -535,6 +558,8 @@ impl<B: Backend> Engine<B> {
             }
             Input::Action { chat, action, result } => self.handle_action(chat, action, result),
             Input::Search { id, result } => self.handle_search(id, result),
+            Input::Members { chat, result } => self.handle_members(chat, result),
+            Input::Profile(result) => self.handle_profile(result),
             Input::Connected { .. } | Input::Retry(_) | Input::Live { .. } | Input::LiveClosed(_) | Input::OutboxResume(_) => {}
         }
         true
@@ -588,6 +613,8 @@ impl<B: Backend> Engine<B> {
             Command::SaveDraft(draft) => self.save_draft(draft),
             Command::Search { id, query } => self.search(id, query),
             Command::CancelSearch => self.search_latest = None,
+            Command::LoadMembers(chat) => self.load_members(chat),
+            Command::LoadProfile => self.load_profile(),
         }
         true
     }
@@ -704,6 +731,8 @@ impl<B: Backend> Engine<B> {
         self.open_chat = None;
         self.live_log.clear();
         self.reaction_inflight.clear();
+        self.members_inflight.clear();
+        self.profile_inflight = false;
         self.outbox = self.db(self.cache.outbox()).unwrap_or_default();
         self.outbox_inflight = None;
         self.read_marks.clear();
@@ -1174,6 +1203,73 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    // -- members and profile --------------------------------------------------------------
+
+    /// Reads the people of `chat`. Plain read: never queued, never cached. Offline answers at once
+    /// (nothing is sent, whatever the chat kind); a load already running for the chat absorbs the
+    /// request. The cached row tells the backend the kind and, for a private chat, the partner.
+    fn load_members(&mut self, chat: ChatId) {
+        if self.members_inflight.contains(&chat) {
+            return;
+        }
+        if !self.is_online() {
+            return self.emit(ClientEvent::MembersFailed { chat, reason: OFFLINE_REASON.into(), offline: true });
+        }
+        let Some(row) = self.db(self.cache.chat(&chat)).flatten() else {
+            return self.emit(ClientEvent::MembersFailed { chat, reason: UNKNOWN_CHAT_REASON.into(), offline: false });
+        };
+        self.members_inflight.insert(chat.clone());
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move {
+            let result = backend.members(&row).await;
+            post(&inputs, Input::Members { chat, result });
+        });
+    }
+
+    fn handle_members(&mut self, chat: ChatId, result: Result<ChatMembers, BackendError>) {
+        if !self.members_inflight.remove(&chat) {
+            return;
+        }
+        match result {
+            Ok(members) => {
+                tracing::debug!(users = members.users.len(), partial = members.partial, "members loaded");
+                self.emit(ClientEvent::Members(members));
+            }
+            Err(BackendError::SessionExpired) => self.expire(),
+            Err(error) => {
+                tracing::warn!(kind = error_kind(&error), "members load failed");
+                self.emit(ClientEvent::MembersFailed { chat, reason: read_failure_reason(error), offline: false });
+            }
+        }
+    }
+
+    /// Reads the signed-in account's own profile, with the same rules as `load_members`.
+    fn load_profile(&mut self) {
+        if self.profile_inflight {
+            return;
+        }
+        if !self.is_online() {
+            return self.emit(ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: true });
+        }
+        self.profile_inflight = true;
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move { post(&inputs, Input::Profile(backend.profile().await)) });
+    }
+
+    fn handle_profile(&mut self, result: Result<Profile, BackendError>) {
+        if !std::mem::take(&mut self.profile_inflight) {
+            return;
+        }
+        match result {
+            Ok(profile) => self.emit(ClientEvent::Profile(profile)),
+            Err(BackendError::SessionExpired) => self.expire(),
+            Err(error) => {
+                tracing::warn!(kind = error_kind(&error), "profile load failed");
+                self.emit(ClientEvent::ProfileFailed { reason: read_failure_reason(error), offline: false });
+            }
+        }
+    }
+
     /// Never marks twice for the same or an older message. The counter drops at once; the
     /// request goes out now, or once online when it cannot (only the newest per chat is kept).
     fn mark_read(&mut self, chat: ChatId, timestamp: MessageTs) {
@@ -1605,8 +1701,8 @@ mod tests {
         react_gate: Option<Arc<tokio::sync::Notify>>,
         /// Answer of `members`; no users when unset.
         members_result: Option<Result<ChatMembers, BackendError>>,
-        /// Every `members` call: the chat asked about.
-        members_calls: Vec<ChatId>,
+        /// Every `members` call: the cached row the engine passed.
+        members_calls: Vec<ChatSummary>,
         /// When set, `members` records its call, then waits here before answering.
         members_gate: Option<Arc<tokio::sync::Notify>>,
         /// Answer of `profile`; the account with no name or status when unset.
@@ -1791,7 +1887,7 @@ mod tests {
         async fn members(&self, chat: &ChatSummary) -> Result<ChatMembers, BackendError> {
             let (result, gate) = {
                 let mut s = self.state();
-                s.members_calls.push(chat.id.clone());
+                s.members_calls.push(chat.clone());
                 let empty = ChatMembers { chat: chat.id.clone(), users: Vec::new(), partial: false };
                 (s.members_result.clone().unwrap_or(Ok(empty)), s.members_gate.clone())
             };
@@ -4285,5 +4381,248 @@ mod tests {
         h.quiet();
         let events = h.drain();
         assert!(search_events(&events).is_empty(), "expiry is not a search failure: {events:?}");
+    }
+
+    // -- members and profile --------------------------------------------------------------
+
+    fn member(user: &str, name: &str, role: MemberRole) -> Member {
+        Member { user: UserId(user.into()), name: Some(name.into()), avatar: None, role, me: false }
+    }
+
+    fn listed(chat_id: &str) -> ChatMembers {
+        ChatMembers {
+            chat: id(chat_id),
+            users: vec![member("u1", "Анна", MemberRole::Admin), member("u2", "Борис", MemberRole::Member)],
+            partial: false,
+        }
+    }
+
+    fn members_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
+        events.iter().filter(|e| matches!(e, ClientEvent::Members(_) | ClientEvent::MembersFailed { .. })).collect()
+    }
+
+    fn profile_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
+        events.iter().filter(|e| matches!(e, ClientEvent::Profile(_) | ClientEvent::ProfileFailed { .. })).collect()
+    }
+
+    fn members_of(chat_id: &str) -> Command {
+        Command::LoadMembers(id(chat_id))
+    }
+
+    #[test]
+    fn members_arrive_for_a_known_chat_and_nothing_is_cached() {
+        let expected = listed("a");
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(1), None)];
+                s.members_result = Some(Ok(expected.clone()));
+            },
+            50,
+        );
+        h.online();
+        h.client.send(members_of("a"));
+        let event = h.next("members", |e| matches!(e, ClientEvent::Members(_)));
+        assert_eq!(event, ClientEvent::Members(expected));
+        assert_eq!(h.fake.state().members_calls, [chat("a", Some(1), None)], "the backend gets the cached row");
+        assert_eq!(h.cache().chats().unwrap(), [chat("a", Some(1), None)], "only the chat row is stored");
+    }
+
+    #[test]
+    fn a_private_chat_is_passed_with_its_partner() {
+        let mut private = chat("p", Some(1), None);
+        private.kind = ChatKind::Private;
+        private.partner = Some(UserId("u9".into()));
+        let row = private.clone();
+        let h = start(move |s, _| s.chats = vec![row], 50);
+        h.online();
+        h.client.send(members_of("p"));
+        h.next("members", |e| matches!(e, ClientEvent::Members(_)));
+        assert_eq!(h.fake.state().members_calls, [private]);
+    }
+
+    #[test]
+    fn a_rejected_member_list_carries_the_servers_reason() {
+        let reason = "список участников недоступен для этой учётной записи";
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(1), None)];
+                s.members_result = Some(Err(rejected(reason, true)));
+            },
+            50,
+        );
+        h.online();
+        h.client.send(members_of("a"));
+        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
+        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: reason.into(), offline: false });
+    }
+
+    #[test]
+    fn a_network_failure_while_online_is_a_retryable_failure_not_the_offline_answer() {
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(1), None)];
+                s.members_result = Some(Err(BackendError::Network("reset".into())));
+            },
+            50,
+        );
+        h.online();
+        h.client.send(members_of("a"));
+        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
+        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: OFFLINE_REASON.into(), offline: false });
+    }
+
+    #[test]
+    fn members_offline_are_answered_at_once_without_asking_the_backend() {
+        let h = start(
+            |s, dir| {
+                seed_cache(dir, &[chat("a", Some(1), None)], "a", &[], false);
+                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+            },
+            50,
+        );
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.client.send(members_of("a"));
+        let event = h.next("refusal", |e| matches!(e, ClientEvent::MembersFailed { .. }));
+        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: OFFLINE_REASON.into(), offline: true });
+        h.quiet();
+        assert!(h.fake.state().members_calls.is_empty());
+    }
+
+    #[test]
+    fn a_chat_the_cache_does_not_know_fails_without_asking_the_backend() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        h.client.send(members_of("nope"));
+        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
+        assert_eq!(event, ClientEvent::MembersFailed { chat: id("nope"), reason: UNKNOWN_CHAT_REASON.into(), offline: false });
+        h.quiet();
+        assert!(h.fake.state().members_calls.is_empty());
+    }
+
+    #[test]
+    fn a_second_request_for_a_running_member_load_is_dropped_but_other_chats_and_later_retries_are_served() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(2), None), chat("b", Some(1), None)];
+                s.members_gate = Some(gate.clone());
+                s.members_result = Some(Ok(listed("a")));
+            },
+            50,
+        );
+        h.online();
+        h.client.send(members_of("a"));
+        h.wait_for("the first request", |s| s.members_calls.len() == 1);
+        h.client.send(members_of("a"));
+        h.client.send(members_of("b"));
+        h.wait_for("the other chat", |s| s.members_calls.len() == 2);
+        h.quiet();
+        assert_eq!(h.fake.state().members_calls.len(), 2, "the duplicate never reached the backend");
+        let seen = std::cell::RefCell::new(Vec::new());
+        h.open_gate(&gate, "both answers", || {
+            seen.borrow_mut().extend(h.drain());
+            members_events(&seen.borrow()).len() >= 2
+        });
+        h.quiet();
+        seen.borrow_mut().extend(h.drain());
+        let seen = seen.into_inner();
+        assert_eq!(members_events(&seen).len(), 2, "one answer per chat: {seen:?}");
+
+        // Once answered, the chat can be loaded again (the retry of an error state).
+        h.client.send(members_of("a"));
+        h.wait_for("the retry", |s| s.members_calls.len() == 3);
+    }
+
+    #[test]
+    fn session_expiry_during_a_member_load_ends_the_session() {
+        let h = start(
+            |s, _| {
+                s.chats = vec![chat("a", Some(1), None)];
+                s.members_result = Some(Err(BackendError::SessionExpired));
+            },
+            50,
+        );
+        h.online();
+        h.client.send(members_of("a"));
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.quiet();
+        let events = h.drain();
+        assert!(members_events(&events).is_empty(), "expiry is not a member failure: {events:?}");
+    }
+
+    #[test]
+    fn the_profile_arrives_and_is_never_cached() {
+        let own = Profile {
+            user: account(),
+            name: Some("Ян".into()),
+            avatar: Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }),
+            status_text: Some("в отпуске".into()),
+        };
+        let h = start(|s, _| s.profile_result = Some(Ok(own.clone())), 50);
+        h.online();
+        h.client.send(Command::LoadProfile);
+        assert_eq!(h.next("profile", |e| matches!(e, ClientEvent::Profile(_))), ClientEvent::Profile(own));
+        assert_eq!(h.fake.state().profile_calls, 1);
+        assert!(h.cache().chats().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_rejected_profile_carries_the_reason_and_a_network_failure_the_offline_text() {
+        let h = start(|s, _| s.profile_result = Some(Err(rejected("нет доступа", true))), 50);
+        h.online();
+        h.client.send(Command::LoadProfile);
+        let event = h.next("failure", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
+        assert_eq!(event, ClientEvent::ProfileFailed { reason: "нет доступа".into(), offline: false });
+
+        h.fake.state().profile_result = Some(Err(BackendError::Network("reset".into())));
+        h.client.send(Command::LoadProfile);
+        let event = h.next("failure", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
+        assert_eq!(event, ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: false });
+    }
+
+    #[test]
+    fn the_profile_offline_is_answered_at_once_without_asking_the_backend() {
+        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.client.send(Command::LoadProfile);
+        let event = h.next("refusal", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
+        assert_eq!(event, ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: true });
+        h.quiet();
+        assert_eq!(h.fake.state().profile_calls, 0);
+    }
+
+    #[test]
+    fn a_second_profile_request_while_one_runs_is_dropped() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(|s, _| s.profile_gate = Some(gate.clone()), 50);
+        h.online();
+        h.client.send(Command::LoadProfile);
+        h.wait_for("the first request", |s| s.profile_calls == 1);
+        h.client.send(Command::LoadProfile);
+        h.quiet();
+        assert_eq!(h.fake.state().profile_calls, 1, "the duplicate never reached the backend");
+        let seen = std::cell::RefCell::new(Vec::new());
+        h.open_gate(&gate, "the answer", || {
+            seen.borrow_mut().extend(h.drain());
+            !profile_events(&seen.borrow()).is_empty()
+        });
+        h.quiet();
+        seen.borrow_mut().extend(h.drain());
+        let seen = seen.into_inner();
+        assert_eq!(profile_events(&seen).len(), 1, "{seen:?}");
+
+        h.client.send(Command::LoadProfile);
+        h.wait_for("the retry", |s| s.profile_calls == 2);
+    }
+
+    #[test]
+    fn session_expiry_during_a_profile_load_ends_the_session() {
+        let h = start(|s, _| s.profile_result = Some(Err(BackendError::SessionExpired)), 50);
+        h.online();
+        h.client.send(Command::LoadProfile);
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.quiet();
+        let events = h.drain();
+        assert!(profile_events(&events).is_empty(), "expiry is not a profile failure: {events:?}");
     }
 }

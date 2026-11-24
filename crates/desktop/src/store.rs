@@ -2,9 +2,9 @@
 
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, DownloadFailure, Draft,
-    HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget, SearchFailure,
-    SearchHits, SearchId, UserId,
+    ChatId, ChatKind, ChatMembers, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, DownloadFailure,
+    Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, Profile, ReplyTarget,
+    SearchFailure, SearchHits, SearchId, UserId,
 };
 use bt_chat_core::reactions::{ReactionCode, Reactions};
 use gpui::{Context, EventEmitter};
@@ -105,6 +105,19 @@ pub enum SearchStatus {
     Failed(SearchFailure),
 }
 
+/// Where a plain read (the members of a chat, the own profile) stands. There is no entry before the
+/// first request; a request always starts at `Loading`, so a list or profile from an earlier request
+/// is never shown as current. `offline` is set when the core could not ask at all.
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoadState<T> {
+    Loading,
+    Ready(T),
+    Failed { reason: String, offline: bool },
+}
+
+pub type MembersState = LoadState<ChatMembers>;
+pub type ProfileState = LoadState<Profile>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreEvent {
     Chats,
@@ -122,6 +135,10 @@ pub enum StoreEvent {
     SendRefused { draft: Draft, reason: String },
     /// The server search state changed (issued, answered, failed or cancelled).
     Search,
+    /// The member list state of this chat changed (requested, loaded or failed).
+    Members(ChatId),
+    /// The profile state changed (requested, loaded or failed).
+    Profile,
 }
 
 pub struct ChatStore {
@@ -140,6 +157,9 @@ pub struct ChatStore {
     search: Option<SearchState>,
     /// The id of the last issued search; never reused, also after `cancel_search`.
     last_search: SearchId,
+    /// Member lists by chat, held in memory only.
+    members: HashMap<ChatId, MembersState>,
+    profile: Option<ProfileState>,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -170,6 +190,8 @@ impl ChatStore {
             typing: HashMap::new(),
             search: None,
             last_search: SearchId(0),
+            members: HashMap::new(),
+            profile: None,
         }
     }
 
@@ -220,6 +242,8 @@ impl ChatStore {
                 self.media_requested.clear();
                 self.downloads.clear();
                 self.search = None;
+                self.members.clear();
+                self.profile = None;
                 self.drafts.clear();
                 self.typing.clear();
                 self.session = SessionState::SignedOut;
@@ -244,6 +268,14 @@ impl ChatStore {
             ClientEvent::SearchResults { id, hits } => self.finish_search(id, Some(hits), SearchStatus::Ready, cx),
             ClientEvent::SearchFailed { id, reason } => {
                 self.finish_search(id, None, SearchStatus::Failed(reason), cx);
+            }
+            ClientEvent::Members(members) => self.finish_members(members.chat.clone(), MembersState::Ready(members), cx),
+            ClientEvent::MembersFailed { chat, reason, offline } => {
+                self.finish_members(chat, MembersState::Failed { reason, offline }, cx);
+            }
+            ClientEvent::Profile(profile) => self.finish_profile(ProfileState::Ready(profile), cx),
+            ClientEvent::ProfileFailed { reason, offline } => {
+                self.finish_profile(ProfileState::Failed { reason, offline }, cx);
             }
         }
         cx.notify();
@@ -499,6 +531,63 @@ impl ChatStore {
             }
         }
         cx.emit(StoreEvent::Search);
+    }
+
+    /// Asks the core for the people of `chat`. The state becomes `Loading` at once, so a list from an
+    /// earlier request is never shown as current; while a request is already running nothing is sent
+    /// again (its answer is on the way). Also the retry of a `Failed` state.
+    pub fn load_members(&mut self, chat: ChatId, cx: &mut Context<Self>) {
+        if self.members.get(&chat) == Some(&MembersState::Loading) {
+            return;
+        }
+        self.members.insert(chat.clone(), MembersState::Loading);
+        self.send(Command::LoadMembers(chat.clone()));
+        cx.emit(StoreEvent::Members(chat));
+        cx.notify();
+    }
+
+    pub fn members_state(&self, chat: &ChatId) -> Option<&MembersState> {
+        self.members.get(chat)
+    }
+
+    /// Stores the outcome of a member load; an outcome for a chat that is not loading is ignored.
+    fn finish_members(&mut self, chat: ChatId, outcome: MembersState, cx: &mut Context<Self>) {
+        if self.members.get(&chat) != Some(&MembersState::Loading) {
+            return;
+        }
+        if let MembersState::Ready(members) = &outcome {
+            for avatar in members.users.iter().filter_map(|m| m.avatar.as_ref()) {
+                self.want_media(Some(avatar));
+            }
+        }
+        self.members.insert(chat.clone(), outcome);
+        cx.emit(StoreEvent::Members(chat));
+    }
+
+    /// Asks the core for the account's own profile, with the same rules as `load_members`.
+    pub fn load_profile(&mut self, cx: &mut Context<Self>) {
+        if self.profile == Some(ProfileState::Loading) {
+            return;
+        }
+        self.profile = Some(ProfileState::Loading);
+        self.send(Command::LoadProfile);
+        cx.emit(StoreEvent::Profile);
+        cx.notify();
+    }
+
+    pub fn profile_state(&self) -> Option<&ProfileState> {
+        self.profile.as_ref()
+    }
+
+    fn finish_profile(&mut self, outcome: ProfileState, cx: &mut Context<Self>) {
+        if self.profile != Some(ProfileState::Loading) {
+            return;
+        }
+        if let ProfileState::Ready(profile) = &outcome {
+            self.want_media(profile.avatar.as_ref());
+        }
+        self.profile = Some(outcome);
+        cx.emit(StoreEvent::Profile);
     }
 
     fn set_download(&mut self, media: MediaRef, state: Option<DownloadState>, cx: &mut Context<Self>) {
@@ -1145,6 +1234,213 @@ mod tests {
             rig.apply(cx, results(1, "ab"));
             rig.apply(cx, ClientEvent::SignedOut);
             assert_eq!(rig.state(cx), None);
+        }
+    }
+
+    mod members {
+        use super::*;
+        use bt_chat_core::model::{Member, MemberRole};
+        use gpui::{AppContext, Entity, Subscription, TestAppContext};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            commands: Receiver<Command>,
+            events: Rc<RefCell<Vec<StoreEvent>>>,
+            _client: Sender<ClientEvent>,
+            _subscription: Subscription,
+        }
+
+        impl Rig {
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let log = events.clone();
+                let subscription = cx.update(|cx| {
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                });
+                Self { store, commands, events, _client: client, _subscription: subscription }
+            }
+
+            fn load(&self, cx: &mut TestAppContext, chat: &ChatId) {
+                self.store.update(cx, |s, cx| s.load_members(chat.clone(), cx));
+            }
+
+            fn load_profile(&self, cx: &mut TestAppContext) {
+                self.store.update(cx, |s, cx| s.load_profile(cx));
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn state(&self, cx: &mut TestAppContext, chat: &ChatId) -> Option<MembersState> {
+                self.store.read_with(cx, |s, _| s.members_state(chat).cloned())
+            }
+
+            fn profile(&self, cx: &mut TestAppContext) -> Option<ProfileState> {
+                self.store.read_with(cx, |s, _| s.profile_state().cloned())
+            }
+
+            fn commands(&self) -> Vec<Command> {
+                std::iter::from_fn(|| self.commands.try_recv().ok()).collect()
+            }
+
+            fn take_events(&self) -> Vec<StoreEvent> {
+                std::mem::take(&mut *self.events.borrow_mut())
+            }
+        }
+
+        fn chat(tag: &str) -> ChatId {
+            ChatId(tag.into())
+        }
+
+        fn avatar(id: &str) -> Option<MediaRef> {
+            Some(MediaRef { id: id.into(), kind: MediaKind::Avatar })
+        }
+
+        fn listed(tag: &str) -> ChatMembers {
+            ChatMembers {
+                chat: chat(tag),
+                users: vec![
+                    Member { user: UserId("u1".into()), name: Some("Анна".into()), avatar: avatar("av1"), role: MemberRole::Admin, me: false },
+                    Member { user: UserId("u2".into()), name: Some("Борис".into()), avatar: None, role: MemberRole::Member, me: true },
+                ],
+                partial: false,
+            }
+        }
+
+        fn failed(chat_tag: &str, reason: &str, offline: bool) -> ClientEvent {
+            ClientEvent::MembersFailed { chat: chat(chat_tag), reason: reason.into(), offline }
+        }
+
+        #[gpui::test]
+        fn loading_becomes_ready_and_asks_for_the_avatars_once(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            assert_eq!(rig.state(cx, &chat("a")), None);
+
+            rig.load(cx, &chat("a"));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Loading));
+            assert_eq!(rig.commands(), [Command::LoadMembers(chat("a"))]);
+            assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
+
+            rig.apply(cx, ClientEvent::Members(listed("a")));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Ready(listed("a"))));
+            assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
+            assert_eq!(rig.commands(), [Command::FetchMedia(avatar("av1").unwrap())]);
+        }
+
+        #[gpui::test]
+        fn loading_becomes_failed_with_the_reason_and_the_offline_flag(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.load(cx, &chat("a"));
+            rig.take_events();
+
+            rig.apply(cx, failed("a", "нет прав", false));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Failed { reason: "нет прав".into(), offline: false }));
+            assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
+
+            rig.load(cx, &chat("a"));
+            rig.apply(cx, failed("a", "Нет соединения", true));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Failed { reason: "Нет соединения".into(), offline: true }));
+        }
+
+        #[gpui::test]
+        fn a_retry_after_a_failure_or_a_list_goes_back_to_loading_and_asks_again(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.load(cx, &chat("a"));
+            rig.apply(cx, failed("a", "x", false));
+            rig.commands();
+            rig.take_events();
+
+            rig.load(cx, &chat("a"));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Loading));
+            assert_eq!(rig.commands(), [Command::LoadMembers(chat("a"))]);
+            assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
+
+            rig.apply(cx, ClientEvent::Members(listed("a")));
+            rig.load(cx, &chat("a"));
+            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Loading), "a list is never shown as current again");
+            assert_eq!(rig.commands().iter().filter(|c| **c == Command::LoadMembers(chat("a"))).count(), 1);
+        }
+
+        #[gpui::test]
+        fn a_load_that_is_running_is_not_sent_twice(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.load(cx, &chat("a"));
+            rig.take_events();
+            rig.commands();
+
+            rig.load(cx, &chat("a"));
+            assert!(rig.commands().is_empty());
+            assert!(rig.take_events().is_empty());
+        }
+
+        #[gpui::test]
+        fn an_answer_for_a_chat_that_is_not_loading_is_ignored(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.apply(cx, ClientEvent::Members(listed("a")));
+            rig.apply(cx, failed("a", "x", false));
+            assert_eq!(rig.state(cx, &chat("a")), None);
+            assert!(rig.take_events().is_empty());
+
+            rig.load(cx, &chat("b"));
+            rig.apply(cx, ClientEvent::Members(listed("a")));
+            assert_eq!(rig.state(cx, &chat("a")), None, "the answer for another chat changes nothing");
+            assert_eq!(rig.state(cx, &chat("b")), Some(MembersState::Loading));
+
+            rig.apply(cx, ClientEvent::Members(listed("b")));
+            rig.apply(cx, failed("b", "late", false));
+            assert_eq!(rig.state(cx, &chat("b")), Some(MembersState::Ready(listed("b"))), "a late duplicate does not overwrite");
+        }
+
+        #[gpui::test]
+        fn the_profile_goes_loading_to_ready_and_asks_for_its_avatar(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            assert_eq!(rig.profile(cx), None);
+            rig.load_profile(cx);
+            assert_eq!(rig.profile(cx), Some(ProfileState::Loading));
+            assert_eq!(rig.commands(), [Command::LoadProfile]);
+            assert_eq!(rig.take_events(), [StoreEvent::Profile]);
+
+            let own = Profile { user: UserId("me".into()), name: Some("Ян".into()), avatar: avatar("me-av"), status_text: None };
+            rig.apply(cx, ClientEvent::Profile(own.clone()));
+            assert_eq!(rig.profile(cx), Some(ProfileState::Ready(own)));
+            assert_eq!(rig.take_events(), [StoreEvent::Profile]);
+            assert_eq!(rig.commands(), [Command::FetchMedia(avatar("me-av").unwrap())]);
+        }
+
+        #[gpui::test]
+        fn the_profile_goes_loading_to_failed_and_a_retry_asks_again(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.load_profile(cx);
+            rig.apply(cx, ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true });
+            assert_eq!(rig.profile(cx), Some(ProfileState::Failed { reason: "Нет соединения".into(), offline: true }));
+            rig.commands();
+
+            rig.load_profile(cx);
+            assert_eq!(rig.profile(cx), Some(ProfileState::Loading), "no data of the failed request stays");
+            assert_eq!(rig.commands(), [Command::LoadProfile]);
+            rig.load_profile(cx);
+            assert!(rig.commands().is_empty(), "a running load is not sent twice");
+
+            rig.apply(cx, ClientEvent::ProfileFailed { reason: "x".into(), offline: false });
+            rig.apply(cx, ClientEvent::ProfileFailed { reason: "y".into(), offline: false });
+            assert_eq!(rig.profile(cx), Some(ProfileState::Failed { reason: "x".into(), offline: false }));
+        }
+
+        #[gpui::test]
+        fn signing_out_forgets_members_and_profile(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.load(cx, &chat("a"));
+            rig.apply(cx, ClientEvent::Members(listed("a")));
+            rig.load_profile(cx);
+            rig.apply(cx, ClientEvent::SignedOut);
+            assert_eq!(rig.state(cx, &chat("a")), None);
+            assert_eq!(rig.profile(cx), None);
         }
     }
 }

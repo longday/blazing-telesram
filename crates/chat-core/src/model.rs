@@ -287,6 +287,16 @@ pub enum ClientEvent {
     SearchResults { id: SearchId, hits: SearchHits },
     /// The search `id` asked for produced no results.
     SearchFailed { id: SearchId, reason: SearchFailure },
+    /// The people of `ChatMembers.chat`, as loaded for a `LoadMembers`. Never cached.
+    Members(ChatMembers),
+    /// `LoadMembers` for `chat` produced no list. `offline` is set when the client could not ask
+    /// at all (nothing was sent); otherwise `reason` is the server's or the network's, to show
+    /// with a retry.
+    MembersFailed { chat: ChatId, reason: String, offline: bool },
+    /// The signed-in account's own profile, as loaded for a `LoadProfile`. Never cached.
+    Profile(Profile),
+    /// `LoadProfile` produced no profile; `offline` as for `MembersFailed`.
+    ProfileFailed { reason: String, offline: bool },
 }
 
 /// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing.
@@ -316,6 +326,12 @@ pub enum Command {
     Search { id: SearchId, query: String },
     /// The user no longer waits for a search: its reply is dropped.
     CancelSearch,
+    /// Read the people of `chat` (read-only). The reply is `Members` or `MembersFailed`; a
+    /// second request for a chat whose load is still running is dropped.
+    LoadMembers(ChatId),
+    /// Read the signed-in account's own profile (read-only). The reply is `Profile` or
+    /// `ProfileFailed`; a request while a load is running is dropped.
+    LoadProfile,
 }
 
 #[cfg(test)]
