@@ -3177,3 +3177,208 @@ fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx:
     assert_eq!(composer_reply(&h, cx), None);
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
 }
+
+// ---- chat info panel (CM 4.1) ----
+
+fn member(guid: &str, name: &str, role: MemberRole, me: bool) -> Member {
+    Member { user: UserId(guid.into()), name: Some(name.into()), avatar: None, role, me }
+}
+
+fn members_of(chat_id: &str, users: Vec<Member>, partial: bool) -> ClientEvent {
+    ClientEvent::Members(ChatMembers { chat: ChatId(chat_id.into()), users, partial })
+}
+
+fn members_failed(chat_id: &str, reason: &str, offline: bool) -> ClientEvent {
+    ClientEvent::MembersFailed { chat: ChatId(chat_id.into()), reason: reason.into(), offline }
+}
+
+/// Opens the group "g" with one message and its info panel; the drained commands are the member request.
+fn open_info(h: &Harness, cx: &mut VisualTestContext) {
+    open_with(h, cx, vec![text("g", 1)]);
+    click(cx, "chat-header");
+    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "opening asks for the members, nothing else");
+}
+
+fn info_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.info_is_open())
+}
+
+#[gpui::test]
+fn the_panel_lists_the_users_of_a_group_and_marks_admins_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    assert!(shown(cx, "info-panel"));
+    assert!(shown(cx, "info-loading"), "a loading state, not an empty list");
+    assert!(!shown(cx, "info-count"));
+    assert!(!shown(cx, "member-a"));
+
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![
+                member("b", "Борис", MemberRole::Member, false),
+                member("a", "Алиса", MemberRole::Admin, false),
+                member("m", "Я", MemberRole::Member, true),
+            ],
+            false,
+        )],
+    );
+    assert!(shown(cx, "info-count"));
+    assert!(!shown(cx, "info-partial"));
+    for row in ["member-a", "member-b", "member-m"] {
+        assert!(shown(cx, row), "{row}");
+    }
+    assert!(shown(cx, "member-a-avatar"));
+    assert!(shown(cx, "member-a-admin"), "the admin role is marked");
+    assert!(!shown(cx, "member-b-admin"), "a plain member is not");
+    assert!(!shown(cx, "member-m-admin"));
+    assert!(y(cx, "member-b") < y(cx, "member-a"), "the order of the list is the server's, admins are not moved up");
+    assert!(h.commands().is_empty(), "viewing sends no other request");
+}
+
+#[gpui::test]
+fn a_failed_load_shows_the_reason_and_retries(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [members_failed("g", "сервер ответил ошибкой", false)]);
+    assert!(shown(cx, "info-error"));
+    assert!(shown(cx, "info-error-reason"));
+    assert!(!shown(cx, "info-count"), "no list is presented");
+    assert!(!shown(cx, "info-empty"));
+    assert!(!shown(cx, "info-offline"));
+
+    click(cx, "info-retry");
+    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())]);
+    let state = |h: &Harness, cx: &mut VisualTestContext| h.store.read_with(cx, |s, _| s.members_state(&chat_g()).cloned());
+    assert_eq!(state(&h, cx), Some(crate::store::MembersState::Loading));
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    assert!(shown(cx, "member-a"));
+    assert!(info_open(&h, cx), "the chat itself keeps working: the panel stays and the timeline is there");
+    assert!(shown(cx, msg!(1)));
+}
+
+#[gpui::test]
+fn a_refused_list_says_so_and_is_not_an_empty_list(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    click(cx, row!("ch"));
+    h.feed(cx, [chunk("ch", 1..=2, true)]);
+    h.commands();
+    click(cx, "chat-header");
+    assert_eq!(h.commands(), [Command::LoadMembers(ChatId("ch".into()))]);
+    h.feed(cx, [members_failed("ch", "список участников недоступен для этой учётной записи", false)]);
+    assert!(shown(cx, "info-error-reason"));
+    assert!(!shown(cx, "info-empty"));
+    assert!(!shown(cx, "info-count"));
+    assert!(shown(cx, "timeline"), "the chat keeps working");
+}
+
+#[gpui::test]
+fn offline_the_panel_says_the_list_is_unavailable(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [members_failed("g", "Нет соединения", true)]);
+    assert!(shown(cx, "info-offline"));
+    assert!(!shown(cx, "info-error"), "an offline notice, not an error");
+    assert!(!shown(cx, "info-count"));
+}
+
+#[gpui::test]
+fn a_bounded_list_says_how_many_are_shown_and_that_more_may_exist(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], true)]);
+    assert!(shown(cx, "info-partial"));
+    assert!(!shown(cx, "info-count"), "a bounded list is not presented as the full one");
+    assert!(shown(cx, "member-a"));
+
+    assert_eq!(crate::info_panel::count_text(1000, true), "Показано участников: 1000. Список может быть неполным");
+    assert_eq!(crate::info_panel::count_text(58, false), "Участников: 58");
+}
+
+#[gpui::test]
+fn a_private_chat_shows_its_partner_without_group_parts(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    click(cx, row!("p"));
+    h.feed(cx, [chunk("p", 1..=2, true)]);
+    h.commands();
+    click(cx, "chat-header");
+    let private = ChatId("p".into());
+    assert_eq!(h.commands(), [Command::LoadMembers(private)], "the core answers from the chat row, the panel sends nothing else");
+    h.feed(cx, [members_of("p", vec![member("anna", "Анна", MemberRole::Member, false)], false)]);
+    assert!(shown(cx, "member-anna"));
+    assert!(!shown(cx, "member-anna-admin"), "no role information, no marker");
+    assert!(!shown(cx, "info-partial"));
+    assert!(!shown(cx, "info-empty"));
+}
+
+#[gpui::test]
+fn a_private_chat_without_a_named_partner_lists_nobody(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    click(cx, row!("p"));
+    h.feed(cx, [chunk("p", 1..=2, true)]);
+    h.commands();
+    click(cx, "chat-header");
+    h.feed(cx, [members_of("p", Vec::new(), false)]);
+    assert!(shown(cx, "info-empty"));
+    assert!(!shown(cx, "info-members"), "no participant rows, none invented");
+}
+
+#[gpui::test]
+fn the_panel_closes_by_header_button_escape_and_chat_switch(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    assert!(info_open(&h, cx));
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+
+    click(cx, "chat-header");
+    assert!(!info_open(&h, cx), "the header toggles");
+    assert!(h.commands().is_empty(), "closing sends nothing");
+
+    click(cx, "chat-header");
+    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "a re-open asks again");
+    click(cx, "info-close");
+    assert!(!info_open(&h, cx), "the close button");
+
+    click(cx, "chat-header");
+    h.commands();
+    cx.simulate_keystrokes("escape");
+    assert!(!info_open(&h, cx), "Escape");
+
+    click(cx, "chat-header");
+    h.commands();
+    assert!(info_open(&h, cx));
+    click(cx, row!("p"));
+    assert!(!info_open(&h, cx), "another chat closes the panel");
+    assert!(h.commands().iter().all(|c| !matches!(c, Command::LoadMembers(_))), "and asks for nothing");
+}
+
+#[gpui::test]
+fn closing_the_panel_keeps_the_timeline_scroll(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, (1..=80).map(|i| text("g", i)).collect());
+    scroll(cx, 800.);
+    let before = h.list(cx).logical_scroll_top();
+    assert!(before.item_ix < h.list(cx).item_count(), "scrolled up");
+
+    click(cx, "chat-header");
+    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Admin, false)], false)]);
+    assert!(shown(cx, "info-panel"));
+    click(cx, "info-close");
+    cx.run_until_parked();
+    let after = h.list(cx).logical_scroll_top();
+    assert_eq!((after.item_ix, after.offset_in_item), (before.item_ix, before.offset_in_item));
+}
+
+#[gpui::test]
+fn a_covered_chat_does_not_open_the_panel(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    h.desktop.update(cx, |d, cx| d.toggle_log(cx));
+    h.desktop.update(cx, |d, cx| d.toggle_info(cx));
+    assert!(!info_open(&h, cx));
+    assert!(h.commands().is_empty());
+}

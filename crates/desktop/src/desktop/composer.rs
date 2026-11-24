@@ -428,6 +428,8 @@ impl Desktop {
             // The session dialogs offer only sign-out.
         } else if self.message_menu.take().is_some() {
             cx.notify();
+        } else if self.info.is_some() {
+            self.close_info(cx);
         } else {
             self.cancel_mode(cx);
         }
