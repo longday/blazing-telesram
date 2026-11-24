@@ -37,6 +37,8 @@ const EDIT_REFUSED_REASON: &str = "Это сообщение нельзя изм
 const DELETED_PREVIEW: &str = "Сообщение удалено";
 /// Why a send was refused: it could not be stored, so it would not survive a restart.
 const STORE_FAILED_REASON: &str = "Не удалось сохранить сообщение";
+/// Results asked of the backend per kind: the first page only.
+const SEARCH_LIMIT: usize = 10;
 
 enum LiveChange {
     Upsert(Message),
@@ -140,6 +142,8 @@ enum Input {
     /// The send queue's backoff of generation `.0` ended.
     OutboxResume(u64),
     Action { chat: ChatId, action: Action, result: Result<(), BackendError> },
+    /// The answer to the search `id`, which may have been superseded since.
+    Search { id: SearchId, result: Result<SearchHits, BackendError> },
 }
 
 /// A server write that is attempted once and not queued.
@@ -202,6 +206,8 @@ struct Engine<B> {
     /// Markers requested while we could not send; the newest per chat goes out once online.
     read_deferred: HashMap<ChatId, MessageTs>,
     typing_sent: HashMap<ChatId, tokio::time::Instant>,
+    /// The newest search asked for and still awaited; an answer for any other id is dropped.
+    search_latest: Option<SearchId>,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -333,6 +339,18 @@ fn download_failure(error: &BackendError) -> DownloadFailure {
     }
 }
 
+/// Names the kind of a failure without its text, which may echo what was asked.
+fn error_kind(error: &BackendError) -> &'static str {
+    match error {
+        BackendError::SessionExpired => "session expired",
+        BackendError::Network(_) => "network",
+        BackendError::Protocol(_) => "protocol",
+        BackendError::NotFound => "not found",
+        BackendError::Rejected { .. } => "rejected",
+        BackendError::Storage(_) => "storage",
+    }
+}
+
 /// Lets a download's progress through at most once per [`DOWNLOAD_PROGRESS_INTERVAL`] and remembers
 /// what was last let through, so the final report can complete it.
 #[derive(Default)]
@@ -434,6 +452,7 @@ impl<B: Backend> Engine<B> {
             read_marks: HashMap::new(),
             read_deferred: HashMap::new(),
             typing_sent: HashMap::new(),
+            search_latest: None,
         };
         tokio::spawn(pump_commands(commands, inputs));
 
@@ -494,6 +513,7 @@ impl<B: Backend> Engine<B> {
                 self.pump_outbox();
             }
             Input::Action { chat, action, result } => self.handle_action(chat, action, result),
+            Input::Search { id, result } => self.handle_search(id, result),
             Input::Connected { .. } | Input::Retry(_) | Input::Live { .. } | Input::LiveClosed(_) | Input::OutboxResume(_) => {}
         }
         true
@@ -544,8 +564,8 @@ impl<B: Backend> Engine<B> {
             Command::MarkRead { chat, timestamp } => self.mark_read(chat, timestamp),
             Command::Typing(chat) => self.typing(chat),
             Command::SaveDraft(draft) => self.save_draft(draft),
-            // Handled by task 2.2 of add-global-search; the contract is fixed ahead of the engine.
-            Command::Search { .. } | Command::CancelSearch => {}
+            Command::Search { id, query } => self.search(id, query),
+            Command::CancelSearch => self.search_latest = None,
         }
         true
     }
@@ -1030,6 +1050,36 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    // -- search ---------------------------------------------------------------------------
+
+    /// Server search is read-only and neither queued nor cached: only the newest request's
+    /// answer is delivered, and while we cannot ask it fails at once.
+    fn search(&mut self, id: SearchId, query: String) {
+        self.search_latest = Some(id);
+        if !self.is_online() {
+            return self.emit(ClientEvent::SearchFailed { id, reason: SearchFailure::Offline });
+        }
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move {
+            let result = backend.search(&query, SEARCH_LIMIT).await;
+            post(&inputs, Input::Search { id, result });
+        });
+    }
+
+    fn handle_search(&mut self, id: SearchId, result: Result<SearchHits, BackendError>) {
+        if self.search_latest != Some(id) {
+            return;
+        }
+        match result {
+            Ok(hits) => self.emit(ClientEvent::SearchResults { id, hits }),
+            Err(BackendError::SessionExpired) => self.expire(),
+            Err(error) => {
+                tracing::warn!(kind = error_kind(&error), "search failed");
+                self.emit(ClientEvent::SearchFailed { id, reason: SearchFailure::Failed });
+            }
+        }
+    }
+
     /// Never marks twice for the same or an older message. The counter drops at once; the
     /// request goes out now, or once online when it cannot (only the newest per chat is kept).
     fn mark_read(&mut self, chat: ChatId, timestamp: MessageTs) {
@@ -1440,6 +1490,10 @@ mod tests {
         search_result: Option<Result<SearchHits, BackendError>>,
         /// Every `search` call: query and limit.
         search_calls: Vec<(String, usize)>,
+        /// When set, `search` records its call, then waits here before answering.
+        search_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Searches answered so far (after the gate).
+        search_done: usize,
     }
 
     #[derive(Clone, Default)]
@@ -1583,9 +1637,16 @@ mod tests {
             self.record(Call::Typing(chat.clone()))
         }
         async fn search(&self, query: &str, limit: usize) -> Result<SearchHits, BackendError> {
-            let mut s = self.state();
-            s.search_calls.push((query.into(), limit));
-            s.search_result.clone().unwrap_or_else(|| Ok(SearchHits::default()))
+            let (result, gate) = {
+                let mut s = self.state();
+                s.search_calls.push((query.into(), limit));
+                (s.search_result.clone().unwrap_or_else(|| Ok(SearchHits::default())), s.search_gate.clone())
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            self.state().search_done += 1;
+            result
         }
     }
 
@@ -1710,6 +1771,10 @@ mod tests {
 
         fn send_text(&self, chat: &str, text: &str) {
             self.client.send(Command::Send { chat: id(chat), text: text.into(), reply_to: None });
+        }
+
+        fn search(&self, n: u64, query: &str) {
+            self.client.send(Command::Search { id: SearchId(n), query: query.into() });
         }
     }
 
@@ -3622,5 +3687,95 @@ mod tests {
         let seen = h.drain();
         assert!(!seen.iter().any(|e| is_download_event(e) || matches!(e, ClientEvent::MediaReady { .. } | ClientEvent::MediaUnavailable(_))), "{seen:?}");
         assert!(h.listing().is_empty());
+    }
+
+    fn hits(title: &str) -> SearchHits {
+        SearchHits {
+            chats: vec![ChatHit { id: id("a"), kind: ChatKind::Group, title: title.into(), avatar: None }],
+            ..SearchHits::default()
+        }
+    }
+
+    fn search_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
+        events.iter().filter(|e| matches!(e, ClientEvent::SearchResults { .. } | ClientEvent::SearchFailed { .. })).collect()
+    }
+
+    #[test]
+    fn search_results_arrive_for_the_current_id_and_nothing_is_cached() {
+        let expected = hits("Team");
+        let h = start(|s, _| s.search_result = Some(Ok(expected.clone())), 50);
+        h.online();
+        h.search(1, "ab");
+        let event = h.next("results", |e| matches!(e, ClientEvent::SearchResults { .. }));
+        assert_eq!(event, ClientEvent::SearchResults { id: SearchId(1), hits: expected });
+        assert_eq!(h.fake.state().search_calls, [("ab".to_string(), SEARCH_LIMIT)]);
+        assert!(h.cache().chats().unwrap().is_empty(), "search results are held in memory only");
+    }
+
+    #[test]
+    fn the_results_of_a_superseded_search_are_dropped() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(
+            |s, _| {
+                s.search_gate = Some(gate.clone());
+                s.search_result = Some(Ok(hits("Team")));
+            },
+            50,
+        );
+        h.online();
+        h.search(1, "a");
+        h.wait_for("the first request", |s| s.search_calls.len() == 1);
+        h.search(2, "ab");
+        h.wait_for("the second request", |s| s.search_calls.len() == 2);
+        h.open_gate(&gate, "both answers", || h.fake.state().search_done == 2);
+        h.quiet();
+        let events = h.drain();
+        assert_eq!(search_events(&events), [&ClientEvent::SearchResults { id: SearchId(2), hits: hits("Team") }]);
+    }
+
+    #[test]
+    fn results_after_cancel_search_are_dropped() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(|s, _| s.search_gate = Some(gate.clone()), 50);
+        h.online();
+        h.search(1, "ab");
+        h.wait_for("the request", |s| s.search_calls.len() == 1);
+        h.client.send(Command::CancelSearch);
+        h.quiet();
+        h.open_gate(&gate, "the answer", || h.fake.state().search_done == 1);
+        h.quiet();
+        let events = h.drain();
+        assert!(search_events(&events).is_empty(), "{events:?}");
+    }
+
+    #[test]
+    fn search_offline_fails_fast_without_asking_the_backend() {
+        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.search(1, "ab");
+        h.next("refusal", |e| *e == ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Offline });
+        h.quiet();
+        assert!(h.fake.state().search_calls.is_empty());
+    }
+
+    #[test]
+    fn a_failed_search_reports_failed() {
+        let h = start(|s, _| s.search_result = Some(Err(BackendError::Network("reset".into()))), 50);
+        h.online();
+        h.search(1, "ab");
+        h.next("failure", |e| *e == ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed });
+        assert_eq!(h.fake.state().search_calls.len(), 1);
+    }
+
+    #[test]
+    fn session_expiry_during_a_search_ends_the_session() {
+        let h = start(|s, _| s.search_result = Some(Err(BackendError::SessionExpired)), 50);
+        h.online();
+        h.search(1, "ab");
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        assert!(!h.dir.path().join("session.json").exists());
+        h.quiet();
+        let events = h.drain();
+        assert!(search_events(&events).is_empty(), "expiry is not a search failure: {events:?}");
     }
 }
