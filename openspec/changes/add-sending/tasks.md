@@ -45,8 +45,8 @@
 ## 7. Live verification (self chat only)
 
 - [x] 7.1 `bt-probe` commands `send-self`, `edit-self`, `delete-self`, `seen`, `typing-self`, refusing other chats for the self-chat ones (D11); verify a test for the refusal
-- [ ] 7.2 Live send, duplicate resend, edit and delete in the self chat; verify with `bt-probe history` and the web client (done: `bt-probe history` and the app; open: the web client)
-- [ ] 7.3 Live reply in the self chat; verify the quote in the web client, or remove reply from the change if the form fails (done: quote in `bt-probe history` and the app, including after an edit; open: the web client)
+- [x] 7.2 Live send, duplicate resend, edit and delete in the self chat; verify with `bt-probe history` and the web client (resend with the same payload returned status 8 with the original timestamp; the web client shows one copy, the edit mark and the deletion)
+- [x] 7.3 Live reply in the self chat; verify the quote in the web client, or remove reply from the change if the form fails (quote shown in `bt-probe history`, the app and the web client)
 - [ ] 7.4 Live typing; verify the push in `bt-probe listen` and record `timeout_seconds`, or remove outgoing typing if the form fails (done: push accepted with status 1; open: the server does not echo own typing to the self chat, so the push needs a peer's chat or a second account)
 - [x] 7.5 VM run: send, reply, edit, delete, offline send and drafts in the self chat through the app UI; verify by screenshots and `bt-probe history` (offline: a send during real network timeouts and one with the VM's network off were each delivered once; restart while offline was not run)
 - [x] 7.6 Workspace build with 0 warnings and all tests pass; code review by the `reviewer` agent with findings fixed
