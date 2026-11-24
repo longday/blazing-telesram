@@ -4,15 +4,15 @@
 
 The client can read and (after `add-sending`) write messages, but the user cannot see who is in a chat, cannot see their own profile, and cannot start a new conversation without the web client. This is roadmap item 5 (chat management), slice (a) of three: read-only knowledge of members and the current profile, plus creating chats. Everything that removes people, changes roles or revokes links is deliberately left for later slices, because the protocol contract for those is only partly known and the effects on other people are not reversible.
 
-Context document: `research.md` in this directory (verbatim research report with sources and verification marks). Read it before designing.
+Context document: `research.md` in this directory (verbatim research report with sources and verification marks). Read it before designing; `design.md` holds the technical decisions and the observed-shapes section that the probe tasks fill in.
 
 ## What Changes
 
-- Read the member list of the open chat: users, groups and departments, with the admin role in group chats (HTTP Registry methods `get_chat_members` / `get_group_members`); shown in a read-only members panel of the chat.
-- Read the current user's profile from the existing WebSocket `whoami` answer (`UserInfo`, `UserStatusInfo`); `get_current_user_data` is NOT used (server answers `No such path`). Shown read-only (name, avatar, own status text as the server reports it).
-- Create a private chat with a user (`create_private_chat`: `guid`, `wait_for_update`, `onetime_user_token`) and, subject to Open Question 1, a group chat (`create_chat`: parameters currently opaque), each from an explicit user action ("New chat") that shows the chosen participants and title before sending.
-- Protocol layer: members/profile reads join the closed read allowlist; creation becomes the first Registry (HTTP, CSRF) mutations, as a closed, separately tested set that does not include any other management method.
-- Chat-core/domain: new member and profile models, new backend commands for reading members and creating chats; created chat appears in the chat list through the existing update path.
+- Read the member list of the open chat: users, groups and departments, with the admin role in group chats (HTTP Registry methods `get_chat_members` for private chats, `get_group_members` for groups and channels); shown in a read-only chat info panel opened from the chat header.
+- Read the current user's profile from the socket `whoami` call (`UserInfo`, `UserStatusInfo`). The client does not send `whoami` yet (only its frame encoding exists in `crates/yandex-proto/src/frame.rs`), so it becomes a new socket read; `get_current_user_data` is NOT used (server answers `No such path`). Shown read-only (name, avatar, own status text as the server reports it).
+- Create a private chat with a user (`create_private_chat`: `guid`, `wait_for_update`, `onetime_user_token`) and, subject to the gate in decision 1 below, a group chat (`create_chat`: parameters currently opaque), each from an explicit user action ("New chat" / "Write" on a member) that shows the chosen participants and title in a confirmation dialog before anything is sent.
+- Protocol layer: members/profile reads join the closed read allowlist; creation becomes the first Registry (HTTP, CSRF) mutations, as a closed, separately tested set in a new module that contains no other management method.
+- Chat-core/domain: new member and profile models, new backend commands for reading members and creating chats; the created chat appears in the chat list through the existing chat-list refresh path.
 
 ## Capabilities
 
@@ -21,15 +21,16 @@ Context document: `research.md` in this directory (verbatim research report with
 - `chat-creation`: creating private and group chats from an explicit user action, with confirmation of participants/title and safe failure handling.
 
 ### Modified Capabilities
-- `chat-list`: a "New chat" entry point and the appearance of a freshly created chat in the list (to be confirmed at the specs stage; drop if the entry point lives outside the list spec).
+- `chat-list`: a "New chat" entry point and the appearance of a freshly created chat in the list.
+- `message-sending`: the requirement "Writes only from user actions" names the capabilities allowed to change server state; chat creation is added to that list so the rule stays true.
 
 ## Impact
 
-- `crates/yandex-proto`: `request.rs` (allowlist: member reads), `registry.rs` (first mutating HTTP calls, CSRF, response/error parsing), `wire.rs` (member/profile wire models, `whoami` profile fields); tests asserting that only the listed methods were added.
-- `crates/chat-core`: `model.rs` (member, role and profile types), `backend.rs` (read-members, create-chat commands).
-- `crates/desktop`: `yandex_backend.rs` implementation, members panel, profile view, "New chat" flow with confirmation.
-- `bt-probe`: read-members/`whoami` probe; guarded create-chat probe for payload discovery.
-- Dependency: shares the mutating-method allowlist convention introduced by `add-sending` (not touched here); this change must land after, or be reconciled with, its closed-set tests.
+- `crates/yandex-proto`: `request.rs` (allowlist: `whoami`, `get_chat_members`, `get_group_members`), new `manage.rs` (closed set of Registry mutations), `registry.rs` (CSRF-guarded mutation call with sent/not-sent outcome), `wire.rs` (member/profile parsers), `client.rs` (facade); tests asserting that only the listed methods were added. The existing tests in `request.rs` and `write.rs` pin `ALLOWED_METHODS` to exactly four names and must be updated to the new exact list.
+- `crates/chat-core`: `model.rs` (member, role, profile, creation types; `ChatSummary.partner`), `backend.rs` (read-members, read-profile, create commands), `client.rs` (engine handling).
+- `crates/desktop`: `yandex_backend.rs` implementation, `store.rs` state, chat info panel, profile view, "New chat" flow with confirmation.
+- `bt-probe`: read-members/`whoami` probe; guarded create-chat probes for payload discovery.
+- Dependency on `add-sending` is satisfied: it is archived (`openspec/changes/archive/2026-11-24-add-sending/`) and its closed-write-set conventions (`write.rs`, `BT_WRITE_ONLY_CHAT` guard in `yandex_backend.rs`) are the base this change follows. Sibling changes in flight (`add-message-reactions`, `add-media-download`, `add-global-search`) may also extend `ALLOWED_METHODS`; whoever lands second extends the exact-list tests instead of replacing them.
 - Risk: `create_chat` / `create_private_chat` change the real account and may create duplicates on retry (no known idempotency key); the protocol is unofficial. Live verification limited to chats created with the user's explicit approval.
 
 ## Non-goals
@@ -37,18 +38,25 @@ Context document: `research.md` in this directory (verbatim research report with
 - Changing membership, roles, admins, leaving chats (`change_chat_members`, `change_chat_role`, `change_chat_admins`, `leave`) — slice (b).
 - Invite links (`invite`, `invite_renew`) and `invite_hash` handling — slice (b).
 - Editing chat info (`set_chat_info`), editing the profile, setting statuses/availability — slice (c).
+- Searching the directory for people (`search`, `get_members_and_contacts_suggest`): participants are chosen only among people the client already knows (see decision 7).
 - Any mutation without an explicit user action; any live mutation on the real account without user approval.
 
 ## Follow-ups
 
 - (b) Membership management: add/remove members, change roles/admins, leave, invites and link renewal; every destructive step confirmed; `version` conflicts re-read state instead of blind retry.
 - (c) Profile and status changes: only after the semantics (status message vs availability vs online presence), rights and side effects on other devices are decided and probed.
+- Directory search as a participant source for "New chat" (reuse the `search` read of `add-global-search` once it lands).
+- Group creation, if the gate in decision 1 fails: a separate change `add-group-chat-creation`.
 
-## Open Questions
+## Decisions on the Open Questions
 
-1. **Is group creation (`create_chat`) in this change, or only private chats?** Recommended: first implement reading members/`whoami` and private chat creation; include `create_chat` only after a guarded `bt-probe` run fixes its payload and result shape, keeping it in this change if the probe succeeds, else moving it to a follow-up. Trade-off: group creation delays usefulness slightly, but implementing an opaque payload blindly risks wrong or duplicated server-side chats.
-2. **Retry policy for creation after a network failure.** Recommended: never auto-retry; show "unknown result", refresh the chat list and let the user retry explicitly. Trade-off: slightly more friction vs. risk of duplicate chats since no idempotency key is known.
-3. **What exactly counts as "profile"/"status" on the read side?** Recommended: show only what `whoami` returns (`UserInfo`, `UserStatusInfo`) as read-only text, without interpreting availability; defer semantics to slice (c). Trade-off: profile view may look incomplete, but no wrong claims about presence.
-4. **Confirmation UX for creation.** Recommended: a single dialog listing the title and participants with an explicit "Create" button; no creation on Enter in a search field. Trade-off: an extra step vs. accidental chats visible to other people.
-5. **Live verification scope.** Recommended: reads against the real account are fine; create calls limited to a throwaway chat with the user (or a test colleague) and only after approval. Trade-off: weaker automated coverage of the creation path vs. no side effects on others; rely on recorded-fixture tests for parsing.
-6. **Modified `chat-list` spec or not?** Recommended: yes, minimal delta (entry point plus newly created chat appears). Trade-off: touches an established spec vs. keeping "New chat" fully inside `chat-creation`.
+All six open questions were resolved by taking the recommended answer (autonomous run, no user input requested); two more questions that surfaced while grounding the plan in the code were resolved the same way. `design.md` details the mechanics.
+
+1. **Group creation (`create_chat`) in this change?** Decision: members/`whoami` reads and private chat creation come first; `create_chat` is gated. Gate: task 0.1 reads the web client's code (read-only, no account effects) and records the payload and reply shape in `design.md` (D4); tasks 6.1–6.3 then add the typed request, backend and UI, and task 6.4 verifies it live once with approval. If the payload cannot be determined, or the live check fails for a reason the client cannot fix, group creation moves to a follow-up: task 6.F deletes the group requirement from the `chat-creation` spec and any group code, and this proposal's Follow-ups name `add-group-chat-creation`. Why: an opaque payload implemented blindly can create wrong or duplicate chats visible to other people; delaying groups costs little.
+2. **Retry policy after a network failure.** Decision: never retry automatically and never queue creation (unlike messages there is no outbox). A failure after the request left the client is reported as "unknown result", the chat list is refreshed, and only an explicit user action sends the request again; a private chat that already exists after the refresh is opened instead of created. Why: no idempotency key is known, so a blind retry can duplicate a chat.
+3. **What counts as profile/status on the read side?** Decision: show exactly what `whoami` returns (`UserInfo` name and avatar, `UserStatusInfo` as text when it carries one) as read-only; no interpretation of availability or presence, no edit controls. Why: the semantics belong to slice (c); a wrong claim about presence is worse than a plain view.
+4. **Confirmation UX for creation.** Decision: one dialog listing title (groups) and participants with an explicit "Создать" button and "Отмена"; Enter inside a search or title field never creates; the button is disabled while a creation is in flight. Why: accidental chats are visible to other people and cannot be undone by this client.
+5. **Live verification scope.** Decision: reads against the real account are allowed; create calls run only through `bt-probe` commands that refuse to send without an explicit confirmation flag, and only after the user approves the target (a throwaway chat with the user or a test colleague). Parsing is covered by recorded-fixture tests. Why: no side effects on other people; weaker automated coverage of the creation path is accepted. The tasks that need approval are marked and keep the change from being archived until done.
+6. **Modified `chat-list` spec?** Decision: yes, a minimal delta: the "New chat" entry point and the newly created chat appearing in the list. Why: the entry point is part of the sidebar; the creation behaviour itself stays in `chat-creation`.
+7. **Where do participants come from?** (surfaced during design) Decision: only people the client already knows: partners of existing private chats (new `ChatSummary.partner`) and the members of the chat whose info panel is open; a "Write" action on a member row starts a private chat directly. Directory search is a follow-up. Why: it needs `search`-class reads that belong to `add-global-search`; the closed allowlist grows only by what this change needs.
+8. **Are members cached offline?** (surfaced during design) Decision: no; members and the profile are fetched on demand, and offline the panel says so. Why: the offline-cache spec is untouched, member lists change on the server and a stale list presented as current is misleading.
