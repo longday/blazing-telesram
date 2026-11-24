@@ -8,6 +8,7 @@ use crate::store::{ChatFilter, ChatStore, DownloadState, SearchStatus, SessionSt
 use crate::timeline::gallery_columns;
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
+use bt_chat_core::reactions::{ReactionCode, ReactionCount, Reactions, KNOWN};
 use gpui::{
     point, px, size, AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, MouseButton, Pixels,
     ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
@@ -75,6 +76,7 @@ fn message(chat: &str, i: i64, author: &str, outgoing: bool, body: MessageBody) 
         reply_to: None,
         forwarded_from: None,
         delivery: bt_chat_core::model::Delivery::Sent,
+        reactions: Default::default(),
     }
 }
 
@@ -2844,4 +2846,333 @@ fn clicking_a_cell_or_the_single_image_opens_the_viewer_at_it(cx: &mut TestAppCo
     assert_eq!(viewer_at(&h, cx), Some((ts(1), 0)));
     assert!(shown(cx, "viewer-pos-1-1"));
     assert!(h.commands().is_empty(), "opening the viewer asks for nothing");
+}
+
+// ---- add-message-reactions 5.4: chips, menu row, refusals ----
+//
+// Debug bounds say where an element is, not what it is filled with or which glyph it shows. The own
+// reaction (chip and menu button fill) is therefore asserted through the store state both views read
+// (`Reactions::mine`), and the neutral glyph through the chip being there and clickable for a code
+// outside `KNOWN`. Bounds are also never removed once painted, so every "no such element" case runs in
+// a window that never painted it.
+
+const LIKE: i64 = 100102;
+const FIRE: i64 = 100104;
+const HEART: i64 = 100109;
+const NOT_IN_TABLE: i64 = 424_242;
+
+/// One selector per `KNOWN` type, in picker order; `debug_bounds` only takes `&'static str`.
+const MENU_REACTIONS: [&str; 8] = [
+    "menu-reaction-100109",
+    "menu-reaction-100104",
+    "menu-reaction-100102",
+    "menu-reaction-100103",
+    "menu-reaction-100106",
+    "menu-reaction-100105",
+    "menu-reaction-100110",
+    "menu-reaction-100101",
+];
+
+fn reactions_of(counts: &[(i64, u32)], mine: Option<i64>) -> Reactions {
+    let counts = counts.iter().map(|&(code, count)| ReactionCount { code: ReactionCode(code), count }).collect();
+    Reactions { counts, mine: mine.map(ReactionCode), version: Some(1) }
+}
+
+/// An incoming message with reactions.
+fn reacted(i: i64, counts: &[(i64, u32)], mine: Option<i64>) -> Message {
+    let mut m = text("g", i);
+    m.reactions = reactions_of(counts, mine);
+    m
+}
+
+fn toggle_command(i: i64, code: i64) -> Command {
+    Command::ToggleReaction { chat: chat_g(), timestamp: ts(i), code: ReactionCode(code) }
+}
+
+fn reactions_in_store(h: &Harness, cx: &mut VisualTestContext, i: i64) -> Reactions {
+    h.store.read_with(cx, |s, _| {
+        s.timeline(&chat_g()).unwrap().messages.iter().find(|m| m.timestamp == ts(i)).unwrap().reactions.clone()
+    })
+}
+
+fn menu_is_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.menu_is_open())
+}
+
+/// The menu surface is repainted (its bounds overwritten) every time a menu opens, unlike its entries
+/// that stay in the debug map after they are closed.
+fn menu_height(cx: &mut VisualTestContext) -> f32 {
+    f32::from(bounds(cx, "message-menu").expect("a menu was painted").size.height)
+}
+
+#[gpui::test]
+fn chips_show_one_chip_per_type_in_the_server_order_inside_the_bubble(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let counts = [(LIKE, 3), (FIRE, 1000), (NOT_IN_TABLE, 2)];
+    open_with(&h, cx, vec![text("g", 1), reacted(2, &counts, Some(FIRE))]);
+
+    let chips = [msg!(2, "reaction-100102"), msg!(2, "reaction-100104"), msg!(2, "reaction-424242")];
+    let bubble = bounds(cx, msg!(2)).unwrap();
+    for chip in chips {
+        assert!(inside(bubble, bounds(cx, chip).unwrap_or_else(|| panic!("{chip} is not on screen"))), "{chip} sits in the bubble");
+    }
+    assert!(origin(cx, chips[0]).0 < origin(cx, chips[1]).0 && origin(cx, chips[1]).0 < origin(cx, chips[2]).0, "server order");
+    assert!(!shown(cx, msg!(2, "reaction-100109")), "a type nobody chose has no chip");
+    assert!(!shown(cx, msg!(1, "reaction-100102")), "a message without reactions has no chips");
+    assert!(dims(cx, chips[1]).0 > dims(cx, chips[0]).0 + 10., "the count is part of the chip: 1000 is wider than 3");
+    assert!(h.commands().is_empty(), "showing reactions asks for nothing");
+}
+
+#[gpui::test]
+fn a_type_outside_the_table_is_still_a_clickable_chip(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(2, &[(NOT_IN_TABLE, 1)], None)]);
+    assert!(bt_chat_core::reactions::emoji(ReactionCode(NOT_IN_TABLE)).is_none(), "drawn with the neutral glyph");
+    click(cx, msg!(2, "reaction-424242"));
+    assert_eq!(h.commands(), [toggle_command(2, NOT_IN_TABLE)]);
+}
+
+#[gpui::test]
+fn clicking_a_chip_sends_a_toggle_with_its_code_and_opens_no_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))]);
+    click(cx, msg!(2, "reaction-100102"));
+    assert_eq!(h.commands(), [toggle_command(2, LIKE)], "another type replaces the own one");
+    click(cx, msg!(2, "reaction-100104"));
+    assert_eq!(h.commands(), [toggle_command(2, FIRE)], "the own type goes through the same command: the core removes it");
+    assert!(!menu_is_open(&h, cx));
+    assert_eq!(reactions_in_store(&h, cx, 2), reactions_of(&[(LIKE, 3), (FIRE, 1)], Some(FIRE)), "the UI waits for the core's overlay");
+}
+
+#[gpui::test]
+fn the_own_type_follows_the_account_reaction_in_the_store(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))]);
+    // The chip and the menu button of a type are filled when `mine` is that type (see the header note).
+    assert_eq!(reactions_in_store(&h, cx, 2).mine, Some(ReactionCode(FIRE)));
+
+    let moved = Reactions { version: Some(2), ..reactions_of(&[(LIKE, 4)], Some(LIKE)) };
+    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: moved }]);
+    assert_eq!(reactions_in_store(&h, cx, 2).mine, Some(ReactionCode(LIKE)));
+
+    let removed = Reactions { version: Some(3), ..reactions_of(&[(LIKE, 3)], None) };
+    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: removed }]);
+    assert_eq!(reactions_in_store(&h, cx, 2).mine, None);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_server_update_adds_chips_in_place(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    assert!(!shown(cx, msg!(2, "reaction-100104")));
+
+    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: reactions_of(&[(FIRE, 2)], None) }]);
+    assert!(shown(cx, msg!(2, "reaction-100104")));
+    assert_eq!(stamps(&h, cx), [1, 2], "no message was added or moved in the list");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn deleted_pending_and_failed_messages_show_no_chips(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let busy = reactions_of(&[(LIKE, 2)], None);
+    let mut deleted = message("g", 2, "alice", false, MessageBody::Deleted);
+    deleted.reactions = busy.clone();
+    let mut waiting = pending("g", 3, "p1", "жду");
+    waiting.reactions = busy.clone();
+    let mut broken = failed("g", 4, "p2", "не вышло", "нет прав");
+    broken.reactions = busy;
+    open_with(&h, cx, vec![reacted(1, &[(LIKE, 2)], None), deleted, waiting, broken]);
+
+    assert!(shown(cx, msg!(1, "reaction-100102")), "the control message shows its chip");
+    assert!(shown(cx, msg!(2)) && shown(cx, msg!(3)) && shown(cx, msg!(4)), "the other rows are on screen");
+    assert!(!shown(cx, msg!(2, "reaction-100102")), "deleted");
+    assert!(!shown(cx, msg!(3, "reaction-100102")), "pending");
+    assert!(!shown(cx, msg!(4, "reaction-100102")), "failed");
+}
+
+#[gpui::test]
+fn the_menu_row_has_one_button_per_known_type_in_one_line_above_the_entries(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 1, "мой")]);
+    // The non-empty table is the 3.3 outcome these cases are written for.
+    assert!(!KNOWN.is_empty());
+    assert_eq!(KNOWN.len(), MENU_REACTIONS.len());
+    for (known, selector) in KNOWN.iter().zip(MENU_REACTIONS) {
+        assert_eq!(selector, format!("menu-reaction-{}", known.code.0), "the selector table follows KNOWN");
+    }
+
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-reactions"));
+    let row_y = y(cx, MENU_REACTIONS[0]);
+    let mut left = f32::MIN;
+    for selector in MENU_REACTIONS {
+        assert_eq!(y(cx, selector), row_y, "{selector} is on the first line");
+        assert!(origin(cx, selector).0 > left, "{selector} follows the previous button");
+        left = origin(cx, selector).0;
+        assert!(inside(bounds(cx, "message-menu").unwrap(), bounds(cx, selector).unwrap()), "{selector} fits the menu");
+    }
+    assert!(row_y < y(cx, "menu-reply"), "the row is above the entries");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn choosing_a_type_in_the_menu_toggles_it_and_closes_the_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), reacted(2, &[(LIKE, 1)], Some(LIKE))]);
+    right_click(cx, msg!(2));
+    click(cx, "menu-reaction-100104");
+    assert_eq!(h.commands(), [toggle_command(2, FIRE)]);
+    assert!(!menu_is_open(&h, cx));
+
+    // The own type is marked from the state; choosing it again is the same command, the core removes it.
+    assert_eq!(reactions_in_store(&h, cx, 2).mine, Some(ReactionCode(LIKE)));
+    right_click(cx, msg!(2));
+    click(cx, "menu-reaction-100102");
+    assert_eq!(h.commands(), [toggle_command(2, LIKE)]);
+    assert!(!menu_is_open(&h, cx));
+
+    right_click(cx, msg!(1));
+    click(cx, "menu-reaction-100109");
+    assert_eq!(h.commands(), [toggle_command(1, HEART)], "an incoming message without reactions can be reacted to");
+}
+
+#[gpui::test]
+fn a_message_with_only_a_reaction_row_still_opens_the_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![message("g", 1, "bob", false, MessageBody::Unsupported("sticker".into()))]);
+    right_click(cx, msg!(1));
+    assert!(menu_is_open(&h, cx));
+    assert!(shown(cx, "menu-reactions"));
+    for entry in ["menu-reply", "menu-copy", "menu-edit", "menu-delete"] {
+        assert!(!shown(cx, entry), "{entry}: nothing else applies to it");
+    }
+    click(cx, "menu-reaction-100101");
+    assert_eq!(h.commands(), [toggle_command(1, 100101)]);
+}
+
+#[gpui::test]
+fn pending_and_failed_menus_have_no_reaction_row_and_a_deleted_message_has_no_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let deleted = message("g", 2, "alice", false, MessageBody::Deleted);
+    let mut own_deleted = own("g", 6, "x");
+    own_deleted.body = MessageBody::Deleted;
+    open_with(&h, cx, vec![pending("g", 1, "p1", "жду"), deleted, failed("g", 3, "p2", "не вышло", "нет прав"), own_deleted]);
+
+    right_click(cx, msg!(1));
+    assert!(menu_is_open(&h, cx));
+    assert!(shown(cx, "menu-copy"));
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(3));
+    assert!(menu_is_open(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!shown(cx, "menu-reactions"), "neither a pending nor a failed message offers reactions");
+
+    right_click(cx, msg!(2));
+    assert!(!menu_is_open(&h, cx), "a deleted message has no menu");
+    right_click(cx, msg!(6));
+    assert!(!menu_is_open(&h, cx), "not even its own author's");
+    assert!(!shown(cx, "menu-reactions"));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_toggle_for_a_chat_that_is_not_open_or_while_blocked_is_ignored(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(2, &[(LIKE, 1)], None)]);
+    let ask = |h: &Harness, cx: &mut VisualTestContext, chat: &str| {
+        h.desktop.update(cx, |d, cx| d.toggle_reaction(ChatId(chat.into()), ts(2), ReactionCode(LIKE), cx));
+    };
+    ask(&h, cx, "p");
+    assert!(h.commands().is_empty(), "the chat is not the open one");
+    ask(&h, cx, "g");
+    assert_eq!(h.commands(), [toggle_command(2, LIKE)]);
+
+    h.feed(cx, [ClientEvent::SessionExpired]);
+    assert!(blocked(&h, cx));
+    ask(&h, cx, "g");
+    assert!(h.commands().is_empty(), "an expired session asks for nothing");
+}
+
+#[gpui::test]
+fn a_refused_reaction_rolls_back_the_overlay_and_shows_the_reason_for_a_while(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let confirmed = reactions_of(&[(LIKE, 3)], None);
+    open_with(&h, cx, vec![text("g", 1), reacted(2, &[(LIKE, 3)], None)]);
+
+    click(cx, msg!(2, "reaction-100102"));
+    assert_eq!(h.commands(), [toggle_command(2, LIKE)]);
+    // What the core answers: the overlay at once, then the rollback with the reason when the server refuses.
+    let overlay = reactions_of(&[(LIKE, 4)], Some(LIKE));
+    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: overlay.clone() }]);
+    assert_eq!(reactions_in_store(&h, cx, 2), overlay);
+    assert!(!shown(cx, "toast"));
+
+    h.feed(
+        cx,
+        [
+            ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: confirmed.clone() },
+            ClientEvent::ActionFailed { chat: chat_g(), reason: "NO_PERMISSION".into() },
+        ],
+    );
+    assert_eq!(reactions_in_store(&h, cx, 2), confirmed, "back to the confirmed state");
+    assert!(shown(cx, "toast"));
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), Some("NO_PERMISSION".into()));
+
+    cx.executor().advance_clock(Duration::from_secs(6));
+    cx.run_until_parked();
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), None);
+}
+
+/// Observation from 5.3: right-clicking a pending message right after closing another message's menu
+/// seemed to open the menu "as if Sent". Not a bug, two test-side effects: the entries of a closed menu stay
+/// in the debug map (`shown("menu-reply")` is true from the earlier menu whatever is open now), and the
+/// open menu (192 px below the click) covers the message below it, so a right click there lands on the
+/// menu or its overlay and closes it instead of opening a second one. The check therefore goes through
+/// what every opening repaints, the height of the menu surface, and through what a click does; the
+/// pending message sits below the menu's reach.
+#[gpui::test]
+fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut messages = vec![own("g", 1, "мой")];
+    messages.extend((2..=9).map(|i| text("g", i)));
+    messages.push(pending("g", 10, "p1", "жду"));
+    open_with(&h, cx, messages);
+
+    right_click(cx, msg!(10));
+    let copy_only = menu_height(cx);
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(1));
+    let full = menu_height(cx);
+    assert!(full > copy_only * 2., "the sent message's menu is the long one: {full} against {copy_only}");
+    assert!(y(cx, msg!(10)) > y(cx, "message-menu") + full, "the pending message is outside the open menu");
+
+    // Closed with Escape, then the pending message.
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(10));
+    assert!(menu_is_open(&h, cx));
+    assert_eq!(menu_height(cx), copy_only, "after Escape");
+    cx.simulate_keystrokes("escape");
+
+    // Closed by an outside click.
+    right_click(cx, msg!(1));
+    click(cx, "chat-header");
+    right_click(cx, msg!(10));
+    assert_eq!(menu_height(cx), copy_only, "after an outside click");
+    cx.simulate_keystrokes("escape");
+
+    // A right click on another message while a menu is open only closes that menu.
+    right_click(cx, msg!(1));
+    right_click(cx, msg!(10));
+    assert!(!menu_is_open(&h, cx));
+    right_click(cx, msg!(10));
+    assert!(menu_is_open(&h, cx));
+    assert_eq!(menu_height(cx), copy_only, "after a right click on the occluded message");
+
+    click(cx, "menu-copy");
+    assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), Some("жду".into()));
+    assert!(h.commands().is_empty(), "no reply, edit, delete or reaction came out of it");
+    assert_eq!(composer_reply(&h, cx), None);
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
 }
