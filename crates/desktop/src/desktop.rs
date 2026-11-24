@@ -182,12 +182,14 @@ impl Desktop {
         self.search_input.seen = content;
         self.search_input.generation += 1;
         let generation = self.search_input.generation;
-        if search_query(&self.search_input.seen).is_none() {
+        let Some(query) = search_query(&self.search_input.seen) else {
             self.search_input.settled = generation;
             self.search_input.timer = None;
             self.store.update(cx, |store, cx| store.cancel_search(cx));
             return;
-        }
+        };
+        // A reply still on its way answers the old text: it must not show up before the new request is sent.
+        self.store.update(cx, |store, _| store.supersede_search(query));
         self.search_input.timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |this, cx| {

@@ -462,6 +462,17 @@ impl ChatStore {
         cx.notify();
     }
 
+    /// The query text changed to `next` but the request for it is not sent yet. A reply still on its way
+    /// belongs to the old text, so it is dropped on arrival instead of being shown (stale replies never
+    /// change the view); the hits already shown stay until the new reply. The state gets the id 0, which
+    /// is never issued, and no query, so the next `search` is not mistaken for a repeat.
+    pub fn supersede_search(&mut self, next: &str) {
+        if let Some(state) = self.search.as_mut().filter(|s| s.status == SearchStatus::Loading && s.query != next) {
+            state.id = SearchId(0);
+            state.query.clear();
+        }
+    }
+
     pub fn search_state(&self) -> Option<&SearchState> {
         self.search.as_ref()
     }

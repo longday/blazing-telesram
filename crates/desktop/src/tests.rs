@@ -715,6 +715,34 @@ fn every_local_match_stays_above_the_server_results(cx: &mut TestAppContext) {
     }
 }
 
+#[gpui::test]
+fn a_reply_arriving_while_the_next_query_waits_for_its_pause_is_dropped(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ab");
+    pass(cx, SEARCH_DEBOUNCE);
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    type_search(cx, "c");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert_eq!(h.commands(), [search_command(1, "ab"), search_command(2, "abc")]);
+
+    // The reply to "abc" is in flight; the text changes again and the new request is still waiting.
+    type_search(cx, "d");
+    let late = SearchHits { messages: search_hits().messages, ..SearchHits::default() };
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(2), hits: late.clone() }]);
+    h.store.read_with(cx, |s, _| {
+        let state = s.search_state().unwrap();
+        assert_eq!((state.status, state.hits.clone()), (SearchStatus::Loading, search_hits()), "the old reply changed nothing");
+    });
+    assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"], "what was shown stays");
+
+    pass(cx, SEARCH_DEBOUNCE);
+    let commands = h.commands();
+    let [Command::Search { id, query }] = commands.as_slice() else { panic!("one request expected: {commands:?}") };
+    assert_eq!(query, "abcd");
+    h.feed(cx, [ClientEvent::SearchResults { id: *id, hits: late }]);
+    assert_eq!(search_sections(&h, cx), ["Сообщения"], "the reply to the current text is shown");
+}
+
 // ---- 6.3 timeline ----
 
 fn open_group(h: &Harness, cx: &mut VisualTestContext) {
