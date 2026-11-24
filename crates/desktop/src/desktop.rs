@@ -5,7 +5,10 @@ mod composer;
 use crate::format::{chat_time, log_time, one_line, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::input::{InputEvent, TextInput};
-use crate::store::{ChatFilter, ChatStore, SessionState, StoreEvent, TimelineChange};
+use crate::search_results::{self, SearchView, StatusLine};
+use crate::store::{
+    ChatFilter, ChatStore, SearchStatus, SessionState, StoreEvent, TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
+};
 use crate::theme::*;
 use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
@@ -23,6 +26,8 @@ const LOG_POLL: Duration = Duration::from_millis(250);
 
 const ROW_HEIGHT: f32 = 64.;
 const SIDEBAR_WIDTH: f32 = 340.;
+/// Most local rows kept on screen while server results are listed below them.
+const LOCAL_ROWS_WITH_RESULTS: usize = 5;
 
 const FILTERS: [(&str, &str, ChatFilter); 5] = [
     ("filter-all", "Все", ChatFilter::All),
@@ -52,10 +57,28 @@ struct LogView {
     _poll: Task<()>,
 }
 
+/// The search field as the server search sees it: which text was last looked at and the debounce state.
+struct SearchInput {
+    /// The field content the generation counts changes of.
+    seen: SharedString,
+    /// Bumped on every change of the content; a debounce timer acts only if it still holds its own value.
+    generation: u64,
+    /// The generation whose query was handled (sent, cancelled or refused); behind `generation` while a timer runs.
+    settled: u64,
+    timer: Option<Task<()>>,
+}
+
+/// What the server search is asked for: the trimmed field text, if it has at least `SEARCH_MIN_CHARS` characters.
+fn search_query(content: &str) -> Option<&str> {
+    let query = content.trim();
+    (query.chars().count() >= SEARCH_MIN_CHARS).then_some(query)
+}
+
 pub struct Desktop {
     pub(crate) store: Entity<ChatStore>,
     clock: Clock,
     pub(crate) search: Entity<TextInput>,
+    search_input: SearchInput,
     pub(crate) filter: ChatFilter,
     open: Option<OpenTimeline>,
     pub(crate) menu: AccountMenu,
@@ -77,7 +100,10 @@ impl Desktop {
         let search = cx.new(|cx| TextInput::single_line("Поиск", cx));
         let compose = Compose::new(cx);
         let subscriptions = vec![
-            cx.observe(&search, |_, _, cx| cx.notify()),
+            cx.observe(&search, |this, _, cx| {
+                this.search_changed(cx);
+                cx.notify();
+            }),
             cx.observe(&compose.input, |_, _, cx| cx.notify()),
             cx.subscribe_in(&compose.input, window, |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx)),
             cx.observe_in(&store, window, |this, _, window, cx| {
@@ -88,6 +114,7 @@ impl Desktop {
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
                 StoreEvent::Timeline { chat, change } => this.apply_timeline_change(chat, change, cx),
                 StoreEvent::Drafts => this.restore_late_draft(cx),
+                StoreEvent::Connection => this.resume_search(cx),
                 StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
                 StoreEvent::SendRefused { draft, reason } => this.send_refused(draft.clone(), reason.clone(), cx),
                 _ => {}
@@ -102,6 +129,7 @@ impl Desktop {
             store,
             clock,
             search,
+            search_input: SearchInput { seen: SharedString::default(), generation: 0, settled: 0, timer: None },
             filter: ChatFilter::All,
             open: None,
             menu: AccountMenu::Closed,
@@ -144,6 +172,86 @@ impl Desktop {
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.select(chat, cx));
+    }
+
+    /// Reacts to a change of the search field: a short or empty query cancels the server search at once,
+    /// a longer one is sent after `SEARCH_DEBOUNCE` without further changes.
+    fn search_changed(&mut self, cx: &mut Context<Self>) {
+        let content = self.search.read(cx).content.clone();
+        if content == self.search_input.seen {
+            return;
+        }
+        self.search_input.seen = content;
+        self.search_input.generation += 1;
+        let generation = self.search_input.generation;
+        if search_query(&self.search_input.seen).is_none() {
+            self.search_input.settled = generation;
+            self.search_input.timer = None;
+            self.store.update(cx, |store, cx| store.cancel_search(cx));
+            return;
+        }
+        self.search_input.timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SEARCH_DEBOUNCE).await;
+            this.update(cx, |this, cx| {
+                if this.search_input.generation == generation {
+                    this.search_input.settled = generation;
+                    this.run_search(cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Sends the current field text to the server unless it is too short, the connection is down or that
+    /// query is already answered or in flight. While offline nothing is sent; any search state is dropped.
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        let content = self.search_input.seen.clone();
+        let Some(query) = search_query(&content) else { return };
+        let store = self.store.read(cx);
+        if store.connection() == ConnectionState::Offline {
+            self.store.update(cx, |store, cx| store.cancel_search(cx));
+            return;
+        }
+        let current = store
+            .search_state()
+            .is_some_and(|state| state.query == query && !matches!(state.status, SearchStatus::Failed(_)));
+        if !current {
+            self.store.update(cx, |store, cx| store.search(query.to_string(), cx));
+        }
+    }
+
+    /// The connection changed: a query that was refused or failed (typically for lack of a connection) is
+    /// sent again, unless a debounce timer is still about to send the field text.
+    fn resume_search(&mut self, cx: &mut Context<Self>) {
+        if self.search_input.settled != self.search_input.generation {
+            return;
+        }
+        let store = self.store.read(cx);
+        if store.search_state().is_none_or(|state| matches!(state.status, SearchStatus::Failed(_))) {
+            self.run_search(cx);
+        }
+    }
+
+    /// What lists below the local rows: the offline notice while offline, else the stored search state.
+    /// `None` when there is nothing to show (short query, no search yet, nothing to say).
+    fn search_view(&self, local: &[ChatId], cx: &App) -> Option<SearchView> {
+        search_query(&self.search.read(cx).content)?;
+        let store = self.store.read(cx);
+        let view = if store.connection() == ConnectionState::Offline {
+            SearchView { status: Some(StatusLine::Offline), sections: Vec::new() }
+        } else {
+            search_results::view(store.search_state()?, local, self.clock)
+        };
+        (view.status.is_some() || !view.sections.is_empty()).then_some(view)
+    }
+
+    /// What the sidebar lists below the local rows right now.
+    #[cfg(test)]
+    pub(crate) fn search_listing(&self, cx: &App) -> Option<SearchView> {
+        let query = self.search.read(cx).content.to_string();
+        let local: Vec<ChatId> =
+            self.store.read(cx).visible_chats(&query, self.filter).into_iter().map(|c| c.id.clone()).collect();
+        self.search_view(&local, cx)
     }
 
     /// Opens the viewer on picture `index` of the message `ts` in the open chat `chat`. Ignored while
@@ -342,6 +450,8 @@ impl Desktop {
         };
         let connection = store.connection();
         let count = rows.len();
+        let results = self.search_view(&rows, cx).map(|view| search_results::render(&view, &self.store, cx));
+        let listing = results.is_some();
 
         div()
             .relative()
@@ -451,17 +561,17 @@ impl Desktop {
             .child(match empty {
                 Some(text) => div()
                     .debug_selector(|| "chat-list-empty".into())
-                    .flex_1()
+                    .when(listing, |d| d.flex_none().py(px(12.)))
+                    .when(!listing, |d| d.flex_1().pt(px(40.)))
                     .flex()
                     .justify_center()
-                    .pt(px(40.))
                     .text_color(rgb(MUTED))
                     .child(text)
                     .into_any_element(),
                 None => div()
                     .debug_selector(|| "chat-list".into())
-                    .flex_1()
-                    .min_h_0()
+                    .when(listing, |d| d.flex_none().h(px(count.min(LOCAL_ROWS_WITH_RESULTS) as f32 * ROW_HEIGHT)))
+                    .when(!listing, |d| d.flex_1().min_h_0())
                     .child(
                         uniform_list(
                             "chat-list",
@@ -474,6 +584,17 @@ impl Desktop {
                     )
                     .into_any_element(),
             })
+            .children(results.map(|results| {
+                div()
+                    .id("search-results")
+                    .debug_selector(|| "search-results".into())
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .border_t_1()
+                    .border_color(rgb(DIVIDER))
+                    .child(results)
+            }))
             .when(self.menu == AccountMenu::Open, |d| {
                 d.child(
                     div()

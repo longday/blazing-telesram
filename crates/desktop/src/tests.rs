@@ -1,9 +1,10 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
-use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, ToggleLog, ViewerNext, ViewerPrev};
+use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, Search, ToggleLog, ViewerNext, ViewerPrev};
 use crate::format::{fit_thumbnail, Clock};
 use crate::logging::{LogBuffer, LogLine};
-use crate::store::{ChatFilter, ChatStore, DownloadState, SessionState};
+use crate::search_results::StatusLine;
+use crate::store::{ChatFilter, ChatStore, DownloadState, SearchStatus, SessionState, SEARCH_DEBOUNCE};
 use crate::timeline::gallery_columns;
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
@@ -494,6 +495,210 @@ fn clicking_a_row_opens_the_chat_without_marking_it_read(cx: &mut TestAppContext
     assert!(shown(cx, part!("c", "badge")), "unread counter stays");
     h.store.read_with(cx, |s, _| assert_eq!(s.chat(&ChatId("c".into())).unwrap().unread, 2));
     assert!(h.commands().is_empty());
+}
+
+// ---- global search ----
+
+fn search_chats() -> Vec<ChatSummary> {
+    vec![chat("g", ChatKind::Group, "Команда", Some(1)), chat("a", ChatKind::Private, "Анна", Some(2))]
+}
+
+fn search_hits() -> SearchHits {
+    SearchHits {
+        chats: vec![ChatHit { id: ChatId("srv".into()), kind: ChatKind::Group, title: "Сервер".into(), avatar: None }],
+        people: vec![PersonHit { user: UserId("u1".into()), name: "Борис".into(), avatar: None, chat: None }],
+        messages: vec![MessageHit {
+            chat: ChatId("g".into()),
+            chat_title: "Команда".into(),
+            timestamp: ts(7),
+            author_name: Some("Анна".into()),
+            text: "найденный текст".into(),
+        }],
+    }
+}
+
+fn search_command(id: u64, query: &str) -> Command {
+    Command::Search { id: SearchId(id), query: query.into() }
+}
+
+/// Types into the search field: the `Search` action focuses it first.
+fn type_search(cx: &mut VisualTestContext, text: &str) {
+    cx.dispatch_action(Search);
+    cx.simulate_input(text);
+}
+
+fn pass(cx: &mut VisualTestContext, time: Duration) {
+    cx.executor().advance_clock(time);
+    cx.run_until_parked();
+}
+
+fn search_status(h: &Harness, cx: &mut VisualTestContext) -> Option<StatusLine> {
+    h.desktop.read_with(cx, |d, cx| d.search_listing(cx).and_then(|view| view.status))
+}
+
+fn search_sections(h: &Harness, cx: &mut VisualTestContext) -> Vec<&'static str> {
+    h.desktop.read_with(cx, |d, cx| {
+        d.search_listing(cx).map(|view| view.sections.iter().map(|s| s.title).collect()).unwrap_or_default()
+    })
+}
+
+fn online_with_chats(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Online)]);
+    (h, cx)
+}
+
+#[gpui::test]
+fn a_short_query_sends_nothing_and_two_characters_send_one_search_after_the_pause(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "a");
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty(), "one character is below the minimum");
+    type_search(cx, "   ");
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty(), "the minimum counts the trimmed text");
+
+    // Keystrokes inside the pause restart it: only the last text is sent, once, 300 ms after the last keystroke.
+    cx.simulate_keystrokes("cmd-a backspace");
+    type_search(cx, "a");
+    pass(cx, Duration::from_millis(200));
+    type_search(cx, "b");
+    pass(cx, Duration::from_millis(200));
+    type_search(cx, "c");
+    pass(cx, SEARCH_DEBOUNCE - Duration::from_millis(1));
+    assert!(h.commands().is_empty(), "still inside the pause");
+    pass(cx, Duration::from_millis(1));
+    assert_eq!(h.commands(), [search_command(1, "abc")]);
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty(), "exactly one request");
+    h.store.read_with(cx, |s, _| assert_eq!(s.search_state().map(|s| s.status), Some(SearchStatus::Loading)));
+    assert_eq!(search_status(&h, cx), Some(StatusLine::Loading));
+}
+
+#[gpui::test]
+fn the_query_is_sent_trimmed(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "  ab ");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert_eq!(h.commands(), [search_command(1, "ab")]);
+}
+
+#[gpui::test]
+fn results_list_below_the_local_rows_and_clearing_cancels_the_search(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ан");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert_eq!(h.commands(), [search_command(1, "ан")]);
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    assert!(shown(cx, row!("a")), "the local name match stays listed");
+    assert!(shown(cx, "search-section-Чаты"));
+    assert!(shown(cx, "search-section-Люди"));
+    assert!(shown(cx, "search-section-Сообщения"));
+    assert!(y(cx, "search-section-Сообщения") > y(cx, row!("a")), "server results sit below the local rows");
+    assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"]);
+    assert_eq!(search_status(&h, cx), None);
+
+    cx.simulate_keystrokes("cmd-a backspace");
+    assert_eq!(h.commands(), [Command::CancelSearch], "an empty query cancels at once, without waiting");
+    assert_eq!(search_sections(&h, cx), Vec::<&str>::new(), "the sections are gone");
+    h.store.read_with(cx, |s, _| assert!(s.search_state().is_none()));
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn shortening_the_query_cancels_the_search_and_a_pending_timer(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ab");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert_eq!(h.commands(), [search_command(1, "ab")]);
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+
+    type_search(cx, "c");
+    cx.simulate_keystrokes("backspace backspace");
+    assert_eq!(h.commands(), [Command::CancelSearch]);
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty(), "the timer of the longer text never fires");
+    assert_eq!(search_sections(&h, cx), Vec::<&str>::new());
+}
+
+#[gpui::test]
+fn offline_sends_nothing_and_says_a_connection_is_needed(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Offline)],
+        |d, cx| d.search.update(cx, |input, cx| input.set_text("анн", cx)),
+    );
+    pass(cx, SEARCH_DEBOUNCE * 3);
+    assert!(h.commands().is_empty(), "nothing is sent while offline");
+    assert_eq!(search_status(&h, cx), Some(StatusLine::Offline));
+    assert!(shown(cx, "search-status"));
+    assert!(shown(cx, row!("a")), "local name matches still filter");
+    assert!(!shown(cx, row!("g")));
+}
+
+#[gpui::test]
+fn going_online_sends_the_query_that_waited_for_a_connection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Offline)]);
+    type_search(cx, "ab");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert!(h.commands().is_empty());
+    assert_eq!(search_status(&h, cx), Some(StatusLine::Offline));
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert_eq!(h.commands(), [search_command(1, "ab")]);
+    assert_eq!(search_status(&h, cx), Some(StatusLine::Loading));
+
+    // A connection event while the answer is awaited, or after it, does not repeat the request.
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_stale_result_after_a_newer_query_changes_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ab");
+    pass(cx, SEARCH_DEBOUNCE);
+    type_search(cx, "c");
+    pass(cx, SEARCH_DEBOUNCE);
+    assert_eq!(h.commands(), [search_command(1, "ab"), search_command(2, "abc")]);
+
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.store.read_with(cx, |s, _| {
+        let state = s.search_state().unwrap();
+        assert_eq!((state.id, state.status, state.hits.clone()), (SearchId(2), SearchStatus::Loading, SearchHits::default()));
+    });
+    assert_eq!(search_sections(&h, cx), Vec::<&str>::new());
+
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(2), hits: search_hits() }]);
+    assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"]);
+}
+
+#[gpui::test]
+fn clicking_a_message_hit_opens_its_chat_without_marking_it_read(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ab");
+    pass(cx, SEARCH_DEBOUNCE);
+    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.commands();
+
+    click(cx, "search-message-g-7-row");
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("g".into()))], "opening the chat is the only effect");
+    h.store.read_with(cx, |s, _| assert_eq!(s.selected(), Some(&ChatId("g".into()))));
+    assert!(shown(cx, "chat-header"));
+}
+
+#[gpui::test]
+fn a_failed_search_keeps_the_local_rows(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_chats(cx);
+    type_search(cx, "ан");
+    pass(cx, SEARCH_DEBOUNCE);
+    h.feed(cx, [ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed }]);
+    assert_eq!(search_status(&h, cx), Some(StatusLine::Failed));
+    assert!(shown(cx, "search-status"));
+    assert!(shown(cx, row!("a")), "the local match is still listed");
+    assert_eq!(h.commands(), [search_command(1, "ан")], "a failure is not retried by itself");
 }
 
 // ---- 6.3 timeline ----
