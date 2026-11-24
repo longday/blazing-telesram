@@ -1540,6 +1540,7 @@ impl<B: Backend> Engine<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::CreateError;
     use crate::fixtures::{chat, id, msg};
     use crate::reactions::ReactionCount;
     use std::collections::VecDeque;
@@ -1602,6 +1603,24 @@ mod tests {
         search_done: usize,
         /// When set, `react` records its call, then waits here before answering.
         react_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Answer of `members`; no users when unset.
+        members_result: Option<Result<ChatMembers, BackendError>>,
+        /// Every `members` call: the chat asked about.
+        members_calls: Vec<ChatId>,
+        /// When set, `members` records its call, then waits here before answering.
+        members_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Answer of `profile`; the account with no name or status when unset.
+        profile_result: Option<Result<Profile, BackendError>>,
+        /// `profile` calls so far.
+        profile_calls: usize,
+        /// When set, `profile` records its call, then waits here before answering.
+        profile_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Answers of `create_private_chat`, then `Ok(None)` (created, the reply names no chat).
+        create_results: VecDeque<Result<Option<ChatId>, CreateError>>,
+        /// Every `create_private_chat` call: the person.
+        create_calls: Vec<UserId>,
+        /// When set, `create_private_chat` records its call, then waits here before answering.
+        create_gate: Option<Arc<tokio::sync::Notify>>,
     }
 
     #[derive(Clone, Default)]
@@ -1767,6 +1786,41 @@ mod tests {
                 gate.notified().await;
             }
             self.state().search_done += 1;
+            result
+        }
+        async fn members(&self, chat: &ChatSummary) -> Result<ChatMembers, BackendError> {
+            let (result, gate) = {
+                let mut s = self.state();
+                s.members_calls.push(chat.id.clone());
+                let empty = ChatMembers { chat: chat.id.clone(), users: Vec::new(), partial: false };
+                (s.members_result.clone().unwrap_or(Ok(empty)), s.members_gate.clone())
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            result
+        }
+        async fn profile(&self) -> Result<Profile, BackendError> {
+            let (result, gate) = {
+                let mut s = self.state();
+                s.profile_calls += 1;
+                let own = Profile { user: UserId(s.account.clone()), name: None, avatar: None, status_text: None };
+                (s.profile_result.clone().unwrap_or(Ok(own)), s.profile_gate.clone())
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            result
+        }
+        async fn create_private_chat(&self, user: &UserId) -> Result<Option<ChatId>, CreateError> {
+            let (result, gate) = {
+                let mut s = self.state();
+                s.create_calls.push(user.clone());
+                (s.create_results.pop_front().unwrap_or(Ok(None)), s.create_gate.clone())
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             result
         }
     }

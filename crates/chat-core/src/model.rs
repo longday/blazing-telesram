@@ -48,6 +48,48 @@ pub struct ChatSummary {
     pub muted: bool,
     /// Lower value sorts first; `None` means not pinned.
     pub pinned_rank: Option<u32>,
+    /// The other person of a private chat; `None` for groups and channels. Absent in rows
+    /// cached before the field existed, which load as `None` until the next list refresh.
+    #[serde(default)]
+    pub partner: Option<UserId>,
+}
+
+/// What a member may do in a chat. The server's `role` `"admin"` is `Admin`; every other value,
+/// or none, is `Member`. The order of a member list is not relied on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberRole {
+    Member,
+    Admin,
+}
+
+/// One person of a chat, as the server lists them. `me` is set by the backend, which knows the
+/// account's own guid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Member {
+    pub user: UserId,
+    pub name: Option<String>,
+    pub avatar: Option<MediaRef>,
+    pub role: MemberRole,
+    pub me: bool,
+}
+
+/// The members of one chat. The server sends no total and no "more" flag, so `partial` is set
+/// when the paging bound was reached and more members may exist. Held in memory only.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatMembers {
+    pub chat: ChatId,
+    pub users: Vec<Member>,
+    pub partial: bool,
+}
+
+/// The signed-in account as `whoami` reports it. `status_text` is set only when the account has
+/// a non-blank status text; no availability is inferred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    pub user: UserId,
+    pub name: Option<String>,
+    pub avatar: Option<MediaRef>,
+    pub status_text: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

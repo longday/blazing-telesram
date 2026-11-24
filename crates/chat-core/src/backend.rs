@@ -1,9 +1,11 @@
 //! The seam between the sync engine and the network. Domain types only: the protocol crate
 //! implements [`Backend`], tests implement it with a fake. The only writes are the user's own
-//! actions listed on the trait: send, edit, delete, react, read position and typing.
+//! actions listed on the trait: send, edit, delete, react, read position, typing and creating
+//! a private chat.
 
 use crate::model::{
-    ChatId, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, ReplyTarget, SearchHits, UserId,
+    ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, Profile, ReplyTarget, SearchHits,
+    UserId,
 };
 use crate::reactions::{ReactionCode, ReactionsUpdate};
 use std::io::Write;
@@ -29,6 +31,20 @@ pub enum BackendError {
     /// A local write failed while saving a download (disk full, folder gone).
     #[error("storage error: {0}")]
     Storage(String),
+}
+
+/// Why creating a chat did not give a chat. A repeated creation can duplicate a chat, so the
+/// two cases say whether the server may have acted. Strings never hold cookie or token values.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CreateError {
+    /// Nothing was created: the request never left the client, or the server answered and
+    /// refused. Repeating it is safe.
+    #[error("{0}")]
+    Failed(BackendError),
+    /// The request was sent and its outcome is not known (timeout, dropped connection, HTTP
+    /// 5xx, unreadable reply). The chat may exist; the caller must not retry by itself.
+    #[error("outcome unknown: {0}")]
+    Unknown(String),
 }
 
 /// What a subscription delivers. The backend owns reconnection of its live connection and
@@ -132,4 +148,17 @@ pub trait Backend: Send + Sync + 'static {
     /// messages), first page only. Read-only; the query is typed text and must not be logged
     /// above `trace`.
     fn search(&self, query: &str, limit: usize) -> impl Future<Output = Result<SearchHits, BackendError>> + Send;
+
+    /// The people of `chat`. A group or channel is read from the server (paged, bounded; the
+    /// server refusing the list is `Rejected`, `permanent`); a private chat is answered from
+    /// the row itself without a request. Read-only; nothing is persisted.
+    fn members(&self, chat: &ChatSummary) -> impl Future<Output = Result<ChatMembers, BackendError>> + Send;
+
+    /// The signed-in account's own profile. Read-only.
+    fn profile(&self) -> impl Future<Output = Result<Profile, BackendError>> + Send;
+
+    /// Opens the private chat with `user`, creating it when missing: one request, never
+    /// retried. Returns the chat id when the reply names one. A guard refusal (developer
+    /// limit on writes) is `Failed(Rejected { permanent: true })` and sends nothing.
+    fn create_private_chat(&self, user: &UserId) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
 }

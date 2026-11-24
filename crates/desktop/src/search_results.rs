@@ -448,6 +448,7 @@ mod tests {
                 unread: 0,
                 muted: false,
                 pinned_rank: None,
+                partner: None,
             }
         }
 
