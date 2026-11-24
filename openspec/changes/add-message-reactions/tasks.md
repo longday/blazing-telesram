@@ -8,7 +8,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
 
 ## 1. Reaction type table
 
-- [ ] 1.1 Collect the confirmed (code, emoji) pairs, read-only (decision P1)
+- [x] 1.1 Collect the confirmed (code, emoji) pairs, read-only (decision P1)
   - Owns: `openspec/changes/add-message-reactions/research.md` (append a section "Reaction types").
   - Depends on: nothing.
   - Do: find the code-to-emoji table in the public web client bundle (the static `app.js` named in the protocol notes, current build), cross-check code `100101` against `tests/fixtures/live-push-reaction.json`, and cross-check every pair with a second source (another bundle location or a self-chat observation). No account writes.
