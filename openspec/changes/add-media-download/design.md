@@ -89,11 +89,25 @@ The download request logs through the existing `media exchange` record (host and
 
 ## Risks / Trade-offs
 
-- **URL template and `Id2` handle come from a reference, not from this project** → task 1.3 runs `bt-probe download` on a self-chat file first; the template lives in one function (`MediaTarget::url`), so a mismatch is a one-line fix plus a design note before tasks 3.1 and 5.x finish. If the account has no file in the self chat and none can be created (uploading is out of scope), the result is recorded as unverified rather than invented.
-- **`FileInfo.Source == DISK` files** may use another handle than `Id2` (research §1); only the `MDS` case is covered by the reference's live capture. A `NotFound` for such a file surfaces as the "no longer available" failure and is recorded in task 1.3's notes; no special case is built without evidence.
+- **URL template and `Id2` handle were verified live for Disk images only** (section "Live verification") → task 1.3 repeats the check with the Rust client on a large non-image file; the template lives in one function (`MediaTarget::url`), so a mismatch is a one-line fix plus a design note before tasks 3.1 and 5.x finish.
+- **Redirect chain of two hops** (`files.messenger.yandex.ru` → `downloader.disk.yandex.ru` → `mds.storage.yandex.net`) → reqwest's default limit of 10 covers it; the signed storage URLs are short-lived, so the client never stores or logs a redirect target (and `redact_url` already drops the query).
 - **No size cap** → a huge file fills the disk until cancelled (proposal Decision 4); mitigated by progress, Cancel and removal of the partial on `Disk` errors. Only three transfers run at once.
 - **Orphan `<name>.part` after a crash** → visible in Downloads, never under the final name; accepted, not cleaned at startup because the app cannot tell its own leftovers from the user's files.
 - **`hard_link` unsupported on the Downloads volume** → the download fails visibly with a disk reason instead of risking an overwrite.
 - **Cached gallery messages show one image until reloaded** (Decision 3) → bounded: the newest chunk of an opened chat is replaced from the server; older ones on the next scroll load.
 - **Concurrent changes touch the same files** (`model.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `store.rs`, `timeline.rs`, `desktop.rs`, `tests.rs`, `bt-probe.rs` are also candidates for `add-message-reactions`, `add-global-search`, `add-chat-members-and-creation`). Edits here are additive (new variants, new trait method, new module `viewer.rs`); tasks rebase before editing and keep diffs minimal. New tests are appended to `tests.rs` in one delimited section.
 - **Blocking writes on the engine thread** → same as `store_media` today; chunk-sized and local. If the Downloads folder is on a slow network volume the engine thread stalls between chunks; accepted for a single-user desktop client.
+
+## Live verification
+
+2026-11-24, before the specs were finalized. Method: read-only GETs with the stored session of the signed-in account (cookie attached only for `files.messenger.yandex.ru`, never forwarded on redirects), `bt-probe history` to find messages; no file was saved, bodies were only counted. Private content (ids, names, chat) is deliberately not recorded here.
+
+| Check | Result |
+|---|---|
+| `GET https://files.messenger.yandex.ru/file_shortterm/{Id2}?attach=true`, `Id2` = `disk/<uuid>` (`Source` Disk) | `302`, empty body, no `Content-Disposition` |
+| first redirect target | `downloader.disk.yandex.ru`, `302`, `Content-Disposition` present, no cookie sent and none needed |
+| second redirect target | `mds.storage.yandex.net`, `200`, `Content-Length` announced, `Content-Disposition: attachment`, correct `Content-Type` (`image/jpeg`, `image/png`) |
+| body size vs `FileInfo.Size` | equal for both images tested (62962 and 240897 bytes) |
+| `?size=MIDDLE2048` for the same id | `302` as well (thumbnail path unchanged) |
+
+Consequences: the template of Decision 2 stands; handles are `disk/<uuid>` in practice (the "bucket" is `disk`); the chain has two redirect hops; `Content-Length` is announced, so the truncated-body check and the total in progress work. The self chat holds no files; any chat works for `bt-probe download`. Still open for task 1.3: a file above 25 MiB (the account has files of about 60 MB and 160 MB in a group chat) through the Rust client, which also exercises streaming, idle timeout and the progress totals, and a non-image `MiscFile`.
