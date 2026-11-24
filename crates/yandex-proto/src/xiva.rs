@@ -230,15 +230,16 @@ fn transport_error(code: u64) -> ProtoError {
     }
 }
 
-/// Kind name and chat id of a push for the log; never the message content.
-fn push_kind(event: &PushEvent) -> (&'static str, &str) {
+/// Kind name of a push for the log. Never the content and never the chat id: ids hold account
+/// guids (a private chat is `<guid>_<guid>`), which the log must not carry at any level.
+fn push_kind(event: &PushEvent) -> &'static str {
     match event {
-        PushEvent::MessageUpserted(message) => ("MessageUpserted", &message.chat),
-        PushEvent::MessageDeleted { chat, .. } => ("MessageDeleted", chat),
-        PushEvent::ChatChanged { chat } => ("ChatChanged", chat),
-        PushEvent::Typing { chat, .. } => ("Typing", chat),
-        PushEvent::Reaction { chat, .. } => ("Reaction", chat),
-        PushEvent::Ignored { .. } => ("Ignored", ""),
+        PushEvent::MessageUpserted(_) => "MessageUpserted",
+        PushEvent::MessageDeleted { .. } => "MessageDeleted",
+        PushEvent::ChatChanged { .. } => "ChatChanged",
+        PushEvent::Typing { .. } => "Typing",
+        PushEvent::Reaction { .. } => "Reaction",
+        PushEvent::Ignored { .. } => "Ignored",
     }
 }
 
@@ -680,8 +681,7 @@ impl<C: Connector> Actor<C> {
                 match decode_push(&body) {
                     Ok(PushEvent::Ignored { kind }) => debug!(%kind, "push ignored"),
                     Ok(event) => {
-                        let (kind, chat) = push_kind(&event);
-                        debug!(kind, chat, "push");
+                        debug!(kind = push_kind(&event), "push");
                         self.emit(XivaEvent::Push(event));
                     }
                     Err(e) => self.warning(format!("undecodable push: {e}")),
@@ -1196,8 +1196,32 @@ mod tests {
         }));
         assert!(matches!(next(&mut events).await, XivaEvent::Push(PushEvent::MessageUpserted(_))));
         let text = capture.text();
-        assert!(text.contains("MessageUpserted") && text.contains("chat-9"), "{text}");
-        capture.assert_absent(&["TOPSECRET-TEXT", "operation frame"]);
+        assert!(text.contains("MessageUpserted"), "{text}");
+        capture.assert_absent(&["TOPSECRET-TEXT", "chat-9", "operation frame"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn debug_level_logs_no_chat_id_of_any_push_kind() {
+        const GUID: &str = "c9a71201-70b5-992e-61f2-b27e2d3fc8fb";
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (_handle, mut events) = start(&connector);
+        next(&mut events).await;
+        let chat = format!("{GUID}_00000004-0000-4000-8000-000000000004");
+        server.push_frame(json!({
+            "ClientMessage": { "Reaction": { "ChatId": chat, "Timestamp": 5, "Action": 2, "Type": 9 } },
+            "Reactions": [{ "Type": 9, "Count": 1 }],
+            "ReactionsVersion": 2,
+            "ServerMessageInfo": { "Timestamp": 5 }
+        }));
+        assert!(matches!(next(&mut events).await, XivaEvent::Push(PushEvent::Reaction { .. })));
+        server.push_frame(json!({ "ClientMessage": { "Plain": { "ChatId": chat } }, "ServerMessageInfo": { "Timestamp": 6, "Deleted": true } }));
+        assert!(matches!(next(&mut events).await, XivaEvent::Push(PushEvent::MessageDeleted { .. })));
+        let text = capture.text();
+        assert!(text.contains("Reaction") && text.contains("MessageDeleted"), "{text}");
+        capture.assert_absent(&[GUID, "00000004-0000-4000-8000-000000000004"]);
     }
 
     #[tokio::test(start_paused = true)]
