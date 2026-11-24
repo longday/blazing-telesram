@@ -63,7 +63,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
 
 ## 5. Desktop UI
 
-- [ ] 5.1 Store: apply reaction changes, toggle API (D8)
+- [x] 5.1 Store: apply reaction changes, toggle API (D8)
   - Owns: `crates/desktop/src/store.rs` (including the `Message` literal in its tests).
   - Depends on: 3.1.
   - Do: handle `ClientEvent::ReactionsChanged` in place with `TimelineChange::Delta { touched }`, only when the reactions differ and the message is loaded; no typing or media side effect; `ChatStore::toggle_reaction`.
