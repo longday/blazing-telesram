@@ -93,11 +93,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | done (59d765b; `Client::create_private_chat`, `bt-probe create-private <guid> --confirm-create`, README) | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
 | 3.1 | done (c31b7a0 incl. 0e3283d; `Backend::{members, profile, create_private_chat}`, `ChatSummary.partner`; also touched a `search_results.rs` test helper and a `cache.rs` test, no in-flight work on them) | 1.3, 2.2 | CM-C1 |
-| 3.2 | done on `integ/members` (03540eb; one expected `dead_code` on the new store methods until 4.1/4.2) | 3.1 | CM-M (with 4.1, 4.2) |
-| 3.3 | blocked-by CM-M | 3.2 | CM-N (with 4.3) |
-| 4.1 | ready on `integ/members` (head 6e6b0ad, has the `whoami` status-path parser change; `info_panel.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`; first consumer of the store members state from 3.2) | 3.2 | CM-M |
-| 4.2 | blocked-by CM 4.1 (`profile.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`: same files as 4.1, so strictly after it; first consumer of the profile state) | 3.2, 4.1 | CM-M |
-| 4.3 | blocked-by CM-M, 3.3 | 3.3, 4.2 | CM-N |
+| 3.2 | done (CM-M, 9a57c30) | 3.1 | CM-M |
+| 3.3 | **ready** (unit CM-N with 4.3; `model.rs`, chat-core `client.rs`, `store.rs`) | 3.2 | CM-N (with 4.3) |
+| 4.1 | done (CM-M, 9a57c30; `info_panel.rs`, `desktop.rs`, `main.rs`, `tests.rs`, dismiss branch in `desktop/composer.rs`) | 3.2 | CM-M |
+| 4.2 | done (CM-M, 9a57c30; `profile.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `composer.rs`) | 3.2, 4.1 | CM-M |
+| 4.3 | blocked-by CM 3.3 (same unit CM-N; `new_chat.rs` new, `info_panel.rs`, `desktop.rs`, `tests.rs`, `main.rs`: starts after 3.3 is merged into the unit) | 3.3, 4.2 | CM-N |
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
 | 5.2 | blocked-by CM 4.3 | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
 | 5.3 | blocked-by CM 5.1, 5.2 | 5.1, 5.2 | **[approval] [live]** |
@@ -130,11 +130,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **CM-M on `integ/members`** (head 6e6b0ad, main c421110 merged in): 3.2 done; 4.1 now, then 4.2 (sequential: shared `desktop.rs`, `tests.rs`, `main.rs`). The unit is mergeable to `main` only after 4.2 removes the `dead_code` warning.
+- **CM-N** (3.3 then 4.3; one unit, branch `integ/newchat` from `main` 9a57c30): the core lane is free. CM-M is merged (build 0 warnings; tests 277/177/178/20/13).
 - **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
 - (GS 4.1 is done; GS is archived.)
 
-In flight: `integ/members` (CM-M). Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3 (incl. status path `UserStatus.CustomStatus.Text`, c421110), 2.1, 2.2, 3.1, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
+In flight: nothing. Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3 (incl. status path `UserStatus.CustomStatus.Text`, c421110), 2.1, 2.2, 3.1, 3.2, 4.1, 4.2 (CM-M, 9a57c30), 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
