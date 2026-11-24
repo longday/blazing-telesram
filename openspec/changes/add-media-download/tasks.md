@@ -29,5 +29,5 @@ Waves: **A** (parallel): 1.1, 2.1, 2.2, 5.1 · **B** (parallel, after A): 1.2, 2
 
 ## 5. Docs and verification
 
-- [ ] 5.1 README. Owns `README.md`. Fix the sign-out sentence ("deletes the session, the account cache and downloaded media"): sign-out deletes the cache and previews but keeps files the user saved; add one sentence that "Скачать" saves to `~/Downloads`, never overwrites and never downloads on its own. No dependency.
+- [x] 5.1 README. Owns `README.md`. Fix the sign-out sentence ("deletes the session, the account cache and downloaded media"): sign-out deletes the cache and previews but keeps files the user saved; add one sentence that "Скачать" saves to `~/Downloads`, never overwrites and never downloads on its own. No dependency.
 - [ ] 5.2 Final verification. Owns no files; fixes only what it finds, in the owning file. Run `cargo fmt --check`, `cargo clippy --workspace --all-targets`, `cargo test --workspace`; `openspec validate add-media-download --strict`; walk the scenarios of `specs/attachment-download` and `specs/message-history` against the tests (every scenario has a test or is listed as manual); manual check in the running app against the self chat when 1.3 found a file there (download, cancel, retry offline, name collision, gallery grid and viewer). Depends on all tasks.

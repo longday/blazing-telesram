@@ -23,7 +23,9 @@ cargo test --locked --workspace
 
 ## Sign-in
 
-On first start a window with the Yandex sign-in page opens. Sign in as on `telemost.yandex.ru`; the window closes once the session is verified. The session (cookies, account ids) is stored in `.runtime/session.json` with mode 0600, not in the Keychain. Sign out from the app deletes the session, the account cache and downloaded media.
+On first start a window with the Yandex sign-in page opens. Sign in as on `telemost.yandex.ru`; the window closes once the session is verified. The session (cookies, account ids) is stored in `.runtime/session.json` with mode 0600, not in the Keychain. Sign out from the app deletes the session, the account cache and previews, but keeps the files you saved.
+
+«Скачать» on a file saves it to `~/Downloads`, never overwrites an existing file and never downloads on its own.
 
 `bt-probe` checks the stored session without the UI and never prints cookie values:
 
