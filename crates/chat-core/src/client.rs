@@ -4,7 +4,7 @@
 //! All state lives in one single-threaded event loop. Network calls run as spawned tasks that
 //! post their results back as inputs, so cache writes and event emission are totally ordered.
 
-use crate::backend::{Backend, BackendError, LiveEvent};
+use crate::backend::{Backend, BackendError, CreateError, LiveEvent};
 use crate::cache::{self, Cache, CacheError, OutboxEntry};
 use crate::model::*;
 use crate::paths::{commit_partial, create_partial, escape_component, media_dir, sanitize_file_name};
@@ -44,6 +44,8 @@ const STORE_FAILED_REASON: &str = "Не удалось сохранить соо
 const SEARCH_LIMIT: usize = 10;
 /// Shown when a member list is asked for a chat the cache does not know.
 const UNKNOWN_CHAT_REASON: &str = "Чат не найден";
+/// Shown when a creation was sent and its outcome is not known: the chat may exist.
+const CREATION_UNKNOWN_REASON: &str = "Результат неизвестен: чат мог быть создан";
 
 enum LiveChange {
     Upsert(Message),
@@ -154,6 +156,13 @@ enum Input {
     Members { chat: ChatId, result: Result<ChatMembers, BackendError> },
     /// The answer to a `LoadProfile`.
     Profile(Result<Profile, BackendError>),
+    /// The answer to a `CreatePrivateChat` for `user`; `chats` is the list read right after it
+    /// (only when the chat may have been created).
+    Created {
+        user: UserId,
+        result: Result<Option<ChatId>, CreateError>,
+        chats: Option<Result<Vec<ChatSummary>, BackendError>>,
+    },
 }
 
 /// A server write that is attempted once and not queued.
@@ -228,6 +237,8 @@ struct Engine<B> {
     members_inflight: HashSet<ChatId>,
     /// A profile read is running.
     profile_inflight: bool,
+    /// A chat creation is running (or its list refresh is); a second one is dropped meanwhile.
+    creation_inflight: bool,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -497,6 +508,7 @@ impl<B: Backend> Engine<B> {
             reaction_inflight: HashMap::new(),
             members_inflight: HashSet::new(),
             profile_inflight: false,
+            creation_inflight: false,
         };
         tokio::spawn(pump_commands(commands, inputs));
 
@@ -560,6 +572,7 @@ impl<B: Backend> Engine<B> {
             Input::Search { id, result } => self.handle_search(id, result),
             Input::Members { chat, result } => self.handle_members(chat, result),
             Input::Profile(result) => self.handle_profile(result),
+            Input::Created { user, result, chats } => self.handle_created(user, result, chats),
             Input::Connected { .. } | Input::Retry(_) | Input::Live { .. } | Input::LiveClosed(_) | Input::OutboxResume(_) => {}
         }
         true
@@ -615,6 +628,7 @@ impl<B: Backend> Engine<B> {
             Command::CancelSearch => self.search_latest = None,
             Command::LoadMembers(chat) => self.load_members(chat),
             Command::LoadProfile => self.load_profile(),
+            Command::CreatePrivateChat { user } => self.create_private_chat(user),
         }
         true
     }
@@ -733,6 +747,7 @@ impl<B: Backend> Engine<B> {
         self.reaction_inflight.clear();
         self.members_inflight.clear();
         self.profile_inflight = false;
+        self.creation_inflight = false;
         self.outbox = self.db(self.cache.outbox()).unwrap_or_default();
         self.outbox_inflight = None;
         self.read_marks.clear();
@@ -1270,6 +1285,81 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    // -- chat creation --------------------------------------------------------------------
+
+    /// Starts a private chat with `user`. Attempted once, never queued, never retried, nothing
+    /// persisted: a second command while one runs is dropped, offline answers at once without a
+    /// request, and a chat the account already has is reported without one.
+    fn create_private_chat(&mut self, user: UserId) {
+        if self.creation_inflight {
+            return;
+        }
+        if !self.is_online() {
+            return self.emit(ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+        }
+        if let Some(chat) = self.private_chat_with(&user) {
+            return self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+        }
+        self.creation_inflight = true;
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move {
+            let result = backend.create_private_chat(&user).await;
+            // The list is read here, after anything that may have created the chat, and travels
+            // with the answer, so the list event always comes before `ChatCreated`.
+            let chats = match &result {
+                Ok(_) | Err(CreateError::Unknown(_)) => Some(backend.chat_list().await),
+                Err(CreateError::Failed(_)) => None,
+            };
+            post(&inputs, Input::Created { user, result, chats });
+        });
+    }
+
+    fn handle_created(
+        &mut self,
+        user: UserId,
+        result: Result<Option<ChatId>, CreateError>,
+        chats: Option<Result<Vec<ChatSummary>, BackendError>>,
+    ) {
+        if !std::mem::take(&mut self.creation_inflight) {
+            return;
+        }
+        if let Some(chats) = chats {
+            self.handle_chats(chats);
+            if self.phase == Phase::Expired {
+                return;
+            }
+        }
+        match result {
+            Ok(created) => {
+                // The reply's id, else the list entry of that person (the id may be missing).
+                let chat = created.or_else(|| self.private_chat_with(&user));
+                tracing::info!(listed = chat.is_some(), "private chat created");
+                self.emit(ClientEvent::ChatCreated { chat, existing: false });
+            }
+            Err(CreateError::Failed(BackendError::SessionExpired)) => self.expire(),
+            Err(CreateError::Failed(error)) => {
+                tracing::warn!(kind = error_kind(&error), "private chat creation failed");
+                self.emit(ClientEvent::CreationFailed { reason: read_failure_reason(error), unknown: false });
+            }
+            // Never retried here. The refreshed list may already hold the chat: then it is simply opened.
+            Err(CreateError::Unknown(_)) => match self.private_chat_with(&user) {
+                Some(chat) => {
+                    tracing::info!("private chat found after an unknown result");
+                    self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+                }
+                None => {
+                    tracing::warn!("private chat creation outcome unknown");
+                    self.emit(ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true });
+                }
+            },
+        }
+    }
+
+    /// The cached private chat whose other participant is `user`.
+    fn private_chat_with(&self, user: &UserId) -> Option<ChatId> {
+        self.db(self.cache.chats())?.into_iter().find(|c| c.partner.as_ref() == Some(user)).map(|c| c.id)
+    }
+
     /// Never marks twice for the same or an older message. The counter drops at once; the
     /// request goes out now, or once online when it cannot (only the newest per chat is kept).
     fn mark_read(&mut self, chat: ChatId, timestamp: MessageTs) {
@@ -1636,7 +1726,6 @@ impl<B: Backend> Engine<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::CreateError;
     use crate::fixtures::{chat, id, msg};
     use crate::reactions::ReactionCount;
     use std::collections::VecDeque;
@@ -4624,5 +4713,181 @@ mod tests {
         h.quiet();
         let events = h.drain();
         assert!(profile_events(&events).is_empty(), "expiry is not a profile failure: {events:?}");
+    }
+
+    // -- chat creation --------------------------------------------------------------------
+
+    fn private(tag: &str, partner: &str) -> ChatSummary {
+        let mut row = chat(tag, Some(1), None);
+        row.kind = ChatKind::Private;
+        row.partner = Some(UserId(partner.into()));
+        row
+    }
+
+    fn create_with(user: &str) -> Command {
+        Command::CreatePrivateChat { user: UserId(user.into()) }
+    }
+
+    fn is_creation_outcome(event: &ClientEvent) -> bool {
+        matches!(event, ClientEvent::ChatCreated { .. } | ClientEvent::CreationFailed { .. })
+    }
+
+    fn creation_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
+        events.iter().filter(|e| is_creation_outcome(e)).collect()
+    }
+
+    /// Whether the list event `event` holds the chat `tag`.
+    fn lists(event: &ClientEvent, tag: &str) -> bool {
+        matches!(event, ClientEvent::ChatsReplaced(chats) if chats.iter().any(|c| c.id == id(tag)))
+    }
+
+    #[test]
+    fn a_created_chat_is_announced_with_the_replys_id_after_the_list_was_refreshed() {
+        let h = start(|s, _| s.create_results = VecDeque::from([Ok(Some(id("p")))]), 50);
+        h.online();
+        h.fake.state().chats = vec![private("p", "u9")];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
+        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        assert_eq!(h.fake.state().create_calls, [UserId("u9".into())]);
+        assert_eq!(h.cache().chats().unwrap(), [private("p", "u9")], "the refreshed list is stored");
+    }
+
+    #[test]
+    fn a_reply_without_an_id_is_resolved_by_the_partner_in_the_refreshed_list() {
+        // The scripted answer is the default: created, the reply names no chat.
+        let h = start(|_, _| {}, 50);
+        h.online();
+        h.fake.state().chats = vec![chat("g", Some(2), None), private("p", "u9")];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
+        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+    }
+
+    #[test]
+    fn a_reply_without_an_id_and_a_list_without_the_person_gives_no_chat() {
+        let h = start(|_, _| {}, 50);
+        h.online();
+        h.client.send(create_with("u9"));
+        h.next("created", |e| *e == ClientEvent::ChatCreated { chat: None, existing: false });
+        assert_eq!(h.fake.state().create_calls.len(), 1);
+    }
+
+    #[test]
+    fn a_rejected_creation_carries_the_reason_and_neither_refreshes_nor_retries() {
+        let reason = "нельзя создать чат с этим человеком";
+        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(rejected(reason, true)))]), 50);
+        h.online();
+        h.fake.state().chats = vec![private("p", "u9")];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::CreationFailed { reason: reason.into(), unknown: false }));
+        h.quiet();
+        let later = h.drain();
+        assert!(!seen.iter().chain(&later).any(|e| lists(e, "p")), "nothing was created, so no refresh: {seen:?} {later:?}");
+        assert!(creation_events(&later).is_empty());
+        assert_eq!(h.fake.state().create_calls.len(), 1);
+    }
+
+    #[test]
+    fn a_request_that_never_left_is_a_plain_failure_with_the_offline_text() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(BackendError::Network("no route".into())))]),
+            50,
+        );
+        h.online();
+        h.client.send(create_with("u9"));
+        let event = h.next("the outcome", is_creation_outcome);
+        assert_eq!(event, ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+    }
+
+    #[test]
+    fn an_unknown_result_refreshes_the_list_says_so_and_never_retries() {
+        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        h.online();
+        h.fake.state().chats = vec![chat("g", Some(2), None)];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true }));
+        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "g")), "the list was refreshed first: {seen:?}");
+        h.quiet();
+        assert!(creation_events(&h.drain()).is_empty());
+        assert_eq!(h.fake.state().create_calls.len(), 1, "the backend was called once and never again by itself");
+    }
+
+    #[test]
+    fn a_private_chat_that_appeared_after_an_unknown_result_is_opened_not_created_again() {
+        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        h.online();
+        h.fake.state().chats = vec![private("p", "u9")];
+        h.client.send(create_with("u9"));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: true }));
+        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        h.quiet();
+        assert_eq!(h.fake.state().create_calls.len(), 1);
+    }
+
+    #[test]
+    fn offline_a_creation_is_refused_at_once_without_a_request() {
+        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
+        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.client.send(create_with("u9"));
+        let event = h.next("refusal", is_creation_outcome);
+        assert_eq!(event, ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+        h.quiet();
+        assert!(h.fake.state().create_calls.is_empty());
+    }
+
+    #[test]
+    fn a_second_creation_while_one_runs_is_dropped_and_a_later_one_is_served() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(|s, _| s.create_gate = Some(gate.clone()), 50);
+        h.online();
+        h.client.send(create_with("u9"));
+        h.wait_for("the first request", |s| s.create_calls.len() == 1);
+        h.client.send(create_with("u9"));
+        h.client.send(create_with("u8"));
+        h.quiet();
+        assert_eq!(h.fake.state().create_calls.len(), 1, "the duplicates never reached the backend");
+        let seen = std::cell::RefCell::new(Vec::new());
+        h.open_gate(&gate, "the answer", || {
+            seen.borrow_mut().extend(h.drain());
+            !creation_events(&seen.borrow()).is_empty()
+        });
+        h.quiet();
+        seen.borrow_mut().extend(h.drain());
+        let seen = seen.into_inner();
+        assert_eq!(creation_events(&seen).len(), 1, "one answer for the one creation: {seen:?}");
+
+        h.client.send(create_with("u8"));
+        h.wait_for("the later request", |s| s.create_calls.len() == 2);
+    }
+
+    #[test]
+    fn an_existing_private_chat_is_reported_without_asking_the_backend() {
+        let h = start(|s, _| s.chats = vec![private("p", "u9"), chat("g", Some(2), None)], 50);
+        h.online();
+        h.client.send(create_with("u9"));
+        let event = h.next("existing", is_creation_outcome);
+        assert_eq!(event, ClientEvent::ChatCreated { chat: Some(id("p")), existing: true });
+        h.quiet();
+        assert!(h.fake.state().create_calls.is_empty());
+    }
+
+    #[test]
+    fn session_expiry_during_a_creation_ends_the_session() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(BackendError::SessionExpired))]),
+            50,
+        );
+        h.online();
+        h.client.send(create_with("u9"));
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.quiet();
+        let events = h.drain();
+        assert!(creation_events(&events).is_empty(), "expiry is not a creation failure: {events:?}");
     }
 }

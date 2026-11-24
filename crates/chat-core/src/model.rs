@@ -297,9 +297,21 @@ pub enum ClientEvent {
     Profile(Profile),
     /// `LoadProfile` produced no profile; `offline` as for `MembersFailed`.
     ProfileFailed { reason: String, offline: bool },
+    /// The chat the user asked for with `CreatePrivateChat`. `existing` is set when no request was
+    /// needed (the account already had the chat, or the refreshed list showed it after an unknown
+    /// result); otherwise the server created it. The chat list was refreshed before this event, so
+    /// `chat` is normally in the list already. `chat` is `None` when neither the reply nor the
+    /// refreshed list names it: the chat may exist, the UI cannot open it.
+    ChatCreated { chat: Option<ChatId>, existing: bool },
+    /// A `CreatePrivateChat` produced no chat. `unknown` is set when the request was sent and its
+    /// outcome is not known (the chat may exist; the list was refreshed and nothing is retried);
+    /// otherwise nothing was created and `reason` is the server's, or the offline text when
+    /// nothing was sent.
+    CreationFailed { reason: String, unknown: bool },
 }
 
-/// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing.
+/// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing,
+/// creating a chat.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     OpenChat(ChatId),
@@ -332,6 +344,9 @@ pub enum Command {
     /// Read the signed-in account's own profile (read-only). The reply is `Profile` or
     /// `ProfileFailed`; a request while a load is running is dropped.
     LoadProfile,
+    /// Start a private chat with `user`; the reply is `ChatCreated` or `CreationFailed`. One
+    /// creation runs at a time (a command meanwhile is dropped), it is never queued or retried.
+    CreatePrivateChat { user: UserId },
 }
 
 #[cfg(test)]
