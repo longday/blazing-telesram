@@ -56,6 +56,8 @@ pub struct ClientConfig {
     /// After a transient send failure the queue waits `step * failures`, at most `max`.
     pub send_backoff_step: Duration,
     pub send_backoff_max: Duration,
+    /// Where saved originals go; `None` when no destination is known (downloads then fail).
+    pub downloads_dir: Option<PathBuf>,
 }
 
 impl ClientConfig {
@@ -70,6 +72,7 @@ impl ClientConfig {
             media_missing_ttl: Duration::from_secs(3600),
             send_backoff_step: Duration::from_secs(5),
             send_backoff_max: Duration::from_secs(60),
+            downloads_dir: None,
         }
     }
 }
@@ -265,7 +268,9 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
 fn preview_text(body: &MessageBody) -> Option<String> {
     match body {
         MessageBody::Text(text) => Some(text.clone()),
-        MessageBody::Image { caption, .. } => Some(caption.clone().unwrap_or_else(|| "Фото".into())),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+            Some(caption.clone().unwrap_or_else(|| "Фото".into()))
+        }
         MessageBody::File { name, .. } => Some(name.clone()),
         MessageBody::Unsupported(kind) => Some(format!("[{kind}]")),
         MessageBody::Deleted => None,
@@ -1208,6 +1213,14 @@ mod tests {
         history_calls: Vec<(ChatId, Option<MessageTs>, usize)>,
         watch_calls: Vec<Option<ChatId>>,
         media_calls: usize,
+        /// Original files by id, for `download`.
+        files: HashMap<String, Vec<u8>>,
+        /// Every `download` call, in order.
+        download_calls: Vec<MediaRef>,
+        /// Answers of `download` (before any byte is written), then the bytes of `files`.
+        download_errors: VecDeque<BackendError>,
+        /// When set, `download` writes the first half of the bytes, then waits here.
+        download_gate: Option<Arc<tokio::sync::Notify>>,
         /// When set, `history` takes its snapshot, then waits here before answering.
         history_gate: Option<Arc<tokio::sync::Notify>>,
         /// `PayloadId`s the server's history reports for a chat's own messages.
@@ -1288,6 +1301,31 @@ mod tests {
             let mut s = self.state();
             s.media_calls += 1;
             s.media.get(&media.id).cloned().ok_or(BackendError::NotFound)
+        }
+        async fn download(
+            &self,
+            media: &MediaRef,
+            out: &mut (dyn Write + Send),
+            progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+        ) -> Result<u64, BackendError> {
+            let (bytes, gate) = {
+                let mut s = self.state();
+                s.download_calls.push(media.clone());
+                if let Some(error) = s.download_errors.pop_front() {
+                    return Err(error);
+                }
+                (s.files.get(&media.id).cloned().ok_or(BackendError::NotFound)?, s.download_gate.clone())
+            };
+            let total = Some(bytes.len() as u64);
+            let (head, tail) = bytes.split_at(bytes.len() / 2);
+            out.write_all(head).map_err(|e| BackendError::Storage(e.kind().to_string()))?;
+            progress(head.len() as u64, total);
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            out.write_all(tail).map_err(|e| BackendError::Storage(e.kind().to_string()))?;
+            progress(bytes.len() as u64, total);
+            Ok(bytes.len() as u64)
         }
         fn watch(&self, chat: Option<&ChatId>) {
             self.state().watch_calls.push(chat.cloned());
@@ -2998,5 +3036,35 @@ mod tests {
         h.quiet();
         assert!(h.fake.state().history_calls.len() >= 6, "the scenario must have loaded history");
         assert_eq!(h.fake.calls(), [], "loading must never write");
+    }
+
+    #[test]
+    fn a_gallery_previews_like_an_image() {
+        let item = GalleryItem { media: MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail }, width: 4, height: 3, name: None };
+        let gallery = |caption: Option<&str>| MessageBody::Gallery { items: vec![item.clone()], caption: caption.map(Into::into) };
+        assert_eq!(preview_text(&gallery(None)).as_deref(), Some("Фото"));
+        assert_eq!(preview_text(&gallery(Some("отпуск"))).as_deref(), Some("отпуск"));
+    }
+
+    #[test]
+    fn the_fake_streams_scripted_bytes_with_progress_and_scripted_errors() {
+        let fake = Fake::default();
+        let original = MediaRef { id: "b/1".into(), kind: MediaKind::File };
+        fake.state().files.insert("b/1".into(), b"hello".to_vec());
+        fake.state().download_errors.push_back(BackendError::Network("boom".into()));
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let run = |media: &MediaRef| {
+            let seen = Mutex::new(Vec::new());
+            let mut out = Vec::new();
+            let result = runtime.block_on(fake.download(media, &mut out, &|received, total| seen.lock().unwrap().push((received, total))));
+            (result, out, seen.into_inner().unwrap())
+        };
+        assert_eq!(run(&original).0, Err(BackendError::Network("boom".into())));
+        let (result, out, progress) = run(&original);
+        assert_eq!((result, out.as_slice()), (Ok(5), b"hello".as_slice()));
+        assert_eq!(progress, [(2, Some(5)), (5, Some(5))]);
+        let missing = MediaRef { id: "b/2".into(), kind: MediaKind::File };
+        assert_eq!(run(&missing).0, Err(BackendError::NotFound));
+        assert_eq!(fake.state().download_calls, [original.clone(), original, missing]);
     }
 }

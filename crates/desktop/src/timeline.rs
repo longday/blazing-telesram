@@ -227,13 +227,13 @@ fn body(store: &ChatStore, m: &Message) -> AnyElement {
     let ts = m.timestamp;
     match &m.body {
         MessageBody::Text(text) => text_block(text.clone()).into_any_element(),
-        MessageBody::Image { media, width, height, caption } => div()
-            .flex()
-            .flex_col()
-            .gap(px(4.))
-            .child(thumbnail(store, ts, media, *width, *height))
-            .when_some(caption.as_ref(), |d, caption| d.child(text_block(caption.clone())))
-            .into_any_element(),
+        MessageBody::Image { media, width, height, caption, .. } => {
+            image_block(store, ts, Some((media, *width, *height)), caption.as_deref())
+        }
+        // Until the grid (4.2) a gallery shows its first picture, as before.
+        MessageBody::Gallery { items, caption } => {
+            image_block(store, ts, items.first().map(|i| (&i.media, i.width, i.height)), caption.as_deref())
+        }
         MessageBody::File { name, size, .. } => file_card(ts, name, *size).into_any_element(),
         MessageBody::Deleted => div()
             .debug_selector(move || format!("msg-{ts}-deleted"))
@@ -250,6 +250,16 @@ fn body(store: &ChatStore, m: &Message) -> AnyElement {
             .child(format!("Сообщение типа «{kind}» пока не поддерживается"))
             .into_any_element(),
     }
+}
+
+fn image_block(store: &ChatStore, ts: i64, image: Option<(&MediaRef, u32, u32)>, caption: Option<&str>) -> AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(4.))
+        .children(image.map(|(media, width, height)| thumbnail(store, ts, media, width, height)))
+        .when_some(caption, |d, caption| d.child(text_block(caption.to_owned())))
+        .into_any_element()
 }
 
 /// The bubble is content-sized, so gpui measures its text at max-content width and keeps that single-line
