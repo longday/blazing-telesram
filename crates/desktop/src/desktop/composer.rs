@@ -226,7 +226,11 @@ impl Desktop {
                     return;
                 }
                 if let Some(chat) = self.compose.chat.clone() {
-                    self.store.read(cx).typing(chat);
+                    // The server reads the chat for an outgoing typing, so it is withheld over unseen messages.
+                    let store = self.store.read(cx);
+                    if store.chat(&chat).is_none_or(|c| c.unread == 0) {
+                        store.typing(chat);
+                    }
                 }
                 self.schedule_draft_save(cx);
             }

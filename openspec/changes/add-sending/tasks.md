@@ -41,6 +41,7 @@
 
 - [x] 6.1 Send `MarkRead` for the newest visible message while the window is active (D6); verify tests for active, inactive and scrolled-up cases
 - [x] 6.2 Send `Typing` on composer edits; show "печатает…" in the header and chat row; verify tests
+- [x] 6.3 Withhold outgoing `Typing` while the chat's unread counter is above 0, because the server marks the chat read on typing (D7); the draft is still saved on every edit; verify a test that typing over unseen messages sends nothing and resumes once the newest message is marked
 
 ## 7. Live verification (self chat only)
 

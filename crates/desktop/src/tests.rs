@@ -1544,6 +1544,39 @@ fn every_composer_edit_notifies_the_core(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn typing_is_withheld_while_newer_messages_are_unseen(cx: &mut TestAppContext) {
+    // The server treats an outgoing typing as reading the chat, so it must not go out over unseen messages.
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 1..=80, true)]);
+    scroll_to_top(&h, cx);
+    // What the core reports once messages 79 and 80 arrived while the user was up here.
+    let mut unseen = chat("g", ChatKind::Group, "Команда", Some(80));
+    unseen.unread = 2;
+    h.feed(cx, [ClientEvent::ChatUpdated(unseen)]);
+    activate(cx);
+    h.commands();
+
+    cx.simulate_input("а");
+    cx.simulate_keystrokes("backspace");
+    assert!(h.commands().is_empty(), "no typing over unseen messages");
+    assert_eq!(composer_text(&h, cx), "");
+
+    cx.simulate_input("привет");
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    let draft = Draft { chat: chat_g(), text: "привет".into(), reply_to: None };
+    assert_eq!(h.commands(), [Command::SaveDraft(draft)], "the draft is still saved");
+
+    scroll(cx, -1_000_000.);
+    cx.run_until_parked();
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(80) }]);
+    h.feed(cx, [ClientEvent::ChatUpdated(chat("g", ChatKind::Group, "Команда", Some(80)))]);
+    cx.simulate_input("!");
+    assert_eq!(h.commands(), [Command::Typing(chat_g())], "typing resumes once the newest message is read");
+}
+
+#[gpui::test]
 fn typing_shows_in_the_header_and_the_chat_row_and_then_expires(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);

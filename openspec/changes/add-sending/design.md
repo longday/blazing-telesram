@@ -46,6 +46,7 @@ Each timeline row reports its painted bounds; the desktop reports the newest sen
 
 ### D7. Typing
 Outgoing: on composer text change of a new message (not while editing a sent one), send `Typing` if none was sent for that chat in the last 4 s; nothing is sent offline or after the user stops, since typing expires on its own. Incoming typing pushes become `ClientEvent::Typing { chat, user, until }` with `until = now + TimeoutSeconds`, or 7 s when the push has none (live pushes repeat every 3–5 s and carried no timeout); the account's own typing from other clients is dropped. The store expires entries and clears a user's entry when their message arrives. Names come from the push or the users already known.
+Outgoing typing is withheld while the chat's unread counter is above 0 (the draft is still saved): the server reads the chat for it. The counter, not the marker the UI sent, is the gate because the core raises it on every incoming message and zeroes it only when the newest message is marked (3.5), so it stays above 0 exactly while newer messages are unseen.
 
 ### D8. Multi-line input on the existing `TextInput`
 `TextInput` gains a multi-line mode: text is shaped with `WindowTextSystem::shape_text` and a wrap width into `WrappedLine`s; caret, selection and hit-testing use `WrappedLineLayout::position_for_index` and `closest_index_for_position`. The composer grows to 8 lines, then scrolls inside. Enter is a composer action (send); Shift+Enter inserts `\n`.
@@ -66,6 +67,7 @@ Context menu: a right-click on a bubble opens an anchored popup with the items o
 - [Reply and typing forms are inferred, not confirmed] → live checks in the self chat are tasks; a form that fails its check is removed from this change rather than shipped unverified.
 - [Channels and restricted chats: write rights are not known in advance] → the server's permanent status marks the message failed with the reason; no retry loop.
 - [Read markers change what the user's other clients show] → markers only for messages visible in the focused window (D6); task 3.4 of the archived change verifies that loading alone changes nothing.
+- [The server treats an outgoing typing as reading the chat (live: a peer's message went from one check to two right after `bt-probe typing <chat>`)] → typing goes out only while the chat's unread counter is 0 (D7), so it cannot report unseen messages as read.
 - [Unknown rate limits] → one send in flight, backoff on THROTTLED/RATE_LIMIT_EXCEEDED.
 
 ## Migration Plan
