@@ -10,7 +10,8 @@ use crate::session::{SessionCookie, cookie_header};
 #[derive(Clone, Copy, Debug)]
 pub struct HttpSettings {
     pub connect_timeout: Duration,
-    /// Covers the whole exchange, response body included.
+    /// Covers the whole exchange, response body included. Streaming downloads have no
+    /// total deadline: for them this is the longest silence allowed between chunks.
     pub request_timeout: Duration,
 }
 
@@ -24,6 +25,16 @@ pub(crate) fn http_client(settings: &HttpSettings) -> Result<reqwest::Client, Pr
     reqwest::Client::builder()
         .connect_timeout(settings.connect_timeout)
         .timeout(settings.request_timeout)
+        .build()
+        .map_err(ProtoError::from)
+}
+
+/// Client for large bodies: a connect deadline and an idle (between-chunks) deadline, but
+/// no total deadline, so a slow but steady transfer is not cut off while a stalled one fails.
+pub(crate) fn http_client_streaming(settings: &HttpSettings) -> Result<reqwest::Client, ProtoError> {
+    reqwest::Client::builder()
+        .connect_timeout(settings.connect_timeout)
+        .read_timeout(settings.request_timeout)
         .build()
         .map_err(ProtoError::from)
 }

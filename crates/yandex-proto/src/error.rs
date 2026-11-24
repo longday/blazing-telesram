@@ -12,6 +12,10 @@ pub enum ProtoError {
     /// HTTP 404 for media: the server has no such file.
     #[error("not found")]
     NotFound,
+    /// A write to the caller's destination failed while downloading; carries the
+    /// `io::ErrorKind` text only (no path, no file name).
+    #[error("local write failed: {0}")]
+    Storage(String),
     /// A `push` the server answered with a refusing commit status. `permanent` means the same
     /// request will keep failing (no permission, unknown chat); otherwise it may succeed later.
     #[error("push not committed: status {status} {name}")]

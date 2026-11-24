@@ -1,6 +1,8 @@
 //! Facade over the socket, registry and media clients: reads, and the closed write set of
 //! [`WriteRequest`]. This is what the adapter in `bt-chat-core` maps to its `Backend` trait.
 
+use std::io::Write;
+
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
@@ -93,6 +95,17 @@ impl Client {
 
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
         self.media.fetch(target).await
+    }
+
+    /// Streams an original file into `out` without buffering it and without a size cap or
+    /// total deadline (see [`MediaClient::download`]). Returns the byte count.
+    pub async fn download_media(
+        &self,
+        target: &MediaTarget,
+        out: &mut (dyn Write + Send),
+        progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+    ) -> Result<u64, ProtoError> {
+        self.media.download(target, out, progress).await
     }
 
     /// Chats to subscribe for live events (see the live-update assumptions in the design).
