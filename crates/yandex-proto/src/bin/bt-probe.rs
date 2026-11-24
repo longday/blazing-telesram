@@ -39,7 +39,7 @@ download takes the file or the N-th (from 1) image of the message with that time
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
-whoami and members are read-only and print the raw reply as pretty JSON on stdout (it carries names, emails and positions; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only";
+whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 type Failure = (u8, String);
@@ -396,23 +396,20 @@ async fn search(query: &str, flags: SearchFlags) -> Result<(), Failure> {
     Ok(())
 }
 
-fn print_json(value: &serde_json::Value) -> Result<(), Failure> {
-    println!("{}", serde_json::to_string_pretty(value).map_err(|e| (1, e.to_string()))?);
+/// The signed-in account's own `whoami` reply, parsed (guid, name, avatar id, status text).
+async fn whoami() -> Result<(), Failure> {
+    let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
+    println!("{:#?}", client.whoami().await.map_err(fail)?);
     Ok(())
 }
 
-/// The signed-in account's own `whoami` reply (socket), untyped.
-async fn whoami() -> Result<(), Failure> {
-    let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
-    print_json(&client.whoami_raw().await.map_err(fail)?)
-}
-
-/// The raw first page (50 users) of the members of one group chat (`get_chat_members`, registry,
-/// bare cookie), untyped.
+/// The first page (50 users) of the members of one group chat (`get_chat_members`, registry,
+/// bare cookie), parsed.
 async fn members(chat: &str) -> Result<(), Failure> {
     let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
     eprintln!("members of {chat} via get_chat_members");
-    print_json(&client.members_raw(chat, MEMBERS_PAGE, None).await.map_err(fail)?)
+    println!("{:#?}", client.members(chat, MEMBERS_PAGE, None).await.map_err(fail)?);
+    Ok(())
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]

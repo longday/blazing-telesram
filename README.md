@@ -33,7 +33,7 @@ On first start a window with the Yandex sign-in page opens. Sign in as on `telem
 BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked -p yandex-proto --bin bt-probe -- me
 ```
 
-Two more read-only commands inspect the profile and chat member endpoints; both print the raw reply as pretty JSON on stdout (it carries names, emails and positions, so keep it out of commits and logs), a header line goes to stderr:
+Two more read-only commands inspect the profile and chat member endpoints; both print the parsed reply (`{:#?}`: guids, display names, roles, status text) on stdout, a header line goes to stderr; keep it out of commits and logs:
 
 ```sh
 bt-probe whoami                                  # the signed-in account: UserInfo and UserStatusInfo

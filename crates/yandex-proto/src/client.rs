@@ -3,8 +3,6 @@
 
 use std::io::Write;
 
-use serde_json::Value;
-
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
 use crate::media::{MediaClient, MediaConfig, MediaTarget};
@@ -113,12 +111,7 @@ impl Client {
 
     /// The signed-in account's profile (socket `whoami`).
     pub async fn whoami(&self) -> Result<WireProfile, ProtoError> {
-        parse_profile(&self.whoami_raw().await?)
-    }
-
-    /// Raw `whoami` reply; the probe prints it as received.
-    pub async fn whoami_raw(&self) -> Result<Value, ProtoError> {
-        self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await
+        parse_profile(&self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await?)
     }
 
     /// One page of up to `limit` members of a **group** chat (`get_chat_members`): the first page
@@ -127,18 +120,13 @@ impl Client {
     /// channels are refused with `no_permissions_for_this_chat_operation`, which surfaces as
     /// `ProtoError::Protocol` carrying that code.
     pub async fn members(&self, chat: &str, limit: u32, guid_offset: Option<&str>) -> Result<WireMembers, ProtoError> {
-        parse_members(&self.members_raw(chat, limit, guid_offset).await?)
-    }
-
-    /// Raw `data` of a `get_chat_members` page; the probe prints it as received.
-    pub async fn members_raw(&self, chat: &str, limit: u32, guid_offset: Option<&str>) -> Result<Value, ProtoError> {
         let request = ReadRequest::ChatMembers {
             chat: chat.to_owned(),
             limit,
             guid_offset: guid_offset.map(str::to_owned),
             roles: None,
         };
-        self.registry.execute(&request).await
+        parse_members(&self.registry.execute(&request).await?)
     }
 
     pub async fn fetch_media(&self, target: &MediaTarget) -> Result<Vec<u8>, ProtoError> {
@@ -178,7 +166,6 @@ mod tests {
         assert!(client.chat_list().await.is_err());
         assert_eq!(client.history_limit, 50);
         assert_eq!(client.guid, "g");
-        assert!(client.whoami_raw().await.is_err());
         assert!(client.whoami().await.is_err());
     }
 
