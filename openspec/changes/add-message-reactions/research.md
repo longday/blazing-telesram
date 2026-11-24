@@ -72,3 +72,50 @@
 - `crates/chat-core/src/backend.rs:30-99` — live events и backend seam.
 - `crates/desktop/src/timeline.rs` (около 137, 204) — показ forwarding/reply-метаданных.
 - `crates/desktop/src/desktop.rs` (около 436, 486) — pinned-chat UI, не message pins.
+
+## Reaction types
+
+Task 1.1, read-only, 2026-11-24. No account was used and nothing was written: everything below comes from public static files and an anonymous page request.
+
+### Sources
+
+- `https://yandex.ru/chat` (anonymous GET) names the current build: `https://yastatic.net/s3/chat-static/telemessenger/_/3.6.3/web/app.js` (4 078 115 bytes, sha256 `88292adf0e94312b84f24ccc91d0556519d85f7eea635b6016a12b41adb0bc73`). The page also embeds the server config (`reactions_enabled: true`, `reactions_by_namespace`, `extended_reactions_by_namespace`).
+- The build the protocol notes name (`.../chat-static/_/0x8b21684/web/app.js`, `chats-web/3.21.0`, last modified 2026-07-08) is still served but is older and has **no** table: it contains no code `1001xx`, and its embedded default config has `reactions_enabled: false` with empty namespace maps. It is not used as evidence; it only confirms `ReactionAction` (`REMOVE = 1`, `REPLACE = 2`).
+- Where one pair is found in the current build (the "locations" cited in the evidence column):
+  - **E**: module `70109`, enum `EmotionCode`: code to name (`CHECK = 100101`, ...). Legacy codes are Unicode code points (`UNICODE_LIKE = 128077`).
+  - **U**: module `35031`, `getReactionImageUrl`: code (via enum name) to image slug, e.g. `CHECK` to `2358365/reaction-check-ext`. The web client draws reactions as server-hosted images, **not** as emoji text; no code-to-emoji-character table exists in the bundle. The emoji here is the Unicode character the enum name designates, checked against the artwork.
+  - **C**: the server config embedded in the `/chat` page: the picker lists, by chat namespace.
+  - **I**: the image itself. `https://files.messenger.yandex.net/reactions/{code}/small` and `https://avatars.mds.yandex.net/get-mssngr/{slug}/orig` return byte-identical PNGs (512x512) for every code `100101`-`100157`, so the E-to-U link is checked from the server side; each image was looked at.
+  - **L**: legacy twin: a pre-`1001xx` code whose value is the Unicode code point and whose image is the earlier artwork of the same reaction.
+  - **F**: `crates/yandex-proto/tests/fixtures/live-push-reaction.json`: a live `Reaction` push whose `Reaction.Type`, `Reactions[].Type` and `RecentUserReactions[].Type` are all `100101`. It confirms that `100101` is a code real traffic carries and counts; it says nothing about the glyph.
+- A self-chat observation (a second source of a different kind) was not possible: no signed-in session and no account writes in this task. Task 7.2 may add one.
+
+### Confirmed pairs, in picker order
+
+Order is the server's `default` / `private` list from C, `[100109, 100108, 100104, 100102, 100103, 100106, 100105, 100110, 100101]`: the web client's default picker for a private chat and for a group chat with no namespace entry. It is not the order of the extended list.
+
+| # | code | enum name | emoji (code points) | evidence |
+|---|------|-----------|---------------------|----------|
+| 1 | 100109 | `HEART` | ❤️ (U+2764 U+FE0F) | E, U, C, I; L: `UNICODE_HEART = 10084` (U+2764) |
+| 2 | 100108 | `SMILE` | 😆 (U+1F606) | E, U (`reaction-laugh-ext`), C, I; L: `UNICODE_SMILE = 128518` (U+1F606, slug `reaction-laugh`). The new artwork is a grin with arc eyes (closer to 😄); the legacy code fixes 😆 |
+| 3 | 100104 | `FIRE` | 🔥 (U+1F525) | E, U (`reaction-flame-ext`), C, I; L: `UNICODE_FIRE = 128293` |
+| 4 | 100102 | `LIKE` | 👍 (U+1F44D) | E, U, C, I; L: `UNICODE_LIKE = 128077` |
+| 5 | 100103 | `DISLIKE` | 👎 (U+1F44E) | E, U, C, I; L: `UNICODE_DISLIKE = 128078` |
+| 6 | 100106 | `SURPRISED` | 😲 (U+1F632) | E, U, C, I; L: `UNICODE_SURPRISED = 128562` |
+| 7 | 100105 | `CRYING` | 😭 (U+1F62D) | E, U, C, I; L: `UNICODE_CRYING = 128557` |
+| 8 | 100110 | `EYES` | 👀 (U+1F440) | E, U (`reaction-eyes-ext`), C, I; no legacy twin; the name designates 👀 and the artwork is a pair of eyes |
+| 9 | 100101 | `CHECK` | ✅ (U+2705) | E, U (`reaction-check-ext`), C, I, **F**; no legacy twin; the artwork is a white tick on a green disc, which is ✅ (✔️ and ☑️ rejected: not green) |
+
+`KNOWN` (task 3.3) is these nine rows, in this order. Every code is also in the `extended_reactions_by_namespace.private` list, so a server that offers the extended picker accepts them too.
+
+### Not in the table
+
+- Namespace 17 (`reactions_by_namespace["17"]`) offers only `100102` and `100103`; a group chat of that namespace may refuse the others (the server answer is an error that rolls the toggle back, D5). The client does not know the namespace, so the picker stays the nine.
+- `100107` `GOOSE` is in `default_team` only. Its legacy twin `UNICODE_GOOSE = 129442` is U+1F9A2 (a swan, 🦢) while the artwork is a goose: the enum's own code point is a placeholder, so no Unicode glyph is confirmed. It stays out; a chip for it shows `NEUTRAL_GLYPH`.
+- Codes `100111`-`100157` (extended picker, flag `web_enable_extended_reactions_picker`, `false` in the page config) and the seasonal `1000xx` / `110001` codes are not offered by the default picker. Several have an unambiguous Unicode name (💯 `HUNDRED_POINTS`, 🤡 `CLOWN`, 💩 `POOP`, 🤯 `EXPLODING_HEAD`, 💔 `BROKEN_HEART`, 🎉 `TADA`, 👏 `CLAP`, 🤔 `THINKING`, 😎 `SUNGLASSES`, 🙏 `PRAY`, 🤝 `HANDSHAKE`, 👌 `OK`), others are product art with no Unicode counterpart (`PLUS`, `MINUS`, `FOUR_PLUS`, `LOGO_360`, `ROWAN`, `CALENDAR`, `PIXEL_HEART`, `FLOWERS_*`). None has a second source beyond E, U, I, so none is confirmed; they render as `NEUTRAL_GLYPH` chips. A follow-up change that adds the extended picker can use this list as its starting point.
+
+### Other facts found in the bundle (not for the table)
+
+- Picker contents are server config, not constants: `reactions_enabled` (`false` hides reactions entirely) and per-namespace lists. Task 3.3 transcribes the private/default list; a later change could read the config instead.
+- Wire form of the web client (both builds): `sendReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 2 }` and `removeReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 1 }`: **the web client's `Remove` carries `Type`** (its method takes the type as a parameter; the callers are not recoverable from the minified bundle, so what they pass is inferred to be the user's current reaction). D2 sends `Remove` without `Type` (the notes say the server demands `Type` only for add and replace); this is unverified, and task 7.2 must test the bare form first and fall back to `Type: <current code>` if refused, as D2 already says.
+- Chip order in the web client's old build (3.21.0, `reactions` selector): count descending, ties by type descending. D3 keeps server order and appends a new type last; if the server's order turns out to differ from the web client's, that is a display difference, not a data one.
