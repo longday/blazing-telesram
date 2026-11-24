@@ -65,7 +65,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 3.4 | done (bb34be8; `ChatStore::supersede_search`, documented in `tasks.md`) | 3.2, 3.3 | GS-A |
 | 4.1 | ready [live] manual run with the `main` build | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
 
-## add-media-download (MD)
+## add-media-download (MD) — archived (`openspec/changes/archive/2026-11-25-add-media-download`; main specs `attachment-download` and `message-history` synced)
 
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
@@ -80,7 +80,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 4.3 | done (86dd403; follow-up `md/4.3-fit`, the viewer picture fits the window, merged in aca841a) | 2.1, 4.1, 2.3 | MD-C |
 | 4.2 | done (86dd403; valid PNG test fixture) | 4.1, 4.3 | MD-C |
 | 5.1 | done (ad90cc4, README) | — | MD-D |
-| 5.2 | ready [live] manual run with the `main` build | all | MD-D |
+| 5.2 | done (038c749 + md/5.2 merge c4d15c6; VM run; the gallery `.overflow_hidden()` fix in `timeline.rs`) | all | MD-D |
 
 ## add-chat-members-and-creation (CM)
 
@@ -92,7 +92,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.3 | done (19cf57a; typed `Client::members`/`whoami`, `GroupMembers` removed, allowlist 7 names, `write.rs` pin updated) | 1.2 | CM-P |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | done (59d765b; `Client::create_private_chat`, `bt-probe create-private <guid> --confirm-create`, README) | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
-| 3.1 | blocked-by MR-B merged (core lane: `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` are held by MR-B tasks 3.1, 3.2, 4.1, 5.4 until MR-B merges to `main`); CM 1.3 and 2.2 are done; notes: members only for group chats via paged `get_chat_members` (pages of 50, `guid_offset`), a private chat is answered from the chat row, a channel refusal is a failed load; reuses `YandexBackend.known.private` of GS 3.1 for the partner guid | 1.3, 2.2 | CM-C1 |
+| 3.1 | **ready** (MR-B merged to `main` at 65204cb, core lane free; CM 1.3 and 2.2 are done; files `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal); notes: members only for group chats via paged `get_chat_members` (pages of 50, `guid_offset`), a private chat is answered from the chat row, a channel refusal is a failed load; reuses `YandexBackend.known.private` of GS 3.1 for the partner guid; `Message` now has `reactions` (add `Default::default()` in new literals) | 1.3, 2.2 | CM-C1 |
 | 3.2 | blocked-by CM 3.1 | 3.1 | CM-M (with 4.1, 4.2) |
 | 3.3 | blocked-by CM-M | 3.2 | CM-N (with 4.3) |
 | 4.1 | blocked-by CM 3.1 (unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
@@ -113,33 +113,31 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | done (a56f811, `research.md`) | — | |
-| 2.1 | done on `integ/reactions` (be7c461; does not compile alone) | — | MR-B |
-| 2.2 | done on `integ/reactions` (f1ae91a) | — | MR-B |
-| 3.1 | done on `integ/reactions` (a37a324 merge; chat-core does not compile until 3.2) | — | MR-B |
-| 3.2 | in flight (`rx/3.2`; `client.rs`, `cache.rs`) | 3.1 | MR-B |
-| 3.3 | done on `integ/reactions` (dc9baa9) | 1.1, 3.1 | MR-B |
-| 4.1 | done on `integ/reactions` (23e416c) | 2.1, 2.2, 3.1 | MR-B |
-| 5.1 | done on `integ/reactions` (0b17a8a) | 3.1 | MR-B |
-| 5.2 | done on `integ/reactions` (deab288; type-checked only, 7.1 must cover `timeline.rs`) | 3.1 | MR-B |
-| 5.3 | in flight (`composer.rs`, `desktop.rs`) | 3.1, 5.1 | MR-B |
-| 5.4 | blocked-by MR 5.3 (`tests.rs`) | | MR-B |
-| 6.1 | ready (CM 6.1 merged and in `integ/reactions` 922880d; `bt-probe.rs`; carries the `WireMessage` literal fix) | 2.1, 2.2 | MR-B |
-| 7.1 | blocked-by all MR code | | |
-| 7.2 | blocked-by MR 1.1, 6.1, 7.1 | | **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); confirm with the user |
-| 7.3 | blocked-by MR 7.1, 7.2 | | archive |
+| 2.1 | done (MR-B merged, 65204cb) | — | MR-B |
+| 2.2 | done (MR-B, 65204cb) | — | MR-B |
+| 3.1 | done (MR-B, 65204cb) | — | MR-B |
+| 3.2 | done (MR-B, 65204cb) | 3.1 | MR-B |
+| 3.3 | done (MR-B, 65204cb) | 1.1, 3.1 | MR-B |
+| 4.1 | done (MR-B, 65204cb) | 2.1, 2.2, 3.1 | MR-B |
+| 5.1 | done (MR-B, 65204cb) | 3.1 | MR-B |
+| 5.2 | done (MR-B, 65204cb) | 3.1 | MR-B |
+| 5.3 | done (MR-B, 65204cb) | 3.1, 5.1 | MR-B |
+| 5.4 | done (MR-B, 65204cb) | | MR-B |
+| 6.1 | done (MR-B, 65204cb; `react-self`, `WireMessage` literal fix) | 2.1, 2.2 | MR-B |
+| 7.1 | done (65204cb; build 0 warnings, 232/163/178/20/13 green; clippy has two new `large_enum_variant` caused by `Message.reactions`, see tasks.md 7.1) | | |
+| 7.2 | ready; **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); needs the user's approval of the target message (P5); rebuild the main checkout `bt-probe` from `main` first | 1.1, 6.1, 7.1 | |
+| 7.3 | blocked-by MR 7.2 | | archive |
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **MR 6.1** on `integ/reactions` (head 922880d, includes `main` 07925ff): `bt-probe.rs` only; CM 2.2 and CM 6.1 are merged, nothing else touches it.
-- **CM 6.2 [approval] [live]** (real group creation; the user approves title and participants; live gate for CM 6.3, 6.4) and **CM 5.1 [approval] [live]** (real private chat creation; the user approves the target guid). Rebuild the main checkout `bt-probe` from `main` before either.
-- MR-B in flight: `rx/3.2`, MR 5.3; then 5.4, 6.1, 7.1 and the unit merge. CM 3.1 waits for MR-B on the core lane.
-- GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; all GS code is on `main`).
-- MD 5.2 [live, manual] (`main` build; owns no files; worker `md/5.2`).
+- **CM 3.1** (CM-C1: `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal): the core lane is free (GS-A, MD-C, MR-B merged). It unblocks CM-M (3.2, 4.1, 4.2).
+- **MR 7.2 [live, writes]** (self chat only, approval of the target, `BT_WRITE_ONLY_CHAT`), **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run.
+- GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; in progress on `gs/4.1`).
 
-In flight: `integ/reactions` (head 922880d; tasks 2.1–2.2, 3.1, 3.3, 4.1, 5.1, 5.2 in; `rx/3.2`, 5.3 running), `cm/1.2-status` (CM `design.md`/`tasks.md`), `md/5.2`. Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`), 5.1; CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1.
+In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–7.1).
 
 ## Needs the user
 
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
-- Live session, reads only, no approval: GS 4.1, CM 5.2 (VM), MD 5.2 (may end "unverified" when the self chat holds no file). Done: GS 1.3, MD 1.3, CM 1.2.
+- Live session, reads only, no approval: GS 4.1, CM 5.2 (VM). Done: GS 1.3, MD 1.3, MD 5.2, CM 1.2.
