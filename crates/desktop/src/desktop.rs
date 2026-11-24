@@ -199,10 +199,11 @@ impl Desktop {
         }
     }
 
-    fn viewer_view(&self, cx: &mut Context<Self>) -> Option<Div> {
+    fn viewer_view(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
         let viewer = self.viewer.as_ref()?;
         let items = self.gallery_of(&viewer.chat, viewer.ts, cx);
-        let frame = viewer::frame(viewer, &items, self.store.read(cx))?;
+        let size = window.viewport_size();
+        let frame = viewer::frame(viewer, &items, self.store.read(cx), (f32::from(size.width), f32::from(size.height)))?;
         Some(viewer::render(frame, cx))
     }
 
@@ -785,7 +786,7 @@ impl Render for Desktop {
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
-        let viewer = self.viewer_view(cx);
+        let viewer = self.viewer_view(window, cx);
         let delete = self.delete_dialog(cx);
 
         div()

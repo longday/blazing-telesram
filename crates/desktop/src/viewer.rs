@@ -5,7 +5,7 @@
 //! original is only fetched when the user chooses Download.
 
 use crate::desktop::Desktop;
-use crate::format::{fit_thumbnail, human_size};
+use crate::format::human_size;
 use crate::store::{ChatStore, DownloadState};
 use crate::theme::*;
 use crate::widgets::button;
@@ -15,6 +15,27 @@ use std::path::PathBuf;
 
 /// The longest side of the picture box; smaller pictures keep their size.
 const IMAGE_MAX: f32 = 800.;
+/// Fixed bands around the picture, so the space left for it follows from the window size alone.
+const TOP_BAR: f32 = 56.;
+const BOTTOM_BAR: f32 = 64.;
+const PAD: f32 = 16.;
+const ARROW_WIDTH: f32 = 48.;
+
+/// The picture box for a `width`x`height` picture in a window of `viewport` (width, height): the picture
+/// scaled down, never up, to the space left after the bars, the padding and (with several pictures) the
+/// two arrows, and to `IMAGE_MAX`. Unknown dimensions give a square.
+pub fn picture_box(width: u32, height: u32, viewport: (f32, f32), multiple: bool) -> (f32, f32) {
+    let arrows = if multiple { 2. * (ARROW_WIDTH + PAD) } else { 0. };
+    let max_w = (viewport.0 - 2. * PAD - arrows).clamp(1., IMAGE_MAX);
+    let max_h = (viewport.1 - TOP_BAR - BOTTOM_BAR - 2. * PAD).clamp(1., IMAGE_MAX);
+    if width == 0 || height == 0 {
+        let side = 0.6 * max_w.min(max_h);
+        return (side, side);
+    }
+    let (w, h) = (width as f32, height as f32);
+    let scale = (max_w / w).min(max_h / h).min(1.);
+    (w * scale, h * scale)
+}
 
 /// Which picture of which message the viewer shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,14 +130,17 @@ pub struct Frame {
     item: GalleryItem,
     index: usize,
     len: usize,
+    picture: (f32, f32),
     preview: Option<PathBuf>,
     line: ActionLine,
 }
 
-pub fn frame(viewer: &Viewer, items: &[GalleryItem], store: &ChatStore) -> Option<Frame> {
+/// `viewport` is the window's (width, height).
+pub fn frame(viewer: &Viewer, items: &[GalleryItem], store: &ChatStore, viewport: (f32, f32)) -> Option<Frame> {
     let item = items.get(viewer.index)?.clone();
     let online = store.connection() == ConnectionState::Online;
     Some(Frame {
+        picture: picture_box(item.width, item.height, viewport, items.len() > 1),
         preview: store.media_path(&item.media).map(PathBuf::from),
         line: action_line(store.download_state(&item.media.original()), online),
         index: viewer.index,
@@ -126,8 +150,7 @@ pub fn frame(viewer: &Viewer, items: &[GalleryItem], store: &ChatStore) -> Optio
 }
 
 pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
-    let Frame { item, index, len, preview, line } = frame;
-    let (w, h) = fit_thumbnail(item.width, item.height, IMAGE_MAX);
+    let Frame { item, index, len, picture: (w, h), preview, line } = frame;
     let position = position_label(index, len);
     let position_selector = format!("viewer-pos-{}-{len}", index + 1);
     let multiple = len > 1;
@@ -173,6 +196,7 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
         .flex()
         .flex_col()
         .bg(rgba(0x000000dd))
+        .overflow_hidden()
         .child(
             div()
                 .h(px(56.))
@@ -192,11 +216,11 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
             div()
                 .flex_1()
                 .min_h_0()
-                .px(px(16.))
+                .p(px(PAD))
                 .flex()
                 .items_center()
                 .justify_center()
-                .gap(px(16.))
+                .gap(px(PAD))
                 .when(multiple, |d| d.child(arrow("viewer-prev", "‹", index > 0, -1, cx)))
                 .child(picture)
                 .when(multiple, |d| d.child(arrow("viewer-next", "›", index + 1 < len, 1, cx))),
@@ -204,7 +228,7 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
         .child(
             div()
                 .flex_none()
-                .py(px(14.))
+                .h(px(BOTTOM_BAR))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -222,7 +246,14 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
 
 /// Previous/next control; dimmed and inert at the end it cannot move past.
 fn arrow(id: &'static str, glyph: &'static str, enabled: bool, delta: isize, cx: &mut Context<Desktop>) -> Stateful<Div> {
-    let arrow = button(id, glyph).debug_selector(move || id.into()).text_size(px(28.)).flex_none();
+    let arrow = button(id, glyph)
+        .debug_selector(move || id.into())
+        .text_size(px(28.))
+        .w(px(ARROW_WIDTH))
+        .px(px(0.))
+        .flex()
+        .justify_center()
+        .flex_none();
     if enabled {
         arrow.on_click(cx.listener(move |this, _, _, cx| this.step_viewer(delta, cx)))
     } else {
@@ -232,7 +263,7 @@ fn arrow(id: &'static str, glyph: &'static str, enabled: bool, delta: isize, cx:
 
 #[cfg(test)]
 mod tests {
-    use super::{action_line, position_label, step, Action, ActionLine};
+    use super::{action_line, picture_box, position_label, step, Action, ActionLine};
     use crate::store::DownloadState;
     use bt_chat_core::model::DownloadFailure;
     use std::path::Path;
@@ -282,5 +313,25 @@ mod tests {
             ActionLine { status: Some("Не удалось записать на диск".into()), action: Action::Retry, enabled: true }
         );
         assert!(!line(failed, false).enabled);
+    }
+
+    fn near(actual: (f32, f32), expected: (f32, f32)) {
+        assert!((actual.0 - expected.0).abs() < 0.01 && (actual.1 - expected.1).abs() < 0.01, "{actual:?} != {expected:?}");
+    }
+
+    #[test]
+    fn the_picture_box_fits_the_space_left_by_the_bars_and_arrows() {
+        // The test window keeps the 800 cap and the aspect ratio.
+        near(picture_box(1600, 800, (1200., 1400.), true), (800., 400.));
+        // The smallest window, 850x560, leaves 690x408 with arrows and 818x408 without (the cap is 800).
+        near(picture_box(3000, 4000, (850., 560.), true), (306., 408.));
+        near(picture_box(4000, 1000, (850., 560.), true), (690., 172.5));
+        near(picture_box(4000, 1000, (850., 560.), false), (800., 200.));
+        // Small pictures are not scaled up; unknown sizes give a square inside the space.
+        near(picture_box(100, 50, (850., 560.), true), (100., 50.));
+        near(picture_box(0, 0, (850., 560.), true), (244.8, 244.8));
+        // A window smaller than the bars never gives a zero or negative box.
+        let (w, h) = picture_box(1000, 1000, (50., 50.), true);
+        assert!(w >= 1. && h >= 1.);
     }
 }
