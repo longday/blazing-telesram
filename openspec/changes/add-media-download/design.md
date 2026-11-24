@@ -111,4 +111,19 @@ The download request logs through the existing `media exchange` record (host and
 | body size vs `FileInfo.Size` | equal for both images tested (62962 and 240897 bytes) |
 | `?size=MIDDLE2048` for the same id | `302` as well (thumbnail path unchanged) |
 
-Consequences: the template of Decision 2 stands; handles are `disk/<uuid>` in practice (the "bucket" is `disk`); the chain has two redirect hops; `Content-Length` is announced, so the truncated-body check and the total in progress work. The self chat holds no files; any chat works for `bt-probe download`. Still open for task 1.3: a file above 25 MiB (the account has files of about 60 MB and 160 MB in a group chat) through the Rust client, which also exercises streaming, idle timeout and the progress totals, and a non-image `MiscFile`.
+Consequences: the template of Decision 2 stands; handles are `disk/<uuid>` in practice (the "bucket" is `disk`); the chain has two redirect hops; `Content-Length` is announced, so the truncated-body check and the total in progress work. The self chat holds no files; any chat works for `bt-probe download`. The two remaining checks (a file above 25 MiB through the Rust client, a non-image `MiscFile`) are recorded below.
+
+### Re-check with the Rust client (task 1.3)
+
+2026-11-25. Method: `bt-probe download <chat> <micros> [--item N] --to <temporary directory>` (`Client::download_media`, the code path of the app) with the stored session (`BT_RUNTIME_DIR` of the main checkout), read-only against the real account, in the group chat that holds the files; `BT_LOG=yandex_proto=debug` for the redirect target. The binary was the debug `bt-probe` already built in the main checkout (its `media.rs`, `net.rs` and `client.rs` are identical to this branch): a freshly built `bt-probe` from a new path never got a connection through the host's per-application firewall (TCP connects to Yandex timed out), the allowed path did. Every downloaded file was deleted afterwards and no ids, names or chats are recorded here.
+
+| Check | Result |
+|---|---|
+| (a) `MiscFile` (`WireBody::File`, a video), `FileInfo.Size` 60344549 bytes (about 57.5 MiB, above the 25 MiB cap) | saved in full: `received` 60344549, equal to `FileInfo.Size` (`size check: matches`); file on disk 60344549 bytes |
+| (a) progress total | the last `progress` call carried `total` 60344549 = the announced `Content-Length` |
+| (a) 25 MiB cap | not applied: the original path streamed 2.3 times the cap to disk without a refusal |
+| (a) redirect | request `files.messenger.yandex.ru/file_shortterm/disk/<uuid>`, final host `mds.storage.yandex.net` (the `landed` field of the `media exchange` record); the record carries no query |
+| (b) single `Image` message, 184397 bytes | `received` 184397 = `FileInfo.Size` = `Content-Length`, `size check: matches` |
+| (b) second image of a three-image `Gallery` (`--item 2`), 336932 bytes | `received` 336932 = `FileInfo.Size` = `Content-Length`, `size check: matches` |
+
+Consequences: no result contradicts Decision 2; `MediaTarget::url` and the `Original` template stand unchanged, so no code change was needed. Streaming, the idle (read) timeout and the status mapping held for a 57.5 MiB body; all three runs exited with status 0. One observation: the debug build of `bt-probe` needed about 90 s for the 57.5 MiB file (about 70 s of CPU, TLS in a debug profile), so that time says nothing about the release build of the app; the idle timeout never fired. The larger files of the group chat (up to about 265 MB) were not downloaded.
