@@ -14,7 +14,10 @@ use crate::frame::RequestFrame;
 pub const HISTORY_CHUNK: u32 = 50;
 
 /// Every method name `ReadRequest` can put on the wire.
-pub const ALLOWED_METHODS: [&str; 4] = ["request_user", "get_users_data", "history", "subscribe"];
+pub const ALLOWED_METHODS: [&str; 5] = ["request_user", "get_users_data", "history", "subscribe", "search"];
+
+/// Rows per result set requested from `search` (the server default), the same for every entity.
+pub const SEARCH_LIMIT: u32 = 10;
 
 /// Lifetime of one app-level chat subscription (the web client's `TtlMcs`).
 pub(crate) const SUBSCRIPTION_TTL_MCS: i64 = 60_000_000;
@@ -34,6 +37,27 @@ pub enum ReadRequest {
     History { chat: String, before: Option<i64>, limit: u32 },
     /// Socket `subscribe` for live events of one chat.
     SubscribeChat { chat: String },
+    /// Registry `search`; works on the bare cookie. One result set per requested entity.
+    Search { query: String, limit: u32, entities: Vec<SearchEntity> },
+}
+
+/// What a `search` can look for. `contacts` is deliberately not representable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchEntity {
+    Messages,
+    Users,
+    Chats,
+}
+
+impl SearchEntity {
+    /// Name in the `entities` request parameter.
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Messages => "messages",
+            Self::Users => "users",
+            Self::Chats => "chats",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,6 +81,7 @@ impl ReadRequest {
             Self::RequestUser => "request_user",
             Self::GetUsersData { .. } => "get_users_data",
             Self::ChatList | Self::History { .. } => "history",
+            Self::Search { .. } => "search",
             Self::SubscribeChat { .. } => "subscribe",
         }
     }
@@ -64,7 +89,7 @@ impl ReadRequest {
     pub fn route(&self) -> Route {
         match self {
             Self::RequestUser => Route::Registry { csrf: true },
-            Self::GetUsersData { .. } => Route::Registry { csrf: false },
+            Self::GetUsersData { .. } | Self::Search { .. } => Route::Registry { csrf: false },
             Self::ChatList | Self::History { .. } | Self::SubscribeChat { .. } => Route::Socket,
         }
     }
@@ -74,6 +99,11 @@ impl ReadRequest {
         let params = match self {
             Self::RequestUser => json!({ "bind_phone_number": false }),
             Self::GetUsersData { guids } => json!({ "guids": guids }),
+            Self::Search { query, limit, entities } => json!({
+                "query": query,
+                "limit": limit,
+                "entities": entities.iter().map(|e| e.wire_name()).collect::<Vec<_>>(),
+            }),
             _ => return None,
         };
         Some(json!({ "method": self.method(), "params": params }).to_string())
@@ -97,7 +127,7 @@ impl ReadRequest {
                 "UserAgent": USER_AGENT,
                 "ClientSupportedFeatures": 0,
             }),
-            Self::RequestUser | Self::GetUsersData { .. } => return None,
+            Self::RequestUser | Self::GetUsersData { .. } | Self::Search { .. } => return None,
         };
         body["RequestId"] = Value::from(ctx.request_id);
         Some(RequestFrame {
@@ -123,6 +153,11 @@ mod tests {
             ReadRequest::History { chat: "0/0/c".into(), before: None, limit: HISTORY_CHUNK },
             ReadRequest::History { chat: "0/0/c".into(), before: Some(1_784_117_592_261_029), limit: 50 },
             ReadRequest::SubscribeChat { chat: "0/0/c".into() },
+            ReadRequest::Search {
+                query: "q".into(),
+                limit: SEARCH_LIMIT,
+                entities: vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats],
+            },
         ];
         for request in &all {
             match request {
@@ -130,7 +165,8 @@ mod tests {
                 | ReadRequest::GetUsersData { .. }
                 | ReadRequest::ChatList
                 | ReadRequest::History { .. }
-                | ReadRequest::SubscribeChat { .. } => {}
+                | ReadRequest::SubscribeChat { .. }
+                | ReadRequest::Search { .. } => {}
             }
         }
         all
@@ -169,7 +205,29 @@ mod tests {
                 assert!(!method.contains(forbidden), "{method} looks like {forbidden}");
             }
         }
-        assert_eq!(ALLOWED_METHODS.len(), 4);
+        assert_eq!(ALLOWED_METHODS.len(), 5);
+    }
+
+    #[test]
+    fn search_is_a_cookie_only_registry_request_with_the_documented_body() {
+        let request = ReadRequest::Search {
+            query: "q".into(),
+            limit: SEARCH_LIMIT,
+            entities: vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats],
+        };
+        assert_eq!(SEARCH_LIMIT, 10);
+        assert_eq!(request.method(), "search");
+        assert!(ALLOWED_METHODS.contains(&"search"));
+        assert_eq!(request.route(), Route::Registry { csrf: false });
+        // serde_json orders object keys alphabetically; compare as JSON, not as text.
+        let body: Value = serde_json::from_str(&request.registry_body().unwrap()).unwrap();
+        let expected: Value = serde_json::from_str(
+            r#"{"method":"search","params":{"query":"q","limit":10,"entities":["messages","users","chats"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(body, expected);
+        let ctx = SocketContext { req_id: 1, request_id: "rid", subscription_id: Some("sub") };
+        assert!(request.socket_frame(&ctx).is_none());
     }
 
     #[test]
