@@ -58,8 +58,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | done (6fb4a72) | — | |
-| 1.2 | ready | 1.1 | GS-P1 |
-| 1.3 | blocked-by GS 1.2 | 1.2 | GS-P2 [live] |
+| 1.2 | done (f8bd206) | 1.1 | GS-P1 |
+| 1.3 | ready [live] (`bt-probe.rs`, fixture; first in the live order) | 1.2 | GS-P2 |
 | 1.4 | blocked-by GS 1.3 | 1.3 | GS-P3 |
 | 2.1 | done on `integ/gs` (5798ec9, parked) | — | GS-C |
 | 2.2 | blocked-by GS 1.4 (unit gate) | 2.1 | GS-C |
@@ -74,13 +74,13 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | done (b2242f0, with the `backend_error` arm) | — | MD-P |
-| 1.2 | ready (`bt-probe.rs` is free; yields to GS 1.3 if that has started) | 1.1 | MD-R1 |
-| 1.3 | blocked-by MD 1.2 | 1.2 | MD-R3 [live] re-check (URL already verified by plain GETs, see `design.md`) |
-| 2.1 | ready | — | MD-C |
-| 2.2 | ready | — | MD-K |
-| 2.3 | blocked-by MD 2.1, 2.2 | 2.1, 2.2 | MD-C |
-| 3.1 | blocked-by MD 2.1 | 2.1 | MD-C |
-| 4.1 | blocked-by MD 2.1 | 2.1 | MD-C |
+| 1.2 | done (e5f2dde) | 1.1 | MD-R1 |
+| 1.3 | ready [live] re-check, after GS 1.3 in the live order (`design.md`, maybe `media.rs`; URL already verified by plain GETs, see `design.md`) | 1.2 | MD-R3 |
+| 2.1 | done on `integ/md` (772b224); placeholder `download` in `yandex_backend.rs` must be replaced by 3.1 before MD-C merges to `main` | — | MD-C |
+| 2.2 | done (e8e533e) | — | MD-K |
+| 2.3 | in progress (MD-C, `integ/md`) | 2.1, 2.2 | MD-C |
+| 3.1 | in progress (MD-C, `integ/md`) | 2.1 | MD-C |
+| 4.1 | in progress (MD-C, `integ/md`); also adds `name: None` to the three `MessageBody::Image` literals in `tests.rs` | 2.1 | MD-C |
 | 4.3 | blocked-by MD-C | 2.1, 4.1 | MD-U1 |
 | 4.2 | blocked-by MD 4.3 | 4.1, 4.3 | MD-U2 |
 | 5.1 | done on `md/5.1` (7e9858a, parked), merges in MD-D | — | MD-D |
@@ -90,11 +90,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 0.1 | ready | — | `design.md` only; PASS/FAIL gates 6.1 |
-| 1.1 | blocked-by GS 1.2 (proto `client.rs`) | — | `request.rs`, `client.rs`, `write.rs`; allowlist becomes 8 names |
+| 0.1 | done, static PASS (2a781dd; `create_chat` payload recorded in `design.md` D4) | — | gate for 6.1 passed |
+| 1.1 | ready (`request.rs`, `client.rs`, `write.rs`; allowlist becomes 8 names) | — | |
 | 1.2 | blocked-by CM 1.1, GS 1.3, MD 1.2 (`bt-probe.rs`) | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
-| 2.1 | blocked-by GS 1.2 (`registry.rs`, `lib.rs`) | — | `manage.rs`, `registry.rs`, `lib.rs` |
+| 2.1 | ready (`manage.rs`, `registry.rs`, `lib.rs`; disjoint from CM 1.1) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
 | 3.1 | blocked-by CM 1.3, 2.2 + core lane | 1.3, 2.2 | CM-C1 |
 | 3.2 | blocked-by CM 3.1 | 3.1 | CM-C2 |
@@ -105,7 +105,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 5.1 | blocked-by CM 2.2 | 2.2 | **[approval] [live]**: real private chat creation, the user approves the target |
 | 5.2 | blocked-by CM 4.3 | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
 | 5.3 | blocked-by CM 5.1, 5.2 | 5.1, 5.2 | **[approval] [live]** |
-| 6.1 | blocked-by CM 0.1 (static PASS), 2.2 | 0.1, 2.2 | probe support only; `manage.rs`, `registry.rs`, `client.rs`, `bt-probe.rs`, `README.md` |
+| 6.1 | blocked-by CM 2.2 (0.1 static PASS done) | 2.2 | probe support only; `manage.rs`, `registry.rs`, `client.rs`, `bt-probe.rs`, `README.md` |
 | 6.2 | blocked-by CM 6.1 | 6.1 | **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 |
 | 6.3 | blocked-by CM 6.2 (live PASS), 3.3 | 6.2, 3.3 | CM-G1 |
 | 6.4 | blocked-by CM 6.3, 4.3 | 6.3, 4.3 | CM-G2 |
@@ -116,7 +116,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
-| 1.1 | in progress (rx/1.1, `research.md` only; merges alone) | — | |
+| 1.1 | done (a56f811, `research.md`) | — | |
 | 2.1 | done on `rx/2.1` (3e4f081, parked; does not compile alone: `WireMessage` literal in `bt-probe.rs`) | — | MR-B1 |
 | 2.2 | cancelled, restarts in MR-B1 | — | MR-B1 |
 | 3.1 | cancelled, restarts in MR-B1 | — | MR-B1 |
@@ -134,13 +134,12 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (nothing in flight touches their files)
 
-- GS 1.2 (GS-P1, critical path of the live chain)
-- MD 2.1 (opens MD-C; then 2.3, 3.1, 4.1 in parallel, disjoint files)
-- MD 2.2 (MD-K)
-- MD 1.2 (`bt-probe.rs`)
-- CM 0.1
+- GS 1.3 [live] (GS-P2, critical path of the live chain)
+- CM 1.1 (proto `client.rs`, `request.rs`, `write.rs`)
+- CM 2.1 (`manage.rs`, `registry.rs`, `lib.rs`)
+- MD 1.3 [live] (after GS 1.3 in the live order)
 
-In flight: MR 1.1 (`research.md` only). Merged: GS 1.1, MD 1.1. Blocked only by GS 1.2: CM 1.1, CM 2.1 (shared proto `client.rs`, `registry.rs`, `lib.rs`).
+In flight: MD-C (MD 2.3, 3.1, 4.1 on `integ/md`) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`), so GS-C, MR-B1 and CM-C1 wait for it (or for GS 1.4/CM 1.3 which gate them anyway). Merged so far: GS 1.1, 1.2; MD 1.1, 1.2, 2.2; CM 0.1; MR 1.1.
 
 ## Needs the user
 
