@@ -101,8 +101,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
 | 5.2 | blocked-by CM 4.3 | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
 | 5.3 | blocked-by CM 5.1, 5.2 | 5.1, 5.2 | **[approval] [live]** |
-| 6.1 | ready (2.2 merged; `manage.rs`, `registry.rs`, `lib.rs`, proto `client.rs`, `bt-probe.rs`, `README.md`; no in-flight task on these files) (0.1 static PASS done); first on `bt-probe.rs`, MR 6.1 follows its merge | 2.2 | probe support only |
-| 6.2 | blocked-by CM 6.1 | 6.1 | **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 |
+| 6.1 | done (07925ff; `bt-probe create-chat <title> <guid>... --confirm-create`, `Client::create_chat`, no live request made) | 2.2 | probe support only |
+| 6.2 | ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 (rebuild the main checkout `bt-probe` from `main` first) | 6.1 | **[approval] [live]** |
 | 6.3 | blocked-by CM 6.2 (live PASS), CM-N | 6.2, 3.3 | CM-G (with 6.4) |
 | 6.4 | blocked-by CM 6.3, 4.3 | 6.3, 4.3 | CM-G |
 | 6.F | conditional | 0.1 FAIL or 6.2 FAIL | removes group wording and code |
@@ -113,30 +113,30 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
 | 1.1 | done (a56f811, `research.md`) | — | |
-| 2.1 | done on `integ/reactions` (be7c461, cherry-pick of 3e4f081 onto `main` 19cf57a; does not compile alone) | — | MR-B |
-| 2.2 | ready (`write.rs`, `request.rs` docs) | — | MR-B |
-| 3.1 | ready (`reactions.rs`, `model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs`, chat-core `client.rs` literals) | — | MR-B |
-| 3.2 | blocked-by MR 3.1 (`client.rs`, `cache.rs`) | 3.1 | MR-B |
-| 3.3 | blocked-by MR 3.1 (`reactions.rs`); 1.1 is done | 1.1, 3.1 | MR-B |
-| 4.1 | blocked-by MR 2.2, 3.1 (`yandex_backend.rs`) | 2.1, 2.2, 3.1 | MR-B |
-| 5.1 | blocked-by MR 3.1 (`store.rs`) | 3.1 | MR-B |
-| 5.2 | blocked-by MR 3.1 (`timeline.rs`, `theme.rs`; lands with 5.3) | 3.1 | MR-B |
-| 5.3 | blocked-by MR 3.1, 5.1 (`composer.rs`, `desktop.rs`) | 3.1, 5.1 | MR-B |
-| 5.4 | blocked-by MR 5.1–5.3 (`tests.rs`) | | MR-B |
-| 6.1 | blocked-by MR 2.2 and by CM 6.1 being merged (`bt-probe.rs`; carries the `WireMessage` literal fix); CM 2.2 is merged | 2.1, 2.2 | MR-B |
+| 2.1 | done on `integ/reactions` (be7c461; does not compile alone) | — | MR-B |
+| 2.2 | done on `integ/reactions` (f1ae91a) | — | MR-B |
+| 3.1 | done on `integ/reactions` (a37a324 merge; chat-core does not compile until 3.2) | — | MR-B |
+| 3.2 | in flight (`rx/3.2`; `client.rs`, `cache.rs`) | 3.1 | MR-B |
+| 3.3 | done on `integ/reactions` (dc9baa9) | 1.1, 3.1 | MR-B |
+| 4.1 | done on `integ/reactions` (23e416c) | 2.1, 2.2, 3.1 | MR-B |
+| 5.1 | done on `integ/reactions` (0b17a8a) | 3.1 | MR-B |
+| 5.2 | done on `integ/reactions` (deab288; type-checked only, 7.1 must cover `timeline.rs`) | 3.1 | MR-B |
+| 5.3 | in flight (`composer.rs`, `desktop.rs`) | 3.1, 5.1 | MR-B |
+| 5.4 | blocked-by MR 5.3 (`tests.rs`) | | MR-B |
+| 6.1 | ready (CM 6.1 merged and in `integ/reactions` 922880d; `bt-probe.rs`; carries the `WireMessage` literal fix) | 2.1, 2.2 | MR-B |
 | 7.1 | blocked-by all MR code | | |
 | 7.2 | blocked-by MR 1.1, 6.1, 7.1 | | **[live]**, writes in the self chat only (`BT_WRITE_ONLY_CHAT`); confirm with the user |
 | 7.3 | blocked-by MR 7.1, 7.2 | | archive |
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **CM 6.1** (probe support for group creation; `manage.rs`, `registry.rs`, `lib.rs`, proto `client.rs`, `bt-probe.rs`, `README.md`; nothing in flight touches them). Start it now so MR 6.1 can follow on `bt-probe.rs`.
-- **CM 5.1 [approval] [live]** (real private chat creation; the user approves the target guid first; uses the `bt-probe` of the main checkout, which must be rebuilt from `main`).
-- **MR-B tasks on `integ/reactions` (head f1ae91a: MR 2.1 and 2.2 merged):** MR 3.1 is in flight on `rx/3.1`. Once it is in: MR 3.2, 3.3, 4.1, 5.1, 5.2 in parallel (files `client.rs`+`cache.rs`, `reactions.rs`, `yandex_backend.rs`, `store.rs`, `timeline.rs`+`theme.rs`: pairwise disjoint); then 5.3 (after 5.1), then 5.4; MR 6.1 last (after CM 6.1 is merged); then 7.1 and the unit merges. MR-B does not touch proto `client.rs`, `README.md`, `manage.rs` or `registry.rs`.
+- **MR 6.1** on `integ/reactions` (head 922880d, includes `main` 07925ff): `bt-probe.rs` only; CM 2.2 and CM 6.1 are merged, nothing else touches it.
+- **CM 6.2 [approval] [live]** (real group creation; the user approves title and participants; live gate for CM 6.3, 6.4) and **CM 5.1 [approval] [live]** (real private chat creation; the user approves the target guid). Rebuild the main checkout `bt-probe` from `main` before either.
+- MR-B in flight: `rx/3.2`, MR 5.3; then 5.4, 6.1, 7.1 and the unit merge. CM 3.1 waits for MR-B on the core lane.
 - GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; all GS code is on `main`).
 - MD 5.2 [live, manual] (`main` build; owns no files; worker `md/5.2`).
 
-In flight: `integ/reactions` (MR 2.1, 2.2 done; `rx/3.1` running), `cm/1.2-status` (CM `design.md`/`tasks.md`), `md/5.2`. Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`), 5.1; CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, spec reconcile; MR 1.1. CM 3.1 waits for MR-B on the core lane.
+In flight: `integ/reactions` (head 922880d; tasks 2.1–2.2, 3.1, 3.3, 4.1, 5.1, 5.2 in; `rx/3.2`, 5.3 running), `cm/1.2-status` (CM `design.md`/`tasks.md`), `md/5.2`. Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD 1.1, 1.2, 1.3, 2.2, MD-C (2.1, 2.3, 3.1, 4.1, 4.2, 4.3 and its follow-up `md/4.3-fit`), 5.1; CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1.
 
 ## Needs the user
 
