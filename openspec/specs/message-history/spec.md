@@ -48,15 +48,3 @@ Image attachments SHALL show a thumbnail; other files SHALL show a card with nam
 #### Scenario: File message
 - **WHEN** a message contains a non-image file
 - **THEN** a card with the file name and size is shown
-
-### Requirement: Read-only client
-The client SHALL NOT send any request that changes server state: no messages, edits, deletions, reactions, read markers, typing or presence events. Message composers SHALL be disabled with a read-only notice.
-
-#### Scenario: Opening a chat leaves it unread
-- **GIVEN** a chat with unread messages
-- **WHEN** the user opens it and scrolls through it
-- **THEN** the web client still shows that chat as unread
-
-#### Scenario: Composer is disabled
-- **WHEN** a chat is open
-- **THEN** the composer cannot accept input and states that sending is not available yet
