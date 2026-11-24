@@ -424,6 +424,8 @@ impl Desktop {
             cx.notify();
         } else if self.viewer.is_some() {
             self.close_viewer(cx);
+        } else if self.profile {
+            self.close_profile(cx);
         } else if self.blocked(cx) {
             // The session dialogs offer only sign-out.
         } else if self.message_menu.take().is_some() {

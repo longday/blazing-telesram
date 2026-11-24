@@ -3382,3 +3382,184 @@ fn a_covered_chat_does_not_open_the_panel(cx: &mut TestAppContext) {
     assert!(!info_open(&h, cx));
     assert!(h.commands().is_empty());
 }
+
+// ---- read-only profile (CM 4.2) ----
+
+fn profile_of(name: Option<&str>, status: Option<&str>) -> Profile {
+    Profile { user: UserId("me".into()), name: name.map(Into::into), avatar: None, status_text: status.map(Into::into) }
+}
+
+fn profile_state(h: &Harness, cx: &mut VisualTestContext) -> Option<crate::store::ProfileState> {
+    h.store.read_with(cx, |s, _| s.profile_state().cloned())
+}
+
+fn profile_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.profile_is_open())
+}
+
+/// Opens the profile through the account menu; the drained commands are the profile request.
+fn open_profile(h: &Harness, cx: &mut VisualTestContext) {
+    click(cx, "menu-button");
+    click(cx, "menu-profile");
+    assert_eq!(h.commands(), [Command::LoadProfile], "opening asks for the profile, nothing else");
+}
+
+#[gpui::test]
+fn the_account_menu_opens_the_profile_with_name_avatar_and_status(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    assert!(!shown(cx, "profile-view"));
+    click(cx, "menu-button");
+    assert!(shown(cx, "menu-profile"));
+    click(cx, "menu-profile");
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+    assert!(profile_open(&h, cx));
+    assert_eq!(h.desktop.read_with(cx, |d, _| d.menu), AccountMenu::Closed, "the menu closes");
+    assert!(shown(cx, "profile-view"));
+    assert!(shown(cx, "profile-loading"), "a loading state, not an empty profile");
+    assert!(!shown(cx, "profile-name"));
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван Петров"), Some("в отпуске до пятницы")))]);
+    assert!(shown(cx, "profile-name"));
+    assert!(shown(cx, "profile-avatar"));
+    assert!(shown(cx, "profile-avatar-initials"), "initials while there is no picture");
+    assert!(shown(cx, "profile-status"), "the status text is shown when the server gave one");
+    assert!(!shown(cx, "profile-error"));
+    assert!(!shown(cx, "profile-offline"));
+    assert!(h.commands().is_empty(), "viewing sends no other request");
+}
+
+#[gpui::test]
+fn the_profile_avatar_is_the_downloaded_picture(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    let mut profile = profile_of(Some("Иван"), None);
+    profile.avatar = Some(media("me-av", MediaKind::Avatar));
+    h.feed(cx, [ClientEvent::Profile(profile)]);
+    assert_eq!(h.commands(), [Command::FetchMedia(media("me-av", MediaKind::Avatar))]);
+    assert!(shown(cx, "profile-avatar-initials"));
+    h.feed(cx, [ClientEvent::MediaReady { media: media("me-av", MediaKind::Avatar), path: PathBuf::from("/tmp/me-av.png") }]);
+    assert!(shown(cx, "profile-avatar-image"));
+}
+
+#[gpui::test]
+fn no_status_information_shows_no_status_line(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван Петров"), None))]);
+    assert!(shown(cx, "profile-name"));
+    assert!(!shown(cx, "profile-status"), "an empty status is no line");
+}
+
+#[gpui::test]
+fn a_failed_profile_load_says_so_and_retries(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::ProfileFailed { reason: "сервер ответил ошибкой".into(), offline: false }]);
+    assert!(shown(cx, "profile-error"));
+    assert!(shown(cx, "profile-error-reason"));
+    assert!(shown(cx, "profile-retry"));
+    assert!(!shown(cx, "profile-offline"));
+    assert!(!shown(cx, "profile-name"), "no name, avatar or status from anywhere else");
+    assert!(!shown(cx, "profile-avatar"));
+    assert!(!shown(cx, "profile-status"));
+
+    click(cx, "profile-retry");
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), None))]);
+    assert!(shown(cx, "profile-name"));
+    assert!(profile_open(&h, cx));
+}
+
+#[gpui::test]
+fn offline_the_profile_says_it_could_not_be_loaded(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true }]);
+    assert!(shown(cx, "profile-offline"));
+    assert!(!shown(cx, "profile-error"), "an offline notice, not an error");
+    assert!(!shown(cx, "profile-name"));
+    assert!(!shown(cx, "profile-avatar"));
+    assert!(!shown(cx, "profile-status"));
+}
+
+#[gpui::test]
+fn every_open_asks_again_and_shows_nothing_from_before(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    click(cx, "profile-close");
+    assert!(!profile_open(&h, cx));
+    assert!(h.commands().is_empty(), "closing sends nothing");
+
+    open_profile(&h, cx);
+    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading), "the old profile is not current");
+    h.store.read_with(cx, |s, _| assert_eq!(crate::profile::body(s.profile_state()), crate::profile::Body::Loading));
+}
+
+#[test]
+fn the_profile_body_follows_the_state() {
+    use crate::profile::{body, Body};
+    use crate::store::ProfileState;
+    assert_eq!(body(None), Body::Loading);
+    assert_eq!(body(Some(&ProfileState::Loading)), Body::Loading);
+    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: true })), Body::Offline);
+    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: false })), Body::Failed("r".into()));
+    assert_eq!(
+        body(Some(&ProfileState::Ready(profile_of(None, None)))),
+        Body::Ready { name: "Без имени".into(), status: None }
+    );
+    assert_eq!(
+        body(Some(&ProfileState::Ready(profile_of(Some("Иван"), Some("занят"))))),
+        Body::Ready { name: "Иван".into(), status: Some("занят".into()) }
+    );
+}
+
+#[gpui::test]
+fn the_profile_has_no_input_and_changes_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    for selector in ["profile-edit", "profile-name-input", "profile-status-input", "profile-avatar-edit"] {
+        assert!(!shown(cx, selector), "{selector}");
+    }
+    // Clicking the fields and typing reaches no input: nothing changes and nothing is sent.
+    click(cx, "profile-name");
+    click(cx, "profile-status");
+    cx.simulate_input("zzz");
+    assert_eq!(composer_text(&h, cx), "");
+    assert_eq!(h.desktop.read_with(cx, |d, cx| d.search.read(cx).content.to_string()), "");
+    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Ready(profile_of(Some("Иван"), Some("на связи")))));
+    cx.run_until_parked();
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn the_profile_blocks_the_chat_and_escape_closes_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1)]);
+    open_profile(&h, cx);
+    assert!(h.desktop.read_with(cx, |d, cx| d.blocked(cx)), "blocks the chat like other overlays");
+    h.desktop.update(cx, |d, cx| d.toggle_info(cx));
+    assert!(!info_open(&h, cx), "the info panel does not open under the profile");
+    assert!(h.commands().is_empty());
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), None))]);
+    cx.simulate_keystrokes("escape");
+    assert!(!profile_open(&h, cx), "Escape");
+    assert!(!h.desktop.read_with(cx, |d, cx| d.blocked(cx)));
+    assert!(shown(cx, msg!(1)), "the chat is as it was");
+
+    open_profile(&h, cx);
+    click(cx, "profile-close");
+    assert!(!profile_open(&h, cx), "the close button");
+}
+
+#[gpui::test]
+fn an_ended_session_closes_the_profile(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::SessionExpired]);
+    assert!(!profile_open(&h, cx));
+    assert!(shown(cx, "session-expired"));
+}

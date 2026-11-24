@@ -6,6 +6,7 @@ use crate::format::{chat_time, log_time, one_line, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::input::{InputEvent, TextInput};
 use crate::info_panel;
+use crate::profile;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
     ChatFilter, ChatStore, SearchStatus, SessionState, StoreEvent, TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
@@ -82,6 +83,8 @@ pub struct Desktop {
     open: Option<OpenTimeline>,
     /// The chat whose info panel is open; always the open chat, or `None`.
     info: Option<ChatId>,
+    /// Whether the read-only profile modal is open.
+    profile: bool,
     pub(crate) menu: AccountMenu,
     compose: Compose,
     message_menu: Option<MessageMenu>,
@@ -111,6 +114,7 @@ impl Desktop {
                 this.sync_open(window, cx);
                 this.sync_viewer(cx);
                 this.sync_info();
+                this.sync_profile(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
@@ -135,6 +139,7 @@ impl Desktop {
             filter: ChatFilter::All,
             open: None,
             info: None,
+            profile: false,
             menu: AccountMenu::Closed,
             compose,
             message_menu: None,
@@ -155,6 +160,7 @@ impl Desktop {
             || self.viewer.is_some()
             || self.delete_pending.is_some()
             || self.menu == AccountMenu::ConfirmSignOut
+            || self.profile
             || self.store.read(cx).session() != SessionState::Active
     }
 
@@ -216,6 +222,46 @@ impl Desktop {
     #[cfg(test)]
     pub(crate) fn info_is_open(&self) -> bool {
         self.info.is_some()
+    }
+
+    /// Opens the profile modal from the account menu; it always asks for the profile again, so nothing
+    /// from an earlier open is shown as current. Ignored while something else covers the chat.
+    pub(crate) fn open_profile(&mut self, cx: &mut Context<Self>) {
+        self.menu = AccountMenu::Closed;
+        if self.blocked(cx) {
+            cx.notify();
+            return;
+        }
+        // The message menu is drawn above the modal; it must not outlive the cover's start.
+        self.message_menu = None;
+        self.profile = true;
+        self.store.update(cx, |store, cx| store.load_profile(cx));
+        cx.notify();
+    }
+
+    pub(crate) fn close_profile(&mut self, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.profile) {
+            cx.notify();
+        }
+    }
+
+    /// The retry of a failed profile load; the store ignores it while a load is running.
+    pub(crate) fn reload_profile(&mut self, cx: &mut Context<Self>) {
+        if self.profile {
+            self.store.update(cx, |store, cx| store.load_profile(cx));
+        }
+    }
+
+    /// The modal has nothing to show once the session is no longer active (the session dialogs take over).
+    fn sync_profile(&mut self, cx: &App) {
+        if self.store.read(cx).session() != SessionState::Active {
+            self.profile = false;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn profile_is_open(&self) -> bool {
+        self.profile
     }
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
@@ -671,6 +717,11 @@ impl Desktop {
                         .rounded(px(10.))
                         .bg(rgb(FIELD))
                         .child(
+                            button("menu-profile", "Профиль")
+                                .debug_selector(|| "menu-profile".into())
+                                .on_click(cx.listener(|this, _, _, cx| this.open_profile(cx))),
+                        )
+                        .child(
                             button("menu-sign-out", "Выйти из аккаунта")
                                 .debug_selector(|| "menu-sign-out".into())
                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -972,6 +1023,7 @@ impl Render for Desktop {
         let sidebar = self.sidebar(cx);
         let pane = self.chat_pane(cx);
         let info = self.info_chat().map(|chat| info_panel::render(&chat, &self.store, cx));
+        let profile = self.profile.then(|| profile::render(&self.store, cx));
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
@@ -999,6 +1051,7 @@ impl Render for Desktop {
             .child(sidebar)
             .child(pane)
             .children(info)
+            .children(profile)
             .children(viewer)
             .children(log)
             .children(toast)
