@@ -115,7 +115,7 @@ Rejected: writing the overlay into the cache at once (a restart during the reque
 
 ### D9. Verification and safety (P5)
 
-Unit and fixture tests carry everything except server behaviour. Server behaviour (REPLACE with no prior reaction, replace semantics, `Remove` without `Type`, whether the sender receives its own `Reaction` push, whether history rows carry `Reactions`) is checked once by task 7.2 in the self chat through `bt-probe`, with the message created by the check itself, and the findings are recorded in `research.md`. A finding that contradicts D2, D3 or P3 reopens the affected artifact before archive.
+Unit and fixture tests carry everything except server behaviour. Server behaviour (REPLACE with no prior reaction, replace semantics, `Remove` without `Type`, whether the sender receives its own `Reaction` push, whether history rows carry `Reactions`) is checked once by task 7.2 in the self chat through `bt-probe`. No reaction is sent until the user has approved the target message (P5); the proposed target is a disposable message created by the check itself, which is an extra safeguard on top of the approval. The findings are recorded in `research.md`. A finding that contradicts D2, D3 or P3 reopens the affected artifact before archive.
 
 ### D10. Ordering with other changes
 
