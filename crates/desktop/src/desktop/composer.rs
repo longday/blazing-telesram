@@ -6,6 +6,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::theme::*;
 use crate::widgets::{button, icon, Icon};
 use bt_chat_core::model::{ChatId, Delivery, Draft, Message, MessageBody, MessageTs, ReplyTarget};
+use bt_chat_core::reactions::{ReactionCode, KNOWN};
 use gpui::{prelude::*, *};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -135,6 +136,12 @@ fn copy_text(m: &Message) -> Option<&str> {
         MessageBody::File { name, .. } => Some(name),
         MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
+}
+
+/// The menu offers the reaction row on any sent, non-deleted message, as the chips do; the row
+/// is hidden while the table of reaction types is empty.
+fn reactable(m: &Message) -> bool {
+    !KNOWN.is_empty() && m.delivery == Delivery::Sent && !matches!(m.body, MessageBody::Deleted)
 }
 
 fn quote_text(m: &Message) -> String {
@@ -431,10 +438,25 @@ impl Desktop {
             return;
         }
         let Some(message) = self.find_message(timestamp, cx) else { return };
-        if menu_actions(&message).is_empty() {
+        if menu_actions(&message).is_empty() && !reactable(&message) {
             return;
         }
         self.message_menu = Some(MessageMenu { chat, timestamp, position });
+        cx.notify();
+    }
+
+    /// The user chose reaction `code` on a message: ignored while the session is blocked or the
+    /// chat is not the open one. The core decides between add, replace and remove.
+    pub(crate) fn toggle_reaction(&mut self, chat: ChatId, timestamp: MessageTs, code: ReactionCode, cx: &mut Context<Self>) {
+        if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
+            return;
+        }
+        self.store.read(cx).toggle_reaction(chat, timestamp, code);
+    }
+
+    fn run_menu_reaction(&mut self, code: ReactionCode, cx: &mut Context<Self>) {
+        let Some(menu) = self.message_menu.take() else { return };
+        self.toggle_reaction(menu.chat, menu.timestamp, code, cx);
         cx.notify();
     }
 
@@ -637,11 +659,19 @@ impl Desktop {
 
     pub(super) fn message_menu_view(&self, cx: &mut Context<Self>) -> Option<Div> {
         let menu = self.message_menu.as_ref()?;
-        let actions = menu_actions(&self.find_message(menu.timestamp, cx)?);
-        if actions.is_empty() {
+        let message = self.find_message(menu.timestamp, cx)?;
+        let actions = menu_actions(&message);
+        let reactions = reactable(&message);
+        if actions.is_empty() && !reactions {
             return None;
         }
         let mut items: Vec<AnyElement> = Vec::new();
+        if reactions {
+            items.push(Self::reaction_row(&message, cx).into_any_element());
+            if !actions.is_empty() {
+                items.push(div().h(px(1.)).my(px(4.)).bg(rgb(MENU_SEPARATOR)).into_any_element());
+            }
+        }
         for (i, &action) in actions.iter().enumerate() {
             if i > 0 && action.is_own_only() != actions[i - 1].is_own_only() {
                 items.push(div().h(px(1.)).my(px(4.)).bg(rgb(MENU_SEPARATOR)).into_any_element());
@@ -698,6 +728,28 @@ impl Desktop {
                     ),
                 ),
         )
+    }
+
+    /// One button per [`KNOWN`] type above the entries; the account's own type is highlighted.
+    fn reaction_row(message: &Message, cx: &mut Context<Self>) -> Div {
+        let buttons = KNOWN.iter().map(|known| {
+            let code = known.code;
+            div()
+                .id(SharedString::from(format!("menu-reaction-{}", code.0)))
+                .debug_selector(move || format!("menu-reaction-{}", code.0))
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .cursor_pointer()
+                .text_size(px(16.))
+                .when(message.reactions.mine == Some(code), |d| d.bg(rgb(REACTION_OWN)))
+                .hover(|s| s.bg(rgb(MENU_HOVER)))
+                .child(known.emoji)
+                .on_click(cx.listener(move |this, _, _, cx| this.run_menu_reaction(code, cx)))
+        });
+        div().debug_selector(|| "menu-reactions".into()).px(px(6.)).py(px(2.)).flex().flex_wrap().justify_between().children(buttons)
     }
 
     pub(super) fn delete_dialog(&self, cx: &mut Context<Self>) -> Option<Div> {
