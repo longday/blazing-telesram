@@ -91,8 +91,8 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | done, static PASS (2a781dd; `create_chat` payload recorded in `design.md` D4) | — | gate for 6.1 passed |
-| 1.1 | ready (`request.rs`, `client.rs`, `write.rs`; allowlist becomes 8 names) | — | |
-| 1.2 | blocked-by CM 1.1, GS 1.3, MD 1.2 (`bt-probe.rs`) | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
+| 1.1 | done (5fce6ae; allowlist now 8 names, `write.rs` pin updated) | — | |
+| 1.2 | blocked-by GS 1.3 (`bt-probe.rs` and the live session); then ready | 1.1 | `bt-probe.rs`, `README.md`, fixtures, `design.md` [live] |
 | 1.3 | blocked-by CM 1.2, GS 1.4 (`wire_fixtures.rs`) | 1.2 | `wire.rs`, `wire_fixtures.rs`, `client.rs`, `request.rs` |
 | 2.1 | ready (`manage.rs`, `registry.rs`, `lib.rs`; disjoint from CM 1.1) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | blocked-by CM 2.1, 1.3 | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
@@ -135,8 +135,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 ## Ready now (nothing in flight touches their files)
 
 - GS 1.3 [live] (GS-P2, critical path of the live chain)
-- CM 1.1 (proto `client.rs`, `request.rs`, `write.rs`)
-- CM 2.1 (`manage.rs`, `registry.rs`, `lib.rs`)
+- CM 2.1 (`manage.rs`, `registry.rs`, `lib.rs`) (CM 1.1 merged; CM 1.2 is live and queues after GS 1.3)
 - MD 1.3 [live] (after GS 1.3 in the live order)
 
 In flight: MD-C (MD 2.3, 3.1, 4.1 on `integ/md`) holds the core lane (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`, `main.rs`, `composer.rs`, `timeline.rs`), so GS-C, MR-B1 and CM-C1 wait for it (or for GS 1.4/CM 1.3 which gate them anyway). Merged so far: GS 1.1, 1.2; MD 1.1, 1.2, 2.2; CM 0.1; MR 1.1.
