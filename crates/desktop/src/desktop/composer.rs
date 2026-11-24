@@ -415,6 +415,8 @@ impl Desktop {
         } else if self.menu == AccountMenu::ConfirmSignOut {
             self.menu = AccountMenu::Closed;
             cx.notify();
+        } else if self.viewer.is_some() {
+            self.close_viewer(cx);
         } else if self.blocked(cx) {
             // The session dialogs offer only sign-out.
         } else if self.message_menu.take().is_some() {

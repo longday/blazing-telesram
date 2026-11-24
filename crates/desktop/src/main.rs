@@ -6,6 +6,7 @@ mod logging;
 mod store;
 mod theme;
 mod timeline;
+mod viewer;
 mod widgets;
 mod yandex_backend;
 #[cfg(test)]
@@ -13,7 +14,7 @@ mod tests;
 
 use bt_chat_core::model::{ChatId, UserId};
 use bt_chat_core::{ChatClient, ClientConfig};
-use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog};
+use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog, ViewerNext, ViewerPrev};
 use format::Clock;
 use gpui::{prelude::*, *};
 use login::{LoginCookie, SignInWindow};
@@ -52,6 +53,8 @@ fn main() {
             KeyBinding::new("ctrl-f", Search, Some("BlazingTelesram")),
             KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram")),
             KeyBinding::new("escape", Dismiss, Some("BlazingTelesram")),
+            KeyBinding::new("left", ViewerPrev, Some("BlazingTelesram")),
+            KeyBinding::new("right", ViewerNext, Some("BlazingTelesram")),
             KeyBinding::new("cmd-q", Quit, None),
         ]);
         cx.on_action(|_: &Quit, cx| cx.quit());

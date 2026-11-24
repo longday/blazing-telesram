@@ -1,6 +1,6 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
-use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, ToggleLog};
+use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, ToggleLog, ViewerNext, ViewerPrev};
 use crate::format::{fit_thumbnail, Clock};
 use crate::logging::{LogBuffer, LogLine};
 use crate::store::{ChatFilter, ChatStore, DownloadState, SessionState};
@@ -130,7 +130,11 @@ fn harness_with(
     cx.update(|cx| {
         if !cx.has_global::<KeysBound>() {
             crate::input::bind(cx);
-            cx.bind_keys([KeyBinding::new("escape", Dismiss, Some("BlazingTelesram"))]);
+            cx.bind_keys([
+                KeyBinding::new("escape", Dismiss, Some("BlazingTelesram")),
+                KeyBinding::new("left", ViewerPrev, Some("BlazingTelesram")),
+                KeyBinding::new("right", ViewerNext, Some("BlazingTelesram")),
+            ]);
             cx.set_global(KeysBound);
         }
     });
@@ -2131,4 +2135,248 @@ fn a_gallery_requests_every_thumbnail_once_and_never_an_original(cx: &mut TestAp
     // The same gallery arriving again (a live edit or a refresh) asks for nothing new.
     h.feed(cx, [ClientEvent::MessageUpserted(message("a", 1, "alice", false, gallery))]);
     assert!(h.commands().is_empty());
+}
+
+// ---- image viewer ----
+
+fn picture(id: &str) -> GalleryItem {
+    GalleryItem { media: media(id, MediaKind::Thumbnail), width: 1600, height: 800, name: Some(format!("{id}.jpg")) }
+}
+
+/// Message 2 of chat "g": four pictures `v/1` … `v/4`.
+fn four_pictures() -> Message {
+    let items = ["v/1", "v/2", "v/3", "v/4"].map(picture).to_vec();
+    message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })
+}
+
+fn open_viewer(h: &Harness, cx: &mut VisualTestContext, ts: MessageTs, index: usize) {
+    h.desktop.update(cx, |d, cx| d.open_viewer(chat_g(), ts, index, cx));
+    cx.run_until_parked();
+}
+
+fn viewer_at(h: &Harness, cx: &mut VisualTestContext) -> Option<(MessageTs, usize)> {
+    h.desktop.read_with(cx, |d, _| d.viewer_at())
+}
+
+fn blocked(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, cx| d.blocked(cx))
+}
+
+#[gpui::test]
+fn the_viewer_opens_at_the_chosen_picture_with_its_position(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), four_pictures()]);
+    assert_eq!(viewer_at(&h, cx), None);
+    open_viewer(&h, cx, ts(2), 2);
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 2)));
+    assert!(shown(cx, "viewer"));
+    assert!(shown(cx, "viewer-pos-3-4"));
+    assert!(shown(cx, "viewer-prev") && shown(cx, "viewer-next"));
+    assert!(h.commands().is_empty(), "opening the viewer downloads nothing and asks for nothing");
+}
+
+#[gpui::test]
+fn the_viewer_ignores_what_it_cannot_show(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), four_pictures()]);
+    open_viewer(&h, cx, ts(2), 4);
+    open_viewer(&h, cx, ts(1), 0);
+    open_viewer(&h, cx, ts(99), 0);
+    h.desktop.update(cx, |d, cx| d.open_viewer(ChatId("other".into()), ts(2), 0, cx));
+    assert_eq!(viewer_at(&h, cx), None);
+}
+
+#[gpui::test]
+fn right_and_left_move_between_pictures_and_stop_at_the_ends(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 2);
+
+    cx.simulate_keystrokes("right");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 3)));
+    assert!(shown(cx, "viewer-pos-4-4"));
+    cx.simulate_keystrokes("right");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 3)), "the end does not wrap");
+
+    for _ in 0..5 {
+        cx.simulate_keystrokes("left");
+    }
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)), "the start does not wrap");
+    assert!(shown(cx, "viewer-pos-1-4"));
+}
+
+#[gpui::test]
+fn the_arrow_controls_step_through_the_pictures(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 1);
+    click(cx, "viewer-next");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 2)));
+    click(cx, "viewer-prev");
+    click(cx, "viewer-prev");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)));
+    click(cx, "viewer-prev");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)), "inert at the start");
+}
+
+#[gpui::test]
+fn escape_and_the_close_control_close_the_viewer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(viewer_at(&h, cx), None);
+    assert!(!blocked(&h, cx));
+
+    open_viewer(&h, cx, ts(2), 1);
+    click(cx, "viewer-close");
+    assert_eq!(viewer_at(&h, cx), None);
+}
+
+#[gpui::test]
+fn escape_closes_the_viewer_before_touching_the_reply(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    h.feed(cx, [ClientEvent::MessageUpserted(four_pictures_at(3))]);
+    open_viewer(&h, cx, ts(3), 0);
+    cx.simulate_keystrokes("escape");
+    assert_eq!(viewer_at(&h, cx), None);
+    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
+}
+
+fn four_pictures_at(i: i64) -> Message {
+    let mut m = four_pictures();
+    m.timestamp = ts(i);
+    m
+}
+
+#[gpui::test]
+fn a_single_image_has_no_previous_or_next(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 600, height: 1200, caption: None, name: None };
+    open_with(&h, cx, vec![message("g", 2, "alice", false, single)]);
+    open_viewer(&h, cx, ts(2), 0);
+    assert!(shown(cx, "viewer-pos-1-1"));
+    assert!(shown(cx, "viewer-image"));
+    assert!(!shown(cx, "viewer-prev") && !shown(cx, "viewer-next"));
+    cx.simulate_keystrokes("right");
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)));
+}
+
+#[gpui::test]
+fn the_preview_replaces_the_placeholder_when_it_arrives(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 1);
+    let b = bounds(cx, "viewer-image").expect("the placeholder is shown");
+    assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (800.0, 400.0));
+    assert!(!shown(cx, "viewer-image-loaded"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v2.png");
+    std::fs::write(&path, PNG_1X1).unwrap();
+    h.feed(cx, [ClientEvent::MediaReady { media: media("v/2", MediaKind::Thumbnail), path }]);
+    assert!(shown(cx, "viewer-image-loaded"));
+    let b = bounds(cx, "viewer-image").unwrap();
+    assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (800.0, 400.0), "the box does not change");
+}
+
+#[gpui::test]
+fn deleting_the_message_closes_the_viewer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), four_pictures()]);
+    open_viewer(&h, cx, ts(2), 1);
+    h.feed(cx, [ClientEvent::MessageDeleted { chat: chat_g(), timestamp: ts(2) }]);
+    assert_eq!(viewer_at(&h, cx), None);
+    assert!(!blocked(&h, cx));
+}
+
+#[gpui::test]
+fn a_body_without_pictures_closes_the_viewer_and_fewer_pictures_step_back(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 3);
+    let two = MessageBody::Gallery { items: vec![picture("v/1"), picture("v/2")], caption: None };
+    h.feed(cx, [ClientEvent::MessageUpserted(message("g", 2, "alice", false, two))]);
+    assert_eq!(viewer_at(&h, cx), Some((ts(2), 1)), "the last picture that is left");
+    assert!(shown(cx, "viewer-pos-2-2"));
+
+    h.feed(cx, [ClientEvent::MessageUpserted(message("g", 2, "alice", false, MessageBody::Deleted))]);
+    assert_eq!(viewer_at(&h, cx), None);
+}
+
+#[gpui::test]
+fn an_open_viewer_blocks_the_composer_and_read_markers(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), four_pictures()]);
+    cx.simulate_input("привет");
+    h.commands();
+
+    open_viewer(&h, cx, ts(2), 0);
+    assert!(blocked(&h, cx));
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("ещё");
+    activate(cx);
+    assert!(h.commands().is_empty(), "no send, no typing notice, nothing read while the viewer is open");
+    assert_eq!(composer_text(&h, cx), "привет");
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(2) }], "reading resumes after it closes");
+    cx.simulate_input("!");
+    assert_eq!(composer_text(&h, cx), "привет!", "the composer has the keyboard again");
+}
+
+#[gpui::test]
+fn the_download_button_saves_the_original_under_the_items_name(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 2);
+    let file = original("v/3");
+
+    click(cx, "viewer-download");
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("v/3.jpg".into()) }]);
+    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+
+    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
+    click(cx, "viewer-cancel");
+    assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
+    h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
+    assert_eq!(download_state(&h, cx, &file), None);
+}
+
+#[gpui::test]
+fn the_viewer_shows_saved_and_failed_downloads_of_its_item(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    let file = original("v/1");
+
+    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Network }]);
+    assert!(shown(cx, "viewer-retry"));
+    click(cx, "viewer-retry");
+    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("v/1.jpg".into()) }]);
+
+    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/Downloads/v (1).jpg") }]);
+    assert!(shown(cx, "viewer-saved"));
+    click(cx, "viewer-download");
+    assert_eq!(h.commands().len(), 1, "a saved picture can be fetched again");
+
+    h.feed(cx, [ClientEvent::DownloadProgress { media: original("v/2"), received: 1, total: None }]);
+    assert_eq!(h.commands(), [], "another picture's download does not touch this one");
+}
+
+#[gpui::test]
+fn the_download_button_is_disabled_without_a_connection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    assert!(shown(cx, "viewer-download"));
+    assert!(shown(cx, "viewer-status"));
+    click(cx, "viewer-download");
+    assert!(h.commands().is_empty());
+    assert_eq!(download_state(&h, cx, &original("v/1")), None);
 }

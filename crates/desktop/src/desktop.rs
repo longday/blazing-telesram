@@ -8,14 +8,15 @@ use crate::input::{InputEvent, TextInput};
 use crate::store::{ChatFilter, ChatStore, SessionState, StoreEvent, TimelineChange};
 use crate::theme::*;
 use crate::timeline::{self, RowBounds, RowContext};
+use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, MessageTs};
+use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs};
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 use std::time::Duration;
 
-actions!(bt, [Search, Quit, ToggleLog, Dismiss]);
+actions!(bt, [Search, Quit, ToggleLog, Dismiss, ViewerPrev, ViewerNext]);
 
 /// How often an open log view looks for new records.
 const LOG_POLL: Duration = Duration::from_millis(250);
@@ -62,6 +63,7 @@ pub struct Desktop {
     message_menu: Option<MessageMenu>,
     delete_pending: Option<(ChatId, MessageTs)>,
     toast: Option<Toast>,
+    viewer: Option<Viewer>,
     log: Option<LogView>,
     /// Whether a blocking overlay covered the chat when focus was last placed.
     covered: bool,
@@ -80,6 +82,7 @@ impl Desktop {
             cx.subscribe_in(&compose.input, window, |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx)),
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.sync_open(window, cx);
+                this.sync_viewer(cx);
                 cx.notify();
             }),
             cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
@@ -106,6 +109,7 @@ impl Desktop {
             message_menu: None,
             delete_pending: None,
             toast: None,
+            viewer: None,
             log: None,
             covered: false,
             focus,
@@ -117,6 +121,7 @@ impl Desktop {
     /// message counts as read until it is gone.
     pub(crate) fn blocked(&self, cx: &App) -> bool {
         self.log.is_some()
+            || self.viewer.is_some()
             || self.delete_pending.is_some()
             || self.menu == AccountMenu::ConfirmSignOut
             || self.store.read(cx).session() != SessionState::Active
@@ -139,6 +144,71 @@ impl Desktop {
 
     pub(crate) fn select(&mut self, chat: ChatId, cx: &mut Context<Self>) {
         self.store.update(cx, |store, cx| store.select(chat, cx));
+    }
+
+    /// Opens the viewer on picture `index` of the message `ts` in the open chat `chat`. Ignored while
+    /// something else covers the chat, when the message is not loaded or has no such picture.
+    pub(crate) fn open_viewer(&mut self, chat: ChatId, ts: MessageTs, index: usize, cx: &mut Context<Self>) {
+        let in_open_chat = self.open.as_ref().is_some_and(|o| o.chat == chat);
+        if !in_open_chat || self.blocked(cx) || index >= self.gallery_of(&chat, ts, cx).len() {
+            return;
+        }
+        self.message_menu = None;
+        self.viewer = Some(Viewer { chat, ts, index });
+        cx.notify();
+    }
+
+    pub(crate) fn close_viewer(&mut self, cx: &mut Context<Self>) {
+        if self.viewer.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    /// Moves to the previous (negative) or next picture; the ends do not wrap.
+    pub(crate) fn step_viewer(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some((chat, ts, index)) = self.viewer.as_ref().map(|v| (v.chat.clone(), v.ts, v.index)) else { return };
+        let next = viewer::step(index, self.gallery_of(&chat, ts, cx).len(), delta);
+        if next != index {
+            if let Some(viewer) = self.viewer.as_mut() {
+                viewer.index = next;
+            }
+            cx.notify();
+        }
+    }
+
+    /// The pictures of the loaded message `ts`; empty when the message is gone or holds none.
+    fn gallery_of(&self, chat: &ChatId, ts: MessageTs, cx: &App) -> Vec<GalleryItem> {
+        let Some(timeline) = self.store.read(cx).timeline(chat) else { return Vec::new() };
+        match timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) {
+            Ok(ix) => timeline.messages[ix].body.gallery_items(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Keeps the viewer on something that still exists: it closes when its message was deleted or lost
+    /// its pictures, or the chat changed, and steps back when the message has fewer pictures than before.
+    fn sync_viewer(&mut self, cx: &mut Context<Self>) {
+        let Some(viewer) = self.viewer.as_ref() else { return };
+        let (chat, ts, index) = (viewer.chat.clone(), viewer.ts, viewer.index);
+        let len = self.gallery_of(&chat, ts, cx).len();
+        let in_open_chat = self.open.as_ref().is_some_and(|o| o.chat == chat);
+        if len == 0 || !in_open_chat {
+            self.close_viewer(cx);
+        } else if let Some(viewer) = self.viewer.as_mut() {
+            viewer.index = index.min(len - 1);
+        }
+    }
+
+    fn viewer_view(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let viewer = self.viewer.as_ref()?;
+        let items = self.gallery_of(&viewer.chat, viewer.ts, cx);
+        let frame = viewer::frame(viewer, &items, self.store.read(cx))?;
+        Some(viewer::render(frame, cx))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn viewer_at(&self) -> Option<(MessageTs, usize)> {
+        self.viewer.as_ref().map(|v| (v.ts, v.index))
     }
 
     pub(crate) fn confirm_sign_out(&mut self, cx: &mut Context<Self>) {
@@ -715,6 +785,7 @@ impl Render for Desktop {
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
+        let viewer = self.viewer_view(cx);
         let delete = self.delete_dialog(cx);
 
         div()
@@ -733,8 +804,11 @@ impl Render for Desktop {
             }))
             .on_action(cx.listener(|this, _: &ToggleLog, _, cx| this.toggle_log(cx)))
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
+            .on_action(cx.listener(|this, _: &ViewerPrev, _, cx| this.step_viewer(-1, cx)))
+            .on_action(cx.listener(|this, _: &ViewerNext, _, cx| this.step_viewer(1, cx)))
             .child(sidebar)
             .child(pane)
+            .children(viewer)
             .children(log)
             .children(toast)
             .children(menu)
