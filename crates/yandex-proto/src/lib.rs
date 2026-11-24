@@ -10,6 +10,7 @@ mod net;
 pub mod registry;
 pub mod request;
 pub mod runtime;
+pub mod search;
 pub mod session;
 #[cfg(test)]
 mod test_log;

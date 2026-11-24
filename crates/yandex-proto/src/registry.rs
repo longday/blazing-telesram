@@ -10,7 +10,8 @@ use tracing::{debug, trace};
 use crate::bootstrap::RegistryEndpoints;
 use crate::error::ProtoError;
 use crate::net::{HttpSettings, cookie_value, failed, host_of, http_client, millis, redact_url};
-use crate::request::{ReadRequest, Route};
+use crate::request::{ReadRequest, Route, SearchEntity};
+use crate::search::{SearchReply, parse_search};
 use crate::session::SessionCookie;
 use crate::wire::{WireUser, parse_users};
 
@@ -108,6 +109,13 @@ impl RegistryClient {
             return Ok(Vec::new());
         }
         parse_users(&self.execute(&ReadRequest::GetUsersData { guids: guids.to_vec() }).await?)
+    }
+
+    /// One `search` for `query`: a result set per requested entity (first page only). The query
+    /// text goes on the wire and into the `trace` log only.
+    pub async fn search(&self, query: &str, limit: u32, entities: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
+        let request = ReadRequest::Search { query: query.to_owned(), limit, entities: entities.to_vec() };
+        parse_search(&self.execute(&request).await?, entities)
     }
 }
 
@@ -240,6 +248,79 @@ mod tests {
     async fn socket_requests_are_not_executed_over_http() {
         let c = client("http://127.0.0.1:1", Duration::from_secs(1));
         assert!(matches!(c.execute(&ReadRequest::ChatList).await, Err(ProtoError::Protocol(_))));
+    }
+
+    const SET: &str = r#"{"items":[{"x":1}],"total":1,"limit":10,"page":1,"pages":1}"#;
+    const EMPTY_SET: &str = r#"{"items":[],"total":0,"limit":10,"page":1,"pages":1}"#;
+    const ALL: [SearchEntity; 3] = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+
+    #[tokio::test]
+    async fn search_posts_the_query_without_csrf_and_parses_the_sets() {
+        let reply = format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
+        let (base, seen) = serve(vec![json_response("200 OK", &reply)]);
+        let found = client(&base, Duration::from_secs(5)).search("needle", 10, &ALL).await.unwrap();
+        assert_eq!(found.messages.total, 1);
+        assert_eq!(found.messages.items.len(), 1);
+        assert!(found.users.items.is_empty() && found.chats.items.is_empty());
+        let request = seen.lock().unwrap()[0].to_lowercase();
+        assert!(request.starts_with("post /api/") && !request.contains("x-csrf-token"));
+        assert!(request.contains(r#""method":"search""#) && request.contains("needle"), "{request}");
+        assert!(request.contains(r#""entities":["messages","users","chats"]"#), "{request}");
+    }
+
+    #[tokio::test]
+    async fn search_with_no_matches_returns_empty_sets() {
+        let reply = format!(r#"{{"status":"ok","data":{{"messages":{EMPTY_SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
+        let (base, _) = serve(vec![json_response("200 OK", &reply)]);
+        let found = client(&base, Duration::from_secs(5)).search("nothing", 10, &ALL).await.unwrap();
+        for set in [&found.messages, &found.users, &found.chats] {
+            assert!(set.items.is_empty());
+            assert_eq!((set.total, set.limit, set.page, set.pages), (0, 10, 1, 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn search_reply_with_a_missing_set_or_no_data_is_a_protocol_error() {
+        let (base, _) = serve(vec![
+            json_response("200 OK", &format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{SET}}}}}"#)),
+            json_response("200 OK", r#"{"status":"ok"}"#),
+        ]);
+        let c = client(&base, Duration::from_secs(5));
+        assert!(matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("chats")));
+        assert!(matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("no data")));
+    }
+
+    #[tokio::test]
+    async fn search_cookie_error_maps_to_session_expired() {
+        let (base, _) = serve(vec![
+            json_response("200 OK", r#"{"status":"error","data":{"code":"invalid_cookies"}}"#),
+            json_response("401 Unauthorized", "{}"),
+        ]);
+        let c = client(&base, Duration::from_secs(5));
+        assert_eq!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::SessionExpired);
+        assert_eq!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::SessionExpired);
+    }
+
+    #[tokio::test]
+    async fn search_query_is_logged_at_trace_only() {
+        use crate::test_log::Capture;
+
+        let reply = format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
+        let (base, _) = serve(vec![json_response("200 OK", &reply), json_response("200 OK", &reply)]);
+        let c = client(&base, Duration::from_secs(5));
+        let debug = Capture::default();
+        {
+            let _guard = debug.install_at(tracing::Level::DEBUG);
+            c.search("QUERY-WORD", 10, &ALL).await.unwrap();
+        }
+        assert!(debug.text().contains("registry exchange"), "{}", debug.text());
+        debug.assert_absent(&["QUERY-WORD"]);
+        let trace = Capture::default();
+        {
+            let _guard = trace.install();
+            c.search("QUERY-WORD", 10, &ALL).await.unwrap();
+        }
+        assert!(trace.text().contains("registry reply body"), "{}", trace.text());
     }
 
     #[tokio::test]
