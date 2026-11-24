@@ -46,7 +46,7 @@ Compile coupling: adding `Backend::react` (3.1) breaks the fake backend in `clie
   - Tests (fake backend): toggle shows the overlay at once and a confirmed request writes the cache; a rejected request rolls back and emits `ActionFailed` with the reason; offline refuses at once with no overlay; a second toggle while one is in flight sends nothing; a pending, failed, deleted or unknown message is refused; a stale event changes nothing; a newer event replaces the overlay and a later failure of the request emits no rollback; a history chunk requested before an event keeps it after replay; an edit upsert and a history chunk without reactions keep the cached ones; an event for an uncached message is ignored without error; no preview or typing side effect; a row written without the field loads.
   - Done when: these tests exist.
 
-- [ ] 3.3 Fill the type table
+- [x] 3.3 Fill the type table
   - Owns: `crates/chat-core/src/reactions.rs` (the `KNOWN` constant and its test only).
   - Depends on: 1.1, 3.1.
   - Do: transcribe the confirmed pairs from `research.md` in picker order; test that codes are unique and `emoji` finds each. If 1.1 confirmed nothing, leave `KNOWN` empty and say so in the commit message.

@@ -40,9 +40,20 @@ pub struct KnownReaction {
     pub emoji: &'static str,
 }
 
-/// The confirmed (code, emoji) pairs in picker order. Empty hides the picker only (chips
-/// still render with [`NEUTRAL_GLYPH`]).
-pub const KNOWN: &[KnownReaction] = &[];
+/// The confirmed (code, emoji) pairs in picker order, transcribed from the "Reaction types"
+/// section of `openspec/changes/add-message-reactions/research.md` (the web client's default
+/// private-chat picker without the unconfirmed `100108`). Empty would hide the picker only
+/// (chips still render with [`NEUTRAL_GLYPH`]).
+pub const KNOWN: &[KnownReaction] = &[
+    KnownReaction { code: ReactionCode(100109), emoji: "\u{2764}\u{FE0F}" }, // HEART ❤️
+    KnownReaction { code: ReactionCode(100104), emoji: "\u{1F525}" },        // FIRE 🔥
+    KnownReaction { code: ReactionCode(100102), emoji: "\u{1F44D}" },        // LIKE 👍
+    KnownReaction { code: ReactionCode(100103), emoji: "\u{1F44E}" },        // DISLIKE 👎
+    KnownReaction { code: ReactionCode(100106), emoji: "\u{1F632}" },        // SURPRISED 😲
+    KnownReaction { code: ReactionCode(100105), emoji: "\u{1F62D}" },        // CRYING 😭
+    KnownReaction { code: ReactionCode(100110), emoji: "\u{1F440}" },        // EYES 👀
+    KnownReaction { code: ReactionCode(100101), emoji: "\u{2705}" },         // CHECK ✅
+];
 
 /// Drawn for a code that is not in [`KNOWN`].
 pub const NEUTRAL_GLYPH: &str = "❔";
@@ -227,10 +238,30 @@ mod tests {
     }
 
     #[test]
+    fn known_matches_the_research_table() {
+        let codes: Vec<i64> = KNOWN.iter().map(|known| known.code.0).collect();
+        assert_eq!(codes, [100109, 100104, 100102, 100103, 100106, 100105, 100110, 100101]);
+    }
+
+    #[test]
+    fn known_codes_and_emoji_are_unique_and_non_empty() {
+        for (i, known) in KNOWN.iter().enumerate() {
+            assert!(!known.emoji.is_empty());
+            assert_ne!(known.emoji, NEUTRAL_GLYPH);
+            for other in &KNOWN[i + 1..] {
+                assert_ne!(known.code, other.code);
+                assert_ne!(known.emoji, other.emoji);
+            }
+        }
+    }
+
+    #[test]
     fn emoji_finds_known_codes_only() {
         for known in KNOWN {
             assert_eq!(emoji(known.code), Some(known.emoji));
         }
+        assert_eq!(emoji(code(100101)), Some("\u{2705}"));
+        assert_eq!(emoji(code(100108)), None);
         assert_eq!(emoji(code(i64::MIN)), None);
     }
 }
