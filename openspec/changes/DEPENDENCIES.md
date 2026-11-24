@@ -98,11 +98,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 4.1 | done (CM-M, 9a57c30; `info_panel.rs`, `desktop.rs`, `main.rs`, `tests.rs`, dismiss branch in `desktop/composer.rs`) | 3.2 | CM-M |
 | 4.2 | done (CM-M, 9a57c30; `profile.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `composer.rs`) | 3.2, 4.1 | CM-M |
 | 4.3 | done (CM-N, 026673c; `new_chat.rs`, `info_panel.rs`, `desktop.rs`, `main.rs`, `composer.rs`, `tests.rs`, design.md D5) | 3.3, 4.2 | CM-N |
-| 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
+| 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid; since 98e5512 every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the run needs it **unset** | 2.2 | **[approval] [live]** |
 | 5.2 | done (6e740cf; VM run of the read paths, guarded creation refusal, no account writes) | 4.3 | VM run |
 | 5.3 | blocked-by CM 5.1 (approval); 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
 | 6.1 | done (07925ff; `bt-probe create-chat <title> <guid>... --confirm-create`, `Client::create_chat`, no live request made) | 2.2 | probe support only |
-| 6.2 | ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 (rebuild the main checkout `bt-probe` from `main` first) | 6.1 | **[approval] [live]** |
+| 6.2 | ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4 (rebuild the main checkout `bt-probe` from `main` first; `BT_WRITE_ONLY_CHAT` must be **unset**, `create-*` is refused while it is set) | 6.1 | **[approval] [live]** |
 | 6.3 | blocked-by CM 6.2 (live PASS); 3.3 is merged | 6.2, 3.3 | CM-G (with 6.4) |
 | 6.4 | blocked-by CM 6.3 (4.3 is merged) | 6.3, 4.3 | CM-G |
 | 6.F | conditional | 0.1 FAIL or 6.2 FAIL | removes group wording and code |
@@ -131,10 +131,10 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 ## Ready now (not started, nothing in flight touches their files)
 
 - Nothing is ready without the user: every open task needs an approval or a decision (see below). CM 7.1 needs 6.4 (or 6.F) first; its archive step needs 5.1, 5.3 and 6.2.
-- **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
+- **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run, and run them with `BT_WRITE_ONLY_CHAT` unset (the probe refuses `create-*` otherwise; other probe writes, such as MR 7.2's, still run with it set to the self chat). MR 7.2 waits for the user's decision on the MR 7.1 gate.
 - (GS 4.1 is done; GS is archived.)
 
-In flight: nothing. Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3 (incl. status path `UserStatus.CustomStatus.Text`, c421110), 2.1, 2.2, 3.1, 3.2, 4.1, 4.2 (CM-M, 9a57c30), 3.3, 4.3 (CM-N, 026673c), 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
+In flight: `rx/fix-recon` (MR reconciliation, edits `add-message-reactions/tasks.md` and chat-core `client.rs`). Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3 (incl. status path `UserStatus.CustomStatus.Text`, c421110), 2.1, 2.2, 3.1, 3.2, 4.1, 4.2 (CM-M, 9a57c30), 3.3, 4.3 (CM-N, 026673c), 5.2, 6.1, review fixes (e85f93a offline views, 98e5512 probe write guard), spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
