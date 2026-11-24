@@ -38,13 +38,13 @@ Alternative: reuse `BackendError::Network` for everything. Rejected: it cannot s
 ### D4. Gate for group creation (`create_chat`)
 `create_chat` has opaque parameters in the reference, so it is not implemented blindly.
 1. Task 0.1 (read-only, no account effects, can start immediately): read the web client's JavaScript bundle (the reference's `docs/protocol-research.md` cites it as the source of its §7 parameter shapes) and record the `createChat` parameters (title field name, participant list field and element form, optional fields, default values) and the reply shape under "D4 outcome" below.
-2. If the payload is fully determined: task 6.1 adds `ManageRequest::CreateChat` and tests with the recorded shape; 6.2–6.3 add backend/core/UI; task 6.4 creates one throwaway group with the user's approved participants through `bt-probe create-chat` and checks it in the web client.
-3. Fallback: if step 1 cannot determine the payload, or task 6.4 fails for a reason the client cannot correct (the server refuses the recorded shape), task 6.F deletes group creation from `specs/chat-creation/spec.md` (the requirement "Group chat" and the group wording in "Explicit confirmation"), removes any group code already written, and adds the follow-up `add-group-chat-creation` to `proposal.md`. Everything else in the change is unaffected and still archivable.
+2. If the payload is fully determined (static PASS): task 6.1 adds `ManageRequest::CreateChat`, its tests and `bt-probe create-chat --confirm-create` with the recorded shape and nothing else; task 6.2 runs that probe once with the user's approved throwaway title and participants and checks the group in the web client, which fixes the payload and the reply shape (live PASS). Only then do 6.3 (backend, engine, store) and 6.4 (UI) start.
+3. Fallback: if step 1 cannot determine the payload, or task 6.2 fails for a reason the client cannot correct (the server refuses the recorded shape), task 6.F deletes group creation from `specs/chat-creation/spec.md` (the requirement "Group chat" and the group wording in "Explicit confirmation"), removes any group code already written, and adds the follow-up `add-group-chat-creation` to `proposal.md`. Everything else in the change is unaffected and still archivable.
 
-**D4 outcome:** recorded here by task 0.1 (payload and reply shape) and by task 6.4 (live result). Until then group tasks 6.x do not start.
+**D4 outcome:** recorded here by task 0.1 (static result: payload and reply shape, or "not determined") and by task 6.2 (live result). Gates: 6.1 needs a static PASS; 6.3 and 6.4 need a live PASS. Until the static result is recorded no group task starts.
 
 ### D5. Creation flow in the engine: no queue, no retry
-New commands `CreatePrivateChat { user }` (and `CreateGroupChat { title, users }` from task 6.2); events `ChatCreated { chat: Option<ChatId>, existing: bool }` and `CreationFailed { reason: String, unknown: bool }`. The engine handles a creation like an `Action` (attempted once, not queued, nothing persisted):
+New commands `CreatePrivateChat { user }` (and `CreateGroupChat { title, users }` from task 6.3); events `ChatCreated { chat: Option<ChatId>, existing: bool }` and `CreationFailed { reason: String, unknown: bool }`. The engine handles a creation like an `Action` (attempted once, not queued, nothing persisted):
 - one creation at a time; a second command while one is in flight is ignored (the UI also disables the button);
 - offline (`!is_online()`): `CreationFailed { unknown: false }` without a request;
 - private chat that already exists in the cached list (`ChatSummary.partner == user`): `ChatCreated { chat: Some(id), existing: true }`, no request;
@@ -71,7 +71,7 @@ When `BT_WRITE_ONLY_CHAT` is set, `YandexBackend::create_*` refuses with `Failed
 
 ## Observed shapes
 
-Filled by task 1.2 (members and `whoami` replies: key names, `role`, paging marker, CSRF requirement), task 5.1 (`create_private_chat` reply, `wait_for_update` behaviour, whether `onetime_user_token` is required) and task 6.4 (group). Known before any run, from the reference only: see Context.
+Filled by task 1.2 (members and `whoami` replies: key names, `role`, paging marker, CSRF requirement), task 5.1 (`create_private_chat` reply, `wait_for_update` behaviour, whether `onetime_user_token` is required) and task 6.2 (group). Known before any run, from the reference only: see Context.
 
 ## Risks / Trade-offs
 
