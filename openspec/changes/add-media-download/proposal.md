@@ -1,6 +1,6 @@
 # Proposal
 
-> Single context document for this change. Full research: [`research.md`](research.md) (roadmap item 2, media). Design, specs and tasks are not written yet: the Open Questions below need user decisions first.
+> Single context document for this change. Full research: [`research.md`](research.md) (roadmap item 2, media). Technical approach: [`design.md`](design.md); behavior: [`specs/`](specs/); work breakdown: [`tasks.md`](tasks.md).
 
 ## Why
 
@@ -10,11 +10,11 @@ Attachments are visible but inert: an image shows only a middle-size thumbnail, 
 
 - Explicit file download: a "Download" action on the file card saves the original to disk. Nothing is downloaded automatically when history loads (only avatars and image thumbnails, as today).
 - Gallery becomes a first-class message body: the application model keeps all images (today `yandex_backend.rs` keeps only the first), the timeline shows them as a grid.
-- Image viewer: clicking an image or a grid cell opens a viewer for the message's images with previous/next navigation.
-- Media layer: `MediaTarget`/`MediaKind` gain an original-file target alongside `Avatar` and `Thumbnail`; the download goes through the existing authenticated `MediaClient` GET path (cookie only for the matching host), with progress, cancel and failure states. Size limit handling for originals is decided in Open Questions (the current 25 MiB cap is for previews).
+- Image viewer: clicking an image or a grid cell opens a viewer for the message's images with previous/next navigation and a "Download" action for the shown image.
+- Media layer: `MediaTarget` gains an original-file target alongside `Avatar` and `Thumbnail`; the download goes through the existing authenticated `MediaClient` GET path (cookie only for the matching host), streamed to disk with progress, cancel and failure states. The 25 MiB cap stays for in-memory previews only; originals have no size cap (Decision 4).
 - Offline and failure behavior: a failed or interrupted download leaves no partial file under the final name and can be retried; offline shows the action as unavailable.
 
-Non-goals: uploading and sending images or files (slice 2); voice and video playback, waveform, video streams (slice 3); `get_media_messages` media browser; automatic download of any original; deleting server-side files; drag-and-drop.
+Non-goals: uploading and sending images or files (slice 2); voice and video playback, waveform, video streams (slice 3); `get_media_messages` media browser; automatic download of any original; deleting server-side files; drag-and-drop; opening or revealing a saved file from the app; a "Save as…" dialog; remembering across restarts which files were saved.
 
 ## Capabilities
 
@@ -22,25 +22,28 @@ Non-goals: uploading and sending images or files (slice 2); voice and video play
 - `attachment-download`: explicit saving of a message's file or image original to disk: action, destination, overwrite policy, progress, cancel, failure and retry.
 
 ### Modified Capabilities
-- `message-history`: the "Attachments preview" requirement changes: "Opening or downloading files is out of scope" is removed (moved to `attachment-download`), and galleries show all images in a grid with an image viewer instead of a single thumbnail.
+- `message-history`: the "Attachments preview" requirement changes: "Opening or downloading files is out of scope" is removed (moved to `attachment-download`), and galleries show all images in a grid; a new "Image viewer" requirement is added.
 
 ## Impact
 
-- `crates/yandex-proto`: `media.rs` (original-file target and URL template, size limit for originals, streaming to a file instead of a memory buffer), `wire.rs` (`Id2` handle for files; gallery already parsed), `client.rs` facade.
-- `crates/chat-core`: `MessageBody` gains a gallery variant; `MediaKind::File` gets a real fetch path; download state (progress, failed, done) kept out of the thumbnail cache in `cache.rs`.
-- `crates/desktop`: `yandex_backend.rs` (stop dropping gallery items, stop rejecting `MediaKind::File`), `store.rs` (originals never auto-requested), `timeline.rs` (download button, gallery grid, viewer).
+- `crates/yandex-proto`: `media.rs` (original-file target and URL template, streaming download to a writer instead of a memory buffer, no 25 MiB cap on that path), `net.rs` (a streaming HTTP client with an idle timeout instead of the 30 s total deadline), `client.rs` facade, `bin/bt-probe.rs` (`download` command). `wire.rs` is unchanged: `WireFile` already carries `Id2`, name and size, and the gallery is already parsed.
+- `crates/chat-core`: `model.rs` (`MessageBody::Gallery`, `name` on images, download `Command`s and `ClientEvent`s), `backend.rs` (`Backend::download`), `client.rs` (download engine: bounded concurrency, partial file, cancel, sign-out cleanup), `paths.rs` (safe file name, collision-free destination). `cache.rs` is unchanged: originals never enter the thumbnail cache.
+- `crates/desktop`: `yandex_backend.rs` (keep every gallery item, implement `download`; `fetch_media` keeps refusing `MediaKind::File` so originals can never take the in-memory path), `store.rs` (download state; gallery thumbnails requested, originals never auto-requested), `timeline.rs` (download button on the file card, gallery grid), a new viewer module and `desktop.rs` (overlay, keys), `main.rs` (Downloads folder in the client config). `README.md`: the sign-out sentence about downloaded media.
 - `bt-probe`: a download command for live verification of the original-file URL against the self chat.
-- Risks: the protocol is unofficial and reverse-engineered, URL templates come from runtime config and may change; downloads write to the user's disk and may store private data; the file-download URL template is confirmed only by the reference, not yet by a live check.
+- Risks: the protocol is unofficial and reverse-engineered, URL templates come from runtime config and may change; downloads write to the user's disk and may store private data; the file-download URL template is confirmed by the reference's own live capture (research reference §17.9) but not yet by this project's probe (Decision 5).
+
+## Decisions
+
+Every open question of the first draft was resolved by taking its recommended answer, as instructed for autonomous work. Rationale and trade-offs below; the technical consequences are in `design.md`.
+
+1. **Download trigger: explicit "Download" button.** Chosen over automatic save. It avoids saving private files and wasting disk by accident; the cost is one extra click per file. Downloading is a read-only user action, so the write allowlist and the `message-sending` rule "Writes only from user actions" are unaffected.
+2. **Destination and overwrite policy: the user's Downloads folder, never overwrite.** An existing name gets a numeric suffix (`report (1).pdf`); the account cache keeps thumbnails only. Trade-off accepted: saved files live outside the runtime directory and are not removed with the account (sign-out does not delete what the user saved), which is what "download" means to the user.
+3. **Gallery presentation: grid inside the message plus a viewer.** Chosen over a sequential list. It keeps every wire `Gallery` item and matches Telegram Desktop's behavior (no code is copied, per project context); the cost is a viewer component and grid layout.
+4. **Size and type limits: originals are streamed to disk with no hard cap, with visible progress and Cancel.** The 25 MiB cap in `media.rs` stays for in-memory previews only. Trade-off accepted: a huge file can fill the disk until cancelled; a write failure (disk full) ends the download as failed and removes the partial file. No type restrictions: any file is saved verbatim and never opened or executed by the app.
+5. **Live check of the original-file URL: not run during planning; it is the first implementation task and gates the URL template.** The recommendation was to probe before writing specs. The planning session produces artifacts only and has no live account access, so the spec is written to be URL-independent (it states behavior, not hosts or templates) and a wrong template cannot invalidate its scenarios. Evidence so far is stronger than a bare third-party claim: the reference's §17.9 records a live capture (`file_shortterm/{fileId}?attach=true`, `Id2` contains `/` and must be encoded per segment, the answer is a `302` to a storage host, `FileInfo.Name` is authoritative over `Content-Disposition`). Task 1.3 re-checks it with `bt-probe download` on a self-chat file; if the live result differs, `design.md` Decision 2 is updated before the dependent tasks are finished.
 
 ## Follow-ups
 
 1. Upload and send media: image/file selection, Disk upload flow (`upload_to_disk` → HTTP PUT → `add_files`), message payload with the resulting `file_id`; explicit target-chat confirmation; orphaned server file risk when the send fails.
 2. Voice/video playback: confirm URLs and formats, GPUI/macOS audio/video support, play on explicit click only; voice upload and waveform only if the chosen UX needs them.
-
-## Open Questions
-
-1. **Download trigger: explicit "Download" button or automatic save?** Recommended: explicit button. It avoids saving private files and wasting disk by accident; the cost is one extra click per file.
-2. **Destination and overwrite policy: the user's Downloads folder or an account cache folder?** Recommended: the user's Downloads folder, never overwrite an existing file (add a numeric suffix), cache stays for thumbnails only. Trade-off: files outside the app's runtime directory are not cleaned up with the account, but that is what the user expects from "download".
-3. **Gallery presentation: grid inside the message plus a viewer, or a sequential list only?** Recommended: grid plus viewer. It keeps every wire `Gallery` item and matches Telegram Desktop; costs a new viewer component and layout work versus a simple vertical list.
-4. **Size and type limits: what maximum size for originals, and what happens beyond it?** The 25 MiB cap in `media.rs` is for preview GETs and is not confirmed as the right limit for files. Recommended: stream originals to disk with no hard cap and a visible progress/cancel, keeping the 25 MiB cap for in-memory previews only. Trade-off: no cap means a huge file can fill the disk until cancelled; a cap blocks legitimate large files.
-5. **Confirm the original-file URL against a live account before specs?** The URL template and `Id2` handle come from a third-party reference and runtime config, not from a live check. Recommended: yes, probe once with `bt-probe` on a file in the self chat before writing specs; trade-off: one extra step, but a wrong template would invalidate the spec's scenarios.
+3. After saving: "Show in Finder" and remembering saved files across restarts (needs persistence of the destination path).
