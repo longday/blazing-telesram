@@ -49,7 +49,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 - **Core lane** (`model.rs`, `backend.rs`, chat-core `client.rs`, `fixtures.rs`, `yandex_backend.rs`, `store.rs`, `tests.rs`): MD-C → GS-A → MR-B → CM-C1 → CM-M → CM-N → CM-G (GS-A first if it is ready while MD-C is not yet started on the core lane; a unit only waits for units that are actually in flight). Desktop UI files (`desktop.rs`, `tests.rs`, `main.rs`, `timeline.rs`) now sit inside these units, so the UI lane has the same order.
 - GS 3.1 and CM 3.1 both derive "private chat of a person": whoever lands second reuses the first one's data (`ChatSummary.partner` or the guid map), not a second map.
 
-## add-global-search (GS)
+## add-global-search (GS) — archived (`openspec/changes/archive/2026-11-25-add-global-search`; main specs `message-search` created, `chat-list` updated)
 
 | ID | Status | Needs | Unit |
 |----|--------|-------|------|
@@ -63,7 +63,7 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 3.2 | done (bb34be8) | 2.1 | GS-A |
 | 3.3 | done (bb34be8) | 3.2 | GS-A |
 | 3.4 | done (bb34be8; `ChatStore::supersede_search`, documented in `tasks.md`) | 3.2, 3.3 | GS-A |
-| 4.1 | ready [live] manual run with the `main` build | 1.4, 2.2, 3.1, 3.4 | [live] manual run |
+| 4.1 | done (ac517b5, merged 7fbc545; manual run in the VM passed) | 1.4, 2.2, 3.1, 3.4 | manual run |
 
 ## add-media-download (MD) — archived (`openspec/changes/archive/2026-11-25-add-media-download`; main specs `attachment-download` and `message-history` synced)
 
@@ -92,11 +92,11 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 | 1.3 | done (19cf57a; typed `Client::members`/`whoami`, `GroupMembers` removed, allowlist 7 names, `write.rs` pin updated) | 1.2 | CM-P |
 | 2.1 | done (merge commit of `cm/2.1`; `manage.rs`, `registry.rs`, `lib.rs`; closed mutation set, no redirects followed) | — | `manage.rs`, `registry.rs`, `lib.rs` |
 | 2.2 | done (59d765b; `Client::create_private_chat`, `bt-probe create-private <guid> --confirm-create`, README) | 2.1, 1.3 | `client.rs`, `bt-probe.rs`, `README.md` |
-| 3.1 | **ready** (MR-B merged to `main` at 65204cb, core lane free; CM 1.3 and 2.2 are done; files `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal); notes: members only for group chats via paged `get_chat_members` (pages of 50, `guid_offset`), a private chat is answered from the chat row, a channel refusal is a failed load; reuses `YandexBackend.known.private` of GS 3.1 for the partner guid; `Message` now has `reactions` (add `Default::default()` in new literals) | 1.3, 2.2 | CM-C1 |
-| 3.2 | blocked-by CM 3.1 | 3.1 | CM-M (with 4.1, 4.2) |
+| 3.1 | done (c31b7a0 incl. 0e3283d; `Backend::{members, profile, create_private_chat}`, `ChatSummary.partner`; also touched a `search_results.rs` test helper and a `cache.rs` test, no in-flight work on them) | 1.3, 2.2 | CM-C1 |
+| 3.2 | ready on `integ/members` (`model.rs`, chat-core `client.rs`, `store.rs`) | 3.1 | CM-M (with 4.1, 4.2) |
 | 3.3 | blocked-by CM-M | 3.2 | CM-N (with 4.3) |
-| 4.1 | blocked-by CM 3.1 (unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
-| 4.2 | blocked-by CM 4.1 | 3.2, 4.1 | CM-M |
+| 4.1 | blocked-by CM 3.2 (`info_panel.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`; unit CM-M: store state from 3.2 first used here) | 3.2 | CM-M |
+| 4.2 | blocked-by CM 4.1 (`profile.rs` new, `desktop.rs`, `tests.rs`, one `mod` line in `main.rs`: same files as 4.1, so strictly after it) | 3.2, 4.1 | CM-M |
 | 4.3 | blocked-by CM-M, 3.3 | 3.3, 4.2 | CM-N |
 | 5.1 | ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid | 2.2 | **[approval] [live]** |
 | 5.2 | blocked-by CM 4.3 | 4.3 | VM run, `BT_WRITE_ONLY_CHAT` = self chat |
@@ -130,15 +130,15 @@ Owner: Integrator. Updated: 2026-11-24 (rev 2: one-owner-per-file, compile-compl
 
 ## Ready now (not started, nothing in flight touches their files)
 
-- **CM 3.1** (CM-C1: `model.rs`, `backend.rs`, `fixtures.rs`, chat-core `client.rs`, `yandex_backend.rs`, `tests.rs` literal) has started from `main` 65204cb; the core lane is held by it. It unblocks CM-M (3.2, 4.1, 4.2).
+- **CM-M on `integ/members`** (from `main` c31b7a0): CM 3.2 now (`model.rs`, chat-core `client.rs`, `store.rs`); 4.1 and 4.2 are sequential after it and after each other (shared `desktop.rs`, `tests.rs`, `main.rs`).
 - **CM 6.2 [approval] [live]** (real group creation) and **CM 5.1 [approval] [live]** (real private chat creation). Rebuild the main checkout `bt-probe` from `main` before any live run. MR 7.2 waits for the user's decision on the MR 7.1 gate.
-- GS 4.1 [live, manual] (`main` build; owns `tasks.md` only; in progress on `gs/4.1`).
+- (GS 4.1 is done; GS is archived.)
 
-In flight: `gs/4.1` (live GS 4.1), `cm/1.2-status` (CM `design.md`/`tasks.md`), CM 3.1 (from `main` 65204cb). Merged so far: GS 1.1–1.4, GS-A (2.1–3.5); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
+In flight: `cm/1.2-status` (one unmerged commit d5bfd78 on an old base: it moves the `whoami` status path in CM `design.md` D6/Observed shapes and `tasks.md` 1.3 to `UserStatusInfo.UserStatus.CustomStatus.Text`; it conflicts with newer CM text on `main`, so it must be re-applied by the CM owner; `wire.rs:85` and `design.md` D6 on `main` still say `UserStatus.text`), `integ/members` (CM-M, nothing started). Merged so far: GS all (archived 2026-11-25); MD all (archived 2026-11-25); CM 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 6.1, spec reconcile; MR 1.1 and MR-B (2.1–6.1; 7.1 open).
 
 ## Needs the user
 
 - Decision on the MR 7.1 acceptance criterion: `cargo fmt --check` (1561 hunks, baseline), the two new clippy `large_enum_variant`. Blocks MR 7.1, 7.2 and 7.3.
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation).
 - Writes on the real account to confirm: MR 7.2 (self chat only).
-- Live session, reads only, no approval: GS 4.1, CM 5.2 (VM). Done: GS 1.3, MD 1.3, MD 5.2, CM 1.2.
+- Live session, reads only, no approval: CM 5.2 (VM). Done: GS 1.3, GS 4.1, MD 1.3, MD 5.2, CM 1.2.
