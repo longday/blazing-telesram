@@ -78,11 +78,12 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
   - Do: the chip row below the body and failure line for `Sent`, non-deleted messages; `emoji(code)` or `NEUTRAL_GLYPH` plus count; highlighted own chip with new theme colors; selectors `msg-{ts}-reaction-{code}`; left click calls `Desktop::toggle_reaction(chat, ts, code, cx)`.
   - Done when: the row renders as specified; behavior is tested in 5.4.
 
-- [ ] 5.3 Menu reaction row and the toggle entry point (D8)
+- [x] 5.3 Menu reaction row and the toggle entry point (D8)
   - Owns: `crates/desktop/src/desktop/composer.rs`; `crates/desktop/src/desktop.rs` only if a field or import is needed.
   - Depends on: 3.1, 5.1.
   - Do: `Desktop::toggle_reaction(chat, timestamp, code, cx)` (ignored while the session is blocked or the chat is not open); a row of `KNOWN` emoji at the top of `message_menu_view` for sent, non-deleted messages, own type marked, selectors `menu-reaction-{code}`, hidden when `KNOWN` is empty; `open_menu` opens the menu when only the reaction row applies; choosing a type closes the menu and toggles.
   - Done when: the menu behaves as specified; behavior is tested in 5.4.
+  - Decisions: the row appears for `Sent` and non-`Deleted` bodies (so also `Unsupported`, like the chips and the "odd messages" risk); eight 24 px buttons fit the 220 px menu in one line (`flex_wrap` only if `KNOWN` grows); the own type is filled with `REACTION_OWN` (not assertable through debug bounds; 5.4 may check it through state); a separator follows the row when other entries exist; `Desktop::toggle_reaction` is `pub(crate)` and the only caller of `ChatStore::toggle_reaction`. Verified locally with temporary tests (not committed; 5.4 owns `tests.rs`): a selector for every `KNOWN` code, a click sends `Command::ToggleReaction` and closes the menu, no row on a pending message, a call for a chat that is not open is ignored.
 
 - [ ] 5.4 UI tests
   - Owns: `crates/desktop/src/tests.rs` (including its `Message` literal helper).
