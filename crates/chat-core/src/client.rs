@@ -839,7 +839,14 @@ impl<B: Backend> Engine<B> {
                 // merge into: the update goes to the ledger, for a request that may insert the row.
                 self.touch(&chat);
                 let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
-                    return self.hold_update(&chat, timestamp, &update);
+                    // The server's state replaces the user's overlay here too: a choice still
+                    // unconfirmed must not overwrite what the ledger accepted (`hold_own`).
+                    if self.hold_update(&chat, timestamp, &update)
+                        && let Some(superseded) = self.reaction_inflight.get_mut(&(chat, timestamp))
+                    {
+                        *superseded = true;
+                    }
+                    return;
                 };
                 if message.reactions.apply(&update) {
                     self.db(self.cache.upsert_message(&message));
@@ -945,10 +952,10 @@ impl<B: Backend> Engine<B> {
     }
 
     /// A reaction update for a message the cache does not hold, kept for the requests still out.
-    fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) {
-        if self.history_out > 0 {
-            self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update);
-        }
+    /// Returns whether the ledger's state changed.
+    fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) -> bool {
+        self.history_out > 0
+            && self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update)
     }
 
     /// A confirmed own choice for a message the cache does not hold, kept for the requests still out.

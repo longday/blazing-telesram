@@ -106,11 +106,13 @@ struct Case {
     pushes: [Push; 2],
     edit: bool,
     own: Own,
+    /// The cache starts with message 3 carrying no reaction state (no counts, no version).
+    bare: bool,
 }
 
 impl Case {
     fn uniform(shape: Shape, snaps: [Snap; 2], pushes: [Push; 2], edit: bool, own: Own) -> Case {
-        Case { shapes: [shape; 2], snaps, pushes, edit, own }
+        Case { shapes: [shape; 2], snaps, pushes, edit, own, bare: false }
     }
 }
 
@@ -257,10 +259,10 @@ struct Model {
 }
 
 impl Model {
-    fn new() -> Model {
+    fn new(bare: bool) -> Model {
         Model {
             present: BTreeSet::from([TS]),
-            held: Held { version: Some(START), mine: Some(LIKE), overlay: None },
+            held: if bare { Held::fresh() } else { Held { version: Some(START), mine: Some(LIKE), overlay: None } },
             out: 0,
             grown: false,
             started: [None, None],
@@ -297,7 +299,7 @@ impl Model {
                 // request is out. With neither, nothing is held and the push is gone.
                 if let (true, Some((v, says))) = (self.cached(TS) || self.out > 0, push_offer(case.pushes[i])) {
                     let changed = self.held.offer(v, says);
-                    self.superseded |= changed && self.cached(TS) && self.reacting;
+                    self.superseded |= changed && self.reacting;
                 }
             }
             Step::Edit => {
@@ -377,9 +379,11 @@ struct Pending {
     rows: Vec<Message>,
 }
 
-/// An engine over a cache with message 3 at version 5 and the account's own reaction LIKE.
+/// An engine over a cache with message 3 at version 5 and the account's own reaction LIKE, or,
+/// when `bare`, with message 3 carrying no reaction state at all.
 fn engine_for(
     refused: bool,
+    bare: bool,
 ) -> (Engine<Fake>, async_channel::Receiver<Input>, async_channel::Receiver<ClientEvent>) {
     let (events, event_rx) = async_channel::unbounded();
     let (inputs, input_rx) = async_channel::unbounded();
@@ -391,7 +395,7 @@ fn engine_for(
     let mut cache = Cache::open_in_memory().unwrap();
     cache.replace_chats(&[chat("a", Some(TS), None)]).unwrap();
     let mut first = reacted();
-    first.reactions = reactions(&[(LIKE, 2)], Some(LIKE), START);
+    first.reactions = if bare { Reactions::default() } else { reactions(&[(LIKE, 2)], Some(LIKE), START) };
     cache.replace_range(&id("a"), None, None, &[first], Some(true)).unwrap();
     let config = ClientConfig::new(Path::new("/nonexistent"), Path::new("/nonexistent").join("session.json"), account());
     let mut engine = Engine::new(Arc::new(fake), config, events, inputs, cache);
@@ -401,8 +405,8 @@ fn engine_for(
 
 /// Runs `order` and reports the first step after which the cache differs from the invariant.
 fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), String> {
-    let (mut engine, input_rx, event_rx) = engine_for(case.own == Own::Refused);
-    let mut model = Model::new();
+    let (mut engine, input_rx, event_rx) = engine_for(case.own == Own::Refused, case.bare);
+    let mut model = Model::new(case.bare);
     let mut pending: [Option<Pending>; 2] = [None, None];
     let (mut edited, mut grown, mut reacting) = (false, false, false);
     for (at, step) in order.iter().enumerate() {
@@ -677,7 +681,7 @@ fn every_interleaving_of_a_snapshot_and_a_page_above_the_cache() {
             ([Snap::At(5), Snap::Bare], [Push::At(6), Push::AtMine(7)], true, Own::Off),
             ([Snap::At(6), Snap::Bare], [Push::AtClear(7), Push::Absent], false, Own::Confirmed),
         ] {
-            check_every_interleaving(Case { shapes, snaps, pushes, edit, own });
+            check_every_interleaving(Case { shapes, snaps, pushes, edit, own, bare: false });
         }
     }
 }
@@ -687,7 +691,7 @@ fn every_interleaving_of_a_snapshot_and_a_page_above_the_cache() {
 /// message 3; A ends. A must not bring back version 5.
 #[test]
 fn a_snapshot_must_not_bring_back_an_older_state_of_a_message_a_page_dropped() {
-    let (mut engine, _input_rx, event_rx) = engine_for(false);
+    let (mut engine, _input_rx, event_rx) = engine_for(false, false);
     let rt = runtime();
     let _enter = rt.enter();
     let page = |rows: Vec<Message>, reached_start| HistoryChunk {
@@ -737,6 +741,80 @@ fn a_snapshot_must_not_bring_back_an_older_state_of_a_message_a_page_dropped() {
     assert!(engine.reaction_ledger.is_empty(), "nothing is kept once no request is out");
 }
 
+/// ReviewRecon6: message 3 has no reaction state; request A holds its bare row, request B is a
+/// page of message 10; the user chooses FIRE; B ends and drops message 3; a versionless push
+/// changes its counts; the choice is confirmed; A ends. The server's push replaced the overlay
+/// (as it does for a cached message), so the confirmation must not overwrite it and A must show
+/// the push, not the overlay.
+#[test]
+fn a_push_for_an_evicted_message_supersedes_the_pending_choice() {
+    let (mut engine, input_rx, event_rx) = engine_for(false, true);
+    let rt = runtime();
+    let _enter = rt.enter();
+    let page = |rows: Vec<Message>, reached_start| HistoryChunk {
+        chat: id("a"),
+        messages: rows,
+        reached_start,
+        replaces: None,
+        payloads: Vec::new(),
+    };
+    let a = HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: Some(TS),
+        mark: engine.begin_snapshots(1),
+        result: Ok(page(vec![msg("a", TS, "hi")], true)),
+    };
+    let b = HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: Some(TS),
+        mark: engine.begin_snapshots(1),
+        result: Ok(page(vec![msg("a", 10, "ten")], false)),
+    };
+    engine.toggle_reaction(id("a"), TS, FIRE);
+    engine.handle(Input::History(b));
+    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3");
+    engine.handle_live(LiveEvent::ReactionsChanged {
+        chat: id("a"),
+        timestamp: TS,
+        update: ReactionsUpdate { counts: junk(), version: None, mine: None },
+    });
+    let input = rt.block_on(input_rx.recv()).unwrap();
+    assert!(matches!(input, Input::Action { .. }));
+    engine.handle(input);
+    while event_rx.try_recv().is_ok() {}
+    engine.handle(Input::History(a));
+
+    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
+    assert_eq!(held.reactions.counts, junk(), "the push, not the overlay");
+    let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
+        .find_map(|event| match event {
+            ClientEvent::History(chunk) => chunk.messages.into_iter().find(|m| m.timestamp == TS),
+            _ => None,
+        })
+        .expect("the snapshot's chunk is shown");
+    assert_eq!(shown.reactions, held.reactions);
+}
+
+/// The same, in every order: versionless and versioned pushes for a message the cache dropped
+/// while the user's choice is in flight, with the cache starting without reaction state.
+#[test]
+fn every_interleaving_of_pushes_for_an_evicted_message_and_a_pending_choice() {
+    for shapes in [[Shape::Single, Shape::Jump], [Shape::Jump, Shape::Single]] {
+        for pushes in [[Push::Versionless, Push::Absent], [Push::Versionless, Push::At(6)]] {
+            check_every_interleaving(Case {
+                shapes,
+                snaps: [Snap::Bare, Snap::Bare],
+                pushes,
+                edit: false,
+                own: Own::Confirmed,
+                bare: true,
+            });
+        }
+    }
+}
+
 /// ReviewRecon3 #1: the page is far above the cache, an edit and then a version-6 push reach
 /// message 3 while it is out; the edit puts message 3 back, and it must keep version 6.
 #[test]
@@ -784,6 +862,7 @@ fn random_inputs_in_random_orders() {
             pushes: [push(next(9)), push(next(9))],
             edit: next(2) == 1,
             own: [Own::Off, Own::Confirmed, Own::Refused][next(3)],
+            bare: next(3) == 0,
         };
         let chains = chains(&case);
         let (mut at, mut order) = (vec![0; chains.len()], Vec::new());
