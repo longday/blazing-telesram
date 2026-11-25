@@ -198,6 +198,17 @@ enum Phase {
     Expired,
 }
 
+/// A reaction request not yet answered.
+struct ReactionInflight {
+    /// A server update replaced the overlay: the request's own result then no longer decides
+    /// what is shown.
+    superseded: bool,
+    /// The cached state the choice was built on. While `superseded` is false it is what the
+    /// cache accepted of the message, even after the row left the cache and the ledger was
+    /// dropped (`hold_update`).
+    base: Reactions,
+}
+
 struct Engine<B> {
     backend: Arc<B>,
     config: ClientConfig,
@@ -253,9 +264,8 @@ struct Engine<B> {
     typing_sent: HashMap<ChatId, tokio::time::Instant>,
     /// The newest search asked for and still awaited; an answer for any other id is dropped.
     search_latest: Option<SearchId>,
-    /// Reaction requests not yet answered, per message; `true` once a server update replaced the
-    /// overlay (the request's own result then no longer decides what is shown).
-    reaction_inflight: HashMap<(ChatId, MessageTs), bool>,
+    /// Reaction requests not yet answered, per message.
+    reaction_inflight: HashMap<(ChatId, MessageTs), ReactionInflight>,
     /// Chats whose member list is being read; a request for one of them is dropped, and an answer
     /// for a chat not in here (the account changed meanwhile) is ignored.
     members_inflight: HashSet<ChatId>,
@@ -842,9 +852,9 @@ impl<B: Backend> Engine<B> {
                     // The server's state replaces the user's overlay here too: a choice still
                     // unconfirmed must not overwrite what the ledger accepted (`hold_own`).
                     if self.hold_update(&chat, timestamp, &update)
-                        && let Some(superseded) = self.reaction_inflight.get_mut(&(chat, timestamp))
+                        && let Some(inflight) = self.reaction_inflight.get_mut(&(chat, timestamp))
                     {
-                        *superseded = true;
+                        inflight.superseded = true;
                     }
                     return;
                 };
@@ -852,8 +862,8 @@ impl<B: Backend> Engine<B> {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
                     // request no longer decides what is shown.
-                    if let Some(superseded) = self.reaction_inflight.get_mut(&(chat.clone(), timestamp)) {
-                        *superseded = true;
+                    if let Some(inflight) = self.reaction_inflight.get_mut(&(chat.clone(), timestamp)) {
+                        inflight.superseded = true;
                     }
                     self.emit(ClientEvent::ReactionsChanged { chat, timestamp, reactions: message.reactions });
                 }
@@ -952,10 +962,23 @@ impl<B: Backend> Engine<B> {
     }
 
     /// A reaction update for a message the cache does not hold, kept for the requests still out.
-    /// Returns whether the ledger's state changed.
+    /// Returns whether it changed what the cache accepted of the message: against the ledger's
+    /// entry, or, with none (the ledger was dropped while no request was out), against the state
+    /// an unanswered own choice was built on, which is what the cache held until now.
     fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) -> bool {
-        self.history_out > 0
-            && self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update)
+        if self.history_out == 0 {
+            return false;
+        }
+        match self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut().apply(update),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let base = match self.reaction_inflight.get(&(chat.clone(), timestamp)) {
+                    Some(inflight) if !inflight.superseded => inflight.base.clone(),
+                    _ => Reactions::default(),
+                };
+                entry.insert(base).apply(update)
+            }
+        }
     }
 
     /// A confirmed own choice for a message the cache does not hold, kept for the requests still out.
@@ -1242,7 +1265,8 @@ impl<B: Backend> Engine<B> {
             return;
         }
         let (overlay, _) = cached.reactions.toggled(code);
-        self.reaction_inflight.insert((chat.clone(), timestamp), false);
+        self.reaction_inflight
+            .insert((chat.clone(), timestamp), ReactionInflight { superseded: false, base: cached.reactions.clone() });
         self.emit(ClientEvent::ReactionsChanged { chat: chat.clone(), timestamp, reactions: overlay.clone() });
         self.run_action(chat, Action::React { timestamp, overlay });
     }
@@ -1267,7 +1291,9 @@ impl<B: Backend> Engine<B> {
     fn handle_action(&mut self, chat: ChatId, action: Action, result: Result<(), BackendError>) {
         // Whether a server update replaced the overlay while the request was out.
         let superseded = match &action {
-            Action::React { timestamp, .. } => self.reaction_inflight.remove(&(chat.clone(), *timestamp)),
+            Action::React { timestamp, .. } => {
+                self.reaction_inflight.remove(&(chat.clone(), *timestamp)).map(|inflight| inflight.superseded)
+            }
             _ => None,
         };
         match result {

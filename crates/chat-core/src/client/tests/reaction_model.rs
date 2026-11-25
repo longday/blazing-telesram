@@ -23,7 +23,8 @@
 //!   it, and while a request is still out the state accepted so far (pushes and the confirmed
 //!   choice included) outlives the row and meets the snapshot that puts it back. Only when no
 //!   request is out any more, and the message is not cached, is it forgotten; a copy of the
-//!   message that comes later starts from nothing.
+//!   message that comes later starts from nothing. The exception is an own choice still in flight
+//!   and not superseded: it keeps the state it was built on, so a push that repeats it is no change.
 //!
 //! Each request has its own `Shape`, which adds the boundaries of a replaced range. `Single`: the
 //! snapshot is message 3 alone and says the chat starts there. `Tail`: the server grows a message
@@ -256,6 +257,12 @@ struct Model {
     started_with: Option<ReactionCode>,
     /// A push changed the cached state while the own reaction was in flight.
     superseded: bool,
+    /// `held` as the own reaction was started: what the engine keeps of the message for as long
+    /// as the choice is unanswered and nothing superseded it.
+    base_held: Held,
+    /// The state of the uncached message was dropped with the last request (nothing held it)
+    /// while the own reaction was in flight and not superseded.
+    lost: bool,
 }
 
 impl Model {
@@ -271,6 +278,8 @@ impl Model {
             start_counts: Vec::new(),
             started_with: None,
             superseded: false,
+            base_held: Held::fresh(),
+            lost: false,
         }
     }
 
@@ -298,6 +307,11 @@ impl Model {
                 // Cached or not, the state is accepted: by the cache, or by the ledger while a
                 // request is out. With neither, nothing is held and the push is gone.
                 if let (true, Some((v, says))) = (self.cached(TS) || self.out > 0, push_offer(case.pushes[i])) {
+                    // The ledger starts again from what the unanswered choice was built on, which
+                    // is what the cache held until the row left it.
+                    if std::mem::take(&mut self.lost) && !self.cached(TS) && self.reacting && !self.superseded {
+                        self.held = self.base_held.clone();
+                    }
                     let changed = self.held.offer(v, says);
                     self.superseded |= changed && self.reacting;
                 }
@@ -308,12 +322,15 @@ impl Model {
                     started.edited = true;
                 }
                 self.present.insert(TS);
+                self.lost = false;
             }
             Step::ReactStart => {
                 self.reacting = self.cached(TS);
                 self.base = self.held.version;
                 self.start_counts = self.held.counts();
                 self.started_with = self.held.mine;
+                self.base_held = self.held.clone();
+                self.lost = false;
                 self.superseded = false;
             }
             Step::ReactEnd => {
@@ -367,6 +384,9 @@ impl Model {
         // Nothing keeps the state of an uncached message once no request is out.
         if self.out == 0 && !self.cached(TS) {
             self.held = Held::fresh();
+            self.lost = true;
+        } else if self.cached(TS) {
+            self.lost = false;
         }
         // Requests that started before this one must not take what it stored for stale.
         self.touch();
@@ -811,6 +831,84 @@ fn every_interleaving_of_pushes_for_an_evicted_message_and_a_pending_choice() {
                 own: Own::Confirmed,
                 bare: true,
             });
+        }
+    }
+}
+
+/// ReviewRecon7: the only request drops message 3 (the ledger is dropped with it) while the
+/// user's choice is out; a request that starts later brings a push that repeats the cached state
+/// the choice was built on. That is no change, so the confirmation must still count and the page
+/// must show the choice, not version 5 without it.
+#[test]
+fn a_push_repeating_the_base_after_the_ledger_was_dropped_does_not_supersede_the_choice() {
+    let (mut engine, input_rx, event_rx) = engine_for(false, false);
+    let rt = runtime();
+    let _enter = rt.enter();
+    let b = HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: Some(TS),
+        mark: engine.begin_snapshots(1),
+        result: Ok(HistoryChunk {
+            chat: id("a"),
+            messages: vec![msg("a", 10, "ten")],
+            reached_start: false,
+            replaces: None,
+            payloads: Vec::new(),
+        }),
+    };
+    engine.toggle_reaction(id("a"), TS, FIRE);
+    engine.handle(Input::History(b));
+    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3");
+    assert!(engine.reaction_ledger.is_empty(), "no request is out any more");
+    let mut seen = msg("a", TS, "hi");
+    seen.reactions = reactions(&[(LIKE, 2)], Some(LIKE), START);
+    let a = HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: Some(10),
+        mark: engine.begin_snapshots(1),
+        result: Ok(HistoryChunk {
+            chat: id("a"),
+            messages: vec![seen],
+            reached_start: true,
+            replaces: None,
+            payloads: Vec::new(),
+        }),
+    };
+    engine.handle_live(LiveEvent::ReactionsChanged {
+        chat: id("a"),
+        timestamp: TS,
+        update: ReactionsUpdate { counts: server_counts(START), version: Some(START), mine: None },
+    });
+    let input = rt.block_on(input_rx.recv()).unwrap();
+    assert!(matches!(input, Input::Action { .. }));
+    engine.handle(input);
+    while event_rx.try_recv().is_ok() {}
+    engine.handle(Input::History(a));
+
+    let (counts, mine) = toggled_to_fire(server_counts(START), Some(LIKE));
+    let want = Reactions { counts, mine, version: Some(START) };
+    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
+    assert_eq!(held.reactions, want, "the confirmed choice survives the repeated state");
+    let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
+        .find_map(|event| match event {
+            ClientEvent::History(chunk) => chunk.messages.into_iter().find(|m| m.timestamp == TS),
+            _ => None,
+        })
+        .expect("the snapshot's chunk is shown");
+    assert_eq!(shown.reactions, want);
+}
+
+/// The same, in every order: a page above the cache drops message 3 while the choice is out, and
+/// the pushes repeat or raise the state it was built on.
+#[test]
+fn every_interleaving_of_pushes_after_the_ledger_was_dropped_under_a_pending_choice() {
+    for shapes in [[Shape::Jump, Shape::Single], [Shape::Single, Shape::Jump]] {
+        for pushes in [[Push::At(5), Push::Absent], [Push::Versionless, Push::At(5)], [Push::At(5), Push::At(6)]] {
+            for snaps in [[Snap::At(5), Snap::At(5)], [Snap::Bare, Snap::At(5)], [Snap::At(5), Snap::Bare]] {
+                check_every_interleaving(Case { shapes, snaps, pushes, edit: false, own: Own::Confirmed, bare: false });
+            }
         }
     }
 }
