@@ -54,10 +54,12 @@ const CREATION_UNVERIFIED_REASON: &str =
 const LIST_CHECK_FAILED_REASON: &str =
     "Не удалось проверить список чатов: прошлое создание могло пройти, новое не отправлено";
 
+/// A change that reached the cache while a history request was out; see `replay_live`.
 enum LiveChange {
-    Upsert(Message),
+    /// `message` as cached (reactions merged into the cached state); `supplied` is what the
+    /// pushed copy itself said about reactions.
+    Upsert { message: Message, supplied: Reactions },
     Delete(MessageTs),
-    Reactions(MessageTs, ReactionsUpdate),
 }
 
 #[derive(Clone, Debug)]
@@ -149,6 +151,8 @@ enum Input {
     LiveClosed(u64),
     Chats(Result<Vec<ChatSummary>, BackendError>),
     History(HistoryFetch),
+    /// History requests that ended without answering: `.0` of them never posted a result.
+    HistoryAbandoned(usize),
     Media { media: MediaRef, result: Result<Vec<u8>, BackendError> },
     /// `bytes` of the saved file, or why the transfer of generation `seq` produced no file.
     Download { media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError> },
@@ -211,6 +215,17 @@ struct Engine<B> {
     /// Counts live message events; `live_log` keeps each chat's recent changes with their count.
     live_seq: u64,
     live_log: HashMap<ChatId, VecDeque<(u64, LiveChange)>>,
+    /// The count of the last change to each chat's cache, replayable or not.
+    touched: HashMap<ChatId, u64>,
+    /// History requests started and not yet answered: each holds a snapshot that may be older
+    /// than what the cache accepts meanwhile.
+    history_out: usize,
+    /// Reaction state the cache accepted for messages it does not hold (an update for an uncached
+    /// message, a confirmed own choice, rows a replaced range dropped), per chat. An entry lives
+    /// only while a history request is out (`history_out > 0`) and the cache does not hold the
+    /// row: a snapshot that started earlier may put the row back (`store_chunk`) and must not
+    /// bring an older state with it.
+    reaction_ledger: HashMap<ChatId, HashMap<MessageTs, Reactions>>,
     media_inflight: HashSet<MediaRef>,
     /// Requested while we could not fetch; started once online.
     media_deferred: Vec<MediaRef>,
@@ -310,13 +325,14 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
     let in_range = |ts: MessageTs| lo.is_none_or(|lo| ts >= lo) && hi.is_none_or(|hi| ts <= hi);
     for change in changes {
         match change {
-            LiveChange::Upsert(message) if in_range(message.timestamp) => {
+            LiveChange::Upsert { message, supplied } if in_range(message.timestamp) => {
                 match messages.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                     Ok(i) => {
-                        // A reaction-less copy (an edit) must keep what the snapshot or an
-                        // earlier replayed event established for this row.
+                        // The row's reactions are what the snapshot and the changes replayed so
+                        // far established; the copy adds only what it said itself.
                         let mut replacement = message.clone();
-                        replacement.inherit_reactions(&messages[i]);
+                        replacement.reactions = std::mem::take(&mut messages[i].reactions);
+                        replacement.reactions.merge(supplied);
                         messages[i] = replacement;
                     }
                     Err(i) => messages.insert(i, message.clone()),
@@ -325,11 +341,6 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
             LiveChange::Delete(ts) if in_range(*ts) => {
                 if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
                     messages[i].body = MessageBody::Deleted;
-                }
-            }
-            LiveChange::Reactions(ts, update) if in_range(*ts) => {
-                if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
-                    messages[i].reactions.apply(update);
                 }
             }
             _ => {}
@@ -483,16 +494,14 @@ async fn run_download<B: Backend>(
 }
 
 impl<B: Backend> Engine<B> {
-    async fn run(backend: Arc<B>, config: ClientConfig, commands: Receiver<Command>, events: Sender<ClientEvent>) {
-        let (inputs, input_rx) = async_channel::unbounded();
-        let account = config.account.clone();
-        let mut engine = Engine {
-            cache: open_cache(&config.runtime_dir, &account),
+    fn new(backend: Arc<B>, config: ClientConfig, events: Sender<ClientEvent>, inputs: Sender<Input>, cache: Cache) -> Self {
+        Engine {
+            cache,
             backend,
+            account: config.account.clone(),
             config,
-            account,
             events,
-            inputs: inputs.clone(),
+            inputs,
             phase: Phase::Connecting,
             shown: None,
             epoch: 0,
@@ -501,6 +510,9 @@ impl<B: Backend> Engine<B> {
             open_chat: None,
             live_seq: 0,
             live_log: HashMap::new(),
+            touched: HashMap::new(),
+            history_out: 0,
+            reaction_ledger: HashMap::new(),
             media_inflight: HashSet::new(),
             media_deferred: Vec::new(),
             media_missing: HashMap::new(),
@@ -522,7 +534,13 @@ impl<B: Backend> Engine<B> {
             profile_inflight: false,
             creation_inflight: false,
             creation_unverified: false,
-        };
+        }
+    }
+
+    async fn run(backend: Arc<B>, config: ClientConfig, commands: Receiver<Command>, events: Sender<ClientEvent>) {
+        let (inputs, input_rx) = async_channel::unbounded();
+        let cache = open_cache(&config.runtime_dir, &config.account);
+        let mut engine = Engine::new(backend, config, events, inputs.clone(), cache);
         tokio::spawn(pump_commands(commands, inputs));
 
         let cached = engine.db(engine.cache.chats()).unwrap_or_default();
@@ -573,6 +591,10 @@ impl<B: Backend> Engine<B> {
             Input::LiveClosed(epoch) if epoch == self.epoch => self.connection_lost(),
             Input::Chats(result) => self.handle_chats(result),
             Input::History(fetch) => self.handle_history(fetch),
+            Input::HistoryAbandoned(count) => {
+                self.history_out = self.history_out.saturating_sub(count);
+                self.forget_idle_reactions();
+            }
             Input::Media { media, result } => self.handle_media_result(media, result),
             Input::Download { media, seq, result } => self.handle_download_result(media, seq, result),
             Input::DownloadProgress { media, seq, received, total } => self.handle_download_progress(&media, seq, received, total),
@@ -758,6 +780,8 @@ impl<B: Backend> Engine<B> {
         self.account = account;
         self.open_chat = None;
         self.live_log.clear();
+        self.touched.clear();
+        self.reaction_ledger.clear();
         self.reaction_inflight.clear();
         self.members_inflight.clear();
         self.profile_inflight = false;
@@ -793,20 +817,37 @@ impl<B: Backend> Engine<B> {
         match event {
             LiveEvent::MessageUpserted(mut message) => {
                 // The copy of an edit push or a reaction-less history row says nothing about
-                // reactions, so it must not erase the ones already known.
-                if let Some(cached) = self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
-                    message.inherit_reactions(&cached);
+                // reactions, so it must not erase the ones already known: what it does say is
+                // merged into the cached state, or, for a message the cache does not hold, into
+                // what the ledger kept of it. The log keeps what the copy said, apart from the
+                // merged copy it replays, which is only the fallback for an absent row.
+                let supplied = message.reactions.clone();
+                match self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
+                    Some(cached) => message.inherit_reactions(&cached),
+                    None => self.inherit_held_reactions(&mut message),
                 }
-                self.record_live(&message.chat, LiveChange::Upsert(message.clone()));
+                self.record_live(&message.chat, LiveChange::Upsert { message: message.clone(), supplied });
                 self.db(self.cache.upsert_message(&message));
                 self.emit(ClientEvent::MessageUpserted(message.clone()));
                 self.update_preview(&message);
             }
             LiveEvent::ReactionsChanged { chat, timestamp, update } => {
-                // Recorded even for an uncached message: a history chunk requested before this
-                // event must not undo it (see `replay_live`).
-                self.record_live(&chat, LiveChange::Reactions(timestamp, update.clone()));
-                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
+                // The cache is where states are merged (`Reactions::apply`); a history request
+                // that started earlier merges its snapshot into it (`store_chunk`), so a cached
+                // message's update is only noted as a change (`touch`: it bounds what such a
+                // request may replace, it replays nothing). An uncached message has no state to
+                // merge into: the update goes to the ledger, for a request that may insert the row.
+                self.touch(&chat);
+                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                    // The server's state replaces the user's overlay here too: a choice still
+                    // unconfirmed must not overwrite what the ledger accepted (`hold_own`).
+                    if self.hold_update(&chat, timestamp, &update)
+                        && let Some(superseded) = self.reaction_inflight.get_mut(&(chat, timestamp))
+                    {
+                        *superseded = true;
+                    }
+                    return;
+                };
                 if message.reactions.apply(&update) {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
@@ -859,13 +900,96 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    /// Journals a change a history request that started earlier must replay.
     fn record_live(&mut self, chat: &ChatId, change: LiveChange) {
-        self.live_seq += 1;
+        self.touch(chat);
         let log = self.live_log.entry(chat.clone()).or_default();
         if log.len() == LIVE_LOG_CAP {
             log.pop_front();
         }
         log.push_back((self.live_seq, change));
+    }
+
+    /// Notes that the chat's cache changed, for the bounds of requests that started earlier
+    /// (`store_chunk`). Kept apart from `live_log`: a change the cache already holds needs no
+    /// replay and must not push a real entry out of the capped log.
+    fn touch(&mut self, chat: &ChatId) {
+        self.live_seq += 1;
+        self.touched.insert(chat.clone(), self.live_seq);
+    }
+
+    /// Starts `count` history requests: until each has answered, the reaction state the cache
+    /// accepts for rows it may drop is kept (`reaction_ledger`). Returns the mark they replay from.
+    fn begin_snapshots(&mut self, count: usize) -> u64 {
+        self.history_out += count;
+        self.live_seq
+    }
+
+    /// Drops the ledger once no request is left that could put an older row back, except what an
+    /// unanswered own choice still relies on: the state the cache accepted of its message, which a
+    /// later page may bring back.
+    fn forget_idle_reactions(&mut self) {
+        if self.history_out == 0 {
+            let inflight = &self.reaction_inflight;
+            self.reaction_ledger.retain(|chat, held| {
+                held.retain(|timestamp, _| inflight.contains_key(&(chat.clone(), *timestamp)));
+                !held.is_empty()
+            });
+        }
+    }
+
+    /// Whether the state accepted for an uncached message is kept: while a history request is
+    /// out, and while the user's own choice for the message is unanswered.
+    fn keeps_reactions(&self, chat: &ChatId, timestamp: MessageTs) -> bool {
+        self.history_out > 0 || self.reaction_inflight.contains_key(&(chat.clone(), timestamp))
+    }
+
+    /// Keeps `state`, the state the cache accepted for a row about to leave it, for the requests
+    /// still out and for an unanswered own choice (even a state that says nothing: the entry is
+    /// what tells that the cache accepted it, instead of the state a later push may meet).
+    /// The cache's state is never lower than what the ledger kept before.
+    fn hold_reactions(&mut self, chat: &ChatId, timestamp: MessageTs, state: &Reactions) {
+        let own = self.reaction_inflight.contains_key(&(chat.clone(), timestamp));
+        if !own && (self.history_out == 0 || state.is_unknown()) {
+            return;
+        }
+        let held = self.reaction_ledger.entry(chat.clone()).or_default();
+        match held.get_mut(&timestamp) {
+            Some(kept) => {
+                let mut merged = state.clone();
+                merged.merge(kept);
+                *kept = merged;
+            }
+            None => {
+                held.insert(timestamp, state.clone());
+            }
+        }
+    }
+
+    /// A reaction update for a message the cache does not hold, kept for the requests still out
+    /// and the unanswered own choice. Returns whether it changed what the cache accepted of the
+    /// message.
+    fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) -> bool {
+        self.keeps_reactions(chat, timestamp)
+            && self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update)
+    }
+
+    /// A confirmed own choice for a message the cache does not hold, kept for the requests still out.
+    fn hold_own(&mut self, chat: &ChatId, timestamp: MessageTs, own: &Reactions) {
+        if self.history_out > 0 {
+            self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().overlay_own(own);
+        }
+    }
+
+    /// A message the cache did not hold is cached now: puts the state the ledger kept of it under
+    /// the copy's own (the ledger is the held state, as the cache is for a cached message) and
+    /// takes the entry out, since the cache holds that state from here on.
+    fn inherit_held_reactions(&mut self, message: &mut Message) {
+        let kept = self.reaction_ledger.get_mut(&message.chat).and_then(|held| held.remove(&message.timestamp));
+        if let Some(mut merged) = kept {
+            merged.merge(&message.reactions);
+            message.reactions = merged;
+        }
     }
 
     /// Keeps the row preview and unread counter current even when the backend only forwards
@@ -1157,6 +1281,12 @@ impl<B: Backend> Engine<B> {
     }
 
     fn handle_action(&mut self, chat: ChatId, action: Action, result: Result<(), BackendError>) {
+        self.finish_action(chat, action, result);
+        // The own choice no longer needs the state kept for its message.
+        self.forget_idle_reactions();
+    }
+
+    fn finish_action(&mut self, chat: ChatId, action: Action, result: Result<(), BackendError>) {
         // Whether a server update replaced the overlay while the request was out.
         let superseded = match &action {
             Action::React { timestamp, .. } => self.reaction_inflight.remove(&(chat.clone(), *timestamp)),
@@ -1171,12 +1301,19 @@ impl<B: Backend> Engine<B> {
                     self.handle_live(LiveEvent::MessageUpserted(message));
                 }
                 Action::Delete(timestamp) => self.handle_live(LiveEvent::MessageDeleted { chat, timestamp }),
-                // Only now does the cache learn the choice (the version stays, so any later
-                // push overwrites it); a restart mid-request must not show an unseen reaction.
+                // Only now does the cache learn the choice, and only if the server has not told
+                // a newer state meanwhile (`overlay_own`; the overlay keeps the version it was
+                // built on, so any later push overwrites it). A restart mid-request must not
+                // show an unseen reaction. History requests that started earlier meet the choice
+                // in the cache (`store_chunk`).
                 Action::React { timestamp, overlay } if superseded != Some(true) => {
-                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
-                    message.reactions = overlay;
-                    self.db(self.cache.upsert_message(&message));
+                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                        return self.hold_own(&chat, timestamp, &overlay);
+                    };
+                    if message.reactions.overlay_own(&overlay) {
+                        self.db(self.cache.upsert_message(&message));
+                        self.touch(&chat);
+                    }
                 }
                 Action::React { .. } => {}
             },
@@ -1480,10 +1617,10 @@ impl<B: Backend> Engine<B> {
 
     // -- history --------------------------------------------------------------------------
 
-    fn spawn_history(&self, chat: ChatId, before: Option<MessageTs>) {
+    fn spawn_history(&mut self, chat: ChatId, before: Option<MessageTs>) {
         let known_newest = self.db(self.cache.newest_ts(&chat)).flatten();
-        let (backend, inputs, limit, mark) =
-            (self.backend.clone(), self.inputs.clone(), self.config.history_limit, self.live_seq);
+        let mark = self.begin_snapshots(1);
+        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
         tokio::spawn(async move {
             let result = backend.history(&chat, before, limit).await;
             post(&inputs, Input::History(HistoryFetch { chat, before, known_newest, mark, result }));
@@ -1492,7 +1629,7 @@ impl<B: Backend> Engine<B> {
 
     /// Refetches the newest chunk of the open chat and of every chat with cached history, one
     /// at a time, so messages missed while disconnected show up and deleted ones vanish.
-    fn spawn_catch_up(&self) {
+    fn spawn_catch_up(&mut self) {
         let mut chats: Vec<ChatId> = self.open_chat.iter().cloned().collect();
         let cached: HashSet<ChatId> = self.db(self.cache.chats_with_messages()).unwrap_or_default().into_iter().collect();
         for summary in self.db(self.cache.chats()).unwrap_or_default() {
@@ -1507,21 +1644,31 @@ impl<B: Backend> Engine<B> {
                 (chat, newest)
             })
             .collect();
-        let (backend, inputs, limit, mark) =
-            (self.backend.clone(), self.inputs.clone(), self.config.history_limit, self.live_seq);
+        let total = targets.len();
+        let mark = self.begin_snapshots(total);
+        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
         tokio::spawn(async move {
+            let mut posted = 0;
             for (chat, known_newest) in targets {
                 let result = backend.history(&chat, None, limit).await;
                 let stop = matches!(result, Err(BackendError::SessionExpired | BackendError::Network(_)));
                 post(&inputs, Input::History(HistoryFetch { chat, before: None, known_newest, mark, result }));
+                posted += 1;
                 if stop {
                     break;
                 }
+            }
+            // Targets never asked for: their snapshots will not arrive.
+            if posted < total {
+                post(&inputs, Input::HistoryAbandoned(total - posted));
             }
         });
     }
 
     fn handle_history(&mut self, fetch: HistoryFetch) {
+        // This request no longer holds a snapshot, but the ledger stays until the chunk is
+        // stored: it is what this very chunk may need.
+        self.history_out = self.history_out.saturating_sub(1);
         match fetch.result {
             Ok(chunk) => {
                 let chunk = self.apply_chunk(&fetch.chat, fetch.before, fetch.known_newest, fetch.mark, chunk);
@@ -1538,6 +1685,7 @@ impl<B: Backend> Engine<B> {
                 }
             }
         }
+        self.forget_idle_reactions();
     }
 
     /// Stores the chunk (see `store_chunk`) and adds the cached messages newer than it. They
@@ -1584,23 +1732,14 @@ impl<B: Backend> Engine<B> {
             return chunk;
         }
         let raced = raced(&self.live_log, chat, mark);
-        // A server row that carries no reactions must not erase the cached ones; the rows it
-        // replaces are read once, before they are overwritten.
-        if let (Some(min), Some(max)) = (min, max) {
-            let cached = self.db(self.cache.messages_between(chat, min, max)).unwrap_or_default();
-            for message in &mut chunk.messages {
-                if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
-                    message.inherit_reactions(&cached[i]);
-                }
-            }
-        }
         let (lo, hi, history_start) = match before {
             None => {
                 // Live messages newer than the server snapshot stay cached: keep everything
                 // after the chunk then. An empty snapshot vouches only for what was cached when
                 // the request started (`known_newest`); everything cached above that arrived
                 // live meanwhile and is kept, even when the capped live log forgot it.
-                let hi = if raced.is_empty() { None } else { max.or(known_newest).or(Some(MessageTs::MIN)) };
+                let moved = self.touched.get(chat).is_some_and(|seq| *seq > mark);
+                let hi = if raced.is_empty() && !moved { None } else { max.or(known_newest).or(Some(MessageTs::MIN)) };
                 if chunk.reached_start {
                     (None, hi, Some(true))
                 } else if known_newest.is_none_or(|newest| newest >= min.unwrap_or(MessageTs::MAX)) {
@@ -1617,8 +1756,64 @@ impl<B: Backend> Engine<B> {
             }
         };
         replay_live(&mut chunk.messages, &raced, lo, hi);
+        // Reaction state the cache accepted for these messages while it did not hold them (an
+        // update, a confirmed own choice, a row an earlier request's range dropped) is the held
+        // state of a row the snapshot puts back: it is merged under the snapshot's own, so a
+        // snapshot older than the change cannot bring back a state that was accepted since. The
+        // cache holds the row from here on, so its entry leaves the ledger.
+        if let Some(kept) = self.reaction_ledger.get_mut(chat) {
+            for message in &mut chunk.messages {
+                if let Some(state) = kept.remove(&message.timestamp) {
+                    let mut merged = state;
+                    merged.merge(&message.reactions);
+                    message.reactions = merged;
+                }
+            }
+        }
+        // The cache holds every state accepted so far, whatever the live handlers and the other
+        // history requests stored meanwhile; every row about to be stored, replayed ones
+        // outside the snapshot's own range included, is merged into it, never the other way
+        // round, so a state the cache rejected cannot come back through the snapshot (design
+        // D5, "Invariant"). The rows are read once, before `replace_range` overwrites them.
+        // While another request is out, the whole replaced range is read: rows that are not put
+        // back leave the cache, and their state moves to the ledger for that request. Without one,
+        // only the rows of the chunk are read, plus, one by one, the rows of unanswered own
+        // choices of this chat that the range drops: their state is what a later push meets.
+        let others_out = self.history_out > 0;
+        let span = if others_out {
+            Some((lo.unwrap_or(MessageTs::MIN), hi.unwrap_or(MessageTs::MAX)))
+        } else {
+            chunk.messages.first().zip(chunk.messages.last()).map(|(first, last)| (first.timestamp, last.timestamp))
+        };
+        let cached = match span {
+            Some((from, to)) => self.db(self.cache.messages_between(chat, from, to)).unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let pending: Vec<MessageTs> = if others_out {
+            Vec::new()
+        } else {
+            let range = lo.unwrap_or(MessageTs::MIN)..=hi.unwrap_or(MessageTs::MAX);
+            let read = |ts: &MessageTs| span.is_some_and(|(from, to)| (from..=to).contains(ts));
+            self.reaction_inflight.keys().filter(|(own, ts)| own == chat && range.contains(ts) && !read(ts)).map(|(_, ts)| *ts).collect()
+        };
+        let pending: Vec<Message> = pending.into_iter().filter_map(|ts| self.db(self.cache.message(chat, ts)).flatten()).collect();
+        for message in &mut chunk.messages {
+            if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
+                message.inherit_reactions(&cached[i]);
+            }
+        }
+        for dropped in &cached {
+            if chunk.messages.binary_search_by_key(&dropped.timestamp, |m| m.timestamp).is_err() {
+                self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
+            }
+        }
+        for dropped in &pending {
+            self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
+        }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
+        // Requests that started before this one must not take what it stored for stale.
+        self.touch(chat);
         chunk.replaces = Some((lo, hi));
         chunk
     }
@@ -3634,6 +3829,273 @@ mod tests {
         assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), expected));
     }
 
+    /// Rejected pushes for a cached message replay nothing and must not push the edit, which does,
+    /// out of the capped live log.
+    #[test]
+    fn rejected_reaction_pushes_do_not_push_an_edit_out_of_the_replay_log() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let history = hold_next_history(&h, reacted());
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        h.upserted("edit");
+        for _ in 0..LIVE_LOG_CAP + 4 {
+            h.fake.push(reaction_push(3, &[(LIKE, 1)], 4));
+        }
+        h.quiet();
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = chunk.messages.iter().find(|m| m.timestamp == 3).expect("message 3");
+        assert_eq!(row.body, MessageBody::Text("hi!".into()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!(cached.body, MessageBody::Text("hi!".into()));
+    }
+
+    /// The same flood must not make a request forget that the chat moved on: what arrived live
+    /// above its rows stays even when the log no longer holds it.
+    #[test]
+    fn rejected_reaction_pushes_do_not_make_a_history_request_drop_a_newer_live_message() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let history = hold_next_history(&h, reacted());
+        h.fake.push(LiveEvent::MessageUpserted(msg("a", 4, "four")));
+        h.upserted("newer message");
+        for _ in 0..LIVE_LOG_CAP + 4 {
+            h.fake.push(reaction_push(3, &[(LIKE, 1)], 4));
+        }
+        h.quiet();
+        history.notify_one();
+        h.history("raced history");
+        assert!(h.cache().message(&id("a"), 4).unwrap().is_some(), "the live message must stay");
+    }
+
+    /// Opens chat "a" online with `snapshot` as the server's answer: the fetch takes it now and
+    /// delivers it only when the returned gate opens (the cached chunk of the open is consumed).
+    fn hold_next_history(h: &Harness, snapshot: Message) -> Arc<tokio::sync::Notify> {
+        let gate = react_gate();
+        let calls = {
+            let mut s = h.fake.state();
+            s.history.insert(id("a"), vec![snapshot]);
+            s.history_gate = Some(gate.clone());
+            s.history_calls.len()
+        };
+        h.client.send(Command::OpenChat(id("a")));
+        h.wait_for("the history request", |s| s.history_calls.len() > calls);
+        h.fake.state().history_gate = None;
+        h.drain();
+        gate
+    }
+
+    fn wait_cached(h: &Harness, what: &str, cond: impl Fn(&Reactions) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cond(&cached_reactions(h)) {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn with_reactions(reactions: Reactions) -> Message {
+        Message { reactions, ..reacted() }
+    }
+
+    #[test]
+    fn a_confirmed_choice_survives_a_history_snapshot_taken_before_it() {
+        let react = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(react.clone()));
+        // The snapshot (version 5, no choice) is taken first and delivered last.
+        let history = hold_next_history(&h, reacted());
+        toggle(&h, 3, FIRE);
+        let overlay = reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5);
+        assert_eq!(next_reactions(&h, "overlay"), (3, overlay.clone()));
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        react.notify_one();
+        wait_cached(&h, "the confirmation", |r| *r == overlay);
+        history.notify_one();
+        let chunk = h.history("old snapshot");
+        assert_eq!(chunk.messages[0].reactions, overlay, "the UI must keep the confirmed choice");
+        assert_eq!(cached_reactions(&h), overlay);
+        // The next click asks for the removal, not for the same choice again.
+        toggle(&h, 3, FIRE);
+        assert_eq!(next_reactions(&h, "removal").1, reactions(&[(LIKE, 2)], None, 5));
+        h.wait_for("the removal", |s| s.calls.len() == 2);
+        assert_eq!(h.fake.calls()[1], Call::React(id("a"), 3, None));
+    }
+
+    #[test]
+    fn a_newer_push_after_a_confirmed_choice_wins_over_it_in_an_older_snapshot() {
+        let react = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(react.clone()));
+        let history = hold_next_history(&h, reacted());
+        toggle(&h, 3, FIRE);
+        let overlay = reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5);
+        assert_eq!(next_reactions(&h, "overlay").1, overlay);
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        react.notify_one();
+        wait_cached(&h, "the confirmation", |r| *r == overlay);
+        h.fake.push(reaction_push(3, &[(LIKE, 2), (FIRE, 2)], 6));
+        let server = reactions(&[(LIKE, 2), (FIRE, 2)], Some(FIRE), 6);
+        assert_eq!(next_reactions(&h, "server state").1, server);
+        history.notify_one();
+        assert_eq!(h.history("old snapshot").messages[0].reactions, server);
+        assert_eq!(cached_reactions(&h), server);
+    }
+
+    #[test]
+    fn a_snapshot_with_a_newer_version_wins_over_a_choice_confirmed_after_it_was_taken() {
+        let react = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(react.clone()));
+        let server = reactions(&[(LIKE, 2), (FIRE, 2)], None, 7);
+        let history = hold_next_history(&h, with_reactions(server.clone()));
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "overlay");
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        react.notify_one();
+        wait_cached(&h, "the confirmation", |r| r.mine == Some(FIRE));
+        history.notify_one();
+        // The snapshot does not say what the account chose; the confirmed FIRE is still counted.
+        let shown = reactions(&[(LIKE, 2), (FIRE, 2)], Some(FIRE), 7);
+        assert_eq!(h.history("newer snapshot").messages[0].reactions, shown);
+        assert_eq!(cached_reactions(&h), shown);
+    }
+
+    #[test]
+    fn a_confirmation_does_not_write_its_overlay_over_a_newer_state_from_history() {
+        let react = react_gate();
+        let h = start_reacting_online(reacted(), |s| s.react_gate = Some(react.clone()));
+        toggle(&h, 3, FIRE);
+        next_reactions(&h, "overlay");
+        h.wait_for("the request", |s| s.calls.len() == 1);
+        // The request is out over version 5; history delivers version 7 before it is answered.
+        let server = reactions(&[(LIKE, 2), (FIRE, 2)], None, 7);
+        let history = hold_next_history(&h, with_reactions(server.clone()));
+        history.notify_one();
+        assert_eq!(h.history("newer history").messages[0].reactions, server);
+        assert_eq!(cached_reactions(&h), server);
+        react.notify_one();
+        h.quiet();
+        assert_eq!(cached_reactions(&h), server, "the confirmation must not restore the overlay");
+        assert_eq!(shown(&h.drain()), [], "nothing is shown for the confirmation");
+        // The entry is gone: the next choice starts from the state history delivered.
+        toggle(&h, 3, LIKE);
+        assert_eq!(next_reactions(&h, "next choice").1, reactions(&[(LIKE, 3), (FIRE, 2)], Some(LIKE), 7));
+    }
+
+    #[test]
+    fn an_edit_of_a_cached_message_during_a_history_fetch_keeps_a_newer_history_state() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let newer = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
+        let history = hold_next_history(&h, with_reactions(newer.clone()));
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        // The cache has version 5, so the edit inherits it for the cache and the UI.
+        assert_eq!(h.upserted("edit").reactions, reacted().reactions);
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = &chunk.messages[0];
+        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), newer.clone()));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), newer));
+    }
+
+    #[test]
+    fn a_versionless_snapshot_row_does_not_override_the_cached_state_and_an_edit_still_applies() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let versionless = Reactions { counts: counts(&[(FIRE, 1)]), mine: None, version: None };
+        let history = hold_next_history(&h, with_reactions(versionless));
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        assert_eq!(h.upserted("edit").reactions, reacted().reactions);
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = &chunk.messages[0];
+        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), reacted().reactions));
+        let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
+        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+    }
+
+    #[test]
+    fn a_history_row_older_than_the_cached_state_keeps_the_cached_state() {
+        let h = start_reacting(reacted(), with_reactions(reactions(&[(LIKE, 1)], None, 4)), |_| {});
+        h.online();
+        assert_eq!(h.history("catch-up").messages[0].reactions, reacted().reactions);
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+    }
+
+    fn versionless_push(timestamp: MessageTs, pairs: &[(ReactionCode, u32)]) -> LiveEvent {
+        let update = ReactionsUpdate { counts: counts(pairs), version: None, mine: None };
+        LiveEvent::ReactionsChanged { chat: id("a"), timestamp, update }
+    }
+
+    #[test]
+    fn a_versionless_push_never_overrides_a_versioned_state_and_a_later_versioned_one_ends_the_newest() {
+        let h = start_reacting_online(reacted(), |_| {});
+        let history = hold_next_history(&h, reacted());
+        h.fake.push(versionless_push(3, &[(LIKE, 3)]));
+        h.quiet();
+        assert_eq!(shown(&h.drain()), [], "nothing changes for a versionless push over version 5");
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+        h.fake.push(reaction_push(3, &[(LIKE, 4)], 6));
+        let newest = reactions(&[(LIKE, 4)], None, 6);
+        assert_eq!(next_reactions(&h, "versioned push").1, newest);
+        history.notify_one();
+        assert_eq!(h.history("older snapshot").messages[0].reactions, newest);
+        assert_eq!(cached_reactions(&h), newest);
+    }
+
+    #[test]
+    fn pushes_the_cache_rejected_do_not_come_back_through_a_bare_snapshot_row() {
+        let h = start_reacting_online(reacted(), |_| {});
+        // The server's row carries no reactions at all. A push without a version and an equal
+        // one are both rejected by the cache, so the replay must not apply them either.
+        let history = hold_next_history(&h, msg("a", 3, "hi"));
+        h.fake.push(versionless_push(3, &[(LIKE, 3)]));
+        h.fake.push(reaction_push(3, &[(LIKE, 4)], 5));
+        h.quiet();
+        assert_eq!(shown(&h.drain()), []);
+        history.notify_one();
+        assert_eq!(h.history("bare snapshot").messages[0].reactions, reacted().reactions);
+        assert_eq!(cached_reactions(&h), reacted().reactions);
+    }
+
+    #[test]
+    fn a_versioned_push_over_a_bare_snapshot_row_ends_at_the_newest_and_keeps_mine() {
+        let mut cached = reacted();
+        cached.reactions = reactions(&[(LIKE, 2)], Some(LIKE), 5);
+        let h = start_reacting_online(cached, |_| {});
+        let history = hold_next_history(&h, msg("a", 3, "hi"));
+        h.fake.push(reaction_push(3, &[(LIKE, 3)], 6));
+        let expected = reactions(&[(LIKE, 3)], Some(LIKE), 6);
+        assert_eq!(next_reactions(&h, "push").1, expected);
+        assert_eq!(cached_reactions(&h), expected);
+        history.notify_one();
+        assert_eq!(h.history("bare snapshot").messages[0].reactions, expected);
+        assert_eq!(cached_reactions(&h), expected);
+    }
+
+    #[test]
+    fn a_state_another_history_request_stored_survives_an_edit_and_a_versionless_snapshot() {
+        let h = start_reacting_online(reacted(), |_| {});
+        // Request A takes a snapshot without a version; request B takes version 6 and is
+        // delivered first; an edit says nothing about reactions; then A is delivered.
+        let first = hold_next_history(&h, with_reactions(Reactions { counts: counts(&[(LIKE, 1)]), mine: None, version: None }));
+        let newer = reactions(&[(LIKE, 4)], None, 6);
+        let second = hold_next_history(&h, with_reactions(newer.clone()));
+        second.notify_one();
+        assert_eq!(h.history("second request").messages[0].reactions, newer);
+        let mut edited = msg("a", 3, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        assert_eq!(h.upserted("edit").reactions, newer);
+        first.notify_one();
+        let chunk = h.history("first request");
+        assert_eq!((chunk.messages[0].body.clone(), chunk.messages[0].reactions.clone()), (MessageBody::Text("hi!".into()), newer.clone()));
+        assert_eq!(cached_reactions(&h), newer);
+        h.fake.push(reaction_push(3, &[(LIKE, 5)], 7));
+        assert_eq!(next_reactions(&h, "later push").1, reactions(&[(LIKE, 5)], None, 7));
+    }
+
     #[test]
     fn an_edit_push_and_a_history_chunk_without_reactions_keep_the_cached_ones() {
         let h = start_reacting(reacted(), msg("a", 3, "hi"), |_| {});
@@ -3669,6 +4131,23 @@ mod tests {
         assert_eq!(next_reactions(&h, "event for the cached message").0, 3);
         assert_eq!(h.cache().message(&id("a"), 99).unwrap(), None);
         assert_eq!(h.drain(), []);
+    }
+
+    #[test]
+    fn a_reaction_event_for_an_uncached_message_during_a_history_fetch_survives_its_snapshot() {
+        let h = start_reacting_online(reacted(), |_| {});
+        // Message 4 is not cached: the cache cannot judge the push, so the log keeps it for the
+        // request that inserts the row, which was taken at version 5.
+        let older = Message { timestamp: 4, reactions: reactions(&[(LIKE, 2)], None, 5), ..reacted() };
+        let history = hold_next_history(&h, older);
+        h.fake.push(reaction_push(4, &[(LIKE, 3)], 6));
+        h.quiet();
+        history.notify_one();
+        let chunk = h.history("raced history");
+        let row = chunk.messages.iter().find(|m| m.timestamp == 4).expect("message 4");
+        assert_eq!(row.reactions, reactions(&[(LIKE, 3)], None, 6));
+        let cached = h.cache().message(&id("a"), 4).unwrap().unwrap();
+        assert_eq!(cached.reactions, reactions(&[(LIKE, 3)], None, 6));
     }
 
     #[test]
@@ -5034,4 +5513,6 @@ mod tests {
         h.client.send(create_with("u9"));
         h.wait_for("the second request", |s| s.create_calls.len() == 2);
     }
+
+    mod reaction_model;
 }

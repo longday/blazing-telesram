@@ -169,12 +169,13 @@ pub struct Message {
 }
 
 impl Message {
-    /// Keeps the reactions already known for this message when the incoming copy carries no
-    /// reaction state at all (an edit push, a history row without reactions).
+    /// Merges this copy's reactions into the cached ones (`Reactions::merge`): a copy that
+    /// carries none (an edit push, a history row without reactions), is older, or has no version
+    /// leaves the known state as it is.
     pub fn inherit_reactions(&mut self, cached: &Message) {
-        if self.reactions.counts.is_empty() && self.reactions.version.is_none() {
-            self.reactions.clone_from(&cached.reactions);
-        }
+        let mut merged = cached.reactions.clone();
+        merged.merge(&self.reactions);
+        self.reactions = merged;
     }
 }
 
@@ -460,18 +461,24 @@ mod tests {
     }
 
     #[test]
-    fn inherit_reactions_copies_only_when_the_incoming_copy_has_no_reaction_state() {
+    fn inherit_reactions_merges_the_incoming_copy_into_the_cached_state() {
         let cached = reacted(&[(1, 2)], Some(1), Some(4));
         let mut bare = crate::fixtures::msg("0/0/c", 1, "edited");
         bare.inherit_reactions(&cached);
         assert_eq!(bare.reactions, cached.reactions);
 
-        let mut with_counts = reacted(&[(2, 1)], None, None);
-        with_counts.inherit_reactions(&cached);
-        assert_eq!(with_counts.reactions, reacted(&[(2, 1)], None, None).reactions);
-
-        let mut with_version = reacted(&[], None, Some(5));
-        with_version.inherit_reactions(&cached);
-        assert_eq!(with_version.reactions, reacted(&[], None, Some(5)).reactions);
+        // A copy without a version never overrides a versioned state; neither does an older or
+        // an equal one. A newer one wins and keeps `mine` while its type still has a count.
+        for stale in [reacted(&[(2, 1)], None, None), reacted(&[(2, 1)], None, Some(3)), reacted(&[(2, 1)], None, Some(4))] {
+            let mut copy = stale;
+            copy.inherit_reactions(&cached);
+            assert_eq!(copy.reactions, cached.reactions);
+        }
+        let mut newer = reacted(&[(1, 3)], None, Some(5));
+        newer.inherit_reactions(&cached);
+        assert_eq!(newer.reactions, reacted(&[(1, 3)], Some(1), Some(5)).reactions);
+        let mut emptied = reacted(&[], None, Some(5));
+        emptied.inherit_reactions(&cached);
+        assert_eq!(emptied.reactions, reacted(&[], None, Some(5)).reactions);
     }
 }

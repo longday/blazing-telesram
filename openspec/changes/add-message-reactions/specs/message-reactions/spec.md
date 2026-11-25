@@ -37,6 +37,11 @@ A message SHALL show the reactions the client has been told about: reaction upda
 - **WHEN** it is edited and the edit carries no reaction state
 - **THEN** the new text appears and the chips stay
 
+#### Scenario: Edit while history loads newer reactions
+- **GIVEN** a message shows reactions and a history request for its chat is in flight
+- **WHEN** it is edited, the edit carries no reaction state, and the history answer carries newer reactions for it
+- **THEN** the new text and the newer reactions are shown
+
 #### Scenario: Update for a message that is not loaded
 - **WHEN** a reaction update arrives for a message the client has not loaded or cached
 - **THEN** nothing is shown for it and no error appears
@@ -106,7 +111,7 @@ When the server refuses a reaction, the message SHALL return to the reactions it
 - **THEN** the chips do not change and an error says there is no connection
 
 ### Requirement: Stale reaction updates
-A reaction update SHALL replace the message's known reactions only when its version is newer than the known one; an update with an older or equal version SHALL be ignored. An update without a version SHALL be applied. While a reaction of the user is unconfirmed, an update for the same message SHALL replace the unconfirmed state.
+A reaction update SHALL replace the message's known reactions only when its version is newer than the known one; an update with an older or equal version SHALL be ignored (an update without a version is covered by "Reaction input without a version"). While a reaction of the user is unconfirmed, an update for the same message SHALL replace the unconfirmed state.
 
 #### Scenario: Older update
 - **GIVEN** a message shows reactions of version 5
@@ -117,3 +122,44 @@ A reaction update SHALL replace the message's known reactions only when its vers
 - **GIVEN** the user's reaction on a message is unconfirmed
 - **WHEN** a newer update for that message arrives
 - **THEN** the chips show the update and the unconfirmed state is dropped
+
+### Requirement: History does not undo newer reaction state
+A history row SHALL NOT replace known reactions of a newer version. The user's confirmed choice SHALL survive a history row of the same or an older version and SHALL NOT replace a newer state, whichever of the two finishes first.
+
+#### Scenario: History snapshot older than a confirmed choice
+- **GIVEN** a history request was started before the user's reaction on a message was confirmed
+- **WHEN** its answer, which does not contain the choice, arrives after the confirmation
+- **THEN** the chips keep the confirmed choice
+
+#### Scenario: Newer history state during an own request
+- **GIVEN** the user's reaction on a message is unconfirmed and history delivers a newer version of its reactions
+- **WHEN** the request is confirmed
+- **THEN** the chips keep the newer state from history
+
+#### Scenario: Several history requests and an edit
+- **GIVEN** two history requests are out for a chat, and the second one has delivered a newer reaction version for a message
+- **WHEN** the message is edited and then the first request, taken before both, delivers its older snapshot
+- **THEN** the chips keep the newer reaction version and the message shows the edit
+
+#### Scenario: History page above the cache and a reaction update
+- **GIVEN** a history request is out whose page lies above every cached message, and a cached message is edited and then receives a newer reaction version while it is out
+- **WHEN** the page arrives
+- **THEN** the edited message is still shown, with the newer reaction version
+
+#### Scenario: Reaction update while another history request stores newer messages
+- **GIVEN** a history request started before the server got a newer message, and another request stored that message and a reaction update reached an older one meanwhile
+- **WHEN** the first request arrives, its rows ending below the newer message
+- **THEN** the newer message stays shown
+
+### Requirement: Reaction input without a version
+Reaction input without a version SHALL NOT replace a state that has one and SHALL NOT give a state a version. While a message has no known version, such input SHALL be applied as it arrives. (Conservative rule: the reaction samples on record are all versioned, so a versionless input from the server is not expected; ignoring it can only leave an older versioned state in place until the next versioned update.)
+
+#### Scenario: Versionless update over a versioned state
+- **GIVEN** a message shows reactions of version 5
+- **WHEN** an update without a version arrives for it, and later a history row without reactions
+- **THEN** the chips keep version 5 and its counts
+
+#### Scenario: Versionless history row
+- **GIVEN** a message shows reactions of version 5 and its history row carries counts but no version
+- **WHEN** the row is stored
+- **THEN** the chips keep version 5 and its counts, and the row's other fields (an edit) apply
