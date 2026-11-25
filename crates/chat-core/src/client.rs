@@ -60,7 +60,6 @@ enum LiveChange {
     /// pushed copy itself said about reactions.
     Upsert { message: Message, supplied: Reactions },
     Delete(MessageTs),
-    Reactions(MessageTs, ReactionsUpdate),
 }
 
 #[derive(Clone, Debug)]
@@ -152,6 +151,8 @@ enum Input {
     LiveClosed(u64),
     Chats(Result<Vec<ChatSummary>, BackendError>),
     History(HistoryFetch),
+    /// History requests that ended without answering: `.0` of them never posted a result.
+    HistoryAbandoned(usize),
     Media { media: MediaRef, result: Result<Vec<u8>, BackendError> },
     /// `bytes` of the saved file, or why the transfer of generation `seq` produced no file.
     Download { media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError> },
@@ -216,6 +217,15 @@ struct Engine<B> {
     live_log: HashMap<ChatId, VecDeque<(u64, LiveChange)>>,
     /// The count of the last change to each chat's cache, replayable or not.
     touched: HashMap<ChatId, u64>,
+    /// History requests started and not yet answered: each holds a snapshot that may be older
+    /// than what the cache accepts meanwhile.
+    history_out: usize,
+    /// Reaction state the cache accepted for messages it does not hold (an update for an uncached
+    /// message, a confirmed own choice, rows a replaced range dropped), per chat. An entry lives
+    /// only while a history request is out (`history_out > 0`) and the cache does not hold the
+    /// row: a snapshot that started earlier may put the row back (`store_chunk`) and must not
+    /// bring an older state with it.
+    reaction_ledger: HashMap<ChatId, HashMap<MessageTs, Reactions>>,
     media_inflight: HashSet<MediaRef>,
     /// Requested while we could not fetch; started once online.
     media_deferred: Vec<MediaRef>,
@@ -331,11 +341,6 @@ fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<
             LiveChange::Delete(ts) if in_range(*ts) => {
                 if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
                     messages[i].body = MessageBody::Deleted;
-                }
-            }
-            LiveChange::Reactions(ts, update) if in_range(*ts) => {
-                if let Ok(i) = messages.binary_search_by_key(ts, |m| m.timestamp) {
-                    messages[i].reactions.apply(update);
                 }
             }
             _ => {}
@@ -506,6 +511,8 @@ impl<B: Backend> Engine<B> {
             live_seq: 0,
             live_log: HashMap::new(),
             touched: HashMap::new(),
+            history_out: 0,
+            reaction_ledger: HashMap::new(),
             media_inflight: HashSet::new(),
             media_deferred: Vec::new(),
             media_missing: HashMap::new(),
@@ -584,6 +591,10 @@ impl<B: Backend> Engine<B> {
             Input::LiveClosed(epoch) if epoch == self.epoch => self.connection_lost(),
             Input::Chats(result) => self.handle_chats(result),
             Input::History(fetch) => self.handle_history(fetch),
+            Input::HistoryAbandoned(count) => {
+                self.history_out = self.history_out.saturating_sub(count);
+                self.forget_idle_reactions();
+            }
             Input::Media { media, result } => self.handle_media_result(media, result),
             Input::Download { media, seq, result } => self.handle_download_result(media, seq, result),
             Input::DownloadProgress { media, seq, received, total } => self.handle_download_progress(&media, seq, received, total),
@@ -770,6 +781,7 @@ impl<B: Backend> Engine<B> {
         self.open_chat = None;
         self.live_log.clear();
         self.touched.clear();
+        self.reaction_ledger.clear();
         self.reaction_inflight.clear();
         self.members_inflight.clear();
         self.profile_inflight = false;
@@ -806,11 +818,13 @@ impl<B: Backend> Engine<B> {
             LiveEvent::MessageUpserted(mut message) => {
                 // The copy of an edit push or a reaction-less history row says nothing about
                 // reactions, so it must not erase the ones already known: what it does say is
-                // merged into the cached state. The log keeps what the copy said, apart from the
+                // merged into the cached state, or, for a message the cache does not hold, into
+                // what the ledger kept of it. The log keeps what the copy said, apart from the
                 // merged copy it replays, which is only the fallback for an absent row.
                 let supplied = message.reactions.clone();
-                if let Some(cached) = self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
-                    message.inherit_reactions(&cached);
+                match self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
+                    Some(cached) => message.inherit_reactions(&cached),
+                    None => self.inherit_held_reactions(&mut message),
                 }
                 self.record_live(&message.chat, LiveChange::Upsert { message: message.clone(), supplied });
                 self.db(self.cache.upsert_message(&message));
@@ -822,11 +836,11 @@ impl<B: Backend> Engine<B> {
                 // that started earlier merges its snapshot into it (`store_chunk`), so a cached
                 // message's update is only noted as a change (`touch`: it bounds what such a
                 // request may replace, it replays nothing). An uncached message has no state to
-                // merge into: the update is logged for the request that will insert its row.
-                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
-                    return self.record_live(&chat, LiveChange::Reactions(timestamp, update));
-                };
+                // merge into: the update goes to the ledger, for a request that may insert the row.
                 self.touch(&chat);
+                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                    return self.hold_update(&chat, timestamp, &update);
+                };
                 if message.reactions.apply(&update) {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
@@ -895,6 +909,64 @@ impl<B: Backend> Engine<B> {
     fn touch(&mut self, chat: &ChatId) {
         self.live_seq += 1;
         self.touched.insert(chat.clone(), self.live_seq);
+    }
+
+    /// Starts `count` history requests: until each has answered, the reaction state the cache
+    /// accepts for rows it may drop is kept (`reaction_ledger`). Returns the mark they replay from.
+    fn begin_snapshots(&mut self, count: usize) -> u64 {
+        self.history_out += count;
+        self.live_seq
+    }
+
+    /// Drops the ledger once no request is left that could put an older row back.
+    fn forget_idle_reactions(&mut self) {
+        if self.history_out == 0 {
+            self.reaction_ledger.clear();
+        }
+    }
+
+    /// Keeps `state`, the state the cache accepted for a row about to leave it, for the requests
+    /// still out. The cache's state is never lower than what the ledger kept before.
+    fn hold_reactions(&mut self, chat: &ChatId, timestamp: MessageTs, state: &Reactions) {
+        if self.history_out == 0 || state.is_unknown() {
+            return;
+        }
+        let held = self.reaction_ledger.entry(chat.clone()).or_default();
+        match held.get_mut(&timestamp) {
+            Some(kept) => {
+                let mut merged = state.clone();
+                merged.merge(kept);
+                *kept = merged;
+            }
+            None => {
+                held.insert(timestamp, state.clone());
+            }
+        }
+    }
+
+    /// A reaction update for a message the cache does not hold, kept for the requests still out.
+    fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) {
+        if self.history_out > 0 {
+            self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update);
+        }
+    }
+
+    /// A confirmed own choice for a message the cache does not hold, kept for the requests still out.
+    fn hold_own(&mut self, chat: &ChatId, timestamp: MessageTs, own: &Reactions) {
+        if self.history_out > 0 {
+            self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().overlay_own(own);
+        }
+    }
+
+    /// A message the cache did not hold is cached now: puts the state the ledger kept of it under
+    /// the copy's own (the ledger is the held state, as the cache is for a cached message) and
+    /// takes the entry out, since the cache holds that state from here on.
+    fn inherit_held_reactions(&mut self, message: &mut Message) {
+        let kept = self.reaction_ledger.get_mut(&message.chat).and_then(|held| held.remove(&message.timestamp));
+        if let Some(mut merged) = kept {
+            merged.merge(&message.reactions);
+            message.reactions = merged;
+        }
     }
 
     /// Keeps the row preview and unread counter current even when the backend only forwards
@@ -1206,7 +1278,9 @@ impl<B: Backend> Engine<B> {
                 // show an unseen reaction. History requests that started earlier meet the choice
                 // in the cache (`store_chunk`).
                 Action::React { timestamp, overlay } if superseded != Some(true) => {
-                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
+                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                        return self.hold_own(&chat, timestamp, &overlay);
+                    };
                     if message.reactions.overlay_own(&overlay) {
                         self.db(self.cache.upsert_message(&message));
                         self.touch(&chat);
@@ -1514,10 +1588,10 @@ impl<B: Backend> Engine<B> {
 
     // -- history --------------------------------------------------------------------------
 
-    fn spawn_history(&self, chat: ChatId, before: Option<MessageTs>) {
+    fn spawn_history(&mut self, chat: ChatId, before: Option<MessageTs>) {
         let known_newest = self.db(self.cache.newest_ts(&chat)).flatten();
-        let (backend, inputs, limit, mark) =
-            (self.backend.clone(), self.inputs.clone(), self.config.history_limit, self.live_seq);
+        let mark = self.begin_snapshots(1);
+        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
         tokio::spawn(async move {
             let result = backend.history(&chat, before, limit).await;
             post(&inputs, Input::History(HistoryFetch { chat, before, known_newest, mark, result }));
@@ -1526,7 +1600,7 @@ impl<B: Backend> Engine<B> {
 
     /// Refetches the newest chunk of the open chat and of every chat with cached history, one
     /// at a time, so messages missed while disconnected show up and deleted ones vanish.
-    fn spawn_catch_up(&self) {
+    fn spawn_catch_up(&mut self) {
         let mut chats: Vec<ChatId> = self.open_chat.iter().cloned().collect();
         let cached: HashSet<ChatId> = self.db(self.cache.chats_with_messages()).unwrap_or_default().into_iter().collect();
         for summary in self.db(self.cache.chats()).unwrap_or_default() {
@@ -1541,21 +1615,31 @@ impl<B: Backend> Engine<B> {
                 (chat, newest)
             })
             .collect();
-        let (backend, inputs, limit, mark) =
-            (self.backend.clone(), self.inputs.clone(), self.config.history_limit, self.live_seq);
+        let total = targets.len();
+        let mark = self.begin_snapshots(total);
+        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
         tokio::spawn(async move {
+            let mut posted = 0;
             for (chat, known_newest) in targets {
                 let result = backend.history(&chat, None, limit).await;
                 let stop = matches!(result, Err(BackendError::SessionExpired | BackendError::Network(_)));
                 post(&inputs, Input::History(HistoryFetch { chat, before: None, known_newest, mark, result }));
+                posted += 1;
                 if stop {
                     break;
                 }
+            }
+            // Targets never asked for: their snapshots will not arrive.
+            if posted < total {
+                post(&inputs, Input::HistoryAbandoned(total - posted));
             }
         });
     }
 
     fn handle_history(&mut self, fetch: HistoryFetch) {
+        // This request no longer holds a snapshot, but the ledger stays until the chunk is
+        // stored: it is what this very chunk may need.
+        self.history_out = self.history_out.saturating_sub(1);
         match fetch.result {
             Ok(chunk) => {
                 let chunk = self.apply_chunk(&fetch.chat, fetch.before, fetch.known_newest, fetch.mark, chunk);
@@ -1572,6 +1656,7 @@ impl<B: Backend> Engine<B> {
                 }
             }
         }
+        self.forget_idle_reactions();
     }
 
     /// Stores the chunk (see `store_chunk`) and adds the cached messages newer than it. They
@@ -1642,18 +1727,44 @@ impl<B: Backend> Engine<B> {
             }
         };
         replay_live(&mut chunk.messages, &raced, lo, hi);
+        // Reaction state the cache accepted for these messages while it did not hold them (an
+        // update, a confirmed own choice, a row an earlier request's range dropped) is the held
+        // state of a row the snapshot puts back: it is merged under the snapshot's own, so a
+        // snapshot older than the change cannot bring back a state that was accepted since. The
+        // cache holds the row from here on, so its entry leaves the ledger.
+        if let Some(kept) = self.reaction_ledger.get_mut(chat) {
+            for message in &mut chunk.messages {
+                if let Some(state) = kept.remove(&message.timestamp) {
+                    let mut merged = state;
+                    merged.merge(&message.reactions);
+                    message.reactions = merged;
+                }
+            }
+        }
         // The cache holds every state accepted so far, whatever the live handlers and the other
         // history requests stored meanwhile; every row about to be stored, replayed ones
         // outside the snapshot's own range included, is merged into it, never the other way
         // round, so a state the cache rejected cannot come back through the snapshot (design
         // D5, "Invariant"). The rows are read once, before `replace_range` overwrites them.
-        let cached = match (chunk.messages.first(), chunk.messages.last()) {
-            (Some(first), Some(last)) => self.db(self.cache.messages_between(chat, first.timestamp, last.timestamp)).unwrap_or_default(),
-            _ => Vec::new(),
+        // While another request is out, the whole replaced range is read: rows that are not put
+        // back leave the cache, and their state moves to the ledger for that request.
+        let span = if self.history_out > 0 {
+            Some((lo.unwrap_or(MessageTs::MIN), hi.unwrap_or(MessageTs::MAX)))
+        } else {
+            chunk.messages.first().zip(chunk.messages.last()).map(|(first, last)| (first.timestamp, last.timestamp))
+        };
+        let cached = match span {
+            Some((from, to)) => self.db(self.cache.messages_between(chat, from, to)).unwrap_or_default(),
+            None => Vec::new(),
         };
         for message in &mut chunk.messages {
             if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                 message.inherit_reactions(&cached[i]);
+            }
+        }
+        for dropped in &cached {
+            if chunk.messages.binary_search_by_key(&dropped.timestamp, |m| m.timestamp).is_err() {
+                self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
             }
         }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
