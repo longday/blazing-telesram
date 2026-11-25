@@ -4,8 +4,8 @@
 //! range queries, so a row that no longer deserializes is skipped instead of failing a load.
 
 use crate::model::{
-    ChatId, ChatSummary, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, ReplyTarget,
-    UserId,
+    ChatId, ChatSummary, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs,
+    PayloadId, ReplyTarget, UserId,
 };
 use crate::paths::cache_path;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -25,7 +25,8 @@ pub enum CacheError {
 }
 
 /// Applied in order; `PRAGMA user_version` holds the number already applied.
-const MIGRATIONS: &[&str] = &["
+const MIGRATIONS: &[&str] = &[
+    "
     CREATE TABLE chats (
         id TEXT PRIMARY KEY,
         pinned_rank INTEGER,
@@ -50,8 +51,8 @@ const MIGRATIONS: &[&str] = &["
         PRIMARY KEY (kind, id)
     );
 ",
-// Pending sends and unsent composer state; both must survive a restart.
-"
+    // Pending sends and unsent composer state; both must survive a restart.
+    "
     CREATE TABLE outbox (
         payload_id TEXT PRIMARY KEY,
         chat TEXT NOT NULL,
@@ -62,7 +63,8 @@ const MIGRATIONS: &[&str] = &["
         chat TEXT PRIMARY KEY,
         json TEXT NOT NULL
     );
-"];
+",
+];
 
 /// A send that has not been confirmed yet. `created_us` is the local timestamp of its
 /// pending message; `failed` holds the server's reason once it was rejected for good.
@@ -101,7 +103,12 @@ impl Cache {
         if let Some(dir) = path.parent() {
             DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         }
-        OpenOptions::new().create(true).write(true).truncate(false).mode(0o600).open(&path)?;
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         Self::init(Connection::open(&path)?, true)
     }
@@ -119,7 +126,10 @@ impl Cache {
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         let supported = MIGRATIONS.len() as i64;
         if version > supported {
-            return Err(CacheError::TooNew { found: version, supported });
+            return Err(CacheError::TooNew {
+                found: version,
+                supported,
+            });
         }
         for (index, sql) in MIGRATIONS.iter().enumerate().skip(version as usize) {
             let tx = conn.transaction()?;
@@ -137,12 +147,18 @@ impl Cache {
              ORDER BY pinned_rank IS NULL, pinned_rank, last_ts IS NULL, last_ts DESC, id",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+        Ok(rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect())
     }
 
     pub fn chat(&self, id: &ChatId) -> Result<Option<ChatSummary>, CacheError> {
-        let json: Option<String> =
-            self.conn.query_row("SELECT json FROM chats WHERE id = ?1", [&id.0], |row| row.get(0)).optional()?;
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM chats WHERE id = ?1", [&id.0], |row| {
+                row.get(0)
+            })
+            .optional()?;
         Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
@@ -153,8 +169,14 @@ impl Cache {
         for chat in chats {
             put_chat(&tx, chat)?;
         }
-        tx.execute("DELETE FROM messages WHERE chat NOT IN (SELECT id FROM chats)", [])?;
-        tx.execute("DELETE FROM chat_state WHERE chat NOT IN (SELECT id FROM chats)", [])?;
+        tx.execute(
+            "DELETE FROM messages WHERE chat NOT IN (SELECT id FROM chats)",
+            [],
+        )?;
+        tx.execute(
+            "DELETE FROM chat_state WHERE chat NOT IN (SELECT id FROM chats)",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -165,15 +187,22 @@ impl Cache {
 
     /// Cached messages older than `before` (all when `None`), oldest first, at most `limit`.
     /// `reached_start` is set only when the first message of the chat is known to be cached.
-    pub fn history(&self, chat: &ChatId, before: Option<MessageTs>, limit: usize) -> Result<HistoryChunk, CacheError> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT json FROM messages WHERE chat = ?1 AND ts < ?2 ORDER BY ts DESC LIMIT ?3")?;
-        let rows = stmt.query_map(params![chat.0, before.unwrap_or(MessageTs::MAX), limit as i64 + 1], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut messages: Vec<Message> =
-            rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect();
+    pub fn history(
+        &self,
+        chat: &ChatId,
+        before: Option<MessageTs>,
+        limit: usize,
+    ) -> Result<HistoryChunk, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM messages WHERE chat = ?1 AND ts < ?2 ORDER BY ts DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![chat.0, before.unwrap_or(MessageTs::MAX), limit as i64 + 1],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut messages: Vec<Message> = rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect();
         let more = messages.len() > limit;
         messages.truncate(limit);
         messages.reverse();
@@ -187,35 +216,66 @@ impl Cache {
     }
 
     /// Cached messages newer than `after` (all when `None`), oldest first.
-    pub fn newer_than(&self, chat: &ChatId, after: Option<MessageTs>) -> Result<Vec<Message>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT json FROM messages WHERE chat = ?1 AND ts > ?2 ORDER BY ts")?;
-        let rows = stmt.query_map(params![chat.0, after.unwrap_or(MessageTs::MIN)], |row| row.get::<_, String>(0))?;
-        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+    pub fn newer_than(
+        &self,
+        chat: &ChatId,
+        after: Option<MessageTs>,
+    ) -> Result<Vec<Message>, CacheError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json FROM messages WHERE chat = ?1 AND ts > ?2 ORDER BY ts")?;
+        let rows = stmt.query_map(params![chat.0, after.unwrap_or(MessageTs::MIN)], |row| {
+            row.get::<_, String>(0)
+        })?;
+        Ok(rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect())
     }
 
     /// Cached messages with `lo <= ts <= hi`, oldest first.
-    pub fn messages_between(&self, chat: &ChatId, lo: MessageTs, hi: MessageTs) -> Result<Vec<Message>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT json FROM messages WHERE chat = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts")?;
+    pub fn messages_between(
+        &self,
+        chat: &ChatId,
+        lo: MessageTs,
+        hi: MessageTs,
+    ) -> Result<Vec<Message>, CacheError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM messages WHERE chat = ?1 AND ts >= ?2 AND ts <= ?3 ORDER BY ts",
+        )?;
         let rows = stmt.query_map(params![chat.0, lo, hi], |row| row.get::<_, String>(0))?;
-        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+        Ok(rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect())
     }
 
     pub fn message(&self, chat: &ChatId, ts: MessageTs) -> Result<Option<Message>, CacheError> {
         let json: Option<String> = self
             .conn
-            .query_row("SELECT json FROM messages WHERE chat = ?1 AND ts = ?2", params![chat.0, ts], |row| row.get(0))
+            .query_row(
+                "SELECT json FROM messages WHERE chat = ?1 AND ts = ?2",
+                params![chat.0, ts],
+                |row| row.get(0),
+            )
             .optional()?;
         Ok(json.and_then(|json| serde_json::from_str(&json).ok()))
     }
 
     pub fn newest_ts(&self, chat: &ChatId) -> Result<Option<MessageTs>, CacheError> {
-        Ok(self.conn.query_row("SELECT MAX(ts) FROM messages WHERE chat = ?1", [&chat.0], |row| row.get(0))?)
+        Ok(self.conn.query_row(
+            "SELECT MAX(ts) FROM messages WHERE chat = ?1",
+            [&chat.0],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn history_start(&self, chat: &ChatId) -> Result<bool, CacheError> {
         let flag: Option<i64> = self
             .conn
-            .query_row("SELECT history_start FROM chat_state WHERE chat = ?1", [&chat.0], |row| row.get(0))
+            .query_row(
+                "SELECT history_start FROM chat_state WHERE chat = ?1",
+                [&chat.0],
+                |row| row.get(0),
+            )
             .optional()?;
         Ok(flag == Some(1))
     }
@@ -223,7 +283,11 @@ impl Cache {
     pub fn chats_with_messages(&self) -> Result<Vec<ChatId>, CacheError> {
         let mut stmt = self.conn.prepare("SELECT DISTINCT chat FROM messages")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.collect::<Result<Vec<_>, _>>()?.into_iter().map(ChatId).collect())
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(ChatId)
+            .collect())
     }
 
     /// Server data for the time range `lo..=hi` (`None` = unbounded) replaces what is cached
@@ -240,7 +304,11 @@ impl Cache {
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM messages WHERE chat = ?1 AND ts >= ?2 AND ts <= ?3",
-            params![chat.0, lo.unwrap_or(MessageTs::MIN), hi.unwrap_or(MessageTs::MAX)],
+            params![
+                chat.0,
+                lo.unwrap_or(MessageTs::MIN),
+                hi.unwrap_or(MessageTs::MAX)
+            ],
         )?;
         for message in messages {
             put_message(&tx, chat, message)?;
@@ -261,7 +329,9 @@ impl Cache {
 
     /// Turns a cached message into the deleted placeholder; false when it is not cached.
     pub fn mark_deleted(&self, chat: &ChatId, ts: MessageTs) -> Result<bool, CacheError> {
-        let Some(mut message) = self.message(chat, ts)? else { return Ok(false) };
+        let Some(mut message) = self.message(chat, ts)? else {
+            return Ok(false);
+        };
         message.body = MessageBody::Deleted;
         put_message(&self.conn, chat, &message)?;
         Ok(true)
@@ -289,9 +359,13 @@ impl Cache {
 
     /// Unconfirmed sends in the order they were queued.
     pub fn outbox(&self) -> Result<Vec<OutboxEntry>, CacheError> {
-        let mut stmt = self.conn.prepare("SELECT json FROM outbox ORDER BY rowid")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT json FROM outbox ORDER BY rowid")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+        Ok(rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect())
     }
 
     /// Queues a send and drops the chat's draft in one transaction: either both happen or
@@ -300,7 +374,12 @@ impl Cache {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
             "INSERT INTO outbox (payload_id, chat, created_us, json) VALUES (?1, ?2, ?3, ?4)",
-            params![entry.payload.0, entry.chat.0, entry.created_us, encode(entry)],
+            params![
+                entry.payload.0,
+                entry.chat.0,
+                entry.created_us,
+                encode(entry)
+            ],
         )?;
         tx.execute("DELETE FROM drafts WHERE chat = ?1", [&entry.chat.0])?;
         Ok(tx.commit()?)
@@ -311,30 +390,41 @@ impl Cache {
         self.conn.execute(
             "INSERT INTO outbox (payload_id, chat, created_us, json) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (payload_id) DO UPDATE SET json = excluded.json",
-            params![entry.payload.0, entry.chat.0, entry.created_us, encode(entry)],
+            params![
+                entry.payload.0,
+                entry.chat.0,
+                entry.created_us,
+                encode(entry)
+            ],
         )?;
         Ok(())
     }
 
     pub fn remove_outbox(&self, payload: &PayloadId) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM outbox WHERE payload_id = ?1", [&payload.0])?;
+        self.conn
+            .execute("DELETE FROM outbox WHERE payload_id = ?1", [&payload.0])?;
         Ok(())
     }
 
     pub fn drafts(&self) -> Result<Vec<Draft>, CacheError> {
         let mut stmt = self.conn.prepare("SELECT json FROM drafts ORDER BY chat")?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-        Ok(rows.filter_map(|json| serde_json::from_str(&json.ok()?).ok()).collect())
+        Ok(rows
+            .filter_map(|json| serde_json::from_str(&json.ok()?).ok())
+            .collect())
     }
 
     pub fn put_draft(&self, draft: &Draft) -> Result<(), CacheError> {
-        self.conn
-            .execute("INSERT OR REPLACE INTO drafts (chat, json) VALUES (?1, ?2)", params![draft.chat.0, encode(draft)])?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO drafts (chat, json) VALUES (?1, ?2)",
+            params![draft.chat.0, encode(draft)],
+        )?;
         Ok(())
     }
 
     pub fn remove_draft(&self, chat: &ChatId) -> Result<(), CacheError> {
-        self.conn.execute("DELETE FROM drafts WHERE chat = ?1", [&chat.0])?;
+        self.conn
+            .execute("DELETE FROM drafts WHERE chat = ?1", [&chat.0])?;
         Ok(())
     }
 }
@@ -342,7 +432,12 @@ impl Cache {
 fn put_chat(conn: &Connection, chat: &ChatSummary) -> Result<(), CacheError> {
     conn.execute(
         "INSERT OR REPLACE INTO chats (id, pinned_rank, last_ts, json) VALUES (?1, ?2, ?3, ?4)",
-        params![chat.id.0, chat.pinned_rank, chat.last_message.as_ref().map(|m| m.timestamp), encode(chat)],
+        params![
+            chat.id.0,
+            chat.pinned_rank,
+            chat.last_message.as_ref().map(|m| m.timestamp),
+            encode(chat)
+        ],
     )?;
     Ok(())
 }
@@ -368,7 +463,9 @@ pub fn remove_files(runtime_dir: &Path, account: &UserId) -> io::Result<()> {
             _ => {}
         }
     }
-    let (Some(dir), Some(file)) = (path.parent(), path.file_name()) else { return Ok(()) };
+    let (Some(dir), Some(file)) = (path.parent(), path.file_name()) else {
+        return Ok(());
+    };
     let mut backup_prefix = file.to_os_string();
     backup_prefix.push(".broken-");
     let backup_prefix = backup_prefix.as_encoded_bytes();
@@ -378,7 +475,11 @@ pub fn remove_files(runtime_dir: &Path, account: &UserId) -> io::Result<()> {
     };
     for entry in entries {
         let entry = entry?;
-        if entry.file_name().as_encoded_bytes().starts_with(backup_prefix) {
+        if entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(backup_prefix)
+        {
             match fs::remove_file(entry.path()) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
                 _ => {}
@@ -400,7 +501,16 @@ pub fn move_aside(runtime_dir: &Path, account: &UserId, unix_secs: u64) -> io::R
         PathBuf::from(name)
     };
     let target = (0u32..)
-        .map(|n| with_suffix(&path, &if n == 0 { format!(".broken-{unix_secs}") } else { format!(".broken-{unix_secs}-{n}") }))
+        .map(|n| {
+            with_suffix(
+                &path,
+                &if n == 0 {
+                    format!(".broken-{unix_secs}")
+                } else {
+                    format!(".broken-{unix_secs}-{n}")
+                },
+            )
+        })
         .find(|target| !target.exists())
         .expect("a free name exists");
     for suffix in ["", "-journal", "-wal", "-shm"] {
@@ -435,11 +545,28 @@ mod tests {
         let account = UserId("42".into());
         {
             let mut cache = Cache::open(dir.path(), &account).unwrap();
-            cache.replace_chats(&[chat("a", Some(5), None), chat("b", Some(9), None), chat("p", Some(1), Some(0))]).unwrap();
-            cache.replace_range(&id("a"), None, None, &[msg("a", 1, "one"), msg("a", 2, "two")], Some(true)).unwrap();
+            cache
+                .replace_chats(&[
+                    chat("a", Some(5), None),
+                    chat("b", Some(9), None),
+                    chat("p", Some(1), Some(0)),
+                ])
+                .unwrap();
+            cache
+                .replace_range(
+                    &id("a"),
+                    None,
+                    None,
+                    &[msg("a", 1, "one"), msg("a", 2, "two")],
+                    Some(true),
+                )
+                .unwrap();
         }
         let path = cache_path(dir.path(), &account);
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         let cache = Cache::open(dir.path(), &account).unwrap();
         let order: Vec<_> = cache.chats().unwrap().into_iter().map(|c| c.id.0).collect();
@@ -447,7 +574,10 @@ mod tests {
         let chunk = cache.history(&id("a"), None, 50).unwrap();
         assert_eq!(texts(&chunk), [(1, "one".into()), (2, "two".into())]);
         assert!(chunk.reached_start);
-        let version: i64 = cache.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = cache
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, MIGRATIONS.len() as i64);
     }
 
@@ -455,12 +585,28 @@ mod tests {
     fn history_pages_and_reports_start_only_when_all_cached() {
         let mut cache = Cache::open_in_memory().unwrap();
         let all: Vec<_> = (1..=5).map(|i| msg("a", i, "m")).collect();
-        cache.replace_range(&id("a"), None, None, &all, Some(true)).unwrap();
+        cache
+            .replace_range(&id("a"), None, None, &all, Some(true))
+            .unwrap();
         let newest = cache.history(&id("a"), None, 3).unwrap();
-        assert_eq!(newest.messages.iter().map(|m| m.timestamp).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(
+            newest
+                .messages
+                .iter()
+                .map(|m| m.timestamp)
+                .collect::<Vec<_>>(),
+            [3, 4, 5]
+        );
         assert!(!newest.reached_start);
         let older = cache.history(&id("a"), Some(3), 3).unwrap();
-        assert_eq!(older.messages.iter().map(|m| m.timestamp).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(
+            older
+                .messages
+                .iter()
+                .map(|m| m.timestamp)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
         assert!(older.reached_start);
     }
 
@@ -471,20 +617,40 @@ mod tests {
         let all: Vec<_> = (1..=6).map(|i| msg("a", i, "old")).collect();
         cache.replace_range(&a, None, None, &all, None).unwrap();
         // Server now returns 3 and 5 for the range 3..=5 (4 vanished) with an edit of 5.
-        cache.replace_range(&a, Some(3), Some(5), &[msg("a", 3, "old"), msg("a", 5, "new")], None).unwrap();
+        cache
+            .replace_range(
+                &a,
+                Some(3),
+                Some(5),
+                &[msg("a", 3, "old"), msg("a", 5, "new")],
+                None,
+            )
+            .unwrap();
         let chunk = cache.history(&a, None, 50).unwrap();
         assert_eq!(
             texts(&chunk),
-            [(1, "old".into()), (2, "old".into()), (3, "old".into()), (5, "new".into()), (6, "old".into())]
+            [
+                (1, "old".into()),
+                (2, "old".into()),
+                (3, "old".into()),
+                (5, "new".into()),
+                (6, "old".into())
+            ]
         );
     }
 
     #[test]
     fn range_replace_is_scoped_to_its_chat() {
         let mut cache = Cache::open_in_memory().unwrap();
-        cache.replace_range(&id("a"), None, None, &[msg("a", 1, "a")], None).unwrap();
-        cache.replace_range(&id("b"), None, None, &[msg("b", 1, "b")], None).unwrap();
-        cache.replace_range(&id("a"), None, None, &[], None).unwrap();
+        cache
+            .replace_range(&id("a"), None, None, &[msg("a", 1, "a")], None)
+            .unwrap();
+        cache
+            .replace_range(&id("b"), None, None, &[msg("b", 1, "b")], None)
+            .unwrap();
+        cache
+            .replace_range(&id("a"), None, None, &[], None)
+            .unwrap();
         assert!(cache.message(&id("a"), 1).unwrap().is_none());
         assert!(cache.message(&id("b"), 1).unwrap().is_some());
     }
@@ -494,33 +660,77 @@ mod tests {
         let cache = Cache::open_in_memory().unwrap();
         cache.upsert_message(&msg("a", 1, "secret")).unwrap();
         assert!(cache.mark_deleted(&id("a"), 1).unwrap());
-        assert_eq!(cache.message(&id("a"), 1).unwrap().unwrap().body, MessageBody::Deleted);
+        assert_eq!(
+            cache.message(&id("a"), 1).unwrap().unwrap().body,
+            MessageBody::Deleted
+        );
         assert!(!cache.mark_deleted(&id("a"), 2).unwrap());
     }
 
     #[test]
     fn a_row_written_before_reactions_existed_loads_without_them() {
         let cache = Cache::open_in_memory().unwrap();
-        let mut json: serde_json::Value = serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
-        assert!(json.as_object_mut().unwrap().remove("reactions").is_some(), "the field is serialized today");
-        cache.conn.execute("INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)", [json.to_string()]).unwrap();
+        let mut json: serde_json::Value =
+            serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
+        assert!(
+            json.as_object_mut().unwrap().remove("reactions").is_some(),
+            "the field is serialized today"
+        );
+        cache
+            .conn
+            .execute(
+                "INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)",
+                [json.to_string()],
+            )
+            .unwrap();
         let loaded = cache.message(&id("a"), 1).unwrap().unwrap();
         assert_eq!(loaded.reactions, Default::default());
-        assert_eq!(cache.history(&id("a"), None, 50).unwrap().messages[0].reactions, Default::default());
+        assert_eq!(
+            cache.history(&id("a"), None, 50).unwrap().messages[0].reactions,
+            Default::default()
+        );
     }
 
     #[test]
     fn a_chat_row_written_before_partner_existed_loads_without_one() {
         let mut cache = Cache::open_in_memory().unwrap();
-        let with_partner = ChatSummary { partner: Some(UserId("u1".into())), ..chat("a", Some(5), None) };
-        cache.replace_chats(std::slice::from_ref(&with_partner)).unwrap();
-        assert_eq!(cache.chat(&id("a")).unwrap(), Some(with_partner.clone()), "the field round-trips");
+        let with_partner = ChatSummary {
+            partner: Some(UserId("u1".into())),
+            ..chat("a", Some(5), None)
+        };
+        cache
+            .replace_chats(std::slice::from_ref(&with_partner))
+            .unwrap();
+        assert_eq!(
+            cache.chat(&id("a")).unwrap(),
+            Some(with_partner.clone()),
+            "the field round-trips"
+        );
         let mut json: serde_json::Value = serde_json::from_str(&encode(&with_partner)).unwrap();
-        assert!(json.as_object_mut().unwrap().remove("partner").is_some(), "the field is serialized today");
-        cache.conn.execute("UPDATE chats SET json = ?1 WHERE id = 'a'", [json.to_string()]).unwrap();
+        assert!(
+            json.as_object_mut().unwrap().remove("partner").is_some(),
+            "the field is serialized today"
+        );
+        cache
+            .conn
+            .execute(
+                "UPDATE chats SET json = ?1 WHERE id = 'a'",
+                [json.to_string()],
+            )
+            .unwrap();
         let loaded = cache.chat(&id("a")).unwrap().unwrap();
-        assert_eq!(loaded, ChatSummary { partner: None, ..with_partner });
-        assert_eq!(cache.chats().unwrap().len(), 1, "the list still shows the row");
+        assert_eq!(
+            loaded,
+            ChatSummary {
+                partner: None,
+                ..with_partner
+            }
+        );
+        assert_eq!(
+            cache.chats().unwrap().len(),
+            1,
+            "the list still shows the row"
+        );
     }
 
     #[test]
@@ -530,7 +740,12 @@ mod tests {
             cache.upsert_message(&msg("a", ts, "x")).unwrap();
         }
         cache.upsert_message(&msg("b", 2, "other")).unwrap();
-        let stamps: Vec<_> = cache.messages_between(&id("a"), 2, 3).unwrap().iter().map(|m| m.timestamp).collect();
+        let stamps: Vec<_> = cache
+            .messages_between(&id("a"), 2, 3)
+            .unwrap()
+            .iter()
+            .map(|m| m.timestamp)
+            .collect();
         assert_eq!(stamps, [2, 3]);
         assert!(cache.messages_between(&id("a"), 5, 9).unwrap().is_empty());
     }
@@ -538,8 +753,12 @@ mod tests {
     #[test]
     fn replacing_chats_drops_history_of_removed_chats() {
         let mut cache = Cache::open_in_memory().unwrap();
-        cache.replace_chats(&[chat("a", None, None), chat("b", None, None)]).unwrap();
-        cache.replace_range(&id("a"), None, None, &[msg("a", 1, "x")], Some(true)).unwrap();
+        cache
+            .replace_chats(&[chat("a", None, None), chat("b", None, None)])
+            .unwrap();
+        cache
+            .replace_range(&id("a"), None, None, &[msg("a", 1, "x")], Some(true))
+            .unwrap();
         cache.replace_chats(&[chat("b", None, None)]).unwrap();
         assert!(cache.message(&id("a"), 1).unwrap().is_none());
         assert!(!cache.history_start(&id("a")).unwrap());
@@ -554,13 +773,39 @@ mod tests {
         let mut cache = Cache::open(dir.path(), &first).unwrap();
         cache.replace_chats(&[chat("a", Some(1), None)]).unwrap();
         cache.upsert_message(&msg("a", 1, "private")).unwrap();
-        cache.put_media(&MediaRef { id: "m".into(), kind: MediaKind::Avatar }, "f", 3).unwrap();
+        cache
+            .put_media(
+                &MediaRef {
+                    id: "m".into(),
+                    kind: MediaKind::Avatar,
+                },
+                "f",
+                3,
+            )
+            .unwrap();
 
         let other = Cache::open(dir.path(), &second).unwrap();
         assert!(other.chats().unwrap().is_empty());
-        assert!(other.history(&id("a"), None, 50).unwrap().messages.is_empty());
-        assert!(other.media(&MediaRef { id: "m".into(), kind: MediaKind::Avatar }).unwrap().is_none());
-        assert_ne!(cache_path(dir.path(), &first), cache_path(dir.path(), &second));
+        assert!(
+            other
+                .history(&id("a"), None, 50)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert!(
+            other
+                .media(&MediaRef {
+                    id: "m".into(),
+                    kind: MediaKind::Avatar
+                })
+                .unwrap()
+                .is_none()
+        );
+        assert_ne!(
+            cache_path(dir.path(), &first),
+            cache_path(dir.path(), &second)
+        );
     }
 
     #[test]
@@ -569,8 +814,14 @@ mod tests {
         let account = UserId("7".into());
         let path = cache_path(dir.path(), &account);
         drop(Cache::open(dir.path(), &account).unwrap());
-        Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
-        assert!(matches!(Cache::open(dir.path(), &account), Err(CacheError::TooNew { found: 99, .. })));
+        Connection::open(&path)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        assert!(matches!(
+            Cache::open(dir.path(), &account),
+            Err(CacheError::TooNew { found: 99, .. })
+        ));
         remove_files(dir.path(), &account).unwrap();
         assert!(!path.exists());
         remove_files(dir.path(), &account).unwrap();
@@ -579,15 +830,28 @@ mod tests {
     #[test]
     fn media_index_round_trips_per_kind() {
         let cache = Cache::open_in_memory().unwrap();
-        let avatar = MediaRef { id: "x".into(), kind: MediaKind::Avatar };
-        let thumb = MediaRef { id: "x".into(), kind: MediaKind::Thumbnail };
+        let avatar = MediaRef {
+            id: "x".into(),
+            kind: MediaKind::Avatar,
+        };
+        let thumb = MediaRef {
+            id: "x".into(),
+            kind: MediaKind::Thumbnail,
+        };
         cache.put_media(&avatar, "avatar-x", 10).unwrap();
         assert_eq!(cache.media(&avatar).unwrap(), Some(("avatar-x".into(), 10)));
         assert_eq!(cache.media(&thumb).unwrap(), None);
     }
 
     fn entry(payload: &str, chat: &str, created_us: MessageTs, text: &str) -> OutboxEntry {
-        OutboxEntry { payload: PayloadId(payload.into()), chat: id(chat), created_us, text: text.into(), reply_to: None, failed: None }
+        OutboxEntry {
+            payload: PayloadId(payload.into()),
+            chat: id(chat),
+            created_us,
+            text: text.into(),
+            reply_to: None,
+            failed: None,
+        }
     }
 
     #[test]
@@ -603,13 +867,21 @@ mod tests {
             put_chat(&conn, &chat("a", Some(2), None)).unwrap();
             put_message(&conn, &id("a"), &msg("a", 2, "kept")).unwrap();
             // A version-1 message row has no `delivery` field.
-            let mut json: serde_json::Value = serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
+            let mut json: serde_json::Value =
+                serde_json::from_str(&encode(&msg("a", 1, "old"))).unwrap();
             json.as_object_mut().unwrap().remove("delivery");
-            conn.execute("INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)", [json.to_string()]).unwrap();
+            conn.execute(
+                "INSERT INTO messages (chat, ts, json) VALUES ('a', 1, ?1)",
+                [json.to_string()],
+            )
+            .unwrap();
         }
 
         let cache = Cache::open(dir.path(), &account).unwrap();
-        let version: i64 = cache.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        let version: i64 = cache
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
         assert_eq!(version, 2);
         assert_eq!(cache.chats().unwrap().len(), 1);
         let chunk = cache.history(&id("a"), None, 50).unwrap();
@@ -618,7 +890,13 @@ mod tests {
         assert!(cache.outbox().unwrap().is_empty());
         assert!(cache.drafts().unwrap().is_empty());
         cache.put_outbox(&entry("p", "a", 3, "new")).unwrap();
-        cache.put_draft(&Draft { chat: id("a"), text: "d".into(), reply_to: None }).unwrap();
+        cache
+            .put_draft(&Draft {
+                chat: id("a"),
+                text: "d".into(),
+                reply_to: None,
+            })
+            .unwrap();
         assert_eq!(cache.outbox().unwrap().len(), 1);
         assert_eq!(cache.drafts().unwrap().len(), 1);
     }
@@ -637,7 +915,13 @@ mod tests {
         }
         let cache = Cache::open(dir.path(), &account).unwrap();
         let entries = cache.outbox().unwrap();
-        assert_eq!(entries.iter().map(|e| e.payload.0.as_str()).collect::<Vec<_>>(), ["p1", "p2"]);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|e| e.payload.0.as_str())
+                .collect::<Vec<_>>(),
+            ["p1", "p2"]
+        );
         assert_eq!(entries[0].failed.as_deref(), Some("NO_PERMISSION"));
         cache.remove_outbox(&PayloadId("p1".into())).unwrap();
         assert_eq!(cache.outbox().unwrap().len(), 1);
@@ -646,13 +930,38 @@ mod tests {
     #[test]
     fn drafts_are_replaced_per_chat_and_removed() {
         let cache = Cache::open_in_memory().unwrap();
-        let reply = ReplyTarget { timestamp: 4, author: Some("Ann".into()), text: "hi".into() };
-        cache.put_draft(&Draft { chat: id("a"), text: "one".into(), reply_to: None }).unwrap();
-        cache.put_draft(&Draft { chat: id("a"), text: "two".into(), reply_to: Some(reply.clone()) }).unwrap();
-        cache.put_draft(&Draft { chat: id("b"), text: "other".into(), reply_to: None }).unwrap();
+        let reply = ReplyTarget {
+            timestamp: 4,
+            author: Some("Ann".into()),
+            text: "hi".into(),
+        };
+        cache
+            .put_draft(&Draft {
+                chat: id("a"),
+                text: "one".into(),
+                reply_to: None,
+            })
+            .unwrap();
+        cache
+            .put_draft(&Draft {
+                chat: id("a"),
+                text: "two".into(),
+                reply_to: Some(reply.clone()),
+            })
+            .unwrap();
+        cache
+            .put_draft(&Draft {
+                chat: id("b"),
+                text: "other".into(),
+                reply_to: None,
+            })
+            .unwrap();
         let drafts = cache.drafts().unwrap();
         assert_eq!(drafts.len(), 2);
-        assert_eq!((drafts[0].text.as_str(), drafts[0].reply_to.clone()), ("two", Some(reply)));
+        assert_eq!(
+            (drafts[0].text.as_str(), drafts[0].reply_to.clone()),
+            ("two", Some(reply))
+        );
         cache.remove_draft(&id("a")).unwrap();
         assert_eq!(cache.drafts().unwrap().len(), 1);
     }
@@ -660,7 +969,11 @@ mod tests {
     #[test]
     fn enqueue_is_atomic_a_failed_insert_keeps_the_draft() {
         let cache = Cache::open_in_memory().unwrap();
-        let draft = Draft { chat: id("a"), text: "typed".into(), reply_to: None };
+        let draft = Draft {
+            chat: id("a"),
+            text: "typed".into(),
+            reply_to: None,
+        };
         cache.put_draft(&draft).unwrap();
         cache.enqueue(&entry("p1", "b", 1, "ok")).unwrap();
         cache.conn.execute_batch("CREATE TRIGGER refuse BEFORE INSERT ON outbox BEGIN SELECT RAISE(ABORT, 'full'); END;").unwrap();
@@ -691,7 +1004,10 @@ mod tests {
         assert_eq!(first, named(".broken-1700"));
         assert!(!path.exists() && !named("-wal").exists());
         assert_eq!(fs::read(named(".broken-1700-wal")).unwrap(), b"wal");
-        assert_eq!(fs::metadata(&first).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&first).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
 
         // A repeat in the same second keeps both.
         fs::write(&path, b"second").unwrap();
@@ -718,7 +1034,12 @@ mod tests {
         for suffix in ["-journal", "-wal", "-shm"] {
             fs::write(named(&mine, &format!(".broken-1700-1{suffix}")), b"s").unwrap();
         }
-        let kept = [named(&other, ""), named(&other, ".broken-5"), named(&prefix, ".broken-5"), named(&other, ".broken-5-wal")];
+        let kept = [
+            named(&other, ""),
+            named(&other, ".broken-5"),
+            named(&prefix, ".broken-5"),
+            named(&other, ".broken-5-wal"),
+        ];
         for path in &kept {
             fs::write(path, b"other").unwrap();
         }
@@ -731,7 +1052,13 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with("3.sqlite"))
             .collect();
-        assert!(left.is_empty(), "this account's files survive sign-out: {left:?}");
-        assert!(kept.iter().all(|path| path.exists()), "another account's files were deleted");
+        assert!(
+            left.is_empty(),
+            "this account's files survive sign-out: {left:?}"
+        );
+        assert!(
+            kept.iter().all(|path| path.exists()),
+            "another account's files were deleted"
+        );
     }
 }

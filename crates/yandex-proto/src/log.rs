@@ -12,8 +12,12 @@ const OWN_CRATES: [&str; 3] = ["yandex_proto", "bt_chat_core", "blazing_telesram
 
 /// Parses a `BT_LOG` value; `None` or blank selects `info`. The error names `BT_LOG`.
 pub fn parse_filter(value: Option<&str>) -> Result<EnvFilter, String> {
-    let value = value.filter(|v| !v.trim().is_empty()).unwrap_or(DEFAULT_FILTER);
-    EnvFilter::builder().parse(value).map_err(|e| format!("{LOG_VAR}={value:?} is not a valid log filter: {e}"))
+    let value = value
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or(DEFAULT_FILTER);
+    EnvFilter::builder()
+        .parse(value)
+        .map_err(|e| format!("{LOG_VAR}={value:?} is not a valid log filter: {e}"))
 }
 
 /// The filter from the `BT_LOG` environment variable.
@@ -36,7 +40,11 @@ fn allowed(meta: &Metadata<'_>) -> bool {
 }
 
 fn is_own(target: &str) -> bool {
-    OWN_CRATES.iter().any(|own| target.strip_prefix(own).is_some_and(|rest| rest.is_empty() || rest.starts_with("::")))
+    OWN_CRATES.iter().any(|own| {
+        target
+            .strip_prefix(own)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
 }
 
 #[cfg(test)]

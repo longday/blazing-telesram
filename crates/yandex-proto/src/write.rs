@@ -56,16 +56,38 @@ pub enum ReactionChange {
 pub enum WriteRequest {
     /// New text message. `payload_id` is the server's deduplication key: resending the same id
     /// answers `DUPLICATE` instead of storing a second copy.
-    SendText { chat: String, payload_id: String, text: String, reply: Option<ReplyRef> },
+    SendText {
+        chat: String,
+        payload_id: String,
+        text: String,
+        reply: Option<ReplyRef>,
+    },
     /// Rewrites the whole `Plain`, so a reply must be repeated or the server drops its quote.
-    Edit { chat: String, timestamp: i64, text: String, reply: Option<ReplyRef> },
+    Edit {
+        chat: String,
+        timestamp: i64,
+        text: String,
+        reply: Option<ReplyRef>,
+    },
     /// A `Plain` without content addresses the message for deletion.
-    Delete { chat: String, timestamp: i64 },
+    Delete {
+        chat: String,
+        timestamp: i64,
+    },
     /// Moves the read position of `chat` up to `timestamp` inclusive (`SeqNo` is optional).
-    Seen { chat: String, timestamp: i64 },
-    Typing { chat: String },
+    Seen {
+        chat: String,
+        timestamp: i64,
+    },
+    Typing {
+        chat: String,
+    },
     /// Sets, replaces or removes the account's reaction on a message of `chat`.
-    Reaction { chat: String, timestamp: i64, change: ReactionChange },
+    Reaction {
+        chat: String,
+        timestamp: i64,
+        change: ReactionChange,
+    },
 }
 
 fn quote(text: &str) -> &str {
@@ -102,24 +124,42 @@ impl WriteRequest {
     /// The `ClientMessage` variant, without `LogData`.
     fn client_message(&self) -> Value {
         match self {
-            Self::SendText { chat, payload_id, text, reply } => {
+            Self::SendText {
+                chat,
+                payload_id,
+                text,
+                reply,
+            } => {
                 let mut plain = json!({ "ChatId": chat, "PayloadId": payload_id, "Text": { "MessageText": text } });
                 if let Some(reply) = reply {
                     add_reply(&mut plain, chat, reply);
                 }
                 json!({ "Plain": plain })
             }
-            Self::Edit { chat, timestamp, text, reply } => {
+            Self::Edit {
+                chat,
+                timestamp,
+                text,
+                reply,
+            } => {
                 let mut plain = json!({ "ChatId": chat, "Timestamp": timestamp, "Text": { "MessageText": text } });
                 if let Some(reply) = reply {
                     add_reply(&mut plain, chat, reply);
                 }
                 json!({ "Plain": plain })
             }
-            Self::Delete { chat, timestamp } => json!({ "Plain": { "ChatId": chat, "Timestamp": timestamp } }),
-            Self::Seen { chat, timestamp } => json!({ "SeenMarker": { "ChatId": chat, "Timestamp": timestamp } }),
+            Self::Delete { chat, timestamp } => {
+                json!({ "Plain": { "ChatId": chat, "Timestamp": timestamp } })
+            }
+            Self::Seen { chat, timestamp } => {
+                json!({ "SeenMarker": { "ChatId": chat, "Timestamp": timestamp } })
+            }
             Self::Typing { chat } => json!({ "Typing": { "ChatId": chat } }),
-            Self::Reaction { chat, timestamp, change } => {
+            Self::Reaction {
+                chat,
+                timestamp,
+                change,
+            } => {
                 let mut reaction = json!({ "ChatId": chat, "Timestamp": timestamp });
                 match change {
                     ReactionChange::Set(code) => {
@@ -135,7 +175,11 @@ impl WriteRequest {
 
     /// `None` before the `subscribed` frame: the server answers a push without a subscription id
     /// with a misleading status, so nothing is sent.
-    pub(crate) fn socket_frame(&self, ctx: &SocketContext<'_>, yandex_uid: &str) -> Option<RequestFrame> {
+    pub(crate) fn socket_frame(
+        &self,
+        ctx: &SocketContext<'_>,
+        yandex_uid: &str,
+    ) -> Option<RequestFrame> {
         let mut client_message = self.client_message();
         client_message["LogData"] = json!({ "YandexUid": yandex_uid });
         Some(RequestFrame {
@@ -216,10 +260,15 @@ fn commit_status(code: i64) -> (&'static str, bool) {
 /// Parses the reply of a `push`. Its `Status` is a commit status, not the read path's
 /// `ResponseStatus`: 1 is success here, while `check_status` reads it as an internal error.
 pub(crate) fn parse_commit(body: &Value) -> Result<Committed, ProtoError> {
-    let status = int_field(body, "Status").ok_or_else(|| ProtoError::Protocol("push reply has no Status".into()))?;
+    let status = int_field(body, "Status")
+        .ok_or_else(|| ProtoError::Protocol("push reply has no Status".into()))?;
     if status != STATUS_FULLY_COMMITTED && status != STATUS_DUPLICATE {
         let (name, permanent) = commit_status(status);
-        return Err(ProtoError::Commit { status, name, permanent });
+        return Err(ProtoError::Commit {
+            status,
+            name,
+            permanent,
+        });
     }
     let message = body.get("MessageInfo").and_then(|info| {
         Some(MessageInfo {
@@ -240,25 +289,55 @@ mod tests {
 
     fn every_request() -> Vec<WriteRequest> {
         let all = vec![
-            WriteRequest::SendText { chat: CHAT.into(), payload_id: "p-1".into(), text: "hi".into(), reply: None },
+            WriteRequest::SendText {
+                chat: CHAT.into(),
+                payload_id: "p-1".into(),
+                text: "hi".into(),
+                reply: None,
+            },
             WriteRequest::SendText {
                 chat: CHAT.into(),
                 payload_id: "p-2".into(),
                 text: "re".into(),
-                reply: Some(ReplyRef { timestamp: 1_784_117_592_261_029, quote: "orig".into() }),
+                reply: Some(ReplyRef {
+                    timestamp: 1_784_117_592_261_029,
+                    quote: "orig".into(),
+                }),
             },
-            WriteRequest::Edit { chat: CHAT.into(), timestamp: 5, text: "new".into(), reply: None },
+            WriteRequest::Edit {
+                chat: CHAT.into(),
+                timestamp: 5,
+                text: "new".into(),
+                reply: None,
+            },
             WriteRequest::Edit {
                 chat: CHAT.into(),
                 timestamp: 6,
                 text: "newer".into(),
-                reply: Some(ReplyRef { timestamp: 4, quote: "orig".into() }),
+                reply: Some(ReplyRef {
+                    timestamp: 4,
+                    quote: "orig".into(),
+                }),
             },
-            WriteRequest::Delete { chat: CHAT.into(), timestamp: 5 },
-            WriteRequest::Seen { chat: CHAT.into(), timestamp: 5 },
+            WriteRequest::Delete {
+                chat: CHAT.into(),
+                timestamp: 5,
+            },
+            WriteRequest::Seen {
+                chat: CHAT.into(),
+                timestamp: 5,
+            },
             WriteRequest::Typing { chat: CHAT.into() },
-            WriteRequest::Reaction { chat: CHAT.into(), timestamp: 7, change: ReactionChange::Set(100_101) },
-            WriteRequest::Reaction { chat: CHAT.into(), timestamp: 7, change: ReactionChange::Remove },
+            WriteRequest::Reaction {
+                chat: CHAT.into(),
+                timestamp: 7,
+                change: ReactionChange::Set(100_101),
+            },
+            WriteRequest::Reaction {
+                chat: CHAT.into(),
+                timestamp: 7,
+                change: ReactionChange::Remove,
+            },
         ];
         // An exhaustive `match`: adding a variant is a compile error until it is listed above.
         for request in &all {
@@ -275,7 +354,11 @@ mod tests {
     }
 
     fn frame(request: &WriteRequest) -> RequestFrame {
-        let ctx = SocketContext { req_id: 4, request_id: "rid", subscription_id: Some("sub") };
+        let ctx = SocketContext {
+            req_id: 4,
+            request_id: "rid",
+            subscription_id: Some("sub"),
+        };
         request.socket_frame(&ctx, "4242").unwrap()
     }
 
@@ -295,12 +378,22 @@ mod tests {
 
     #[test]
     fn send_is_a_plain_with_payload_id() {
-        let request = WriteRequest::SendText { chat: CHAT.into(), payload_id: "p-1".into(), text: "hi".into(), reply: None };
+        let request = WriteRequest::SendText {
+            chat: CHAT.into(),
+            payload_id: "p-1".into(),
+            text: "hi".into(),
+            reply: None,
+        };
         let frame = frame(&request);
-        assert_eq!((frame.service_index, frame.req_id, frame.method.as_str()), (0, 4, "push"));
+        assert_eq!(
+            (frame.service_index, frame.req_id, frame.method.as_str()),
+            (0, 4, "push")
+        );
         assert_eq!(
             frame.body,
-            envelope(json!({ "Plain": { "ChatId": CHAT, "PayloadId": "p-1", "Text": { "MessageText": "hi" } } }))
+            envelope(
+                json!({ "Plain": { "ChatId": CHAT, "PayloadId": "p-1", "Text": { "MessageText": "hi" } } })
+            )
         );
     }
 
@@ -310,7 +403,10 @@ mod tests {
             chat: CHAT.into(),
             payload_id: "p-2".into(),
             text: "re".into(),
-            reply: Some(ReplyRef { timestamp: 1_784_117_592_261_029, quote: "orig".into() }),
+            reply: Some(ReplyRef {
+                timestamp: 1_784_117_592_261_029,
+                quote: "orig".into(),
+            }),
         };
         assert_eq!(
             frame(&request).body,
@@ -331,10 +427,16 @@ mod tests {
             chat: CHAT.into(),
             payload_id: "p".into(),
             text: "t".into(),
-            reply: Some(ReplyRef { timestamp: 1, quote: long.clone() }),
+            reply: Some(ReplyRef {
+                timestamp: 1,
+                quote: long.clone(),
+            }),
         };
         let body = frame(&request).body;
-        let sent = body["ClientMessage"]["Plain"]["ForwardedMessageStyles"][0]["Quote"].as_str().unwrap().to_owned();
+        let sent = body["ClientMessage"]["Plain"]["ForwardedMessageStyles"][0]["Quote"]
+            .as_str()
+            .unwrap()
+            .to_owned();
         assert_eq!(sent, long.chars().take(200).collect::<String>());
         assert_eq!(quote("short"), "short");
         assert_eq!(quote(&"a".repeat(200)).len(), 200);
@@ -342,10 +444,17 @@ mod tests {
 
     #[test]
     fn edit_addresses_the_message_by_a_numeric_timestamp() {
-        let request = WriteRequest::Edit { chat: CHAT.into(), timestamp: 1_784_117_592_261_029, text: "new".into(), reply: None };
+        let request = WriteRequest::Edit {
+            chat: CHAT.into(),
+            timestamp: 1_784_117_592_261_029,
+            text: "new".into(),
+            reply: None,
+        };
         assert_eq!(
             frame(&request).body,
-            envelope(json!({ "Plain": { "ChatId": CHAT, "Timestamp": 1_784_117_592_261_029_i64, "Text": { "MessageText": "new" } } }))
+            envelope(
+                json!({ "Plain": { "ChatId": CHAT, "Timestamp": 1_784_117_592_261_029_i64, "Text": { "MessageText": "new" } } })
+            )
         );
     }
 
@@ -356,7 +465,10 @@ mod tests {
             chat: CHAT.into(),
             timestamp: 20,
             text: "new".into(),
-            reply: Some(ReplyRef { timestamp: 10, quote: "orig".into() }),
+            reply: Some(ReplyRef {
+                timestamp: 10,
+                quote: "orig".into(),
+            }),
         };
         assert_eq!(
             frame(&request).body,
@@ -372,30 +484,51 @@ mod tests {
 
     #[test]
     fn delete_is_a_plain_without_content() {
-        let request = WriteRequest::Delete { chat: CHAT.into(), timestamp: 9 };
-        assert_eq!(frame(&request).body, envelope(json!({ "Plain": { "ChatId": CHAT, "Timestamp": 9 } })));
+        let request = WriteRequest::Delete {
+            chat: CHAT.into(),
+            timestamp: 9,
+        };
+        assert_eq!(
+            frame(&request).body,
+            envelope(json!({ "Plain": { "ChatId": CHAT, "Timestamp": 9 } }))
+        );
     }
 
     #[test]
     fn seen_is_a_seen_marker_without_seq_no() {
-        let request = WriteRequest::Seen { chat: CHAT.into(), timestamp: 9 };
-        assert_eq!(frame(&request).body, envelope(json!({ "SeenMarker": { "ChatId": CHAT, "Timestamp": 9 } })));
+        let request = WriteRequest::Seen {
+            chat: CHAT.into(),
+            timestamp: 9,
+        };
+        assert_eq!(
+            frame(&request).body,
+            envelope(json!({ "SeenMarker": { "ChatId": CHAT, "Timestamp": 9 } }))
+        );
     }
 
     #[test]
     fn typing_names_only_the_chat() {
         let request = WriteRequest::Typing { chat: CHAT.into() };
-        assert_eq!(frame(&request).body, envelope(json!({ "Typing": { "ChatId": CHAT } })));
+        assert_eq!(
+            frame(&request).body,
+            envelope(json!({ "Typing": { "ChatId": CHAT } }))
+        );
     }
 
     /// `REPLACE` (2) with an integer `Type`: also the add, when the user has no reaction yet.
     #[test]
     fn setting_a_reaction_is_a_replace_with_an_integer_type() {
-        let request = WriteRequest::Reaction { chat: CHAT.into(), timestamp: 1_795_070_677_887_127, change: ReactionChange::Set(100_101) };
+        let request = WriteRequest::Reaction {
+            chat: CHAT.into(),
+            timestamp: 1_795_070_677_887_127,
+            change: ReactionChange::Set(100_101),
+        };
         let body = frame(&request).body;
         assert_eq!(
             body,
-            envelope(json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 1_795_070_677_887_127_i64, "Type": 100_101, "Action": 2 } }))
+            envelope(
+                json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 1_795_070_677_887_127_i64, "Type": 100_101, "Action": 2 } })
+            )
         );
         assert!(body["ClientMessage"]["Reaction"]["Type"].is_i64());
         assert_eq!(request.kind(), "reaction");
@@ -404,9 +537,16 @@ mod tests {
     /// `REMOVE` (1) names no `Type`: the server demands it only for add and replace.
     #[test]
     fn removing_a_reaction_is_a_remove_without_a_type() {
-        let request = WriteRequest::Reaction { chat: CHAT.into(), timestamp: 9, change: ReactionChange::Remove };
+        let request = WriteRequest::Reaction {
+            chat: CHAT.into(),
+            timestamp: 9,
+            change: ReactionChange::Remove,
+        };
         let body = frame(&request).body;
-        assert_eq!(body, envelope(json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 9, "Action": 1 } })));
+        assert_eq!(
+            body,
+            envelope(json!({ "Reaction": { "ChatId": CHAT, "Timestamp": 9, "Action": 1 } }))
+        );
         assert!(body["ClientMessage"]["Reaction"].get("Type").is_none());
     }
 
@@ -420,15 +560,24 @@ mod tests {
             assert_eq!(request.method(), "push");
             let client_message = frame.body["ClientMessage"].as_object().unwrap();
             for key in client_message.keys().filter(|k| *k != "LogData") {
-                assert!(CLIENT_MESSAGE_VARIANTS.contains(&key.as_str()), "{key} is not an allowed variant");
+                assert!(
+                    CLIENT_MESSAGE_VARIANTS.contains(&key.as_str()),
+                    "{key} is not an allowed variant"
+                );
                 seen.insert(key.clone());
             }
             assert_eq!(client_message["LogData"], json!({ "YandexUid": "4242" }));
         }
         let mut expected = CLIENT_MESSAGE_VARIANTS.to_vec();
         expected.sort_unstable();
-        assert_eq!(seen.iter().map(String::as_str).collect::<Vec<_>>(), expected);
-        assert_eq!(CLIENT_MESSAGE_VARIANTS, ["Plain", "SeenMarker", "Typing", "Reaction"]);
+        assert_eq!(
+            seen.iter().map(String::as_str).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            CLIENT_MESSAGE_VARIANTS,
+            ["Plain", "SeenMarker", "Typing", "Reaction"]
+        );
     }
 
     #[test]
@@ -438,14 +587,30 @@ mod tests {
         }
         assert_eq!(
             crate::request::ALLOWED_METHODS,
-            ["request_user", "get_users_data", "history", "subscribe", "search", "whoami", "get_chat_members"]
+            [
+                "request_user",
+                "get_users_data",
+                "history",
+                "subscribe",
+                "search",
+                "whoami",
+                "get_chat_members"
+            ]
         );
     }
 
     #[test]
     fn nothing_is_sent_before_the_subscription_id_is_known() {
-        let ctx = SocketContext { req_id: 1, request_id: "rid", subscription_id: None };
-        assert!(WriteRequest::Typing { chat: CHAT.into() }.socket_frame(&ctx, "4242").is_none());
+        let ctx = SocketContext {
+            req_id: 1,
+            request_id: "rid",
+            subscription_id: None,
+        };
+        assert!(
+            WriteRequest::Typing { chat: CHAT.into() }
+                .socket_frame(&ctx, "4242")
+                .is_none()
+        );
     }
 
     #[test]
@@ -473,13 +638,22 @@ mod tests {
         assert_eq!(duplicate.message, None);
 
         // A message info without a timestamp tells nothing about where the message went.
-        assert_eq!(parse_commit(&json!({ "Status": 1, "MessageInfo": { "SeqNo": 5 } })).unwrap().message, None);
+        assert_eq!(
+            parse_commit(&json!({ "Status": 1, "MessageInfo": { "SeqNo": 5 } }))
+                .unwrap()
+                .message,
+            None
+        );
     }
 
     #[test]
     fn refusals_split_into_permanent_and_transient() {
         let refused = |status: i64| match parse_commit(&json!({ "Status": status })) {
-            Err(ProtoError::Commit { status: s, name, permanent }) => {
+            Err(ProtoError::Commit {
+                status: s,
+                name,
+                permanent,
+            }) => {
                 assert_eq!(s, status);
                 (name, permanent)
             }
@@ -498,14 +672,24 @@ mod tests {
         ] {
             assert_eq!(refused(status), (name, true), "{name}");
         }
-        for (status, name) in [(3, "FAILED"), (23, "RATE_LIMIT_EXCEEDED"), (10, "KIKIMR_WRITE_FAILED"), (99, "unknown")] {
+        for (status, name) in [
+            (3, "FAILED"),
+            (23, "RATE_LIMIT_EXCEEDED"),
+            (10, "KIKIMR_WRITE_FAILED"),
+            (99, "unknown"),
+        ] {
             assert_eq!(refused(status), (name, false), "{name}");
         }
     }
 
     #[test]
     fn a_reply_without_status_is_not_a_commit() {
-        assert!(matches!(parse_commit(&json!({ "MessageInfo": { "TimestampMcs": 5 } })), Err(ProtoError::Protocol(m)) if m.contains("Status")));
-        assert!(matches!(parse_commit(&json!({})), Err(ProtoError::Protocol(_))));
+        assert!(
+            matches!(parse_commit(&json!({ "MessageInfo": { "TimestampMcs": 5 } })), Err(ProtoError::Protocol(m)) if m.contains("Status"))
+        );
+        assert!(matches!(
+            parse_commit(&json!({})),
+            Err(ProtoError::Protocol(_))
+        ));
     }
 }

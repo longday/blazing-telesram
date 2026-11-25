@@ -2,19 +2,19 @@ mod desktop;
 mod format;
 mod info_panel;
 mod input;
-mod login;
 mod logging;
+mod login;
 mod new_chat;
 mod profile;
 mod search_results;
 mod store;
+#[cfg(test)]
+mod tests;
 mod theme;
 mod timeline;
 mod viewer;
 mod widgets;
 mod yandex_backend;
-#[cfg(test)]
-mod tests;
 
 use bt_chat_core::model::{ChatId, UserId};
 use bt_chat_core::{ChatClient, ClientConfig};
@@ -93,10 +93,15 @@ fn session_cookie(cookie: LoginCookie) -> SessionCookie {
 }
 
 /// Runs the HTTP bootstrap on a throwaway Tokio runtime: reqwest needs one, GPUI has none.
-fn verify(cookies: Vec<SessionCookie>) -> async_channel::Receiver<(Vec<SessionCookie>, Result<Identity, BootstrapError>)> {
+fn verify(
+    cookies: Vec<SessionCookie>,
+) -> async_channel::Receiver<(Vec<SessionCookie>, Result<Identity, BootstrapError>)> {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let result = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        let result = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
             Ok(runtime) => runtime.block_on(bootstrap(&RegistryEndpoints::production(), &cookies)),
             Err(error) => Err(BootstrapError::Network(error.to_string())),
         };
@@ -108,16 +113,23 @@ fn verify(cookies: Vec<SessionCookie>) -> async_channel::Receiver<(Vec<SessionCo
 /// Closing this window before sign-in completes quits the app without writing anything.
 fn open_sign_in(runtime: RuntimeDir, cx: &mut App) {
     let opened = login::open_sign_in_window(cx, move |cookies, window, cx| {
-        let Some(handle) = window.window_handle().downcast::<SignInWindow>() else { return };
+        let Some(handle) = window.window_handle().downcast::<SignInWindow>() else {
+            return;
+        };
         let verified = verify(cookies.into_iter().map(session_cookie).collect());
         let runtime = runtime.clone();
         cx.spawn(async move |cx| {
-            let Ok((cookies, result)) = verified.recv().await else { return };
+            let Ok((cookies, result)) = verified.recv().await else {
+                return;
+            };
             let _ = cx.update(|cx| {
                 let saved = match result {
                     Ok(identity) => {
                         let session = Session { cookies, identity };
-                        session.save(&runtime).map(|()| session).map_err(|e| e.to_string())
+                        session
+                            .save(&runtime)
+                            .map(|()| session)
+                            .map_err(|e| e.to_string())
                     }
                     Err(error) => Err(error.to_string()),
                 };
@@ -177,7 +189,10 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(850.), px(560.))),
-            titlebar: Some(TitlebarOptions { title: Some("Blazing Telesram".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Blazing Telesram".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         },
         |window, cx| cx.new(|cx| Desktop::new(window_store, Clock::system(), window, cx)),
@@ -203,13 +218,19 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
 /// title bar included, fits it.
 pub(crate) fn fitted_window_bounds(preferred: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
     use objc2_app_kit::{NSScreen, NSWindow, NSWindowStyleMask};
-    let Some(mtm) = objc2::MainThreadMarker::new() else { return Bounds::centered(None, preferred, cx) };
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Bounds::centered(None, preferred, cx);
+    };
     let (Some(screen), Some(primary)) = (NSScreen::mainScreen(mtm), cx.primary_display()) else {
         return Bounds::centered(None, preferred, cx);
     };
     let visible = screen.visibleFrame();
-    let content = NSWindow::contentRectForFrameRect_styleMask(visible, NSWindowStyleMask::Titled, mtm);
-    let fitted = preferred.min(&size(px(content.size.width as f32), px(content.size.height as f32)));
+    let content =
+        NSWindow::contentRectForFrameRect_styleMask(visible, NSWindowStyleMask::Titled, mtm);
+    let fitted = preferred.min(&size(
+        px(content.size.width as f32),
+        px(content.size.height as f32),
+    ));
     // gpui takes the frame's top-left corner with the content size. AppKit measures y up from the primary
     // screen's bottom edge; gpui measures it down from its top edge.
     let top = primary.bounds().size.height - px((visible.origin.y + visible.size.height) as f32);
@@ -238,11 +259,26 @@ mod session_tests {
         };
         let converted = session_cookie(cookie);
         assert_eq!(
-            (converted.name.as_str(), converted.value.as_str(), converted.domain.as_str(), converted.path.as_str()),
+            (
+                converted.name.as_str(),
+                converted.value.as_str(),
+                converted.domain.as_str(),
+                converted.path.as_str()
+            ),
             ("Session_id", "v", "yandex.ru", "/")
         );
-        assert_eq!((converted.expires_unix, converted.secure, converted.http_only), (Some(1_900_000_000), true, true));
-        assert_eq!(yandex_proto::session::cookie_header(&[converted], "yandex.ru"), "Session_id=v");
+        assert_eq!(
+            (
+                converted.expires_unix,
+                converted.secure,
+                converted.http_only
+            ),
+            (Some(1_900_000_000), true, true)
+        );
+        assert_eq!(
+            yandex_proto::session::cookie_header(&[converted], "yandex.ru"),
+            "Session_id=v"
+        );
     }
 }
 
@@ -253,7 +289,10 @@ mod downloads_dir_tests {
 
     #[test]
     fn the_downloads_folder_is_under_an_absolute_home() {
-        assert_eq!(downloads_dir(Some("/Users/me".into())), Some(PathBuf::from("/Users/me/Downloads")));
+        assert_eq!(
+            downloads_dir(Some("/Users/me".into())),
+            Some(PathBuf::from("/Users/me/Downloads"))
+        );
     }
 
     #[test]

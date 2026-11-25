@@ -39,7 +39,11 @@ impl NewChat {
     pub fn new(cx: &mut Context<Desktop>) -> Self {
         let search = cx.new(|cx| TextInput::single_line("Поиск людей", cx));
         let repaint = cx.observe(&search, |_, _, cx| cx.notify());
-        Self { search, chosen: None, _repaint: repaint }
+        Self {
+            search,
+            chosen: None,
+            _repaint: repaint,
+        }
     }
 }
 
@@ -73,9 +77,19 @@ pub fn candidates(store: &ChatStore, panel: Option<&ChatId>) -> Vec<Candidate> {
     let mut seen: HashSet<UserId> = HashSet::new();
     let mut out = Vec::new();
     for chat in chats.iter().filter(|_| !me.is_empty()) {
-        let Some(partner) = chat.partner.as_ref().filter(|_| chat.kind == ChatKind::Private) else { continue };
+        let Some(partner) = chat
+            .partner
+            .as_ref()
+            .filter(|_| chat.kind == ChatKind::Private)
+        else {
+            continue;
+        };
         if !me.contains(partner) && seen.insert(partner.clone()) {
-            out.push(Candidate { user: partner.clone(), name: chat.title.clone(), avatar: chat.avatar.clone() });
+            out.push(Candidate {
+                user: partner.clone(),
+                name: chat.title.clone(),
+                avatar: chat.avatar.clone(),
+            });
         }
     }
     if let Some(MembersState::Ready(members)) = panel.and_then(|chat| store.members_state(chat)) {
@@ -96,7 +110,9 @@ pub fn candidates(store: &ChatStore, panel: Option<&ChatId>) -> Vec<Candidate> {
 /// The candidates whose name contains the trimmed query, case-insensitively; all of them for a blank query.
 pub fn matching<'a>(all: &'a [Candidate], query: &str) -> Vec<&'a Candidate> {
     let query = query.trim().to_lowercase();
-    all.iter().filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query)).collect()
+    all.iter()
+        .filter(|c| query.is_empty() || c.name.to_lowercase().contains(&query))
+        .collect()
 }
 
 /// The account's private chat with `user`, if the list holds one.
@@ -126,8 +142,14 @@ pub fn notice(state: Option<&CreationState>) -> Notice {
     match state {
         None => Notice::Nothing,
         Some(CreationState::InFlight) => Notice::Sending,
-        Some(CreationState::Failed { reason, unknown: false }) => Notice::Failed(reason.clone()),
-        Some(CreationState::Failed { reason, unknown: true }) => Notice::Unknown(reason.clone()),
+        Some(CreationState::Failed {
+            reason,
+            unknown: false,
+        }) => Notice::Failed(reason.clone()),
+        Some(CreationState::Failed {
+            reason,
+            unknown: true,
+        }) => Notice::Unknown(reason.clone()),
         Some(CreationState::Unverified { reason }) => Notice::Unverified(reason.clone()),
     }
 }
@@ -137,7 +159,12 @@ pub fn can_create(chosen: bool, state: Option<&CreationState>) -> bool {
     chosen && state != Some(&CreationState::InFlight)
 }
 
-fn candidate_row(store: &ChatStore, candidate: &Candidate, chosen: bool, cx: &Context<Desktop>) -> Stateful<Div> {
+fn candidate_row(
+    store: &ChatStore,
+    candidate: &Candidate,
+    chosen: bool,
+    cx: &Context<Desktop>,
+) -> Stateful<Div> {
     let tag = format!("candidate-{}", candidate.user.0);
     let row_tag = tag.clone();
     let user = candidate.user.clone();
@@ -154,29 +181,56 @@ fn candidate_row(store: &ChatStore, candidate: &Candidate, chosen: bool, cx: &Co
         .cursor_pointer()
         .bg(rgb(if chosen { ROW_SELECTED } else { PANEL }))
         .hover(|s| s.bg(rgb(if chosen { ROW_SELECTED } else { ROW_HOVER })))
-        .child(avatar(store, candidate.avatar.as_ref(), &candidate.user.0, &candidate.name, 36., format!("{tag}-avatar")))
-        .child(div().flex_1().min_w_0().truncate().child(candidate.name.clone()))
+        .child(avatar(
+            store,
+            candidate.avatar.as_ref(),
+            &candidate.user.0,
+            &candidate.name,
+            36.,
+            format!("{tag}-avatar"),
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(candidate.name.clone()),
+        )
         .on_click(cx.listener(move |this, _, _, cx| this.choose_person(user.clone(), cx)))
 }
 
 fn note(selector: &'static str, text: impl Into<SharedString>) -> Div {
-    div().debug_selector(move || selector.into()).text_color(rgb(MUTED)).child(text.into())
+    div()
+        .debug_selector(move || selector.into())
+        .text_color(rgb(MUTED))
+        .child(text.into())
 }
 
 /// The modal. Debug selectors: `new-chat-view`, `new-chat-search`, `candidate-<guid>` (+ `-avatar`),
 /// `new-chat-empty`, `new-chat-identity`, `new-chat-nomatch`, `new-chat-participant` (+ `-avatar`),
 /// `new-chat-sending`, `new-chat-error`, `new-chat-unknown`, `new-chat-unverified`, `new-chat-cancel`,
 /// `new-chat-create`.
-pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
+pub fn render(
+    state: &NewChat,
+    panel: Option<ChatId>,
+    store: &Entity<ChatStore>,
+    cx: &mut Context<Desktop>,
+) -> Div {
     let query = state.search.read(cx).content.to_string();
     let (all, creation, identity) = {
         let store = store.read(cx);
         let identity = match (identity_known(store), store.profile_state()) {
             (true, _) => None,
-            (false, Some(ProfileState::Failed { .. })) => Some("Не удалось определить вашу учётную запись. Закройте окно и откройте его снова."),
+            (false, Some(ProfileState::Failed { .. })) => Some(
+                "Не удалось определить вашу учётную запись. Закройте окно и откройте его снова.",
+            ),
             (false, _) => Some("Загрузка…"),
         };
-        (candidates(store, panel.as_ref()), store.creation_state().cloned(), identity)
+        (
+            candidates(store, panel.as_ref()),
+            store.creation_state().cloned(),
+            identity,
+        )
     };
     let shown = matching(&all, &query).len();
     let notice = notice(creation.as_ref());
@@ -221,7 +275,12 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(div().text_size(px(13.)).text_color(rgb(MUTED)).child("Личный чат с"))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(rgb(MUTED))
+                    .child("Личный чат с"),
+            )
             .child(
                 div()
                     .flex()
@@ -235,7 +294,12 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
                         32.,
                         "new-chat-participant-avatar".into(),
                     ))
-                    .child(div().font_weight(FontWeight::MEDIUM).truncate().child(chosen.name.clone())),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .truncate()
+                            .child(chosen.name.clone()),
+                    ),
             )
     });
 
@@ -277,12 +341,15 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
     let cancel = button("new-chat-cancel", "Отмена")
         .debug_selector(|| "new-chat-cancel".into())
         .when(sending, |b| b.text_color(rgb(MUTED)).cursor_default())
-        .when(!sending, |b| b.on_click(cx.listener(|this, _, _, cx| this.close_new_chat(cx))));
+        .when(!sending, |b| {
+            b.on_click(cx.listener(|this, _, _, cx| this.close_new_chat(cx)))
+        });
     let create = button("new-chat-create", "Создать")
         .debug_selector(|| "new-chat-create".into())
         .when(!enabled, |b| b.text_color(rgb(MUTED)).cursor_default())
         .when(enabled, |b| {
-            b.text_color(rgb(ACCENT)).on_click(cx.listener(|this, _, _, cx| this.confirm_new_chat(cx)))
+            b.text_color(rgb(ACCENT))
+                .on_click(cx.listener(|this, _, _, cx| this.confirm_new_chat(cx)))
         });
 
     div()
@@ -303,7 +370,12 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .child(div().text_size(px(17.)).font_weight(FontWeight::MEDIUM).child("Новый чат"))
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Новый чат"),
+                )
                 .child(
                     div()
                         .debug_selector(|| "new-chat-search".into())
@@ -316,6 +388,13 @@ pub fn render(state: &NewChat, panel: Option<ChatId>, store: &Entity<ChatStore>,
                 .child(list)
                 .children(participant)
                 .children(message)
-                .child(div().flex().justify_end().gap(px(8.)).child(cancel).child(create)),
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(cancel)
+                        .child(create),
+                ),
         )
 }

@@ -97,8 +97,8 @@ impl IncomingFrame {
             return Err(FrameError::UnknownType(frame_type));
         }
         // read_value advances `rest` by exactly the parsed length: that is the header end.
-        let header = rmpv::decode::read_value(&mut rest)
-            .map_err(|e| FrameError::Header(e.to_string()))?;
+        let header =
+            rmpv::decode::read_value(&mut rest).map_err(|e| FrameError::Header(e.to_string()))?;
         let Value::Array(items) = header else {
             return Err(FrameError::Header("not an array".into()));
         };
@@ -172,7 +172,13 @@ mod tests {
 
     /// Encodes a request with service index 0.
     fn request(method: &str, req_id: u64, body: Json) -> Vec<u8> {
-        RequestFrame { service_index: 0, req_id, method: method.into(), body }.encode()
+        RequestFrame {
+            service_index: 0,
+            req_id,
+            method: method.into(),
+            body,
+        }
+        .encode()
     }
 
     #[test]
@@ -217,7 +223,11 @@ mod tests {
             assert_eq!(&frame[..3], &[0x01, 0x93, 0x00]);
             let mut expected = hex(enc);
             expected.extend(hex("a1 6d"));
-            assert_eq!(&frame[3..3 + expected.len()], expected.as_slice(), "{req_id}");
+            assert_eq!(
+                &frame[3..3 + expected.len()],
+                expected.as_slice(),
+                "{req_id}"
+            );
         }
         let long = "a".repeat(40);
         let frame = request(&long, 3, json!({}));
@@ -247,7 +257,12 @@ mod tests {
     fn decode_reply_with_req_id_5_does_not_scan_for_separator() {
         let frame = request("push", 5, json!({"RequestId": "p"}));
         assert_eq!(frame.iter().position(|&b| b == 0x05), Some(3));
-        let IncomingFrame::Reply { req_id, method, body, .. } = IncomingFrame::decode(&frame).unwrap()
+        let IncomingFrame::Reply {
+            req_id,
+            method,
+            body,
+            ..
+        } = IncomingFrame::decode(&frame).unwrap()
         else {
             panic!("expected reply");
         };
@@ -257,9 +272,22 @@ mod tests {
 
     #[test]
     fn encode_decode_roundtrip_across_uint_widths() {
-        for req_id in [0, 1, 127, 128, 255, 256, 65535, 65536, u32::MAX as u64, u64::MAX] {
+        for req_id in [
+            0,
+            1,
+            127,
+            128,
+            255,
+            256,
+            65535,
+            65536,
+            u32::MAX as u64,
+            u64::MAX,
+        ] {
             let frame = request("history", req_id, json!({"a": [1, "é"]}));
-            let IncomingFrame::Reply { req_id: got, body, .. } = IncomingFrame::decode(&frame).unwrap()
+            let IncomingFrame::Reply {
+                req_id: got, body, ..
+            } = IncomingFrame::decode(&frame).unwrap()
             else {
                 panic!("expected reply");
             };
@@ -290,7 +318,10 @@ mod tests {
     fn decode_proxy_status() {
         assert_eq!(
             IncomingFrame::decode(&hex("02 92 07 06")).unwrap(),
-            IncomingFrame::ProxyStatus { req_id: 7, error_code: 6 }
+            IncomingFrame::ProxyStatus {
+                req_id: 7,
+                error_code: 6
+            }
         );
     }
 
@@ -313,37 +344,58 @@ mod tests {
     #[test]
     fn malformed_frames_return_errors() {
         assert_err(&[], |e| matches!(e, FrameError::Empty));
-        assert_err(&[0x09, 0x90], |e| matches!(e, FrameError::UnknownType(0x09)));
+        assert_err(&[0x09, 0x90], |e| {
+            matches!(e, FrameError::UnknownType(0x09))
+        });
         // Truncated / missing header.
         assert_err(&[0x01], |e| matches!(e, FrameError::Header(_)));
-        assert_err(&hex("01 93 00 01 a6 77686f"), |e| matches!(e, FrameError::Header(_)));
+        assert_err(&hex("01 93 00 01 a6 77686f"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
         // Invalid msgpack marker (0xc1 is never used).
         assert_err(&hex("01 c1"), |e| matches!(e, FrameError::Header(_)));
         // Header is not an array.
         assert_err(&hex("01 80 00"), |e| matches!(e, FrameError::Header(_)));
         // Wrong arity for the frame type.
         assert_err(&hex("01 92 00 01"), |e| matches!(e, FrameError::Header(_)));
-        assert_err(&hex("02 93 00 01 02"), |e| matches!(e, FrameError::Header(_)));
+        assert_err(&hex("02 93 00 01 02"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
         // Wrong element types: string reqId, integer method, negative reqId.
-        assert_err(&hex("01 93 00 a1 61 a1 6d"), |e| matches!(e, FrameError::Header(_)));
-        assert_err(&hex("01 93 00 01 05"), |e| matches!(e, FrameError::Header(_)));
-        assert_err(&hex("01 93 00 ff a1 6d"), |e| matches!(e, FrameError::Header(_)));
+        assert_err(&hex("01 93 00 a1 61 a1 6d"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
+        assert_err(&hex("01 93 00 01 05"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
+        assert_err(&hex("01 93 00 ff a1 6d"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
         // Method is not valid UTF-8: rmpv keeps it as a non-string.
-        assert_err(&hex("01 93 00 01 a1 ff"), |e| matches!(e, FrameError::Header(_)));
+        assert_err(&hex("01 93 00 01 a1 ff"), |e| {
+            matches!(e, FrameError::Header(_))
+        });
         // Short data section.
-        assert_err(&hex("01 93 00 01 a1 6d"), |e| matches!(e, FrameError::ShortDataSection(0)));
-        assert_err(&hex("01 93 00 01 a1 6d 05 0000"), |e| matches!(e, FrameError::ShortDataSection(3)));
+        assert_err(&hex("01 93 00 01 a1 6d"), |e| {
+            matches!(e, FrameError::ShortDataSection(0))
+        });
+        assert_err(&hex("01 93 00 01 a1 6d 05 0000"), |e| {
+            matches!(e, FrameError::ShortDataSection(3))
+        });
         // Wrong separator.
-        assert_err(&hex("01 93 00 01 a1 6d 07 000000000000000000 0000 7b7d"), |e| {
-            matches!(e, FrameError::BadSeparator(0x07))
-        });
+        assert_err(
+            &hex("01 93 00 01 a1 6d 07 000000000000000000 0000 7b7d"),
+            |e| matches!(e, FrameError::BadSeparator(0x07)),
+        );
         // Bad JSON.
-        assert_err(&hex("01 93 00 01 a1 6d 05 000000000000000000 0000 7b"), |e| {
-            matches!(e, FrameError::Body(_))
-        });
-        assert_err(&hex("03 94 00 a1 73 a1 65 01 05 000000000000000000 0000 ff"), |e| {
-            matches!(e, FrameError::Body(_))
-        });
+        assert_err(
+            &hex("01 93 00 01 a1 6d 05 000000000000000000 0000 7b"),
+            |e| matches!(e, FrameError::Body(_)),
+        );
+        assert_err(
+            &hex("03 94 00 a1 73 a1 65 01 05 000000000000000000 0000 ff"),
+            |e| matches!(e, FrameError::Body(_)),
+        );
     }
 
     #[test]

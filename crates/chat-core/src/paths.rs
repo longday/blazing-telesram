@@ -20,7 +20,9 @@ pub fn escape_component(raw: &str) -> String {
 }
 
 pub fn cache_path(runtime_dir: &Path, account: &UserId) -> PathBuf {
-    runtime_dir.join("cache").join(format!("{}.sqlite", escape_component(&account.0)))
+    runtime_dir
+        .join("cache")
+        .join(format!("{}.sqlite", escape_component(&account.0)))
 }
 
 pub fn media_dir(runtime_dir: &Path, account: &UserId) -> PathBuf {
@@ -69,9 +71,13 @@ fn cut_on_boundary(s: &str, max: usize) -> &str {
 /// Empty, `.`, `..`, only dots and `None` give `"Файл"`. Idempotent.
 pub fn sanitize_file_name(name: Option<&str>) -> String {
     let last = name.unwrap_or("").rsplit(['/', '\\']).next().unwrap_or("");
-    let replaced: String =
-        last.chars().map(|c| if c.is_control() || c == ':' { '_' } else { c }).collect();
-    let trimmed = replaced.trim_start_matches(|c: char| c == '.' || c.is_whitespace()).trim_end();
+    let replaced: String = last
+        .chars()
+        .map(|c| if c.is_control() || c == ':' { '_' } else { c })
+        .collect();
+    let trimmed = replaced
+        .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
+        .trim_end();
     if trimmed.is_empty() {
         return FALLBACK_FILE_NAME.to_owned();
     }
@@ -130,7 +136,15 @@ pub fn create_partial(dir: &Path, name: &str) -> io::Result<(File, Partial)> {
     for n in 0..MAX_ATTEMPTS {
         let path = dir.join(format!("{}.part", unique_name(&name, n)));
         match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((file, Partial { path, committed: false })),
+            Ok(file) => {
+                return Ok((
+                    file,
+                    Partial {
+                        path,
+                        committed: false,
+                    },
+                ));
+            }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -223,9 +237,15 @@ mod tests {
 
     #[test]
     fn sanitize_falls_back_for_unusable_names() {
-        for name in
-            [None, Some(""), Some("."), Some(".."), Some("..."), Some("  "), Some("\u{3000}. .")]
-        {
+        for name in [
+            None,
+            Some(""),
+            Some("."),
+            Some(".."),
+            Some("..."),
+            Some("  "),
+            Some("\u{3000}. ."),
+        ] {
             assert_eq!(sanitize_file_name(name), FALLBACK_FILE_NAME, "{name:?}");
         }
     }
@@ -284,7 +304,10 @@ mod tests {
         b.write_all(b"B").unwrap();
         assert_eq!(pa.path(), dir.path().join("report (1).pdf.part"));
         assert_eq!(pb.path(), dir.path().join("report (2).pdf.part"));
-        assert_eq!(fs::read(dir.path().join("report.pdf.part")).unwrap(), b"foreign");
+        assert_eq!(
+            fs::read(dir.path().join("report.pdf.part")).unwrap(),
+            b"foreign"
+        );
         assert_eq!(fs::read(pa.path()).unwrap(), b"A");
         assert_eq!(fs::read(pb.path()).unwrap(), b"B");
     }
@@ -337,7 +360,10 @@ mod tests {
             assert_eq!(fs::read(&path).unwrap(), format!("new{n}").as_bytes());
             assert_eq!(fs::read(&taken).unwrap(), b"old");
         }
-        assert_eq!(names(dir.path()), ["report (1).pdf", "report (2).pdf", "report.pdf"]);
+        assert_eq!(
+            names(dir.path()),
+            ["report (1).pdf", "report (2).pdf", "report.pdf"]
+        );
     }
 
     #[test]

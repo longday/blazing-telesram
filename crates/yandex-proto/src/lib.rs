@@ -22,5 +22,8 @@ pub mod xiva;
 
 pub use client::{Client, ClientConfig};
 pub use error::ProtoError;
-pub use manage::{CreatedChat, MANAGE_METHODS, MAX_CHAT_TITLE, ManageError, ManageRequest, created_chat_id, parse_created_chat};
+pub use manage::{
+    CreatedChat, MANAGE_METHODS, MAX_CHAT_TITLE, ManageError, ManageRequest, created_chat_id,
+    parse_created_chat,
+};
 pub use net::HttpSettings;

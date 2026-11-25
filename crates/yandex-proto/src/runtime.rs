@@ -7,7 +7,9 @@ pub const RUNTIME_DIR_VAR: &str = "BT_RUNTIME_DIR";
 pub struct RuntimeDir(PathBuf);
 
 #[derive(Debug, thiserror::Error)]
-#[error("{RUNTIME_DIR_VAR} is not set: point it at the directory for session and cache files (run.sh uses <repo>/.runtime)")]
+#[error(
+    "{RUNTIME_DIR_VAR} is not set: point it at the directory for session and cache files (run.sh uses <repo>/.runtime)"
+)]
 pub struct MissingRuntimeDir;
 
 impl RuntimeDir {

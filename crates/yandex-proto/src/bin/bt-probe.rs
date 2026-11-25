@@ -63,7 +63,11 @@ fn init_logging() -> Result<(), String> {
     tracing_subscriber::registry()
         .with(yandex_proto::log::filter_from_env()?)
         .with(yandex_proto::log::dependency_cap())
-        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr).with_ansi(std::io::stderr().is_terminal()))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(std::io::stderr().is_terminal()),
+        )
         .try_init()
         .map_err(|e| format!("cannot install the logger: {e}"))
 }
@@ -94,24 +98,44 @@ fn main() -> ExitCode {
             _ => return usage(),
         },
         ["delete-self", ts, flags @ ..] => match (ts.parse(), chat_flag(flags)) {
-            (Ok(ts), Some(chat)) => block_on(write_self(chat, move |chat| WriteRequest::Delete { chat, timestamp: ts })),
+            (Ok(ts), Some(chat)) => block_on(write_self(chat, move |chat| WriteRequest::Delete {
+                chat,
+                timestamp: ts,
+            })),
             _ => return usage(),
         },
-        ["react-self", ts, change, flags @ ..] => match (ts.parse(), reaction_change(change), chat_flag(flags)) {
-            (Ok(ts), Some(change), Some(chat)) => {
-                block_on(write_self(chat, move |chat| WriteRequest::Reaction { chat, timestamp: ts, change }))
+        ["react-self", ts, change, flags @ ..] => {
+            match (ts.parse(), reaction_change(change), chat_flag(flags)) {
+                (Ok(ts), Some(change), Some(chat)) => {
+                    block_on(write_self(chat, move |chat| WriteRequest::Reaction {
+                        chat,
+                        timestamp: ts,
+                        change,
+                    }))
+                }
+                _ => return usage(),
             }
-            _ => return usage(),
-        },
+        }
         ["typing-self", flags @ ..] => match chat_flag(flags) {
             Some(chat) => block_on(write_self(chat, |chat| WriteRequest::Typing { chat })),
             None => return usage(),
         },
         ["seen", chat, ts] => match ts.parse() {
-            Ok(ts) => block_on(write_named(chat, WriteRequest::Seen { chat: (*chat).to_owned(), timestamp: ts })),
+            Ok(ts) => block_on(write_named(
+                chat,
+                WriteRequest::Seen {
+                    chat: (*chat).to_owned(),
+                    timestamp: ts,
+                },
+            )),
             Err(_) => return usage(),
         },
-        ["typing", chat] => block_on(write_named(chat, WriteRequest::Typing { chat: (*chat).to_owned() })),
+        ["typing", chat] => block_on(write_named(
+            chat,
+            WriteRequest::Typing {
+                chat: (*chat).to_owned(),
+            },
+        )),
         ["download", chat, ts, flags @ ..] => match (ts.parse(), download_flags(flags)) {
             (Ok(ts), Some(flags)) => block_on(download(chat, ts, flags)),
             _ => return usage(),
@@ -155,7 +179,9 @@ fn usage() -> ExitCode {
 }
 
 fn block_on(future: impl Future<Output = Result<(), Failure>>) -> Result<(), Failure> {
-    tokio::runtime::Runtime::new().map_err(|e| (1, e.to_string()))?.block_on(future)
+    tokio::runtime::Runtime::new()
+        .map_err(|e| (1, e.to_string()))?
+        .block_on(future)
 }
 
 fn fail(e: ProtoError) -> Failure {
@@ -169,7 +195,12 @@ fn load_session() -> Result<Session, Failure> {
     let dir = RuntimeDir::from_env().map_err(|e| (2, e.to_string()))?;
     Session::load(&dir)
         .map_err(|e| (1, e.to_string()))?
-        .ok_or_else(|| (1, "no stored session: sign in first via ./run.sh".to_owned()))
+        .ok_or_else(|| {
+            (
+                1,
+                "no stored session: sign in first via ./run.sh".to_owned(),
+            )
+        })
 }
 
 /// The account's chat with itself: `<guid>_<guid>`.
@@ -182,7 +213,9 @@ fn self_chat(guid: &str) -> String {
 fn resolve_self_chat(requested: Option<&str>, guid: &str) -> Result<String, String> {
     let own = self_chat(guid);
     match requested {
-        Some(chat) if chat != own => Err(format!("refusing {chat}: the *-self commands act on the self chat only")),
+        Some(chat) if chat != own => Err(format!(
+            "refusing {chat}: the *-self commands act on the self chat only"
+        )),
         _ => Ok(own),
     }
 }
@@ -202,7 +235,10 @@ fn reaction_change(arg: &str) -> Option<ReactionChange> {
     if arg == "remove" {
         return Some(ReactionChange::Remove);
     }
-    arg.parse::<i64>().ok().filter(|code| *code > 0).map(ReactionChange::Set)
+    arg.parse::<i64>()
+        .ok()
+        .filter(|code| *code > 0)
+        .map(ReactionChange::Set)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -233,10 +269,17 @@ fn edit_flags<'a>(flags: &[&'a str]) -> Option<SendFlags<'a>> {
 }
 
 fn print_committed(committed: &Committed) {
-    let outcome = if committed.duplicate() { "DUPLICATE" } else { "FULLY_COMMITTED" };
+    let outcome = if committed.duplicate() {
+        "DUPLICATE"
+    } else {
+        "FULLY_COMMITTED"
+    };
     print!("status={} {outcome}", committed.status);
     if let Some(info) = &committed.message {
-        print!(" timestamp={} seq_no={:?} version={:?}", info.timestamp_mcs, info.seq_no, info.version);
+        print!(
+            " timestamp={} seq_no={:?} version={:?}",
+            info.timestamp_mcs, info.seq_no, info.version
+        );
     }
     println!();
 }
@@ -250,16 +293,26 @@ async fn send_self(text: &str, flags: SendFlags<'_>) -> Result<(), Failure> {
         Some(timestamp) => Some(reply_ref(&client, &chat, timestamp).await?),
         None => None,
     };
-    let payload_id = flags.payload.map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
+    let payload_id = flags
+        .payload
+        .map_or_else(|| uuid::Uuid::new_v4().to_string(), str::to_owned);
     println!("payload: {payload_id}");
-    let request = WriteRequest::SendText { chat, payload_id, text: text.to_owned(), reply };
+    let request = WriteRequest::SendText {
+        chat,
+        payload_id,
+        text: text.to_owned(),
+        reply,
+    };
     print_committed(&client.push(request).await.map_err(fail)?);
     Ok(())
 }
 
 /// A message of the chat, from the page that ends with it (`before` is exclusive).
 async fn find_message(client: &Client, chat: &str, timestamp: i64) -> Result<WireMessage, Failure> {
-    let page = client.history(chat, Some(timestamp + 1)).await.map_err(fail)?;
+    let page = client
+        .history(chat, Some(timestamp + 1))
+        .await
+        .map_err(fail)?;
     page.messages
         .into_iter()
         .find(|m| m.timestamp == timestamp)
@@ -281,16 +334,27 @@ fn stored_reply(message: &WireMessage) -> Result<Option<ReplyRef>, String> {
     let timestamp = message.timestamp;
     match &message.relation {
         Relation::None => Ok(None),
-        Relation::Forward { .. } => Err(format!("message {timestamp} is a forward; editing it would drop the forward")),
-        Relation::Reply { quote, reference, original } => {
-            let target = reference.as_ref().and_then(|r| r.timestamp).or_else(|| original.as_ref()?.timestamp);
+        Relation::Forward { .. } => Err(format!(
+            "message {timestamp} is a forward; editing it would drop the forward"
+        )),
+        Relation::Reply {
+            quote,
+            reference,
+            original,
+        } => {
+            let target = reference
+                .as_ref()
+                .and_then(|r| r.timestamp)
+                .or_else(|| original.as_ref()?.timestamp);
             let quote = quote.clone().or_else(|| match &original.as_ref()?.body {
                 WireBody::Text(text) => Some(text.clone()),
                 _ => None,
             });
             match (target, quote) {
                 (Some(timestamp), Some(quote)) => Ok(Some(ReplyRef { timestamp, quote })),
-                _ => Err(format!("the reply of message {timestamp} has no known target or quote; pass --reply")),
+                _ => Err(format!(
+                    "the reply of message {timestamp} has no known target or quote; pass --reply"
+                )),
             }
         }
     }
@@ -303,22 +367,41 @@ async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(
     let (client, _events) = connect(&session, ClientConfig::production()).await?;
     let reply = match flags.reply {
         Some(target) => Some(reply_ref(&client, &chat, target).await?),
-        None => stored_reply(&find_message(&client, &chat, timestamp).await?).map_err(|e| (1, e))?,
+        None => {
+            stored_reply(&find_message(&client, &chat, timestamp).await?).map_err(|e| (1, e))?
+        }
     };
-    print_committed(&client.push(WriteRequest::Edit { chat, timestamp, text: text.to_owned(), reply }).await.map_err(fail)?);
+    print_committed(
+        &client
+            .push(WriteRequest::Edit {
+                chat,
+                timestamp,
+                text: text.to_owned(),
+                reply,
+            })
+            .await
+            .map_err(fail)?,
+    );
     Ok(())
 }
 
 /// The self chat a `*-self` write goes to: `resolve_self_chat`, then the `BT_WRITE_ONLY_CHAT`
 /// guard. Runs before the connection is made, so a refusal sends nothing.
-fn guarded_self_chat(requested: Option<&str>, guid: &str, allowed: Option<&str>) -> Result<String, Failure> {
+fn guarded_self_chat(
+    requested: Option<&str>,
+    guid: &str,
+    allowed: Option<&str>,
+) -> Result<String, Failure> {
     let chat = resolve_self_chat(requested, guid).map_err(|e| (2, e))?;
     chat_write_guard(allowed, &chat).map_err(|e| (2, e))?;
     Ok(chat)
 }
 
 /// Delete, typing and reaction: one push into the self chat.
-async fn write_self(requested: Option<&str>, build: impl FnOnce(String) -> WriteRequest) -> Result<(), Failure> {
+async fn write_self(
+    requested: Option<&str>,
+    build: impl FnOnce(String) -> WriteRequest,
+) -> Result<(), Failure> {
     let allowed = write_only()?;
     let session = load_session()?;
     let chat = guarded_self_chat(requested, &session.identity.guid, allowed.as_deref())?;
@@ -356,7 +439,9 @@ fn write_only() -> Result<Option<String>, Failure> {
     let value = match std::env::var(WRITE_ONLY_VAR) {
         Ok(value) => Some(value),
         Err(std::env::VarError::NotPresent) => None,
-        Err(std::env::VarError::NotUnicode(_)) => return Err((2, format!("{WRITE_ONLY_VAR} is not valid unicode"))),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err((2, format!("{WRITE_ONLY_VAR} is not valid unicode")));
+        }
     };
     parse_write_only(value).map_err(|e| (2, e))
 }
@@ -364,7 +449,9 @@ fn write_only() -> Result<Option<String>, Failure> {
 /// A write into `chat` is allowed when no limit is set or the limit names that chat.
 fn chat_write_guard(allowed: Option<&str>, chat: &str) -> Result<(), String> {
     match allowed {
-        Some(allowed) if allowed != chat => Err(format!("refusing a write to {chat}: {WRITE_ONLY_VAR} limits writes to {allowed}; nothing was sent")),
+        Some(allowed) if allowed != chat => Err(format!(
+            "refusing a write to {chat}: {WRITE_ONLY_VAR} limits writes to {allowed}; nothing was sent"
+        )),
         _ => Ok(()),
     }
 }
@@ -373,17 +460,27 @@ fn chat_write_guard(allowed: Option<&str>, chat: &str) -> Result<(), String> {
 /// limit refuses it, whatever the target.
 fn creation_guard(allowed: Option<&str>) -> Result<(), Failure> {
     match allowed {
-        Some(chat) => Err((2, format!("refusing to create a chat: {WRITE_ONLY_VAR} limits writes to {chat}, and a new chat can never be that chat; nothing was sent"))),
+        Some(chat) => Err((
+            2,
+            format!(
+                "refusing to create a chat: {WRITE_ONLY_VAR} limits writes to {chat}, and a new chat can never be that chat; nothing was sent"
+            ),
+        )),
         None => Ok(()),
     }
 }
 
 async fn me() -> Result<(), Failure> {
     let session = load_session()?;
-    let identity = bootstrap(&RegistryEndpoints::production(), &session.cookies).await.map_err(|e| (1, e.to_string()))?;
+    let identity = bootstrap(&RegistryEndpoints::production(), &session.cookies)
+        .await
+        .map_err(|e| (1, e.to_string()))?;
     println!("uid: {}", identity.uid.as_deref().unwrap_or("-"));
     println!("guid: {}", identity.guid);
-    println!("display name: {}", identity.display_name.as_deref().unwrap_or("-"));
+    println!(
+        "display name: {}",
+        identity.display_name.as_deref().unwrap_or("-")
+    );
     Ok(())
 }
 
@@ -420,7 +517,8 @@ async fn chats() -> Result<(), Failure> {
             chat.title.as_deref().unwrap_or("-"),
             chat.unread,
             if chat.muted { " muted" } else { "" },
-            chat.last_activity.map_or_else(|| "-".to_owned(), |t| t.to_string()),
+            chat.last_activity
+                .map_or_else(|| "-".to_owned(), |t| t.to_string()),
         );
     }
     Ok(())
@@ -432,7 +530,12 @@ async fn history(chat: &str, before: Option<i64>) -> Result<(), Failure> {
     for message in &page.messages {
         println!("{}", describe(message));
     }
-    println!("-- {} messages, reached_start={}, skipped={}", page.messages.len(), page.reached_start, page.skipped);
+    println!(
+        "-- {} messages, reached_start={}, skipped={}",
+        page.messages.len(),
+        page.reached_start,
+        page.skipped
+    );
     Ok(())
 }
 
@@ -449,13 +552,21 @@ fn search_flags(mut flags: &[&str]) -> Option<SearchFlags> {
     while let [name, value, rest @ ..] = flags {
         match *name {
             "--entities" if entities.is_none() => entities = Some(search_entities(value)?),
-            "--limit" if limit.is_none() => limit = Some(value.parse::<u32>().ok().filter(|n| *n > 0)?),
+            "--limit" if limit.is_none() => {
+                limit = Some(value.parse::<u32>().ok().filter(|n| *n > 0)?)
+            }
             _ => return None,
         }
         flags = rest;
     }
     flags.is_empty().then(|| SearchFlags {
-        entities: entities.unwrap_or_else(|| vec![SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats]),
+        entities: entities.unwrap_or_else(|| {
+            vec![
+                SearchEntity::Messages,
+                SearchEntity::Users,
+                SearchEntity::Chats,
+            ]
+        }),
         limit: limit.unwrap_or(SEARCH_LIMIT),
     })
 }
@@ -464,7 +575,13 @@ fn search_flags(mut flags: &[&str]) -> Option<SearchFlags> {
 fn search_entities(list: &str) -> Option<Vec<SearchEntity>> {
     let mut entities = Vec::new();
     for name in list.split(',') {
-        let entity = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats].into_iter().find(|e| e.wire_name() == name)?;
+        let entity = [
+            SearchEntity::Messages,
+            SearchEntity::Users,
+            SearchEntity::Chats,
+        ]
+        .into_iter()
+        .find(|e| e.wire_name() == name)?;
         if entities.contains(&entity) {
             return None;
         }
@@ -474,7 +591,14 @@ fn search_entities(list: &str) -> Option<Vec<SearchEntity>> {
 }
 
 fn print_search_set(entity: SearchEntity, set: &SearchSet) {
-    println!("{}: total={} limit={} page={} pages={}", entity.wire_name(), set.total, set.limit, set.page, set.pages);
+    println!(
+        "{}: total={} limit={} page={} pages={}",
+        entity.wire_name(),
+        set.total,
+        set.limit,
+        set.page,
+        set.pages
+    );
     for item in &set.items {
         println!("{item}");
     }
@@ -482,8 +606,12 @@ fn print_search_set(entity: SearchEntity, set: &SearchSet) {
 
 /// One registry `search` (HTTP, bare cookie): the first page of every requested entity.
 async fn search(query: &str, flags: SearchFlags) -> Result<(), Failure> {
-    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
-    let reply = client.search_with(query, flags.limit, &flags.entities).await.map_err(fail)?;
+    let (client, _events) =
+        Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    let reply = client
+        .search_with(query, flags.limit, &flags.entities)
+        .await
+        .map_err(fail)?;
     for entity in flags.entities {
         let set = match entity {
             SearchEntity::Messages => &reply.messages,
@@ -505,9 +633,16 @@ async fn whoami() -> Result<(), Failure> {
 /// The first page (50 users) of the members of one group chat (`get_chat_members`, registry,
 /// bare cookie), parsed.
 async fn members(chat: &str) -> Result<(), Failure> {
-    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    let (client, _events) =
+        Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
     eprintln!("members of {chat} via get_chat_members");
-    println!("{:#?}", client.members(chat, MEMBERS_PAGE, None).await.map_err(fail)?);
+    println!(
+        "{:#?}",
+        client
+            .members(chat, MEMBERS_PAGE, None)
+            .await
+            .map_err(fail)?
+    );
     Ok(())
 }
 
@@ -544,8 +679,16 @@ fn refusal(guid: &str) -> String {
 fn creation_failure(error: ManageError) -> Failure {
     match error {
         ManageError::NotSent(e) => (1, format!("not sent, nothing was created: {e}")),
-        ManageError::Rejected(e) => (1, format!("rejected by the server, nothing was created: {e}")),
-        ManageError::Unknown(e) => (3, format!("outcome unknown, the chat may exist: check the web client before repeating: {e}")),
+        ManageError::Rejected(e) => (
+            1,
+            format!("rejected by the server, nothing was created: {e}"),
+        ),
+        ManageError::Unknown(e) => (
+            3,
+            format!(
+                "outcome unknown, the chat may exist: check the web client before repeating: {e}"
+            ),
+        ),
     }
 }
 
@@ -553,9 +696,14 @@ fn creation_failure(error: ManageError) -> Failure {
 /// only with `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
 async fn create_private(guid: &str) -> Result<(), Failure> {
     creation_guard(write_only()?.as_deref())?;
-    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    let (client, _events) =
+        Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
     eprintln!("creating the private chat with {guid}");
-    match client.create_private_chat(guid).await.map_err(creation_failure)? {
+    match client
+        .create_private_chat(guid)
+        .await
+        .map_err(creation_failure)?
+    {
         Some(chat) => println!("created: chat {chat}"),
         None => println!("created: the reply names no chat id (look in the chat list)"),
     }
@@ -592,7 +740,11 @@ fn create_chat_args<'a>(title: &'a str, rest: &[&'a str]) -> Option<GroupPlan<'a
             users.push(*arg);
         }
     }
-    (!users.is_empty()).then_some(GroupPlan { title, users, confirmed })
+    (!users.is_empty()).then_some(GroupPlan {
+        title,
+        users,
+        confirmed,
+    })
 }
 
 /// The refusal printed without `--confirm-create`: everything that would be sent.
@@ -614,16 +766,27 @@ fn group_refusal(plan: &GroupPlan<'_>) -> String {
 /// `--confirm-create`. The raw reply is visible at `BT_LOG=yandex_proto::registry=trace`.
 async fn create_chat(plan: GroupPlan<'_>) -> Result<(), Failure> {
     creation_guard(write_only()?.as_deref())?;
-    let (client, _events) = Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
-    eprintln!("creating the group chat with {} participant(s)", plan.users.len());
+    let (client, _events) =
+        Client::start(&load_session()?, ClientConfig::production()).map_err(fail)?;
+    eprintln!(
+        "creating the group chat with {} participant(s)",
+        plan.users.len()
+    );
     let users: Vec<String> = plan.users.iter().map(|user| (*user).to_owned()).collect();
-    let created = client.create_chat(plan.title, &users).await.map_err(creation_failure)?;
+    let created = client
+        .create_chat(plan.title, &users)
+        .await
+        .map_err(creation_failure)?;
     match created.chat {
         Some(chat) => println!("created: chat {chat}"),
         None => println!("created: the reply names no chat id (look in the chat list)"),
     }
     if !created.refused.is_empty() {
-        println!("not added by the server ({}): {}", created.refused.len(), created.refused.join(", "));
+        println!(
+            "not added by the server ({}): {}",
+            created.refused.len(),
+            created.refused.join(", ")
+        );
     }
     Ok(())
 }
@@ -658,7 +821,11 @@ struct Chosen<'a> {
 
 fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, String> {
     let single = |file| match item {
-        None | Some(1) => Ok(Chosen { file, position: 1, count: 1 }),
+        None | Some(1) => Ok(Chosen {
+            file,
+            position: 1,
+            count: 1,
+        }),
         Some(n) => Err(format!("--item {n}: the message holds one file")),
     };
     match body {
@@ -667,8 +834,17 @@ fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, Strin
         WireBody::Gallery { items, .. } => {
             let position = item.unwrap_or(1);
             let image = position.checked_sub(1).and_then(|index| items.get(index));
-            let image = image.ok_or_else(|| format!("--item {position}: the gallery holds {} images", items.len()))?;
-            Ok(Chosen { file: &image.file, position, count: items.len() })
+            let image = image.ok_or_else(|| {
+                format!(
+                    "--item {position}: the gallery holds {} images",
+                    items.len()
+                )
+            })?;
+            Ok(Chosen {
+                file: &image.file,
+                position,
+                count: items.len(),
+            })
         }
         _ => Err("the message holds no file or image".to_owned()),
     }
@@ -679,8 +855,15 @@ fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, Strin
 /// falls back to the last segment of the file id (which `MediaTarget::url` has validated).
 fn local_name(file: &WireFile) -> String {
     const MAX_BYTES: usize = 200;
-    let last = file.name.as_deref().and_then(|name| name.rsplit(['/', '\\']).next()).unwrap_or("");
-    let cleaned: String = last.chars().map(|c| if c.is_control() || c == ':' { '_' } else { c }).collect();
+    let last = file
+        .name
+        .as_deref()
+        .and_then(|name| name.rsplit(['/', '\\']).next())
+        .unwrap_or("");
+    let cleaned: String = last
+        .chars()
+        .map(|c| if c.is_control() || c == ':' { '_' } else { c })
+        .collect();
     let mut name = cleaned.trim().trim_start_matches('.');
     while name.len() > MAX_BYTES {
         let mut cut = MAX_BYTES;
@@ -689,7 +872,11 @@ fn local_name(file: &WireFile) -> String {
         }
         name = &name[..cut];
     }
-    if name.is_empty() { file.id.rsplit('/').next().unwrap_or("file").to_owned() } else { name.to_owned() }
+    if name.is_empty() {
+        file.id.rsplit('/').next().unwrap_or("file").to_owned()
+    } else {
+        name.to_owned()
+    }
 }
 
 /// Host and path of a URL: no scheme, no query, no fragment.
@@ -701,10 +888,14 @@ fn host_and_path(url: &str) -> &str {
 /// Creates `name` in `dir`; an existing entry of that name is an error and is left untouched.
 fn create_destination(dir: &Path, name: &str) -> Result<File, String> {
     let path = dir.join(name);
-    OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| match e.kind() {
-        ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
-        kind => format!("cannot create {}: {kind}", path.display()),
-    })
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| match e.kind() {
+            ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
+            kind => format!("cannot create {}: {kind}", path.display()),
+        })
 }
 
 fn error_class(error: &ProtoError) -> &'static str {
@@ -729,8 +920,11 @@ async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Resul
     }
     let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
     let message = find_message(&client, chat, timestamp).await?;
-    let chosen = select_file(&message.body, flags.item).map_err(|e| (1, format!("message {timestamp}: {e}")))?;
-    let target = MediaTarget::Original { file_id: chosen.file.id.clone() };
+    let chosen = select_file(&message.body, flags.item)
+        .map_err(|e| (1, format!("message {timestamp}: {e}")))?;
+    let target = MediaTarget::Original {
+        file_id: chosen.file.id.clone(),
+    };
     let url = target.url(&MediaConfig::production()).map_err(fail)?;
     let destination = dir.join(local_name(chosen.file));
     let mut out = create_destination(dir, &local_name(chosen.file)).map_err(|e| (1, e))?;
@@ -745,10 +939,16 @@ async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Resul
         (1, format!("download failed ({class}): {}", fail(e).1))
     })?;
     let content_length = *announced.lock().unwrap();
-    println!("message {timestamp}: item {} of {}", chosen.position, chosen.count);
+    println!(
+        "message {timestamp}: item {} of {}",
+        chosen.position, chosen.count
+    );
     println!("saved: {}", destination.display());
     println!("received: {received} bytes");
-    println!("announced size (FileInfo.Size): {}", or_dash(chosen.file.size));
+    println!(
+        "announced size (FileInfo.Size): {}",
+        or_dash(chosen.file.size)
+    );
     println!("content-length: {}", or_dash(content_length));
     let verdict = match chosen.file.size {
         Some(size) if size == received => "matches",
@@ -779,34 +979,62 @@ async fn listen(watch: Option<&str>) -> Result<(), Failure> {
 }
 
 fn describe(message: &WireMessage) -> String {
-    let author = message.from.as_ref().and_then(|f| f.display_name.as_deref()).unwrap_or("?");
+    let author = message
+        .from
+        .as_ref()
+        .and_then(|f| f.display_name.as_deref())
+        .unwrap_or("?");
     let body = match &message.body {
         WireBody::Text(text) => text.clone(),
         other => format!("[{other:?}]"),
     };
     let flags = if message.edited { " (edited)" } else { "" };
     let reply = match &message.relation {
-        Relation::Reply { quote, original, .. } => {
-            let target = original.as_ref().and_then(|o| o.timestamp).map_or_else(|| "?".to_owned(), |t| t.to_string());
-            format!(" (reply to {target}, quote {:?})", quote.as_deref().unwrap_or(""))
+        Relation::Reply {
+            quote, original, ..
+        } => {
+            let target = original
+                .as_ref()
+                .and_then(|o| o.timestamp)
+                .map_or_else(|| "?".to_owned(), |t| t.to_string());
+            format!(
+                " (reply to {target}, quote {:?})",
+                quote.as_deref().unwrap_or("")
+            )
         }
         _ => String::new(),
     };
-    format!("{}\t{author}\t{body}{flags}{reply}{}", message.timestamp, reactions_note(message))
+    format!(
+        "{}\t{author}\t{body}{flags}{reply}{}",
+        message.timestamp,
+        reactions_note(message)
+    )
 }
 
 /// The reaction state of a history row, as the server sent it: counts `code×count`, the version
 /// and the recent reactors' codes. Empty when the row carried none of the three siblings.
 fn reactions_note(message: &WireMessage) -> String {
-    let Some(reactions) = &message.reactions else { return String::new() };
-    let counts: Vec<String> = reactions.counts.iter().map(|c| format!("{}x{}", c.code, c.count)).collect();
+    let Some(reactions) = &message.reactions else {
+        return String::new();
+    };
+    let counts: Vec<String> = reactions
+        .counts
+        .iter()
+        .map(|c| format!("{}x{}", c.code, c.count))
+        .collect();
     let recent: Vec<String> = reactions
         .recent
         .iter()
         .map(|r| format!("{}:{}", r.user.as_deref().unwrap_or("?"), r.code))
         .collect();
-    let version = reactions.version.map_or_else(|| "-".to_owned(), |v| v.to_string());
-    format!(" (reactions [{}], version {version}, recent [{}])", counts.join(" "), recent.join(" "))
+    let version = reactions
+        .version
+        .map_or_else(|| "-".to_owned(), |v| v.to_string());
+    format!(
+        " (reactions [{}], version {version}, recent [{}])",
+        counts.join(" "),
+        recent.join(" ")
+    )
 }
 
 #[cfg(test)]
@@ -833,7 +1061,12 @@ mod tests {
     }
 
     fn original(timestamp: Option<i64>, body: WireBody) -> WireForwarded {
-        WireForwarded { chat: None, timestamp, from: None, body }
+        WireForwarded {
+            chat: None,
+            timestamp,
+            from: None,
+            body,
+        }
     }
 
     #[test]
@@ -844,36 +1077,98 @@ mod tests {
             reference: None,
             original: Some(original(Some(10), WireBody::Text("new text".into()))),
         };
-        assert_eq!(stored_reply(&message(edited_since)), Ok(Some(ReplyRef { timestamp: 10, quote: "old text".into() })));
+        assert_eq!(
+            stored_reply(&message(edited_since)),
+            Ok(Some(ReplyRef {
+                timestamp: 10,
+                quote: "old text".into()
+            }))
+        );
         // The original was deleted: no original body, the quote and target still come from the reply.
-        let deleted = Relation::Reply { quote: Some("old text".into()), reference: None, original: Some(original(Some(10), WireBody::Empty)) };
-        assert_eq!(stored_reply(&message(deleted)), Ok(Some(ReplyRef { timestamp: 10, quote: "old text".into() })));
+        let deleted = Relation::Reply {
+            quote: Some("old text".into()),
+            reference: None,
+            original: Some(original(Some(10), WireBody::Empty)),
+        };
+        assert_eq!(
+            stored_reply(&message(deleted)),
+            Ok(Some(ReplyRef {
+                timestamp: 10,
+                quote: "old text".into()
+            }))
+        );
         // A reference on the message wins over the snapshot for the target.
         let referenced = Relation::Reply {
             quote: Some("q".into()),
-            reference: Some(WireRef { chat: None, timestamp: Some(7) }),
+            reference: Some(WireRef {
+                chat: None,
+                timestamp: Some(7),
+            }),
             original: Some(original(Some(10), WireBody::Empty)),
         };
-        assert_eq!(stored_reply(&message(referenced)), Ok(Some(ReplyRef { timestamp: 7, quote: "q".into() })));
+        assert_eq!(
+            stored_reply(&message(referenced)),
+            Ok(Some(ReplyRef {
+                timestamp: 7,
+                quote: "q".into()
+            }))
+        );
     }
 
     #[test]
     fn stored_reply_falls_back_to_the_snapshot_text_and_refuses_what_it_cannot_keep() {
-        let no_quote = Relation::Reply { quote: None, reference: None, original: Some(original(Some(10), WireBody::Text("orig".into()))) };
-        assert_eq!(stored_reply(&message(no_quote)), Ok(Some(ReplyRef { timestamp: 10, quote: "orig".into() })));
+        let no_quote = Relation::Reply {
+            quote: None,
+            reference: None,
+            original: Some(original(Some(10), WireBody::Text("orig".into()))),
+        };
+        assert_eq!(
+            stored_reply(&message(no_quote)),
+            Ok(Some(ReplyRef {
+                timestamp: 10,
+                quote: "orig".into()
+            }))
+        );
         assert_eq!(stored_reply(&message(Relation::None)), Ok(None));
-        let unknown_target = Relation::Reply { quote: Some("q".into()), reference: None, original: None };
-        assert!(stored_reply(&message(unknown_target)).unwrap_err().contains("--reply"));
-        let nothing_to_quote = Relation::Reply { quote: None, reference: None, original: Some(original(Some(10), WireBody::Empty)) };
+        let unknown_target = Relation::Reply {
+            quote: Some("q".into()),
+            reference: None,
+            original: None,
+        };
+        assert!(
+            stored_reply(&message(unknown_target))
+                .unwrap_err()
+                .contains("--reply")
+        );
+        let nothing_to_quote = Relation::Reply {
+            quote: None,
+            reference: None,
+            original: Some(original(Some(10), WireBody::Empty)),
+        };
         assert!(stored_reply(&message(nothing_to_quote)).is_err());
-        assert!(stored_reply(&message(Relation::Forward { originals: vec![] })).unwrap_err().contains("forward"));
+        assert!(
+            stored_reply(&message(Relation::Forward { originals: vec![] }))
+                .unwrap_err()
+                .contains("forward")
+        );
     }
 
     #[test]
     fn self_commands_act_on_the_self_chat_and_refuse_every_other_chat() {
-        assert_eq!(resolve_self_chat(None, GUID).unwrap(), format!("{GUID}_{GUID}"));
-        assert_eq!(resolve_self_chat(Some(&format!("{GUID}_{GUID}")), GUID).unwrap(), format!("{GUID}_{GUID}"));
-        for other in ["0/0/some-group", "dc8fe606-16f9-97d9-4faf-3acb552a7764_c9a71201-70b5-992e-61f2-b27e2d3fc8fb", GUID, ""] {
+        assert_eq!(
+            resolve_self_chat(None, GUID).unwrap(),
+            format!("{GUID}_{GUID}")
+        );
+        assert_eq!(
+            resolve_self_chat(Some(&format!("{GUID}_{GUID}")), GUID).unwrap(),
+            format!("{GUID}_{GUID}")
+        );
+        for other in [
+            "0/0/some-group",
+            "dc8fe606-16f9-97d9-4faf-3acb552a7764_c9a71201-70b5-992e-61f2-b27e2d3fc8fb",
+            GUID,
+            "",
+        ] {
             let error = resolve_self_chat(Some(other), GUID).unwrap_err();
             assert!(error.contains("self chat only"), "{other}: {error}");
         }
@@ -884,13 +1179,34 @@ mod tests {
         assert_eq!(send_flags(&[]), Some(SendFlags::default()));
         assert_eq!(
             send_flags(&["--reply", "17", "--payload", "p-1"]),
-            Some(SendFlags { payload: Some("p-1"), reply: Some(17), chat: None })
+            Some(SendFlags {
+                payload: Some("p-1"),
+                reply: Some(17),
+                chat: None
+            })
         );
-        assert_eq!(send_flags(&["--chat", "c"]), Some(SendFlags { chat: Some("c"), ..SendFlags::default() }));
-        for bad in [&["--reply", "x"][..], &["--payload"], &["--unknown", "1"], &["--reply", "1", "stray"]] {
+        assert_eq!(
+            send_flags(&["--chat", "c"]),
+            Some(SendFlags {
+                chat: Some("c"),
+                ..SendFlags::default()
+            })
+        );
+        for bad in [
+            &["--reply", "x"][..],
+            &["--payload"],
+            &["--unknown", "1"],
+            &["--reply", "1", "stray"],
+        ] {
             assert_eq!(send_flags(bad), None, "{bad:?}");
         }
-        assert_eq!(edit_flags(&["--reply", "17"]), Some(SendFlags { reply: Some(17), ..SendFlags::default() }));
+        assert_eq!(
+            edit_flags(&["--reply", "17"]),
+            Some(SendFlags {
+                reply: Some(17),
+                ..SendFlags::default()
+            })
+        );
         assert_eq!(edit_flags(&["--payload", "p"]), None);
         assert_eq!(chat_flag(&[]), Some(None));
         assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
@@ -899,9 +1215,22 @@ mod tests {
 
     #[test]
     fn react_self_takes_a_positive_code_or_remove() {
-        assert_eq!(reaction_change("100101"), Some(ReactionChange::Set(100_101)));
+        assert_eq!(
+            reaction_change("100101"),
+            Some(ReactionChange::Set(100_101))
+        );
         assert_eq!(reaction_change("remove"), Some(ReactionChange::Remove));
-        for bad in ["", "0", "-5", "x", "1.5", "Remove", "remove ", "100101 ", "99999999999999999999"] {
+        for bad in [
+            "",
+            "0",
+            "-5",
+            "x",
+            "1.5",
+            "Remove",
+            "remove ",
+            "100101 ",
+            "99999999999999999999",
+        ] {
             assert_eq!(reaction_change(bad), None, "{bad:?}");
         }
     }
@@ -912,7 +1241,10 @@ mod tests {
         assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
         let error = resolve_self_chat(Some("0/0/some-group"), GUID).unwrap_err();
         assert!(error.contains("self chat only"), "{error}");
-        assert_eq!(resolve_self_chat(None, GUID).unwrap(), format!("{GUID}_{GUID}"));
+        assert_eq!(
+            resolve_self_chat(None, GUID).unwrap(),
+            format!("{GUID}_{GUID}")
+        );
     }
 
     #[test]
@@ -921,39 +1253,97 @@ mod tests {
         let mut row = message(Relation::None);
         assert_eq!(describe(&row), "20\t?\tmine");
         row.reactions = Some(WireReactions {
-            counts: vec![WireReactionCount { code: 100_101, count: 2 }],
+            counts: vec![WireReactionCount {
+                code: 100_101,
+                count: 2,
+            }],
             version: Some(3),
-            recent: vec![WireReactor { user: Some("u".into()), code: 100_101, timestamp: None }],
+            recent: vec![WireReactor {
+                user: Some("u".into()),
+                code: 100_101,
+                timestamp: None,
+            }],
         });
-        assert_eq!(describe(&row), "20\t?\tmine (reactions [100101x2], version 3, recent [u:100101])");
-        row.reactions = Some(WireReactions { version: Some(4), ..WireReactions::default() });
-        assert_eq!(describe(&row), "20\t?\tmine (reactions [], version 4, recent [])");
+        assert_eq!(
+            describe(&row),
+            "20\t?\tmine (reactions [100101x2], version 3, recent [u:100101])"
+        );
+        row.reactions = Some(WireReactions {
+            version: Some(4),
+            ..WireReactions::default()
+        });
+        assert_eq!(
+            describe(&row),
+            "20\t?\tmine (reactions [], version 4, recent [])"
+        );
     }
 
     #[test]
     fn create_private_refuses_without_the_flag_and_names_the_target() {
-        assert_eq!(create_private_args(GUID, &[]), Some(CreatePrivate::Refuse(GUID)));
-        assert_eq!(create_private_args(GUID, &["--confirm-create"]), Some(CreatePrivate::Send(GUID)));
-        for bad in [&["--confirm"][..], &["--confirm-create", "--confirm-create"], &["--confirm-create", "x"], &["yes"]] {
+        assert_eq!(
+            create_private_args(GUID, &[]),
+            Some(CreatePrivate::Refuse(GUID))
+        );
+        assert_eq!(
+            create_private_args(GUID, &["--confirm-create"]),
+            Some(CreatePrivate::Send(GUID))
+        );
+        for bad in [
+            &["--confirm"][..],
+            &["--confirm-create", "--confirm-create"],
+            &["--confirm-create", "x"],
+            &["yes"],
+        ] {
             assert_eq!(create_private_args(GUID, bad), None, "{bad:?}");
         }
         assert_eq!(create_private_args("  ", &["--confirm-create"]), None);
         assert_eq!(create_private_args("", &[]), None);
         let message = refusal(GUID);
-        assert!(message.contains(GUID) && message.contains("nothing was sent") && message.contains("--confirm-create"), "{message}");
+        assert!(
+            message.contains(GUID)
+                && message.contains("nothing was sent")
+                && message.contains("--confirm-create"),
+            "{message}"
+        );
     }
 
     #[test]
     fn create_chat_refuses_without_the_flag_and_prints_what_it_would_send() {
         let plan = create_chat_args("Team A", &[GUID, "g-2"]).unwrap();
-        assert_eq!(plan, GroupPlan { title: "Team A", users: vec![GUID, "g-2"], confirmed: false });
+        assert_eq!(
+            plan,
+            GroupPlan {
+                title: "Team A",
+                users: vec![GUID, "g-2"],
+                confirmed: false
+            }
+        );
         let message = group_refusal(&plan);
-        for needle in ["\"Team A\"", GUID, "g-2", "is_public: true", "channel: false", "nothing was sent", "--confirm-create"] {
+        for needle in [
+            "\"Team A\"",
+            GUID,
+            "g-2",
+            "is_public: true",
+            "channel: false",
+            "nothing was sent",
+            "--confirm-create",
+        ] {
             assert!(message.contains(needle), "{needle}: {message}");
         }
         // The flag may stand anywhere among the guids.
-        for rest in [&[GUID, "g-2", "--confirm-create"][..], &["--confirm-create", GUID, "g-2"], &[GUID, "--confirm-create", "g-2"]] {
-            assert_eq!(create_chat_args("Team A", rest), Some(GroupPlan { title: "Team A", users: vec![GUID, "g-2"], confirmed: true }));
+        for rest in [
+            &[GUID, "g-2", "--confirm-create"][..],
+            &["--confirm-create", GUID, "g-2"],
+            &[GUID, "--confirm-create", "g-2"],
+        ] {
+            assert_eq!(
+                create_chat_args("Team A", rest),
+                Some(GroupPlan {
+                    title: "Team A",
+                    users: vec![GUID, "g-2"],
+                    confirmed: true
+                })
+            );
         }
     }
 
@@ -963,15 +1353,28 @@ mod tests {
         assert_eq!(chat_write_guard(None, &own), Ok(()));
         assert_eq!(chat_write_guard(Some(&own), &own), Ok(()));
         let error = chat_write_guard(Some(&own), "0/0/some-group").unwrap_err();
-        assert!(error.contains("BT_WRITE_ONLY_CHAT") && error.contains("0/0/some-group") && error.contains("nothing was sent"), "{error}");
+        assert!(
+            error.contains("BT_WRITE_ONLY_CHAT")
+                && error.contains("0/0/some-group")
+                && error.contains("nothing was sent"),
+            "{error}"
+        );
     }
 
     #[test]
     fn the_limit_is_read_like_the_desktop_app_reads_it() {
         assert_eq!(parse_write_only(None), Ok(None));
-        assert_eq!(parse_write_only(Some("0/0/c".into())), Ok(Some("0/0/c".into())));
+        assert_eq!(
+            parse_write_only(Some("0/0/c".into())),
+            Ok(Some("0/0/c".into()))
+        );
         for blank in ["", "  ", "\t"] {
-            assert!(parse_write_only(Some(blank.into())).unwrap_err().contains("set but empty"), "{blank:?}");
+            assert!(
+                parse_write_only(Some(blank.into()))
+                    .unwrap_err()
+                    .contains("set but empty"),
+                "{blank:?}"
+            );
         }
     }
 
@@ -984,9 +1387,13 @@ mod tests {
         assert_eq!(guarded_self_chat(None, GUID, Some(&own)), Ok(own.clone()));
         let (code, message) = guarded_self_chat(None, GUID, Some("0/0/some-group")).unwrap_err();
         assert_eq!(code, 2);
-        assert!(message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"), "{message}");
+        assert!(
+            message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"),
+            "{message}"
+        );
         // `--chat` naming another chat stays an error of its own.
-        let (code, message) = guarded_self_chat(Some("0/0/some-group"), GUID, Some("0/0/some-group")).unwrap_err();
+        let (code, message) =
+            guarded_self_chat(Some("0/0/some-group"), GUID, Some("0/0/some-group")).unwrap_err();
         assert_eq!((code, message.contains("self chat only")), (2, true));
     }
 
@@ -996,7 +1403,10 @@ mod tests {
         for allowed in [format!("{GUID}_{GUID}"), "0/0/some-group".to_owned()] {
             let (code, message) = creation_guard(Some(&allowed)).unwrap_err();
             assert_eq!(code, 2, "{allowed}");
-            assert!(message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"), "{message}");
+            assert!(
+                message.contains("BT_WRITE_ONLY_CHAT") && message.contains("nothing was sent"),
+                "{message}"
+            );
         }
     }
 
@@ -1036,19 +1446,48 @@ mod download_tests {
     use yandex_proto::wire::WireImage;
 
     fn file(id: &str, name: Option<&str>) -> WireFile {
-        WireFile { id: id.into(), name: name.map(Into::into), size: Some(5) }
+        WireFile {
+            id: id.into(),
+            name: name.map(Into::into),
+            size: Some(5),
+        }
     }
 
     fn image(id: &str) -> WireImage {
-        WireImage { file: file(id, None), width: 1, height: 1, animated: false }
+        WireImage {
+            file: file(id, None),
+            width: 1,
+            height: 1,
+            animated: false,
+        }
     }
 
     #[test]
     fn download_flags_parse_in_any_order_and_reject_the_rest() {
         assert_eq!(download_flags(&[]), Some(DownloadFlags::default()));
-        assert_eq!(download_flags(&["--to", "/tmp/x", "--item", "3"]), Some(DownloadFlags { item: Some(3), to: Some("/tmp/x") }));
-        assert_eq!(download_flags(&["--item", "1"]), Some(DownloadFlags { item: Some(1), to: None }));
-        for bad in [&["--item", "0"][..], &["--item", "x"], &["--item", "-1"], &["--item"], &["--to"], &["--unknown", "1"], &["--item", "1", "stray"]] {
+        assert_eq!(
+            download_flags(&["--to", "/tmp/x", "--item", "3"]),
+            Some(DownloadFlags {
+                item: Some(3),
+                to: Some("/tmp/x")
+            })
+        );
+        assert_eq!(
+            download_flags(&["--item", "1"]),
+            Some(DownloadFlags {
+                item: Some(1),
+                to: None
+            })
+        );
+        for bad in [
+            &["--item", "0"][..],
+            &["--item", "x"],
+            &["--item", "-1"],
+            &["--item"],
+            &["--to"],
+            &["--unknown", "1"],
+            &["--item", "1", "stray"],
+        ] {
             assert_eq!(download_flags(bad), None, "{bad:?}");
         }
     }
@@ -1057,19 +1496,58 @@ mod download_tests {
     fn select_file_takes_the_file_or_the_nth_image_and_refuses_the_rest() {
         let one = file("disk/a", Some("a.bin"));
         let body = WireBody::File(one.clone());
-        assert_eq!(select_file(&body, None), Ok(Chosen { file: &one, position: 1, count: 1 }));
-        assert!(select_file(&body, Some(2)).unwrap_err().contains("one file"));
+        assert_eq!(
+            select_file(&body, None),
+            Ok(Chosen {
+                file: &one,
+                position: 1,
+                count: 1
+            })
+        );
+        assert!(
+            select_file(&body, Some(2))
+                .unwrap_err()
+                .contains("one file")
+        );
         let single = WireBody::Image(image("disk/i"));
         assert_eq!(select_file(&single, Some(1)).unwrap().file.id, "disk/i");
         assert!(select_file(&single, Some(2)).is_err());
-        let gallery = WireBody::Gallery { items: vec![image("disk/1"), image("disk/2"), image("disk/3")], text: None };
+        let gallery = WireBody::Gallery {
+            items: vec![image("disk/1"), image("disk/2"), image("disk/3")],
+            text: None,
+        };
         let third = select_file(&gallery, Some(3)).unwrap();
-        assert_eq!((third.file.id.as_str(), third.position, third.count), ("disk/3", 3, 3));
+        assert_eq!(
+            (third.file.id.as_str(), third.position, third.count),
+            ("disk/3", 3, 3)
+        );
         assert_eq!(select_file(&gallery, None).unwrap().file.id, "disk/1");
-        assert!(select_file(&gallery, Some(4)).unwrap_err().contains("holds 3 images"));
-        assert!(select_file(&WireBody::Gallery { items: vec![], text: None }, None).is_err());
-        for other in [WireBody::Text("t".into()), WireBody::Deleted, WireBody::Empty] {
-            assert!(select_file(&other, None).unwrap_err().contains("no file or image"), "{other:?}");
+        assert!(
+            select_file(&gallery, Some(4))
+                .unwrap_err()
+                .contains("holds 3 images")
+        );
+        assert!(
+            select_file(
+                &WireBody::Gallery {
+                    items: vec![],
+                    text: None
+                },
+                None
+            )
+            .is_err()
+        );
+        for other in [
+            WireBody::Text("t".into()),
+            WireBody::Deleted,
+            WireBody::Empty,
+        ] {
+            assert!(
+                select_file(&other, None)
+                    .unwrap_err()
+                    .contains("no file or image"),
+                "{other:?}"
+            );
         }
     }
 
@@ -1081,18 +1559,36 @@ mod download_tests {
         assert_eq!(name(Some("a/b\\c.txt")), "c.txt");
         assert_eq!(name(Some("a\nb:c")), "a_b_c");
         assert_eq!(name(Some("..hidden")), "hidden");
-        for unusable in [None, Some(""), Some("."), Some(".."), Some("dir/"), Some("  ")] {
+        for unusable in [
+            None,
+            Some(""),
+            Some("."),
+            Some(".."),
+            Some("dir/"),
+            Some("  "),
+        ] {
             assert_eq!(name(unusable), "0a1b-2c", "{unusable:?}");
         }
         let long = "я".repeat(150) + ".txt";
         let cut = name(Some(&long));
-        assert!(cut.len() <= 200 && cut.chars().all(|c| c == 'я'), "{} bytes", cut.len());
+        assert!(
+            cut.len() <= 200 && cut.chars().all(|c| c == 'я'),
+            "{} bytes",
+            cut.len()
+        );
     }
 
     #[test]
     fn the_printed_target_has_host_and_path_only() {
-        let url = MediaTarget::Original { file_id: "disk/0a1b-2c".into() }.url(&MediaConfig::production()).unwrap();
-        assert_eq!(host_and_path(&url), "files.messenger.yandex.ru/file_shortterm/disk/0a1b-2c");
+        let url = MediaTarget::Original {
+            file_id: "disk/0a1b-2c".into(),
+        }
+        .url(&MediaConfig::production())
+        .unwrap();
+        assert_eq!(
+            host_and_path(&url),
+            "files.messenger.yandex.ru/file_shortterm/disk/0a1b-2c"
+        );
         assert_eq!(host_and_path("https://h/p?token=secret#frag"), "h/p");
         assert_eq!(host_and_path("h/p"), "h/p");
     }
@@ -1122,19 +1618,44 @@ mod download_tests {
 mod search_tests {
     use super::*;
 
-    const ALL: [SearchEntity; 3] = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+    const ALL: [SearchEntity; 3] = [
+        SearchEntity::Messages,
+        SearchEntity::Users,
+        SearchEntity::Chats,
+    ];
 
     #[test]
     fn search_defaults_to_every_entity_and_the_app_limit() {
-        assert_eq!(search_flags(&[]), Some(SearchFlags { entities: ALL.to_vec(), limit: SEARCH_LIMIT }));
+        assert_eq!(
+            search_flags(&[]),
+            Some(SearchFlags {
+                entities: ALL.to_vec(),
+                limit: SEARCH_LIMIT
+            })
+        );
     }
 
     #[test]
     fn search_flags_parse_in_any_order() {
-        let expected = Some(SearchFlags { entities: vec![SearchEntity::Chats, SearchEntity::Messages], limit: 3 });
-        assert_eq!(search_flags(&["--entities", "chats,messages", "--limit", "3"]), expected);
-        assert_eq!(search_flags(&["--limit", "3", "--entities", "chats,messages"]), expected);
-        assert_eq!(search_flags(&["--limit", "25"]), Some(SearchFlags { entities: ALL.to_vec(), limit: 25 }));
+        let expected = Some(SearchFlags {
+            entities: vec![SearchEntity::Chats, SearchEntity::Messages],
+            limit: 3,
+        });
+        assert_eq!(
+            search_flags(&["--entities", "chats,messages", "--limit", "3"]),
+            expected
+        );
+        assert_eq!(
+            search_flags(&["--limit", "3", "--entities", "chats,messages"]),
+            expected
+        );
+        assert_eq!(
+            search_flags(&["--limit", "25"]),
+            Some(SearchFlags {
+                entities: ALL.to_vec(),
+                limit: 25
+            })
+        );
     }
 
     #[test]

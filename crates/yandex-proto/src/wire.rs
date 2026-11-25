@@ -115,12 +115,26 @@ pub enum WireBody {
     Text(String),
     Image(WireImage),
     File(WireFile),
-    Voice { file: WireFile, duration: Option<u64> },
-    Gallery { items: Vec<WireImage>, text: Option<String> },
-    Sticker { id: String, set_id: Option<String> },
-    Poll { title: String },
+    Voice {
+        file: WireFile,
+        duration: Option<u64>,
+    },
+    Gallery {
+        items: Vec<WireImage>,
+        text: Option<String>,
+    },
+    Sticker {
+        id: String,
+        set_id: Option<String>,
+    },
+    Poll {
+        title: String,
+    },
     /// Chat event; `kind` is the variant key (`ChatCreatedInfo`, `ParticipantsChangedDiffV2`, ...).
-    System { kind: String, text: Option<String> },
+    System {
+        kind: String,
+        text: Option<String>,
+    },
     Deleted,
     /// No content of its own, e.g. a forward without a comment.
     Empty,
@@ -154,7 +168,9 @@ pub enum Relation {
         reference: Option<WireRef>,
         original: Option<WireForwarded>,
     },
-    Forward { originals: Vec<WireForwarded> },
+    Forward {
+        originals: Vec<WireForwarded>,
+    },
 }
 
 /// One entry of `Reactions`: how many users chose the type.
@@ -244,13 +260,23 @@ pub struct WireHistory {
 pub enum PushEvent {
     /// New message or an edit (same chat and timestamp, higher version).
     MessageUpserted(WireMessage),
-    MessageDeleted { chat: String, timestamp: Micros },
+    MessageDeleted {
+        chat: String,
+        timestamp: Micros,
+    },
     /// Something that changes the chat row or its history without carrying a message:
     /// read state moved on another device, pin, history cleared, state sync.
-    ChatChanged { chat: String },
+    ChatChanged {
+        chat: String,
+    },
     /// Someone is typing: `user` is the typist's guid. `timeout_secs` is the lifetime of the
     /// indicator when the push states one.
-    Typing { chat: String, user: String, name: Option<String>, timeout_secs: Option<u32> },
+    Typing {
+        chat: String,
+        user: String,
+        name: Option<String>,
+        timeout_secs: Option<u32>,
+    },
     /// A reaction was added, replaced or removed on a message. `actor` is who did it
     /// (`ServerMessageInfo.From.Guid`); `action` and `code` come from the `Reaction` body;
     /// `reactions` is the message's state after the change.
@@ -263,7 +289,9 @@ pub enum PushEvent {
         reactions: WireReactions,
     },
     /// Presence and other events this client does not act on.
-    Ignored { kind: String },
+    Ignored {
+        kind: String,
+    },
 }
 
 fn present<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
@@ -271,14 +299,19 @@ fn present<'a>(value: &'a Json, key: &str) -> Option<&'a Json> {
 }
 
 fn string(value: &Json, key: &str) -> Option<String> {
-    present(value, key)?.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+    present(value, key)?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 /// Accepts a JSON integer, an integral float and a digit string.
 fn micros(value: &Json) -> Option<i64> {
     match value {
         Json::Number(n) => n.as_i64().or_else(|| {
-            n.as_f64().filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15).map(|f| f as i64)
+            n.as_f64()
+                .filter(|f| f.fract() == 0.0 && f.abs() < 9.0e15)
+                .map(|f| f as i64)
         }),
         Json::String(s) => s.parse().ok(),
         _ => None,
@@ -311,7 +344,11 @@ pub fn namespace_of(chat_id: &str) -> Option<u32> {
 
 /// Application-layer status of a reply (`ResponseStatus`): absent or 0 is success.
 pub fn check_status(body: &Json) -> Result<(), ProtoError> {
-    let Some(status) = body.get("Status").and_then(Json::as_i64).filter(|s| *s != 0) else {
+    let Some(status) = body
+        .get("Status")
+        .and_then(Json::as_i64)
+        .filter(|s| *s != 0)
+    else {
         return Ok(());
     };
     if status == 6 {
@@ -325,7 +362,9 @@ pub fn check_status(body: &Json) -> Result<(), ProtoError> {
         5 => "OVERLOAD",
         _ => "unknown",
     };
-    let details = string(body, "Details").map(|d| format!(": {d}")).unwrap_or_default();
+    let details = string(body, "Details")
+        .map(|d| format!(": {d}"))
+        .unwrap_or_default();
     // OVERLOAD clears by itself; everything else is a request the server will keep refusing.
     Err(if status == 5 {
         ProtoError::Network(format!("server overloaded{details}"))
@@ -347,7 +386,11 @@ fn sender(info: &Json) -> Option<WireSender> {
         }
     }
     let custom = present(info, "CustomFrom").filter(|f| f.is_object())?;
-    Some(WireSender { guid: None, display_name: display_name(custom), avatar_id: string(custom, "AvatarId") })
+    Some(WireSender {
+        guid: None,
+        display_name: display_name(custom),
+        avatar_id: string(custom, "AvatarId"),
+    })
 }
 
 fn file_info(holder: &Json) -> Option<WireFile> {
@@ -360,12 +403,19 @@ fn file_info(holder: &Json) -> Option<WireFile> {
 }
 
 fn image(holder: &Json) -> Option<WireImage> {
-    let dimension = |key| int_field(holder, key).and_then(|v| u32::try_from(v).ok()).unwrap_or(0);
+    let dimension = |key| {
+        int_field(holder, key)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    };
     Some(WireImage {
         file: file_info(holder)?,
         width: dimension("Width"),
         height: dimension("Height"),
-        animated: holder.get("Animated").and_then(Json::as_bool).unwrap_or(false),
+        animated: holder
+            .get("Animated")
+            .and_then(Json::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -390,11 +440,19 @@ const PLAIN_META_KEYS: [&str; 14] = [
 /// Content of a `Plain`/`Ephemeral`/forwarded-`Payload` body.
 fn plain_body(plain: &Json) -> WireBody {
     if let Some(text) = present(plain, "Text") {
-        return WireBody::Text(text.get("MessageText").and_then(Json::as_str).unwrap_or_default().to_owned());
+        return WireBody::Text(
+            text.get("MessageText")
+                .and_then(Json::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        );
     }
     if let Some(sticker) = present(plain, "Sticker") {
         return match string(sticker, "Id") {
-            Some(id) => WireBody::Sticker { id, set_id: string(sticker, "SetId") },
+            Some(id) => WireBody::Sticker {
+                id,
+                set_id: string(sticker, "SetId"),
+            },
             None => WireBody::Other("Sticker".into()),
         };
     }
@@ -402,7 +460,8 @@ fn plain_body(plain: &Json) -> WireBody {
         return image(holder).map_or_else(|| WireBody::Other("Image".into()), WireBody::Image);
     }
     if let Some(holder) = present(plain, "MiscFile") {
-        return file_info(holder).map_or_else(|| WireBody::Other("MiscFile".into()), WireBody::File);
+        return file_info(holder)
+            .map_or_else(|| WireBody::Other("MiscFile".into()), WireBody::File);
     }
     if present(plain, "Card").is_some() {
         return WireBody::Other("Card".into());
@@ -411,18 +470,31 @@ fn plain_body(plain: &Json) -> WireBody {
         let items = gallery
             .get("Items")
             .and_then(Json::as_array)
-            .map(|items| items.iter().filter_map(|item| image(present(item, "Image")?)).collect())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| image(present(item, "Image")?))
+                    .collect()
+            })
             .unwrap_or_default();
-        return WireBody::Gallery { items, text: string(gallery, "Text") };
+        return WireBody::Gallery {
+            items,
+            text: string(gallery, "Text"),
+        };
     }
     if let Some(voice) = present(plain, "Voice") {
         return match file_info(voice) {
-            Some(file) => WireBody::Voice { file, duration: voice.get("Duration").and_then(Json::as_u64) },
+            Some(file) => WireBody::Voice {
+                file,
+                duration: voice.get("Duration").and_then(Json::as_u64),
+            },
             None => WireBody::Other("Voice".into()),
         };
     }
     if let Some(poll) = present(plain, "Poll") {
-        return WireBody::Poll { title: string(poll, "Title").unwrap_or_default() };
+        return WireBody::Poll {
+            title: string(poll, "Title").unwrap_or_default(),
+        };
     }
     plain
         .as_object()
@@ -436,12 +508,16 @@ fn system_body(system: &Json) -> WireBody {
         .and_then(|o| o.keys().find(|k| *k != "ChatId" && *k != "PayloadId"))
         .cloned()
         .unwrap_or_else(|| "SystemMessage".into());
-    let text = system.get("GenericMessage").and_then(|g| string(g, "MessageText"));
+    let text = system
+        .get("GenericMessage")
+        .and_then(|g| string(g, "MessageText"));
     WireBody::System { kind, text }
 }
 
 fn forwarded(items: &Json) -> Vec<WireForwarded> {
-    let Some(items) = items.as_array() else { return Vec::new() };
+    let Some(items) = items.as_array() else {
+        return Vec::new();
+    };
     items
         .iter()
         .map(|item| {
@@ -457,18 +533,30 @@ fn forwarded(items: &Json) -> Vec<WireForwarded> {
         .collect()
 }
 
-fn relation(plain: Option<&Json>, originals: Vec<WireForwarded>, has_own_content: bool) -> Relation {
+fn relation(
+    plain: Option<&Json>,
+    originals: Vec<WireForwarded>,
+    has_own_content: bool,
+) -> Relation {
     let quote = plain
         .and_then(|p| p.get("ForwardedMessageStyles")?.as_array())
         .and_then(|styles| styles.iter().find_map(|s| string(s, "Quote")));
     let reference = plain
         .and_then(|p| p.get("ForwardedMessageRefs")?.as_array())
         .and_then(|refs| refs.first())
-        .map(|r| WireRef { chat: string(r, "ChatId"), timestamp: int_field(r, "Timestamp").filter(|t| *t != 0) });
+        .map(|r| WireRef {
+            chat: string(r, "ChatId"),
+            timestamp: int_field(r, "Timestamp").filter(|t| *t != 0),
+        });
 
-    let is_reply = quote.is_some() || ((!originals.is_empty() || reference.is_some()) && has_own_content);
+    let is_reply =
+        quote.is_some() || ((!originals.is_empty() || reference.is_some()) && has_own_content);
     if is_reply {
-        return Relation::Reply { quote, reference, original: originals.into_iter().next() };
+        return Relation::Reply {
+            quote,
+            reference,
+            original: originals.into_iter().next(),
+        };
     }
     if !originals.is_empty() || reference.is_some() {
         return Relation::Forward { originals };
@@ -492,7 +580,9 @@ fn reactions(raw: &Json) -> Option<WireReactions> {
             .iter()
             .filter_map(|entry| {
                 let code = int_field(entry, "Type")?;
-                let count = u32::try_from(int_field(entry, "Count")?).ok().filter(|&c| c > 0)?;
+                let count = u32::try_from(int_field(entry, "Count")?)
+                    .ok()
+                    .filter(|&c| c > 0)?;
                 Some(WireReactionCount { code, count })
             })
             .collect(),
@@ -502,7 +592,11 @@ fn reactions(raw: &Json) -> Option<WireReactions> {
             .filter_map(|entry| {
                 let code = int_field(entry, "Type")?;
                 let user = present(entry, "UserInfo").and_then(|u| string(u, "Guid"));
-                Some(WireReactor { user, code, timestamp: int_field(entry, "Timestamp") })
+                Some(WireReactor {
+                    user,
+                    code,
+                    timestamp: int_field(entry, "Timestamp"),
+                })
             })
             .collect(),
     })
@@ -525,7 +619,10 @@ pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireM
 
     let deleted = info.get("Deleted").and_then(Json::as_bool).unwrap_or(false);
     let edited = int_field(info, "LastEditTimestamp").is_some_and(|t| t > 0);
-    let originals = raw.get("ForwardedMessages").map(forwarded).unwrap_or_default();
+    let originals = raw
+        .get("ForwardedMessages")
+        .map(forwarded)
+        .unwrap_or_default();
 
     let (body, relation) = if deleted {
         (WireBody::Deleted, Relation::None)
@@ -560,7 +657,11 @@ pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireM
 fn parse_chat(entry: &Json) -> Option<WireChat> {
     let id = string(entry, "ChatId")?;
     // Per-chat failure (`Status` != 0): the row has no usable metadata.
-    if entry.get("Status").and_then(Json::as_i64).is_some_and(|s| s != 0) {
+    if entry
+        .get("Status")
+        .and_then(Json::as_i64)
+        .is_some_and(|s| s != 0)
+    {
         return None;
     }
     let private = present(entry, "PrivateChatInfo").is_some();
@@ -573,7 +674,9 @@ fn parse_chat(entry: &Json) -> Option<WireChat> {
     };
     let partner = present(entry, "PartnerInfo");
     let info = present(entry, "ChatInfo");
-    let title = partner.and_then(display_name).or_else(|| info.and_then(|i| string(i, "Name")));
+    let title = partner
+        .and_then(display_name)
+        .or_else(|| info.and_then(|i| string(i, "Name")));
     let avatar_id = partner
         .and_then(|p| string(p, "AvatarId"))
         .or_else(|| info.and_then(|i| string(i, "AvatarId")));
@@ -583,7 +686,11 @@ fn parse_chat(entry: &Json) -> Option<WireChat> {
     let last_message = entry
         .get("Messages")
         .and_then(Json::as_array)
-        .and_then(|rows| rows.iter().filter_map(|r| present(r, "ServerMessage")).next_back())
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(|r| present(r, "ServerMessage"))
+                .next_back()
+        })
         .and_then(|m| parse_server_message(m, Some(&id)).ok());
 
     let mut raw = entry.clone();
@@ -594,7 +701,11 @@ fn parse_chat(entry: &Json) -> Option<WireChat> {
         kind,
         title,
         avatar_id,
-        partner_guid: if private { partner.and_then(|p| string(p, "Guid")) } else { None },
+        partner_guid: if private {
+            partner.and_then(|p| string(p, "Guid"))
+        } else {
+            None
+        },
         last_activity: int_field(entry, "LastTsMcs"),
         unread: u32::try_from((last_seq - seen).max(0)).unwrap_or(u32::MAX),
         muted: entry.get("Muted").and_then(Json::as_bool).unwrap_or(false),
@@ -609,7 +720,9 @@ fn parse_chat(entry: &Json) -> Option<WireChat> {
 pub fn parse_chat_list(body: &Json, excluded: &[u32]) -> Result<Vec<WireChat>, ProtoError> {
     check_status(body)?;
     // An account without chats may answer without a `Chats` key at all.
-    let Some(entries) = body.get("Chats") else { return Ok(Vec::new()) };
+    let Some(entries) = body.get("Chats") else {
+        return Ok(Vec::new());
+    };
     let entries = entries
         .as_array()
         .ok_or_else(|| ProtoError::Protocol("Chats is not an array".into()))?;
@@ -623,15 +736,30 @@ pub fn parse_chat_list(body: &Json, excluded: &[u32]) -> Result<Vec<WireChat>, P
 /// One history page from the reply to [`ReadRequest::History`](crate::request::ReadRequest::History).
 pub fn parse_history(body: &Json, chat: &str, limit: u32) -> Result<WireHistory, ProtoError> {
     check_status(body)?;
-    let entries = body.get("Chats").and_then(Json::as_array).map(Vec::as_slice).unwrap_or_default();
-    let entry = entries.iter().find(|e| string(e, "ChatId").as_deref() == Some(chat));
+    let entries = body
+        .get("Chats")
+        .and_then(Json::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let entry = entries
+        .iter()
+        .find(|e| string(e, "ChatId").as_deref() == Some(chat));
     let Some(entry) = entry else {
         // A chat without messages may be omitted entirely.
-        return Ok(WireHistory { chat: chat.to_owned(), messages: Vec::new(), reached_start: true, skipped: 0 });
+        return Ok(WireHistory {
+            chat: chat.to_owned(),
+            messages: Vec::new(),
+            reached_start: true,
+            skipped: 0,
+        });
     };
     check_status(entry)?;
 
-    let rows = entry.get("Messages").and_then(Json::as_array).map(Vec::as_slice).unwrap_or_default();
+    let rows = entry
+        .get("Messages")
+        .and_then(Json::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let mut messages = Vec::with_capacity(rows.len());
     let mut skipped = 0;
     for row in rows {
@@ -664,7 +792,8 @@ pub fn parse_users(data: &Json) -> Result<Vec<WireUser>, ProtoError> {
         .filter_map(|u| {
             Some(WireUser {
                 guid: pick(u, "guid", "Guid")?,
-                display_name: pick(u, "display_name", "DisplayName").or_else(|| pick(u, "public_name", "PublicName")),
+                display_name: pick(u, "display_name", "DisplayName")
+                    .or_else(|| pick(u, "public_name", "PublicName")),
                 avatar_id: pick(u, "avatar_id", "AvatarId"),
                 uid: id_string(u, "uid").or_else(|| id_string(u, "Uid")),
             })
@@ -699,10 +828,16 @@ pub fn parse_members(data: &Json) -> Result<WireMembers, ProtoError> {
                 None | Some("member") => WireMemberRole::Member,
                 Some(other) => WireMemberRole::Other(other.to_owned()),
             },
-            deleted: user.get("account_deleted").and_then(Json::as_bool).unwrap_or(false),
+            deleted: user
+                .get("account_deleted")
+                .and_then(Json::as_bool)
+                .unwrap_or(false),
         });
     }
-    Ok(WireMembers { users: members, skipped })
+    Ok(WireMembers {
+        users: members,
+        skipped,
+    })
 }
 
 /// The signed-in account's profile from a `whoami` reply (`{UserInfo, UserStatusInfo,
@@ -719,7 +854,12 @@ pub fn parse_profile(body: &Json) -> Result<WireProfile, ProtoError> {
         .pointer("/UserStatusInfo/UserStatus/CustomStatus")
         .and_then(|custom| string(custom, "Text"))
         .filter(|text| !text.trim().is_empty());
-    Ok(WireProfile { guid: string(info, "Guid"), name: display_name(info), avatar_id: string(info, "AvatarId"), status_text })
+    Ok(WireProfile {
+        guid: string(info, "Guid"),
+        name: display_name(info),
+        avatar_id: string(info, "AvatarId"),
+        status_text,
+    })
 }
 
 /// Decodes a server push body: a flat `{ClientMessage, ServerMessageInfo, ...}`.
@@ -732,22 +872,41 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
     {
         let message = parse_server_message(body, None)?;
         return Ok(if matches!(message.body, WireBody::Deleted) {
-            PushEvent::MessageDeleted { chat: message.chat, timestamp: message.timestamp }
+            PushEvent::MessageDeleted {
+                chat: message.chat,
+                timestamp: message.timestamp,
+            }
         } else {
             PushEvent::MessageUpserted(message)
         });
     }
     if let Some(typing) = present(client, "Typing") {
         let from = present(body, "ServerMessageInfo").and_then(sender);
-        if let (Some(chat), Some(WireSender { guid: Some(user), display_name: name, .. })) = (string(typing, "ChatId"), from) {
-            let timeout_secs = int_field(typing, "TimeoutSeconds").and_then(|s| u32::try_from(s).ok());
-            return Ok(PushEvent::Typing { chat, user, name, timeout_secs });
+        if let (
+            Some(chat),
+            Some(WireSender {
+                guid: Some(user),
+                display_name: name,
+                ..
+            }),
+        ) = (string(typing, "ChatId"), from)
+        {
+            let timeout_secs =
+                int_field(typing, "TimeoutSeconds").and_then(|s| u32::try_from(s).ok());
+            return Ok(PushEvent::Typing {
+                chat,
+                user,
+                name,
+                timeout_secs,
+            });
         }
     }
     if let Some(reaction) = present(client, "Reaction") {
         let info = present(body, "ServerMessageInfo");
-        let address = string(reaction, "ChatId")
-            .zip(int_field(reaction, "Timestamp").or_else(|| info.and_then(|i| int_field(i, "Timestamp"))));
+        let address = string(reaction, "ChatId").zip(
+            int_field(reaction, "Timestamp")
+                .or_else(|| info.and_then(|i| int_field(i, "Timestamp"))),
+        );
         if let Some((chat, timestamp)) = address {
             return Ok(PushEvent::Reaction {
                 chat,
@@ -766,12 +925,26 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
     // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
     // modifier, not the event.
     const MODIFIERS: [&str; 1] = ["NotificationBehaviour"];
-    let chat_changing = ["SeenMarker", "Pin", "ClearUserHistory", "StateSync", "ChatApproval"];
-    if let Some(chat) = chat_changing.iter().find_map(|kind| string(present(client, kind)?, "ChatId")) {
+    let chat_changing = [
+        "SeenMarker",
+        "Pin",
+        "ClearUserHistory",
+        "StateSync",
+        "ChatApproval",
+    ];
+    if let Some(chat) = chat_changing
+        .iter()
+        .find_map(|kind| string(present(client, kind)?, "ChatId"))
+    {
         return Ok(PushEvent::ChatChanged { chat });
     }
     let keys = client.as_object().into_iter().flat_map(|o| o.keys());
-    let kind = keys.clone().find(|k| !MODIFIERS.contains(&k.as_str())).or_else(|| keys.clone().next()).cloned().unwrap_or_default();
+    let kind = keys
+        .clone()
+        .find(|k| !MODIFIERS.contains(&k.as_str()))
+        .or_else(|| keys.clone().next())
+        .cloned()
+        .unwrap_or_default();
     Ok(PushEvent::Ignored { kind })
 }
 
@@ -787,9 +960,18 @@ mod tests {
 
     #[test]
     fn micros_accepts_ints_floats_and_digit_strings() {
-        assert_eq!(micros(&json!(1784117592261029_i64)), Some(1_784_117_592_261_029));
-        assert_eq!(micros(&json!(1784117592261029.0)), Some(1_784_117_592_261_029));
-        assert_eq!(micros(&json!("1784117592261029")), Some(1_784_117_592_261_029));
+        assert_eq!(
+            micros(&json!(1784117592261029_i64)),
+            Some(1_784_117_592_261_029)
+        );
+        assert_eq!(
+            micros(&json!(1784117592261029.0)),
+            Some(1_784_117_592_261_029)
+        );
+        assert_eq!(
+            micros(&json!("1784117592261029")),
+            Some(1_784_117_592_261_029)
+        );
         assert_eq!(micros(&json!(1.5)), None);
         assert_eq!(micros(&json!(true)), None);
     }
@@ -807,24 +989,44 @@ mod tests {
     fn status_mapping() {
         assert!(check_status(&json!({})).is_ok());
         assert!(check_status(&json!({ "Status": 0 })).is_ok());
-        assert_eq!(check_status(&json!({ "Status": 6 })), Err(ProtoError::SessionExpired));
-        assert!(matches!(check_status(&json!({ "Status": 4, "Details": "no chat" })), Err(ProtoError::Protocol(m)) if m.contains("ENTITY_NOT_FOUND") && m.contains("no chat")));
-        assert!(matches!(check_status(&json!({ "Status": 5 })), Err(ProtoError::Network(_))));
+        assert_eq!(
+            check_status(&json!({ "Status": 6 })),
+            Err(ProtoError::SessionExpired)
+        );
+        assert!(
+            matches!(check_status(&json!({ "Status": 4, "Details": "no chat" })), Err(ProtoError::Protocol(m)) if m.contains("ENTITY_NOT_FOUND") && m.contains("no chat"))
+        );
+        assert!(matches!(
+            check_status(&json!({ "Status": 5 })),
+            Err(ProtoError::Network(_))
+        ));
     }
 
     #[test]
     fn message_requires_an_address() {
         let no_ts = msg(json!({ "ChatId": "c" }), json!({}));
-        assert_eq!(parse_server_message(&no_ts, None), Err(WireError::Missing("Timestamp")));
+        assert_eq!(
+            parse_server_message(&no_ts, None),
+            Err(WireError::Missing("Timestamp"))
+        );
         let no_chat = msg(json!({}), json!({ "Timestamp": 5 }));
-        assert_eq!(parse_server_message(&no_chat, None), Err(WireError::Missing("ChatId")));
-        assert_eq!(parse_server_message(&no_chat, Some("hint")).unwrap().chat, "hint");
+        assert_eq!(
+            parse_server_message(&no_chat, None),
+            Err(WireError::Missing("ChatId"))
+        );
+        assert_eq!(
+            parse_server_message(&no_chat, Some("hint")).unwrap().chat,
+            "hint"
+        );
         assert!(parse_server_message(&json!({ "ClientMessage": {} }), None).is_err());
     }
 
     #[test]
     fn deleted_flag_overrides_the_body() {
-        let m = msg(json!({ "ChatId": "c", "Text": { "MessageText": "x" } }), json!({ "Timestamp": 5, "Deleted": true }));
+        let m = msg(
+            json!({ "ChatId": "c", "Text": { "MessageText": "x" } }),
+            json!({ "Timestamp": 5, "Deleted": true }),
+        );
         let m = parse_server_message(&m, None).unwrap();
         assert_eq!(m.body, WireBody::Deleted);
         assert_eq!(m.relation, Relation::None);
@@ -849,54 +1051,116 @@ mod tests {
         pure["ForwardedMessages"] = json!([original]);
         let m = parse_server_message(&pure, None).unwrap();
         assert_eq!(m.body, WireBody::Empty);
-        let Relation::Forward { originals } = m.relation else { panic!("not a forward") };
-        assert_eq!(originals[0].from.as_ref().unwrap().display_name.as_deref(), Some("Anna"));
+        let Relation::Forward { originals } = m.relation else {
+            panic!("not a forward")
+        };
+        assert_eq!(
+            originals[0].from.as_ref().unwrap().display_name.as_deref(),
+            Some("Anna")
+        );
         assert_eq!(originals[0].timestamp, Some(3));
         assert_eq!(originals[0].chat.as_deref(), Some("src"));
 
         // Originals next to own text: reply.
-        let mut commented = msg(json!({ "ChatId": "c", "Text": { "MessageText": "hm" } }), json!({ "Timestamp": 9 }));
+        let mut commented = msg(
+            json!({ "ChatId": "c", "Text": { "MessageText": "hm" } }),
+            json!({ "Timestamp": 9 }),
+        );
         commented["ForwardedMessages"] = json!([original]);
         let m = parse_server_message(&commented, None).unwrap();
-        assert!(matches!(m.relation, Relation::Reply { original: Some(_), .. }));
+        assert!(matches!(
+            m.relation,
+            Relation::Reply {
+                original: Some(_),
+                ..
+            }
+        ));
     }
 
     #[test]
     fn unknown_content_is_a_placeholder_not_an_error() {
-        let m = msg(json!({ "ChatId": "c", "Hologram": {} }), json!({ "Timestamp": 5 }));
-        assert_eq!(parse_server_message(&m, None).unwrap().body, WireBody::Other("Hologram".into()));
-        let m = json!({ "ClientMessage": { "Reaction": {} }, "ServerMessageInfo": { "Timestamp": 5 } });
-        assert_eq!(parse_server_message(&m, Some("c")).unwrap().body, WireBody::Other("Reaction".into()));
+        let m = msg(
+            json!({ "ChatId": "c", "Hologram": {} }),
+            json!({ "Timestamp": 5 }),
+        );
+        assert_eq!(
+            parse_server_message(&m, None).unwrap().body,
+            WireBody::Other("Hologram".into())
+        );
+        let m =
+            json!({ "ClientMessage": { "Reaction": {} }, "ServerMessageInfo": { "Timestamp": 5 } });
+        assert_eq!(
+            parse_server_message(&m, Some("c")).unwrap().body,
+            WireBody::Other("Reaction".into())
+        );
         // An image without a file id cannot be fetched: placeholder, not a broken thumbnail.
-        let m = msg(json!({ "ChatId": "c", "Image": { "Width": 1, "Height": 1 } }), json!({ "Timestamp": 5 }));
-        assert_eq!(parse_server_message(&m, None).unwrap().body, WireBody::Other("Image".into()));
+        let m = msg(
+            json!({ "ChatId": "c", "Image": { "Width": 1, "Height": 1 } }),
+            json!({ "Timestamp": 5 }),
+        );
+        assert_eq!(
+            parse_server_message(&m, None).unwrap().body,
+            WireBody::Other("Image".into())
+        );
     }
 
     #[test]
     fn push_decoding() {
-        let upsert = msg(json!({ "ChatId": "c", "Text": { "MessageText": "hi" } }), json!({ "Timestamp": 5, "Version": 1 }));
-        assert!(matches!(decode_push(&upsert), Ok(PushEvent::MessageUpserted(m)) if m.timestamp == 5));
+        let upsert = msg(
+            json!({ "ChatId": "c", "Text": { "MessageText": "hi" } }),
+            json!({ "Timestamp": 5, "Version": 1 }),
+        );
+        assert!(
+            matches!(decode_push(&upsert), Ok(PushEvent::MessageUpserted(m)) if m.timestamp == 5)
+        );
 
         let edit = msg(
             json!({ "ChatId": "c", "Text": { "MessageText": "hi!" } }),
             json!({ "Timestamp": 5, "Version": 2, "LastEditTimestamp": 77 }),
         );
-        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&edit) else { panic!("edit") };
+        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&edit) else {
+            panic!("edit")
+        };
         assert!(m.edited);
         assert_eq!(m.version, Some(2));
 
-        let gone = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5, "Version": 3, "Deleted": true }));
-        assert_eq!(decode_push(&gone), Ok(PushEvent::MessageDeleted { chat: "c".into(), timestamp: 5 }));
+        let gone = msg(
+            json!({ "ChatId": "c" }),
+            json!({ "Timestamp": 5, "Version": 3, "Deleted": true }),
+        );
+        assert_eq!(
+            decode_push(&gone),
+            Ok(PushEvent::MessageDeleted {
+                chat: "c".into(),
+                timestamp: 5
+            })
+        );
 
         let seen = json!({ "ClientMessage": { "SeenMarker": { "ChatId": "c" } }, "ServerMessageInfo": {} });
-        assert_eq!(decode_push(&seen), Ok(PushEvent::ChatChanged { chat: "c".into() }));
+        assert_eq!(
+            decode_push(&seen),
+            Ok(PushEvent::ChatChanged { chat: "c".into() })
+        );
 
         let typing = json!({ "ClientMessage": { "Typing": { "ChatId": "c" } } });
-        assert_eq!(decode_push(&typing), Ok(PushEvent::Ignored { kind: "Typing".into() }));
+        assert_eq!(
+            decode_push(&typing),
+            Ok(PushEvent::Ignored {
+                kind: "Typing".into()
+            })
+        );
         let seen_without_chat = json!({ "ClientMessage": { "SeenMarker": {} } });
-        assert_eq!(decode_push(&seen_without_chat), Ok(PushEvent::Ignored { kind: "SeenMarker".into() }));
+        assert_eq!(
+            decode_push(&seen_without_chat),
+            Ok(PushEvent::Ignored {
+                kind: "SeenMarker".into()
+            })
+        );
 
-        assert_eq!(decode_push(&json!({})), Err(WireError::Missing("ClientMessage")));
+        assert_eq!(
+            decode_push(&json!({})),
+            Err(WireError::Missing("ClientMessage"))
+        );
     }
 
     #[test]
@@ -904,7 +1168,13 @@ mod tests {
         let row = |ts: i64| json!({ "ServerMessage": msg(json!({ "ChatId": "c", "Text": { "MessageText": "m" } }), json!({ "Timestamp": ts })) });
         let body = json!({ "Chats": [{ "ChatId": "c", "Messages": [row(30), row(10), row(20), row(20), { "ServerMessage": {} }] }] });
         let page = parse_history(&body, "c", 50).unwrap();
-        assert_eq!(page.messages.iter().map(|m| m.timestamp).collect::<Vec<_>>(), [10, 20, 30]);
+        assert_eq!(
+            page.messages
+                .iter()
+                .map(|m| m.timestamp)
+                .collect::<Vec<_>>(),
+            [10, 20, 30]
+        );
         assert_eq!(page.skipped, 1);
         assert!(page.reached_start);
         // A full page does not prove the start was reached.
@@ -916,10 +1186,19 @@ mod tests {
 
     #[test]
     fn history_errors_follow_the_status() {
-        assert!(matches!(parse_history(&json!({ "Status": 4 }), "c", 50), Err(ProtoError::Protocol(_))));
+        assert!(matches!(
+            parse_history(&json!({ "Status": 4 }), "c", 50),
+            Err(ProtoError::Protocol(_))
+        ));
         let entry = json!({ "Chats": [{ "ChatId": "c", "Status": 4 }] });
-        assert!(matches!(parse_history(&entry, "c", 50), Err(ProtoError::Protocol(_))));
-        assert_eq!(parse_history(&json!({ "Status": 6 }), "c", 50), Err(ProtoError::SessionExpired));
+        assert!(matches!(
+            parse_history(&entry, "c", 50),
+            Err(ProtoError::Protocol(_))
+        ));
+        assert_eq!(
+            parse_history(&json!({ "Status": 6 }), "c", 50),
+            Err(ProtoError::SessionExpired)
+        );
     }
 
     #[test]
@@ -933,7 +1212,10 @@ mod tests {
             { "Chats": "no id" },
         ] });
         let chats = parse_chat_list(&body, &DEFAULT_EXCLUDED_NAMESPACES).unwrap();
-        assert_eq!(chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["a_b", "22/0/x"]);
+        assert_eq!(
+            chats.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            ["a_b", "22/0/x"]
+        );
         assert_eq!(chats[0].unread, 0);
         assert_eq!(chats[0].partner_guid.as_deref(), Some("b"));
         assert_eq!(parse_chat_list(&json!({}), &[]).unwrap(), vec![]);
@@ -949,7 +1231,15 @@ mod tests {
         ] });
         let users = parse_users(&data).unwrap();
         assert_eq!(users.len(), 2);
-        assert_eq!(users[0], WireUser { guid: "g1".into(), display_name: Some("Ivan".into()), avatar_id: Some("a1".into()), uid: Some("4001".into()) });
+        assert_eq!(
+            users[0],
+            WireUser {
+                guid: "g1".into(),
+                display_name: Some("Ivan".into()),
+                avatar_id: Some("a1".into()),
+                uid: Some("4001".into())
+            }
+        );
         assert_eq!(users[1].display_name.as_deref(), Some("Olga"));
         assert_eq!(users[1].uid.as_deref(), Some("7"));
         assert_eq!(parse_users(&json!([{ "guid": "g" }])).unwrap().len(), 1);
@@ -957,7 +1247,8 @@ mod tests {
     }
 
     #[test]
-    fn members_default_to_the_member_role_and_keep_unknown_roles_and_ignore_groups_and_departments() {
+    fn members_default_to_the_member_role_and_keep_unknown_roles_and_ignore_groups_and_departments()
+    {
         let data = json!({
             "users": [
                 { "guid": "g1", "display_name": "Ivan", "role": "admin", "avatar_id": "a1" },
@@ -972,7 +1263,11 @@ mod tests {
         });
         let members = parse_members(&data).unwrap();
         assert_eq!(members.skipped, 2);
-        let roles: Vec<_> = members.users.iter().map(|u| (u.guid.as_str(), u.role.clone(), u.deleted)).collect();
+        let roles: Vec<_> = members
+            .users
+            .iter()
+            .map(|u| (u.guid.as_str(), u.role.clone(), u.deleted))
+            .collect();
         assert_eq!(
             roles,
             [
@@ -992,38 +1287,93 @@ mod tests {
 
     #[test]
     fn profile_reads_the_name_the_avatar_and_a_non_blank_status_text() {
-        let reply = |status: Json| json!({
-            "UserInfo": { "Guid": "g", "DisplayName": "Ivan", "PublicName": "ivan", "AvatarId": "av" },
-            "UserStatusInfo": { "Timestamp": 1, "UserStatus": status },
-        });
+        let reply = |status: Json| {
+            json!({
+                "UserInfo": { "Guid": "g", "DisplayName": "Ivan", "PublicName": "ivan", "AvatarId": "av" },
+                "UserStatusInfo": { "Timestamp": 1, "UserStatus": status },
+            })
+        };
         let unset = parse_profile(&reply(json!({}))).unwrap();
         assert_eq!(
             unset,
-            WireProfile { guid: Some("g".into()), name: Some("Ivan".into()), avatar_id: Some("av".into()), status_text: None }
+            WireProfile {
+                guid: Some("g".into()),
+                name: Some("Ivan".into()),
+                avatar_id: Some("av".into()),
+                status_text: None
+            }
         );
         let custom = |text: Json| json!({ "Availability": "Away", "CustomStatus": { "Emoji": "x", "Text": text } });
         let set = parse_profile(&reply(custom(json!("On leave")))).unwrap();
         assert_eq!(set.status_text.as_deref(), Some("On leave"));
-        assert_eq!(parse_profile(&reply(custom(json!("  ")))).unwrap().status_text, None);
-        assert_eq!(parse_profile(&reply(custom(json!(5)))).unwrap().status_text, None);
-        assert_eq!(parse_profile(&reply(json!({ "Availability": "Away" }))).unwrap().status_text, None, "no CustomStatus is no status");
-        assert_eq!(parse_profile(&reply(json!({ "CustomStatus": "text" }))).unwrap().status_text, None);
-        for wrong in [json!({ "text": "On leave" }), json!({ "Text": "Pascal" }), json!({ "CustomStatus": { "text": "lower" } })] {
-            assert_eq!(parse_profile(&reply(wrong)).unwrap().status_text, None, "only CustomStatus.Text is a status");
+        assert_eq!(
+            parse_profile(&reply(custom(json!("  "))))
+                .unwrap()
+                .status_text,
+            None
+        );
+        assert_eq!(
+            parse_profile(&reply(custom(json!(5)))).unwrap().status_text,
+            None
+        );
+        assert_eq!(
+            parse_profile(&reply(json!({ "Availability": "Away" })))
+                .unwrap()
+                .status_text,
+            None,
+            "no CustomStatus is no status"
+        );
+        assert_eq!(
+            parse_profile(&reply(json!({ "CustomStatus": "text" })))
+                .unwrap()
+                .status_text,
+            None
+        );
+        for wrong in [
+            json!({ "text": "On leave" }),
+            json!({ "Text": "Pascal" }),
+            json!({ "CustomStatus": { "text": "lower" } }),
+        ] {
+            assert_eq!(
+                parse_profile(&reply(wrong)).unwrap().status_text,
+                None,
+                "only CustomStatus.Text is a status"
+            );
         }
 
         let bare = parse_profile(&json!({ "UserInfo": { "PublicName": "ivan" } })).unwrap();
-        assert_eq!((bare.name.as_deref(), bare.guid, bare.avatar_id, bare.status_text), (Some("ivan"), None, None, None));
+        assert_eq!(
+            (
+                bare.name.as_deref(),
+                bare.guid,
+                bare.avatar_id,
+                bare.status_text
+            ),
+            (Some("ivan"), None, None, None)
+        );
         assert!(parse_profile(&json!({})).is_err());
         assert!(parse_profile(&json!({ "UserInfo": null })).is_err());
-        assert_eq!(parse_profile(&json!({ "Status": 6 })), Err(ProtoError::SessionExpired));
+        assert_eq!(
+            parse_profile(&json!({ "Status": 6 })),
+            Err(ProtoError::SessionExpired)
+        );
     }
 
     #[test]
     fn sender_falls_back_to_custom_from() {
-        let m = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 1, "CustomFrom": { "DisplayName": "Channel", "AvatarId": "av" } }));
+        let m = msg(
+            json!({ "ChatId": "c" }),
+            json!({ "Timestamp": 1, "CustomFrom": { "DisplayName": "Channel", "AvatarId": "av" } }),
+        );
         let from = parse_server_message(&m, None).unwrap().from.unwrap();
-        assert_eq!((from.guid, from.display_name.as_deref(), from.avatar_id.as_deref()), (None, Some("Channel"), Some("av")));
+        assert_eq!(
+            (
+                from.guid,
+                from.display_name.as_deref(),
+                from.avatar_id.as_deref()
+            ),
+            (None, Some("Channel"), Some("av"))
+        );
     }
 
     #[test]
@@ -1032,13 +1382,18 @@ mod tests {
             json!({ "ChatId": "c", "PayloadId": "f2e6b568-c3ce-489d-e28c8f1d", "Text": { "MessageText": "hi" } }),
             json!({ "Timestamp": 5, "From": { "Guid": "me" } }),
         );
-        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&echo) else { panic!("echo") };
+        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&echo) else {
+            panic!("echo")
+        };
         assert_eq!(m.payload_id.as_deref(), Some("f2e6b568-c3ce-489d-e28c8f1d"));
         let plain = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
         assert_eq!(parse_server_message(&plain, None).unwrap().payload_id, None);
         // A system message has no `Plain` and therefore no payload id.
         let system = json!({ "ClientMessage": { "SystemMessage": { "ChatId": "c" } }, "ServerMessageInfo": { "Timestamp": 5 } });
-        assert_eq!(parse_server_message(&system, None).unwrap().payload_id, None);
+        assert_eq!(
+            parse_server_message(&system, None).unwrap().payload_id,
+            None
+        );
     }
 
     #[test]
@@ -1047,44 +1402,94 @@ mod tests {
         let typing = |inner: Json| json!({ "ClientMessage": { "Typing": inner }, "ServerMessageInfo": info });
         assert_eq!(
             decode_push(&typing(json!({ "ChatId": "c" }))),
-            Ok(PushEvent::Typing { chat: "c".into(), user: "g1".into(), name: Some("Anna".into()), timeout_secs: None })
+            Ok(PushEvent::Typing {
+                chat: "c".into(),
+                user: "g1".into(),
+                name: Some("Anna".into()),
+                timeout_secs: None
+            })
         );
         assert_eq!(
             decode_push(&typing(json!({ "ChatId": "c", "TimeoutSeconds": 6 }))),
-            Ok(PushEvent::Typing { chat: "c".into(), user: "g1".into(), name: Some("Anna".into()), timeout_secs: Some(6) })
+            Ok(PushEvent::Typing {
+                chat: "c".into(),
+                user: "g1".into(),
+                name: Some("Anna".into()),
+                timeout_secs: Some(6)
+            })
         );
         // Without a typist there is nobody to show.
         let anonymous = json!({ "ClientMessage": { "Typing": { "ChatId": "c" } }, "ServerMessageInfo": { "Timestamp": 7 } });
-        assert_eq!(decode_push(&anonymous), Ok(PushEvent::Ignored { kind: "Typing".into() }));
+        assert_eq!(
+            decode_push(&anonymous),
+            Ok(PushEvent::Ignored {
+                kind: "Typing".into()
+            })
+        );
     }
 
     #[test]
     fn history_row_siblings_fill_the_reactions() {
-        let mut row = msg(json!({ "ChatId": "c", "Text": { "MessageText": "hi" } }), json!({ "Timestamp": 5 }));
-        assert_eq!(parse_server_message(&row, None).unwrap().reactions, None, "no sibling: no reaction state");
+        let mut row = msg(
+            json!({ "ChatId": "c", "Text": { "MessageText": "hi" } }),
+            json!({ "Timestamp": 5 }),
+        );
+        assert_eq!(
+            parse_server_message(&row, None).unwrap().reactions,
+            None,
+            "no sibling: no reaction state"
+        );
 
         row["Reactions"] = json!([{ "Type": 100101, "Count": 2 }, { "Type": 7, "Count": 1 }]);
         row["ReactionsVersion"] = json!(4);
-        row["RecentUserReactions"] = json!([{ "Timestamp": 9, "Type": 100101, "UserInfo": { "Guid": "g1" } }]);
+        row["RecentUserReactions"] =
+            json!([{ "Timestamp": 9, "Type": 100101, "UserInfo": { "Guid": "g1" } }]);
         let reactions = parse_server_message(&row, None).unwrap().reactions.unwrap();
         assert_eq!(
             reactions,
             WireReactions {
-                counts: vec![WireReactionCount { code: 100101, count: 2 }, WireReactionCount { code: 7, count: 1 }],
+                counts: vec![
+                    WireReactionCount {
+                        code: 100101,
+                        count: 2
+                    },
+                    WireReactionCount { code: 7, count: 1 }
+                ],
                 version: Some(4),
-                recent: vec![WireReactor { user: Some("g1".into()), code: 100101, timestamp: Some(9) }],
+                recent: vec![WireReactor {
+                    user: Some("g1".into()),
+                    code: 100101,
+                    timestamp: Some(9)
+                }],
             }
         );
 
         // Any single sibling is enough to carry state; a version alone means "all removed".
         let mut only_version = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
         only_version["ReactionsVersion"] = json!(6);
-        let reactions = parse_server_message(&only_version, None).unwrap().reactions.unwrap();
-        assert_eq!((reactions.counts.len(), reactions.version, reactions.recent.len()), (0, Some(6), 0));
+        let reactions = parse_server_message(&only_version, None)
+            .unwrap()
+            .reactions
+            .unwrap();
+        assert_eq!(
+            (
+                reactions.counts.len(),
+                reactions.version,
+                reactions.recent.len()
+            ),
+            (0, Some(6), 0)
+        );
 
         // The same rows come out of a history page.
         let body = json!({ "Chats": [{ "ChatId": "c", "Messages": [{ "ServerMessage": row }] }] });
-        assert_eq!(parse_history(&body, "c", 50).unwrap().messages[0].reactions.as_ref().unwrap().version, Some(4));
+        assert_eq!(
+            parse_history(&body, "c", 50).unwrap().messages[0]
+                .reactions
+                .as_ref()
+                .unwrap()
+                .version,
+            Some(4)
+        );
     }
 
     #[test]
@@ -1102,8 +1507,18 @@ mod tests {
             { "Type": 4, "UserInfo": {} },
         ]);
         let reactions = parse_server_message(&row, None).unwrap().reactions.unwrap();
-        assert_eq!(reactions.counts, vec![WireReactionCount { code: 4, count: 5 }]);
-        assert_eq!(reactions.recent, vec![WireReactor { user: None, code: 4, timestamp: None }]);
+        assert_eq!(
+            reactions.counts,
+            vec![WireReactionCount { code: 4, count: 5 }]
+        );
+        assert_eq!(
+            reactions.recent,
+            vec![WireReactor {
+                user: None,
+                code: 4,
+                timestamp: None
+            }]
+        );
     }
 
     #[test]
@@ -1116,7 +1531,11 @@ mod tests {
                 "ServerMessageInfo": info,
             })
         };
-        let reactions = WireReactions { counts: vec![WireReactionCount { code: 9, count: 1 }], version: Some(2), recent: vec![] };
+        let reactions = WireReactions {
+            counts: vec![WireReactionCount { code: 9, count: 1 }],
+            version: Some(2),
+            recent: vec![],
+        };
         let event = |action, code| PushEvent::Reaction {
             chat: "c".into(),
             timestamp: 5,
@@ -1127,35 +1546,58 @@ mod tests {
         };
         let from = json!({ "From": { "Guid": "g1" }, "Timestamp": 8 });
         assert_eq!(
-            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 2 }), from.clone())),
+            decode_push(&push(
+                json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 2 }),
+                from.clone()
+            )),
             Ok(event(Some(ReactionAction::Replace), Some(9)))
         );
         assert_eq!(
-            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Action": 1 }), from.clone())),
+            decode_push(&push(
+                json!({ "ChatId": "c", "Timestamp": 5, "Action": 1 }),
+                from.clone()
+            )),
             Ok(event(Some(ReactionAction::Remove), None))
         );
         assert_eq!(
-            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 7 }), from.clone())),
+            decode_push(&push(
+                json!({ "ChatId": "c", "Timestamp": 5, "Type": 9, "Action": 7 }),
+                from.clone()
+            )),
             Ok(event(Some(ReactionAction::Other(7)), Some(9)))
         );
-        assert_eq!(decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5 }), from)), Ok(event(None, None)));
+        assert_eq!(
+            decode_push(&push(json!({ "ChatId": "c", "Timestamp": 5 }), from)),
+            Ok(event(None, None))
+        );
 
         // The target falls back to the push's own timestamp; the actor may be unknown.
         let anonymous = push(json!({ "ChatId": "c" }), json!({ "Timestamp": 5 }));
         assert!(matches!(
             decode_push(&anonymous),
-            Ok(PushEvent::Reaction { timestamp: 5, actor: None, .. })
+            Ok(PushEvent::Reaction {
+                timestamp: 5,
+                actor: None,
+                ..
+            })
         ));
     }
 
     #[test]
     fn reaction_push_without_an_address_is_ignored() {
         let info = json!({ "From": { "Guid": "g1" } });
-        let ignored = || Ok(PushEvent::Ignored { kind: "Reaction".into() });
+        let ignored = || {
+            Ok(PushEvent::Ignored {
+                kind: "Reaction".into(),
+            })
+        };
         let no_chat = json!({ "ClientMessage": { "Reaction": { "Timestamp": 5, "Action": 2, "Type": 9 } }, "ServerMessageInfo": info });
         assert_eq!(decode_push(&no_chat), ignored());
         let no_timestamp = json!({ "ClientMessage": { "Reaction": { "ChatId": "c", "Action": 2, "Type": 9 } }, "ServerMessageInfo": info });
         assert_eq!(decode_push(&no_timestamp), ignored());
-        assert_eq!(decode_push(&json!({ "ClientMessage": { "Reaction": {} } })), ignored());
+        assert_eq!(
+            decode_push(&json!({ "ClientMessage": { "Reaction": {} } })),
+            ignored()
+        );
     }
 }

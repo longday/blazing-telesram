@@ -1,15 +1,18 @@
 //! One timeline row: day separator, grouped bubble, attachments, reaction chips.
 
 use crate::desktop::Desktop;
-use crate::format::{avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size, Clock};
+use crate::format::{
+    Clock, avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size,
+};
 use crate::store::ChatStore;
 use crate::theme::*;
-use crate::viewer::{action_line, Action, ActionLine};
+use crate::viewer::{Action, ActionLine, action_line};
 use crate::widgets::avatar;
 use bt_chat_core::model::{
-    ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody, MessageTs, ReplyQuote,
+    ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody,
+    MessageTs, ReplyQuote,
 };
-use bt_chat_core::reactions::{emoji, ReactionCount, NEUTRAL_GLYPH};
+use bt_chat_core::reactions::{NEUTRAL_GLYPH, ReactionCount, emoji};
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -49,8 +52,12 @@ pub struct RowContext {
 /// Renders message `ix` of the context's chat; pure in the store so it can run inside list callbacks.
 pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
     let (store, chat, clock) = (ctx.store.read(cx), &ctx.chat, ctx.clock);
-    let Some(messages) = store.timeline(chat).map(|t| &t.messages) else { return div().into_any_element() };
-    let Some(m) = messages.get(ix) else { return div().into_any_element() };
+    let Some(messages) = store.timeline(chat).map(|t| &t.messages) else {
+        return div().into_any_element();
+    };
+    let Some(m) = messages.get(ix) else {
+        return div().into_any_element();
+    };
     let prev = ix.checked_sub(1).map(|i| &messages[i]);
     let next = messages.get(ix + 1);
     let kind = store.chat(chat).map(|c| c.kind);
@@ -64,8 +71,15 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
     let avatar_slot = in_group_chat.then(|| {
         let name = m.author_name.as_deref().unwrap_or("?");
         if group_end {
-            avatar(store, m.author_avatar.as_ref(), &m.author.0, name, AVATAR, format!("msg-{ts}-avatar"))
-                .into_any_element()
+            avatar(
+                store,
+                m.author_avatar.as_ref(),
+                &m.author.0,
+                name,
+                AVATAR,
+                format!("msg-{ts}-avatar"),
+            )
+            .into_any_element()
         } else {
             div().size(px(AVATAR)).flex_none().into_any_element()
         }
@@ -79,23 +93,30 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
             let rows = ctx.rows.clone();
             move |children, _, _| {
                 if let (Some(first), Some(last)) = (children.first(), children.last()) {
-                    rows.borrow_mut().push((ts, Bounds::from_corners(first.origin, last.bottom_right())));
+                    rows.borrow_mut()
+                        .push((ts, Bounds::from_corners(first.origin, last.bottom_right())));
                 }
             }
         })
         .when(new_day, |d| {
             d.child(
-                div().w_full().flex().justify_center().pt(px(8.)).pb(px(4.)).child(
-                    div()
-                        .debug_selector(move || format!("msg-{ts}-day"))
-                        .px(px(10.))
-                        .py(px(2.))
-                        .rounded_full()
-                        .bg(rgb(PANEL))
-                        .text_size(px(13.))
-                        .text_color(rgb(MUTED))
-                        .child(day_label(ts, clock)),
-                ),
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(8.))
+                    .pb(px(4.))
+                    .child(
+                        div()
+                            .debug_selector(move || format!("msg-{ts}-day"))
+                            .px(px(10.))
+                            .py(px(2.))
+                            .rounded_full()
+                            .bg(rgb(PANEL))
+                            .text_size(px(13.))
+                            .text_color(rgb(MUTED))
+                            .child(day_label(ts, clock)),
+                    ),
             )
         })
         .child(
@@ -119,7 +140,11 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
     let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
     div()
         .on_mouse_down(MouseButton::Right, move |event, _, cx| {
-            desktop.update(cx, |desktop, cx| desktop.open_menu(chat.clone(), ts, event.position, cx)).ok();
+            desktop
+                .update(cx, |desktop, cx| {
+                    desktop.open_menu(chat.clone(), ts, event.position, cx)
+                })
+                .ok();
         })
         .debug_selector(move || format!("msg-{ts}"))
         .max_w(px(BUBBLE_MAX))
@@ -138,7 +163,11 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
                     .text_size(px(13.))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(avatar_color(&m.author.0)))
-                    .child(m.author_name.clone().unwrap_or_else(|| "Неизвестный".into())),
+                    .child(
+                        m.author_name
+                            .clone()
+                            .unwrap_or_else(|| "Неизвестный".into()),
+                    ),
             )
         })
         .when_some(m.forwarded_from.as_ref(), |d, from| {
@@ -150,7 +179,9 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
                     .child(format!("Переслано от {from}")),
             )
         })
-        .when_some(m.reply_to.as_ref(), |d, quote| d.child(reply_quote(ts, quote)))
+        .when_some(m.reply_to.as_ref(), |d, quote| {
+            d.child(reply_quote(ts, quote))
+        })
         .child(body(ctx, store, m))
         .when_some(failure(ctx, m), |d, failure| d.child(failure))
         .when_some(reaction_chips(ctx, m), |d, chips| d.child(chips))
@@ -163,7 +194,11 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
                 .text_size(px(11.))
                 .text_color(rgb(MUTED))
                 .when(m.edited, |d| {
-                    d.child(div().debug_selector(move || format!("msg-{ts}-edited")).child("изм."))
+                    d.child(
+                        div()
+                            .debug_selector(move || format!("msg-{ts}-edited"))
+                            .child("изм."),
+                    )
                 })
                 .child(clock_time(ts, ctx.clock))
                 .when(m.outgoing, |d| d.child(delivery_mark(ts, &m.delivery))),
@@ -177,12 +212,17 @@ fn delivery_mark(ts: i64, delivery: &Delivery) -> Div {
         Delivery::Sent => ("sent", "✓", SENT_MARK),
         Delivery::Failed { .. } => ("failed", "!", DANGER),
     };
-    div().debug_selector(move || format!("msg-{ts}-{selector}")).text_color(rgb(color)).child(glyph)
+    div()
+        .debug_selector(move || format!("msg-{ts}-{selector}"))
+        .text_color(rgb(color))
+        .child(glyph)
 }
 
 /// The refusal reason and the retry action of a failed message.
 fn failure(ctx: &RowContext, m: &Message) -> Option<Div> {
-    let Delivery::Failed { payload, reason } = &m.delivery else { return None };
+    let Delivery::Failed { payload, reason } = &m.delivery else {
+        return None;
+    };
     let ts = m.timestamp;
     let (store, payload) = (ctx.store.clone(), payload.clone());
     Some(
@@ -204,7 +244,9 @@ fn failure(ctx: &RowContext, m: &Message) -> Option<Div> {
                     .text_color(rgb(ACCENT))
                     .cursor_pointer()
                     .child("Повторить")
-                    .on_click(move |_, _, cx| store.update(cx, |store, _| store.retry(payload.clone()))),
+                    .on_click(move |_, _, cx| {
+                        store.update(cx, |store, _| store.retry(payload.clone()))
+                    }),
             ),
     )
 }
@@ -213,31 +255,59 @@ fn failure(ctx: &RowContext, m: &Message) -> Option<Div> {
 /// type's emoji (the neutral glyph for a code outside the table) and its count, the account's own
 /// type is highlighted, and a left click toggles that type. Debug selectors: `msg-{ts}-reaction-{code}`.
 fn reaction_chips(ctx: &RowContext, m: &Message) -> Option<Div> {
-    if !matches!(m.delivery, Delivery::Sent) || matches!(m.body, MessageBody::Deleted) || m.reactions.counts.is_empty() {
+    if !matches!(m.delivery, Delivery::Sent)
+        || matches!(m.body, MessageBody::Deleted)
+        || m.reactions.counts.is_empty()
+    {
         return None;
     }
     let ts = m.timestamp;
-    let chips = m.reactions.counts.iter().map(|&ReactionCount { code, count }| {
-        let own = m.reactions.mine == Some(code);
-        let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+    let chips = m
+        .reactions
+        .counts
+        .iter()
+        .map(|&ReactionCount { code, count }| {
+            let own = m.reactions.mine == Some(code);
+            let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+            div()
+                .id(SharedString::from(format!("reaction-{ts}-{}", code.0)))
+                .debug_selector(move || format!("msg-{ts}-reaction-{}", code.0))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(8.))
+                .py(px(2.))
+                .rounded_full()
+                .bg(rgb(if own { REACTION_OWN } else { REACTION_CHIP }))
+                .cursor_pointer()
+                .child(
+                    div()
+                        .text_size(px(14.))
+                        .child(emoji(code).unwrap_or(NEUTRAL_GLYPH)),
+                )
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(rgb(INK))
+                        .child(count.to_string()),
+                )
+                .on_click(move |_, _, cx| {
+                    desktop
+                        .update(cx, |desktop, cx| {
+                            desktop.toggle_reaction(chat.clone(), ts, code, cx)
+                        })
+                        .ok();
+                })
+        });
+    Some(
         div()
-            .id(SharedString::from(format!("reaction-{ts}-{}", code.0)))
-            .debug_selector(move || format!("msg-{ts}-reaction-{}", code.0))
             .flex()
-            .items_center()
+            .flex_wrap()
             .gap(px(4.))
-            .px(px(8.))
-            .py(px(2.))
-            .rounded_full()
-            .bg(rgb(if own { REACTION_OWN } else { REACTION_CHIP }))
-            .cursor_pointer()
-            .child(div().text_size(px(14.)).child(emoji(code).unwrap_or(NEUTRAL_GLYPH)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::MEDIUM).text_color(rgb(INK)).child(count.to_string()))
-            .on_click(move |_, _, cx| {
-                desktop.update(cx, |desktop, cx| desktop.toggle_reaction(chat.clone(), ts, code, cx)).ok();
-            })
-    });
-    Some(div().flex().flex_wrap().gap(px(4.)).pt(px(2.)).children(chips))
+            .pt(px(2.))
+            .children(chips),
+    )
 }
 
 fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {
@@ -259,25 +329,43 @@ fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {
                     .child(author.clone()),
             )
         })
-        .child(div().truncate().text_size(px(13.)).text_color(rgb(MUTED)).child(quote.text.clone()))
+        .child(
+            div()
+                .truncate()
+                .text_size(px(13.))
+                .text_color(rgb(MUTED))
+                .child(quote.text.clone()),
+        )
 }
 
 fn body(ctx: &RowContext, store: &ChatStore, m: &Message) -> AnyElement {
     let ts = m.timestamp;
     match &m.body {
         MessageBody::Text(text) => text_block(text.clone()).into_any_element(),
-        MessageBody::Image { media, width, height, caption, .. } => {
-            attachment(ts, Some(single_image(ctx, store, ts, media, *width, *height)), caption.as_deref())
-        }
+        MessageBody::Image {
+            media,
+            width,
+            height,
+            caption,
+            ..
+        } => attachment(
+            ts,
+            Some(single_image(ctx, store, ts, media, *width, *height)),
+            caption.as_deref(),
+        ),
         MessageBody::Gallery { items, caption } => {
             let pictures = match items.as_slice() {
                 [] => None,
-                [one] => Some(single_image(ctx, store, ts, &one.media, one.width, one.height)),
+                [one] => Some(single_image(
+                    ctx, store, ts, &one.media, one.width, one.height,
+                )),
                 many => Some(grid(ctx, store, ts, many)),
             };
             attachment(ts, pictures, caption.as_deref())
         }
-        MessageBody::File { media, name, size } => file_card(ctx, store, ts, media, name, *size).into_any_element(),
+        MessageBody::File { media, name, size } => {
+            file_card(ctx, store, ts, media, name, *size).into_any_element()
+        }
         MessageBody::Deleted => div()
             .debug_selector(move || format!("msg-{ts}-deleted"))
             .italic()
@@ -303,7 +391,9 @@ fn attachment(ts: i64, pictures: Option<AnyElement>, caption: Option<&str>) -> A
         .gap(px(4.))
         .children(pictures)
         .when_some(caption, |d, caption| {
-            d.child(text_block(caption.to_owned()).debug_selector(move || format!("msg-{ts}-caption")))
+            d.child(
+                text_block(caption.to_owned()).debug_selector(move || format!("msg-{ts}-caption")),
+            )
         })
         .into_any_element()
 }
@@ -311,7 +401,11 @@ fn attachment(ts: i64, pictures: Option<AnyElement>, caption: Option<&str>) -> A
 /// The bubble is content-sized, so gpui measures its text at max-content width and keeps that single-line
 /// height even after the bubble is clamped; a max width on the text itself makes the measurement wrap.
 fn text_block(text: String) -> Div {
-    div().max_w(px(CONTENT_W)).text_size(px(15.)).line_height(px(21.)).child(text)
+    div()
+        .max_w(px(CONTENT_W))
+        .text_size(px(15.))
+        .line_height(px(21.))
+        .child(text)
 }
 
 /// Columns of the picture grid: one picture on its own, two or four in two columns, otherwise three.
@@ -338,16 +432,35 @@ fn grid(ctx: &RowContext, store: &ChatStore, ts: i64, items: &[GalleryItem]) -> 
         .flex_col()
         .gap(px(GRID_GAP))
         .children(items.chunks(columns).enumerate().map(|(row, cells)| {
-            div().flex().gap(px(GRID_GAP)).children(cells.iter().enumerate().map(|(column, item)| {
-                let index = row * columns + column;
-                picture(ctx, store, ts, index, &item.media, side, side, format!("image-{index}"))
-            }))
+            div()
+                .flex()
+                .gap(px(GRID_GAP))
+                .children(cells.iter().enumerate().map(|(column, item)| {
+                    let index = row * columns + column;
+                    picture(
+                        ctx,
+                        store,
+                        ts,
+                        index,
+                        &item.media,
+                        side,
+                        side,
+                        format!("image-{index}"),
+                    )
+                }))
         }))
         .into_any_element()
 }
 
 /// One picture at its aspect ratio.
-fn single_image(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, width: u32, height: u32) -> AnyElement {
+fn single_image(
+    ctx: &RowContext,
+    store: &ChatStore,
+    ts: i64,
+    media: &MediaRef,
+    width: u32,
+    height: u32,
+) -> AnyElement {
     let (w, h) = fit_thumbnail(width, height, THUMB_MAX);
     picture(ctx, store, ts, 0, media, w, h, "image".into()).into_any_element()
 }
@@ -379,7 +492,11 @@ fn picture(
         .bg(rgb(PLACEHOLDER))
         .cursor_pointer()
         .on_click(move |_, _, cx| {
-            desktop.update(cx, |desktop, cx| desktop.open_viewer(chat.clone(), ts, index, cx)).ok();
+            desktop
+                .update(cx, |desktop, cx| {
+                    desktop.open_viewer(chat.clone(), ts, index, cx)
+                })
+                .ok();
         })
         .when_some(store.media_path(media), |d, path| {
             d.child(
@@ -395,7 +512,14 @@ fn picture(
 /// The file's name, size and one action line that follows its download state (design Decision 7).
 /// Debug selectors: `msg-{ts}-file`, and in the action line `-download`, `-cancel`, `-retry` for the
 /// button, `-saved` for the "saved as" text and `-status` for any other text.
-fn file_card(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, name: &str, size: u64) -> Div {
+fn file_card(
+    ctx: &RowContext,
+    store: &ChatStore,
+    ts: i64,
+    media: &MediaRef,
+    name: &str,
+    size: u64,
+) -> Div {
     let extension = name.rsplit_once('.').map_or("", |(_, ext)| ext);
     let badge: String = if extension.is_empty() || extension.chars().count() > 4 {
         "FILE".into()
@@ -430,8 +554,19 @@ fn file_card(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, nam
                 .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().truncate().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(name.to_string()))
-                .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(human_size(size)))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(name.to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child(human_size(size)),
+                )
                 .child(action_row(ctx, ts, original, name, line)),
         )
 }
@@ -439,7 +574,11 @@ fn file_card(ctx: &RowContext, store: &ChatStore, ts: i64, media: &MediaRef, nam
 /// Status text and the button of a file card. The row has one height in every state, so the message
 /// does not change size while a download runs.
 fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: ActionLine) -> Div {
-    let ActionLine { status, action, enabled } = line;
+    let ActionLine {
+        status,
+        action,
+        enabled,
+    } = line;
     let suffix = match action {
         Action::Download | Action::DownloadAgain => "download",
         Action::Cancel => "cancel",
@@ -453,12 +592,17 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
         .child(action.label());
     let button = if enabled {
         let (store, name) = (ctx.store.clone(), name.to_owned());
-        button.text_color(rgb(ACCENT)).cursor_pointer().on_click(move |_, _, cx| match action {
-            Action::Cancel => store.read(cx).cancel_download(&original),
-            Action::Download | Action::Retry | Action::DownloadAgain => {
-                store.update(cx, |store, cx| store.download(original.clone(), Some(name.clone()), cx));
-            }
-        })
+        button
+            .text_color(rgb(ACCENT))
+            .cursor_pointer()
+            .on_click(move |_, _, cx| match action {
+                Action::Cancel => store.read(cx).cancel_download(&original),
+                Action::Download | Action::Retry | Action::DownloadAgain => {
+                    store.update(cx, |store, cx| {
+                        store.download(original.clone(), Some(name.clone()), cx)
+                    });
+                }
+            })
     } else {
         button.text_color(rgb(MUTED)).cursor_default()
     };

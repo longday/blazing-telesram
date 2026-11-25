@@ -8,7 +8,14 @@ use gpui::{prelude::*, *};
 
 /// Round avatar: the downloaded image when ready, otherwise initials on a color derived from `key`.
 /// Debug selectors: `tag`, plus `tag-image` or `tag-initials` for what is shown.
-pub fn avatar(store: &ChatStore, media: Option<&MediaRef>, key: &str, label: &str, size: f32, tag: String) -> Div {
+pub fn avatar(
+    store: &ChatStore,
+    media: Option<&MediaRef>,
+    key: &str,
+    label: &str,
+    size: f32,
+    tag: String,
+) -> Div {
     let base = div()
         .size(px(size))
         .flex_none()
@@ -31,10 +38,14 @@ pub fn avatar(store: &ChatStore, media: Option<&MediaRef>, key: &str, label: &st
                     move || format!("{tag}-image")
                 }),
         ),
-        None => base.child(div().debug_selector({
-            let tag = tag.clone();
-            move || format!("{tag}-initials")
-        }).child(initials(label))),
+        None => base.child(
+            div()
+                .debug_selector({
+                    let tag = tag.clone();
+                    move || format!("{tag}-initials")
+                })
+                .child(initials(label)),
+        ),
     }
     .debug_selector(move || tag)
 }
@@ -73,7 +84,16 @@ impl Icon {
                 (false, &[(10.5, 3.), (3., 3.), (3., 10.5)]),
             ],
             Self::Edit => &[
-                (true, &[(2.5, 13.5), (3.2, 10.), (10.8, 2.4), (13.6, 5.2), (6., 12.8)]),
+                (
+                    true,
+                    &[
+                        (2.5, 13.5),
+                        (3.2, 10.),
+                        (10.8, 2.4),
+                        (13.6, 5.2),
+                        (6., 12.8),
+                    ],
+                ),
                 (false, &[(9.2, 4.), (12., 6.8)]),
             ],
             Self::Trash => &[
@@ -91,7 +111,12 @@ pub fn icon(kind: Icon, size: f32, color: u32) -> Canvas<()> {
         |_, _, _| (),
         move |bounds, _, window, _| {
             let unit = size / 16.;
-            let at = |(x, y): (f32, f32)| point(bounds.origin.x + px(x * unit), bounds.origin.y + px(y * unit));
+            let at = |(x, y): (f32, f32)| {
+                point(
+                    bounds.origin.x + px(x * unit),
+                    bounds.origin.y + px(y * unit),
+                )
+            };
             let mut builder = PathBuilder::stroke(px(1.5 * unit));
             for &(closed, stroke) in kind.strokes() {
                 let points: Vec<_> = stroke.iter().copied().map(at).collect();

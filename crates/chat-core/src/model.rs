@@ -17,25 +17,43 @@ pub struct UserId(pub String);
 pub type MessageTs = i64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChatKind { Private, Group, Channel }
+pub enum ChatKind {
+    Private,
+    Group,
+    Channel,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum MediaKind { Avatar, Thumbnail, File }
+pub enum MediaKind {
+    Avatar,
+    Thumbnail,
+    File,
+}
 
 /// Remote media reference; the client downloads it into the runtime cache on demand.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MediaRef { pub id: String, pub kind: MediaKind }
+pub struct MediaRef {
+    pub id: String,
+    pub kind: MediaKind,
+}
 
 impl MediaRef {
     /// The handle of the original file behind a preview: same id, kind `File`. Originals go
     /// through `Command::Download`, never through `FetchMedia`.
     pub fn original(&self) -> MediaRef {
-        MediaRef { id: self.id.clone(), kind: MediaKind::File }
+        MediaRef {
+            id: self.id.clone(),
+            kind: MediaKind::File,
+        }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct MessagePreview { pub author: Option<String>, pub text: String, pub timestamp: MessageTs }
+pub struct MessagePreview {
+    pub author: Option<String>,
+    pub text: String,
+    pub timestamp: MessageTs,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatSummary {
@@ -93,11 +111,19 @@ pub struct Profile {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReplyQuote { pub author: Option<String>, pub text: String, pub timestamp: Option<MessageTs> }
+pub struct ReplyQuote {
+    pub author: Option<String>,
+    pub text: String,
+    pub timestamp: Option<MessageTs>,
+}
 
 /// The message a draft or send answers: a loaded message of the same chat.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ReplyTarget { pub timestamp: MessageTs, pub author: Option<String>, pub text: String }
+pub struct ReplyTarget {
+    pub timestamp: MessageTs,
+    pub author: Option<String>,
+    pub text: String,
+}
 
 /// Client-generated id of one send, fixed before the first attempt; the server answers a
 /// resend with the same id as a duplicate instead of storing a second copy.
@@ -117,20 +143,43 @@ pub enum Delivery {
 
 /// Unsent composer state of one chat. Empty text with no reply means no draft.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Draft { pub chat: ChatId, pub text: String, pub reply_to: Option<ReplyTarget> }
+pub struct Draft {
+    pub chat: ChatId,
+    pub text: String,
+    pub reply_to: Option<ReplyTarget>,
+}
 
 /// One picture of a message: its preview handle (kind `Thumbnail`), pixel size and file name.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct GalleryItem { pub media: MediaRef, pub width: u32, pub height: u32, pub name: Option<String> }
+pub struct GalleryItem {
+    pub media: MediaRef,
+    pub width: u32,
+    pub height: u32,
+    pub name: Option<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MessageBody {
     Text(String),
     /// `name` is absent in rows cached before downloads existed.
-    Image { media: MediaRef, width: u32, height: u32, caption: Option<String>, #[serde(default)] name: Option<String> },
+    Image {
+        media: MediaRef,
+        width: u32,
+        height: u32,
+        caption: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Several pictures sent as one message.
-    Gallery { items: Vec<GalleryItem>, caption: Option<String> },
-    File { media: MediaRef, name: String, size: u64 },
+    Gallery {
+        items: Vec<GalleryItem>,
+        caption: Option<String>,
+    },
+    File {
+        media: MediaRef,
+        name: String,
+        size: u64,
+    },
     Deleted,
     /// A message type this client cannot render yet; holds the server type name.
     Unsupported(String),
@@ -140,8 +189,19 @@ impl MessageBody {
     /// The pictures of the body in order: one for an image, all for a gallery, none otherwise.
     pub fn gallery_items(&self) -> Vec<GalleryItem> {
         match self {
-            MessageBody::Image { media, width, height, name, .. } => {
-                vec![GalleryItem { media: media.clone(), width: *width, height: *height, name: name.clone() }]
+            MessageBody::Image {
+                media,
+                width,
+                height,
+                name,
+                ..
+            } => {
+                vec![GalleryItem {
+                    media: media.clone(),
+                    width: *width,
+                    height: *height,
+                    name: name.clone(),
+                }]
             }
             MessageBody::Gallery { items, .. } => items.clone(),
             _ => Vec::new(),
@@ -210,7 +270,11 @@ pub enum DownloadFailure {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConnectionState { Connecting, Online, Offline }
+pub enum ConnectionState {
+    Connecting,
+    Online,
+    Offline,
+}
 
 /// Identifies one search request. Chosen by the store, increasing; a reply whose id is not
 /// the latest issued one is stale.
@@ -219,11 +283,21 @@ pub struct SearchId(pub u64);
 
 /// A chat found by name.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ChatHit { pub id: ChatId, pub kind: ChatKind, pub title: String, pub avatar: Option<MediaRef> }
+pub struct ChatHit {
+    pub id: ChatId,
+    pub kind: ChatKind,
+    pub title: String,
+    pub avatar: Option<MediaRef>,
+}
 
 /// A person found by name. `chat` is the existing private chat with them, when known.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PersonHit { pub user: UserId, pub name: String, pub avatar: Option<MediaRef>, pub chat: Option<ChatId> }
+pub struct PersonHit {
+    pub user: UserId,
+    pub name: String,
+    pub avatar: Option<MediaRef>,
+    pub chat: Option<ChatId>,
+}
 
 /// A message found by text.
 #[derive(Clone, Debug, PartialEq)]
@@ -237,7 +311,11 @@ pub struct MessageHit {
 
 /// The first page of server results per kind. Held in memory only, never cached.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct SearchHits { pub chats: Vec<ChatHit>, pub people: Vec<PersonHit>, pub messages: Vec<MessageHit> }
+pub struct SearchHits {
+    pub chats: Vec<ChatHit>,
+    pub people: Vec<PersonHit>,
+    pub messages: Vec<MessageHit>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SearchFailure {
@@ -257,9 +335,19 @@ pub enum ClientEvent {
     /// The reactions of a loaded message changed (a server update, or the optimistic overlay
     /// of the user's own choice and its rollback). Carries no message body on purpose: it
     /// must not look like a new or edited message.
-    ReactionsChanged { chat: ChatId, timestamp: MessageTs, reactions: Reactions },
-    MessageDeleted { chat: ChatId, timestamp: MessageTs },
-    MediaReady { media: MediaRef, path: PathBuf },
+    ReactionsChanged {
+        chat: ChatId,
+        timestamp: MessageTs,
+        reactions: Reactions,
+    },
+    MessageDeleted {
+        chat: ChatId,
+        timestamp: MessageTs,
+    },
+    MediaReady {
+        media: MediaRef,
+        path: PathBuf,
+    },
     /// Not available now (failed, or missing on the server recently); the UI may ask again later.
     MediaUnavailable(MediaRef),
     Connection(ConnectionState),
@@ -269,52 +357,97 @@ pub enum ClientEvent {
     Drafts(Vec<Draft>),
     /// The pending message `payload` was settled; drop it before the server copy arrives as
     /// `MessageUpserted`.
-    PendingSettled { chat: ChatId, payload: PayloadId },
+    PendingSettled {
+        chat: ChatId,
+        payload: PayloadId,
+    },
     /// `user` is typing in `chat` until `until` unless their message arrives first.
-    Typing { chat: ChatId, user: UserId, name: Option<String>, until: Instant },
+    Typing {
+        chat: ChatId,
+        user: UserId,
+        name: Option<String>,
+        until: Instant,
+    },
     /// A reaction, a deletion or an edit did not happen; the message keeps its state.
-    ActionFailed { chat: ChatId, reason: String },
+    ActionFailed {
+        chat: ChatId,
+        reason: String,
+    },
     /// A send was not accepted into durable storage; nothing was queued. The UI puts the
     /// text and reply target back so the user can try again.
-    SendRefused { draft: Draft, reason: String },
+    SendRefused {
+        draft: Draft,
+        reason: String,
+    },
     /// `received` bytes of `total` (when announced) of the original `media` are on disk.
-    DownloadProgress { media: MediaRef, received: u64, total: Option<u64> },
+    DownloadProgress {
+        media: MediaRef,
+        received: u64,
+        total: Option<u64>,
+    },
     /// The original `media` was saved at `path` (the final name, never an overwrite).
-    Downloaded { media: MediaRef, path: PathBuf },
-    DownloadFailed { media: MediaRef, reason: DownloadFailure },
+    Downloaded {
+        media: MediaRef,
+        path: PathBuf,
+    },
+    DownloadFailed {
+        media: MediaRef,
+        reason: DownloadFailure,
+    },
     /// A `CancelDownload` took effect; nothing was left on disk.
     DownloadCancelled(MediaRef),
     /// Server results for the query `id` asked for.
-    SearchResults { id: SearchId, hits: SearchHits },
+    SearchResults {
+        id: SearchId,
+        hits: SearchHits,
+    },
     /// The search `id` asked for produced no results.
-    SearchFailed { id: SearchId, reason: SearchFailure },
+    SearchFailed {
+        id: SearchId,
+        reason: SearchFailure,
+    },
     /// The people of `ChatMembers.chat`, as loaded for a `LoadMembers`. Never cached.
     Members(ChatMembers),
     /// `LoadMembers` for `chat` produced no list. `offline` is set when the client could not ask
     /// at all (nothing was sent); otherwise `reason` is the server's or the network's, to show
     /// with a retry.
-    MembersFailed { chat: ChatId, reason: String, offline: bool },
+    MembersFailed {
+        chat: ChatId,
+        reason: String,
+        offline: bool,
+    },
     /// The signed-in account's own profile, as loaded for a `LoadProfile`. Never cached.
     Profile(Profile),
     /// `LoadProfile` produced no profile; `offline` as for `MembersFailed`.
-    ProfileFailed { reason: String, offline: bool },
+    ProfileFailed {
+        reason: String,
+        offline: bool,
+    },
     /// The chat the user asked for with `CreatePrivateChat`. `existing` is set when no request was
     /// needed (the account already had the chat, or the refreshed list showed it after an unknown
     /// result); otherwise the server created it. The chat list was refreshed before this event, so
     /// `chat` is normally in the list already. `chat` is `None` when neither the reply nor the
     /// refreshed list names it: the chat may exist, the UI cannot open it.
-    ChatCreated { chat: Option<ChatId>, existing: bool },
+    ChatCreated {
+        chat: Option<ChatId>,
+        existing: bool,
+    },
     /// A `CreatePrivateChat` produced no chat. `unknown` is set when the request was sent and its
     /// outcome is not known (the chat may exist; the list was refreshed, did not hold it, and nothing
     /// is retried); otherwise nothing was created and `reason` is the server's, or the offline text
     /// when nothing was sent.
-    CreationFailed { reason: String, unknown: bool },
+    CreationFailed {
+        reason: String,
+        unknown: bool,
+    },
     /// A `CreatePrivateChat` produced no chat and the chat list could not be read to check: either the
     /// request was sent, its outcome is unknown and the refresh that should have shown whether the
     /// chat exists failed, or the list check that precedes a new attempt after such a result failed
     /// (then no request was sent). A chat may exist unseen. Until a read of the list succeeds, a new
     /// `CreatePrivateChat` reads it first and sends nothing when that fails again.
-    CreationUnverified { reason: String },
+    CreationUnverified {
+        reason: String,
+    },
 }
 
 /// UI to core. Writes are only the user's own actions: send, edit, delete, react, read, typing,
@@ -322,27 +455,54 @@ pub enum ClientEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     OpenChat(ChatId),
-    LoadOlder { chat: ChatId, before: MessageTs },
+    LoadOlder {
+        chat: ChatId,
+        before: MessageTs,
+    },
     FetchMedia(MediaRef),
     SignOut,
-    Send { chat: ChatId, text: String, reply_to: Option<ReplyTarget> },
+    Send {
+        chat: ChatId,
+        text: String,
+        reply_to: Option<ReplyTarget>,
+    },
     Retry(PayloadId),
-    Edit { chat: ChatId, timestamp: MessageTs, text: String },
-    Delete { chat: ChatId, timestamp: MessageTs },
+    Edit {
+        chat: ChatId,
+        timestamp: MessageTs,
+        text: String,
+    },
+    Delete {
+        chat: ChatId,
+        timestamp: MessageTs,
+    },
     /// The user chose reaction `code` on a message. The core decides from the cached state
     /// whether that adds, replaces or removes the user's reaction.
-    ToggleReaction { chat: ChatId, timestamp: MessageTs, code: ReactionCode },
+    ToggleReaction {
+        chat: ChatId,
+        timestamp: MessageTs,
+        code: ReactionCode,
+    },
     /// The newest message of `chat` the user has seen in the focused window.
-    MarkRead { chat: ChatId, timestamp: MessageTs },
+    MarkRead {
+        chat: ChatId,
+        timestamp: MessageTs,
+    },
     /// The user changed the composer text of `chat`.
     Typing(ChatId),
     SaveDraft(Draft),
     /// Save the original `media` (kind `File`) into the Downloads folder under `name`
     /// (sanitized by the core); the user asked for it explicitly.
-    Download { media: MediaRef, name: Option<String> },
+    Download {
+        media: MediaRef,
+        name: Option<String>,
+    },
     CancelDownload(MediaRef),
     /// Server search by name and text; the reply is `SearchResults` or `SearchFailed` with `id`.
-    Search { id: SearchId, query: String },
+    Search {
+        id: SearchId,
+        query: String,
+    },
     /// The user no longer waits for a search: its reply is dropped.
     CancelSearch,
     /// Read the people of `chat` (read-only). The reply is `Members` or `MembersFailed`; a
@@ -353,7 +513,9 @@ pub enum Command {
     LoadProfile,
     /// Start a private chat with `user`; the reply is `ChatCreated` or `CreationFailed`. One
     /// creation runs at a time (a command meanwhile is dropped), it is never queued or retried.
-    CreatePrivateChat { user: UserId },
+    CreatePrivateChat {
+        user: UserId,
+    },
 }
 
 #[cfg(test)]
@@ -362,36 +524,69 @@ mod tests {
     use crate::reactions::ReactionCount;
 
     fn thumb(id: &str) -> MediaRef {
-        MediaRef { id: id.into(), kind: MediaKind::Thumbnail }
+        MediaRef {
+            id: id.into(),
+            kind: MediaKind::Thumbnail,
+        }
     }
 
     fn item(id: &str, name: Option<&str>) -> GalleryItem {
-        GalleryItem { media: thumb(id), width: 4, height: 3, name: name.map(Into::into) }
+        GalleryItem {
+            media: thumb(id),
+            width: 4,
+            height: 3,
+            name: name.map(Into::into),
+        }
     }
 
     fn image() -> MessageBody {
-        MessageBody::Image { media: thumb("b/1"), width: 4, height: 3, caption: Some("c".into()), name: Some("a.jpg".into()) }
+        MessageBody::Image {
+            media: thumb("b/1"),
+            width: 4,
+            height: 3,
+            caption: Some("c".into()),
+            name: Some("a.jpg".into()),
+        }
     }
 
     #[test]
     fn original_keeps_the_id_and_switches_to_the_file_kind() {
-        assert_eq!(thumb("b/1").original(), MediaRef { id: "b/1".into(), kind: MediaKind::File });
+        assert_eq!(
+            thumb("b/1").original(),
+            MediaRef {
+                id: "b/1".into(),
+                kind: MediaKind::File
+            }
+        );
     }
 
     #[test]
     fn gallery_items_lists_the_pictures_of_a_body_in_order() {
         assert_eq!(image().gallery_items(), [item("b/1", Some("a.jpg"))]);
-        let gallery = MessageBody::Gallery { items: vec![item("b/2", None), item("b/1", Some("a.jpg"))], caption: None };
-        assert_eq!(gallery.gallery_items(), [item("b/2", None), item("b/1", Some("a.jpg"))]);
+        let gallery = MessageBody::Gallery {
+            items: vec![item("b/2", None), item("b/1", Some("a.jpg"))],
+            caption: None,
+        };
+        assert_eq!(
+            gallery.gallery_items(),
+            [item("b/2", None), item("b/1", Some("a.jpg"))]
+        );
         assert!(MessageBody::Text("x".into()).gallery_items().is_empty());
         assert!(MessageBody::Deleted.gallery_items().is_empty());
-        let file = MessageBody::File { media: thumb("b/3").original(), name: "f".into(), size: 1 };
+        let file = MessageBody::File {
+            media: thumb("b/3").original(),
+            name: "f".into(),
+            size: 1,
+        };
         assert!(file.gallery_items().is_empty());
     }
 
     #[test]
     fn image_and_gallery_survive_a_json_round_trip() {
-        let gallery = MessageBody::Gallery { items: vec![item("b/1", Some("a.jpg")), item("b/2", None)], caption: Some("c".into()) };
+        let gallery = MessageBody::Gallery {
+            items: vec![item("b/1", Some("a.jpg")), item("b/2", None)],
+            caption: Some("c".into()),
+        };
         for body in [image(), gallery] {
             let json = serde_json::to_string(&body).unwrap();
             assert_eq!(serde_json::from_str::<MessageBody>(&json).unwrap(), body);
@@ -401,15 +596,27 @@ mod tests {
     #[test]
     fn an_image_cached_before_names_existed_still_decodes() {
         let old = r#"{"Image":{"media":{"id":"b/1","kind":"Thumbnail"},"width":4,"height":3,"caption":null}}"#;
-        let MessageBody::Image { name, width, .. } = serde_json::from_str(old).unwrap() else { panic!("image") };
+        let MessageBody::Image { name, width, .. } = serde_json::from_str(old).unwrap() else {
+            panic!("image")
+        };
         assert_eq!((name, width), (None, 4));
     }
 
     #[test]
     fn search_contract_types_compare_by_value() {
         let hits = SearchHits {
-            chats: vec![ChatHit { id: ChatId("0/0/c".into()), kind: ChatKind::Group, title: "t".into(), avatar: None }],
-            people: vec![PersonHit { user: UserId("u".into()), name: "n".into(), avatar: None, chat: None }],
+            chats: vec![ChatHit {
+                id: ChatId("0/0/c".into()),
+                kind: ChatKind::Group,
+                title: "t".into(),
+                avatar: None,
+            }],
+            people: vec![PersonHit {
+                user: UserId("u".into()),
+                name: "n".into(),
+                avatar: None,
+                chat: None,
+            }],
             messages: vec![MessageHit {
                 chat: ChatId("0/0/c".into()),
                 chat_title: "t".into(),
@@ -420,11 +627,23 @@ mod tests {
         };
         assert_eq!(hits.clone(), hits);
         assert_ne!(hits, SearchHits::default());
-        let event = ClientEvent::SearchResults { id: SearchId(1), hits };
+        let event = ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits,
+        };
         assert_eq!(event.clone(), event);
-        let failed = |reason| ClientEvent::SearchFailed { id: SearchId(1), reason };
-        assert_ne!(failed(SearchFailure::Offline), failed(SearchFailure::Failed));
-        let search = Command::Search { id: SearchId(2), query: "q".into() };
+        let failed = |reason| ClientEvent::SearchFailed {
+            id: SearchId(1),
+            reason,
+        };
+        assert_ne!(
+            failed(SearchFailure::Offline),
+            failed(SearchFailure::Failed)
+        );
+        let search = Command::Search {
+            id: SearchId(2),
+            query: "q".into(),
+        };
         assert_eq!(search.clone(), search);
         assert_ne!(Command::CancelSearch, search);
     }
@@ -442,7 +661,10 @@ mod tests {
     fn reactions_survive_a_json_round_trip() {
         let mut message = crate::fixtures::msg("0/0/c", 1, "hi");
         message.reactions = Reactions {
-            counts: vec![ReactionCount { code: ReactionCode(100101), count: 2 }],
+            counts: vec![ReactionCount {
+                code: ReactionCode(100101),
+                count: 2,
+            }],
             mine: Some(ReactionCode(100101)),
             version: Some(3),
         };
@@ -453,7 +675,13 @@ mod tests {
     fn reacted(counts: &[(i64, u32)], mine: Option<i64>, version: Option<i64>) -> Message {
         let mut message = crate::fixtures::msg("0/0/c", 1, "hi");
         message.reactions = Reactions {
-            counts: counts.iter().map(|&(c, count)| ReactionCount { code: ReactionCode(c), count }).collect(),
+            counts: counts
+                .iter()
+                .map(|&(c, count)| ReactionCount {
+                    code: ReactionCode(c),
+                    count,
+                })
+                .collect(),
             mine: mine.map(ReactionCode),
             version,
         };
@@ -469,14 +697,21 @@ mod tests {
 
         // A copy without a version never overrides a versioned state; neither does an older or
         // an equal one. A newer one wins and keeps `mine` while its type still has a count.
-        for stale in [reacted(&[(2, 1)], None, None), reacted(&[(2, 1)], None, Some(3)), reacted(&[(2, 1)], None, Some(4))] {
+        for stale in [
+            reacted(&[(2, 1)], None, None),
+            reacted(&[(2, 1)], None, Some(3)),
+            reacted(&[(2, 1)], None, Some(4)),
+        ] {
             let mut copy = stale;
             copy.inherit_reactions(&cached);
             assert_eq!(copy.reactions, cached.reactions);
         }
         let mut newer = reacted(&[(1, 3)], None, Some(5));
         newer.inherit_reactions(&cached);
-        assert_eq!(newer.reactions, reacted(&[(1, 3)], Some(1), Some(5)).reactions);
+        assert_eq!(
+            newer.reactions,
+            reacted(&[(1, 3)], Some(1), Some(5)).reactions
+        );
         let mut emptied = reacted(&[], None, Some(5));
         emptied.inherit_reactions(&cached);
         assert_eq!(emptied.reactions, reacted(&[], None, Some(5)).reactions);

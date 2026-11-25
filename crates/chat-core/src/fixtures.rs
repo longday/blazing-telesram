@@ -8,7 +8,11 @@ pub fn chat(id: &str, last: Option<MessageTs>, pinned: Option<u32>) -> ChatSumma
         kind: ChatKind::Group,
         title: format!("chat {id}"),
         avatar: None,
-        last_message: last.map(|timestamp| MessagePreview { author: None, text: "x".into(), timestamp }),
+        last_message: last.map(|timestamp| MessagePreview {
+            author: None,
+            text: "x".into(),
+            timestamp,
+        }),
         unread: 0,
         muted: false,
         pinned_rank: pinned,

@@ -2,9 +2,9 @@
 
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatMembers, ChatSummary, ClientEvent, Command, ConnectionState, Delivery, DownloadFailure,
-    Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs, PayloadId, Profile, ReplyTarget,
-    SearchFailure, SearchHits, SearchId, UserId,
+    ChatId, ChatKind, ChatMembers, ChatSummary, ClientEvent, Command, ConnectionState, Delivery,
+    DownloadFailure, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs,
+    PayloadId, Profile, ReplyTarget, SearchFailure, SearchHits, SearchId, UserId,
 };
 use bt_chat_core::reactions::{ReactionCode, Reactions};
 use gpui::{Context, EventEmitter};
@@ -71,7 +71,11 @@ pub enum TimelineChange {
     /// Contents replaced wholesale; list indexes are no longer meaningful.
     Reset,
     /// `prepended` messages added in front, `appended` at the end, and the (post-change) indexes in `touched` replaced in place.
-    Delta { prepended: usize, appended: usize, touched: Vec<usize> },
+    Delta {
+        prepended: usize,
+        appended: usize,
+        touched: Vec<usize>,
+    },
     /// The message at this (pre-removal) index is gone.
     Removed { at: usize },
     /// Only loading flags changed.
@@ -82,7 +86,10 @@ pub enum TimelineChange {
 /// No entry means "not started" (or cancelled).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DownloadState {
-    Running { received: u64, total: Option<u64> },
+    Running {
+        received: u64,
+        total: Option<u64>,
+    },
     /// Saved at this final path.
     Saved(PathBuf),
     Failed(DownloadFailure),
@@ -146,7 +153,10 @@ enum PendingOpen {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreEvent {
     Chats,
-    Timeline { chat: ChatId, change: TimelineChange },
+    Timeline {
+        chat: ChatId,
+        change: TimelineChange,
+    },
     Media(MediaRef),
     /// The download state of this original changed (or was cleared).
     Download(MediaRef),
@@ -155,9 +165,15 @@ pub enum StoreEvent {
     /// The persisted drafts arrived.
     Drafts,
     /// An edit or deletion did not happen.
-    ActionFailed { chat: ChatId, reason: String },
+    ActionFailed {
+        chat: ChatId,
+        reason: String,
+    },
     /// A send was not queued; the UI puts the text and reply target back.
-    SendRefused { draft: Draft, reason: String },
+    SendRefused {
+        draft: Draft,
+        reason: String,
+    },
     /// The server search state changed (issued, answered, failed or cancelled).
     Search,
     /// The member list state of this chat changed (requested, loaded or failed).
@@ -169,7 +185,10 @@ pub enum StoreEvent {
     /// A creation ended in a chat: `existing` when none had to be created, `chat` is `None` when it
     /// cannot be opened (the reply and the refreshed list do not name it). The chat is selected as
     /// soon as it is in the list (at once when the list already holds it).
-    ChatCreated { chat: Option<ChatId>, existing: bool },
+    ChatCreated {
+        chat: Option<ChatId>,
+        existing: bool,
+    },
 }
 
 pub struct ChatStore {
@@ -202,7 +221,11 @@ impl EventEmitter<StoreEvent> for ChatStore {}
 
 impl ChatStore {
     /// Drains `events` on the foreground executor until the channel closes or the store is dropped.
-    pub fn new(events: Receiver<ClientEvent>, commands: Sender<Command>, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        events: Receiver<ClientEvent>,
+        commands: Sender<Command>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
                 if this.update(cx, |store, cx| store.apply(event, cx)).is_err() {
@@ -242,7 +265,11 @@ impl ChatStore {
                 }
                 self.chats = chats.into_iter().map(|c| (c.id.clone(), c)).collect();
                 self.chats_loaded = true;
-                if self.selected.as_ref().is_some_and(|id| !self.chats.contains_key(id)) {
+                if self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|id| !self.chats.contains_key(id))
+                {
                     self.selected = None;
                 }
                 cx.emit(StoreEvent::Chats);
@@ -256,7 +283,11 @@ impl ChatStore {
             }
             ClientEvent::History(chunk) => self.apply_history(chunk, cx),
             ClientEvent::MessageUpserted(message) => self.upsert(message, cx),
-            ClientEvent::ReactionsChanged { chat, timestamp, reactions } => self.set_reactions(&chat, timestamp, reactions, cx),
+            ClientEvent::ReactionsChanged {
+                chat,
+                timestamp,
+                reactions,
+            } => self.set_reactions(&chat, timestamp, reactions, cx),
             ClientEvent::MessageDeleted { chat, timestamp } => self.delete(&chat, timestamp, cx),
             ClientEvent::MediaReady { media, path } => {
                 self.media.insert(media.clone(), path);
@@ -301,23 +332,46 @@ impl ChatStore {
                 cx.emit(StoreEvent::Drafts);
             }
             ClientEvent::PendingSettled { chat, payload } => self.settle(&chat, &payload, cx),
-            ClientEvent::SendRefused { draft, reason } => cx.emit(StoreEvent::SendRefused { draft, reason }),
-            ClientEvent::Typing { chat, user, name, until } => self.typing_started(chat, user, name, until, cx),
-            ClientEvent::ActionFailed { chat, reason } => cx.emit(StoreEvent::ActionFailed { chat, reason }),
-            ClientEvent::DownloadProgress { media, received, total } => {
+            ClientEvent::SendRefused { draft, reason } => {
+                cx.emit(StoreEvent::SendRefused { draft, reason })
+            }
+            ClientEvent::Typing {
+                chat,
+                user,
+                name,
+                until,
+            } => self.typing_started(chat, user, name, until, cx),
+            ClientEvent::ActionFailed { chat, reason } => {
+                cx.emit(StoreEvent::ActionFailed { chat, reason })
+            }
+            ClientEvent::DownloadProgress {
+                media,
+                received,
+                total,
+            } => {
                 self.set_download(media, Some(DownloadState::Running { received, total }), cx);
             }
-            ClientEvent::Downloaded { media, path } => self.set_download(media, Some(DownloadState::Saved(path)), cx),
+            ClientEvent::Downloaded { media, path } => {
+                self.set_download(media, Some(DownloadState::Saved(path)), cx)
+            }
             ClientEvent::DownloadFailed { media, reason } => {
                 self.set_download(media, Some(DownloadState::Failed(reason)), cx);
             }
             ClientEvent::DownloadCancelled(media) => self.set_download(media, None, cx),
-            ClientEvent::SearchResults { id, hits } => self.finish_search(id, Some(hits), SearchStatus::Ready, cx),
+            ClientEvent::SearchResults { id, hits } => {
+                self.finish_search(id, Some(hits), SearchStatus::Ready, cx)
+            }
             ClientEvent::SearchFailed { id, reason } => {
                 self.finish_search(id, None, SearchStatus::Failed(reason), cx);
             }
-            ClientEvent::Members(members) => self.finish_members(members.chat.clone(), MembersState::Ready(members), cx),
-            ClientEvent::MembersFailed { chat, reason, offline } => {
+            ClientEvent::Members(members) => {
+                self.finish_members(members.chat.clone(), MembersState::Ready(members), cx)
+            }
+            ClientEvent::MembersFailed {
+                chat,
+                reason,
+                offline,
+            } => {
                 self.finish_members(chat, MembersState::Failed { reason, offline }, cx);
             }
             ClientEvent::Profile(profile) => self.finish_profile(ProfileState::Ready(profile), cx),
@@ -328,7 +382,9 @@ impl ChatStore {
             ClientEvent::CreationFailed { reason, unknown } => {
                 self.creation_failed(CreationState::Failed { reason, unknown }, cx);
             }
-            ClientEvent::CreationUnverified { reason } => self.creation_failed(CreationState::Unverified { reason }, cx),
+            ClientEvent::CreationUnverified { reason } => {
+                self.creation_failed(CreationState::Unverified { reason }, cx)
+            }
         }
         cx.notify();
     }
@@ -350,14 +406,24 @@ impl ChatStore {
 
     /// Requests the chunk before the oldest loaded message, once, unless the start of history is known.
     pub fn load_older(&mut self, chat: &ChatId, cx: &mut Context<Self>) {
-        let Some(timeline) = self.timelines.get_mut(chat) else { return };
+        let Some(timeline) = self.timelines.get_mut(chat) else {
+            return;
+        };
         if !timeline.loaded || timeline.reached_start || timeline.loading_older {
             return;
         }
-        let Some(before) = timeline.messages.first().map(|m| m.timestamp) else { return };
+        let Some(before) = timeline.messages.first().map(|m| m.timestamp) else {
+            return;
+        };
         timeline.loading_older = true;
-        self.send(Command::LoadOlder { chat: chat.clone(), before });
-        cx.emit(StoreEvent::Timeline { chat: chat.clone(), change: TimelineChange::Status });
+        self.send(Command::LoadOlder {
+            chat: chat.clone(),
+            before,
+        });
+        cx.emit(StoreEvent::Timeline {
+            chat: chat.clone(),
+            change: TimelineChange::Status,
+        });
         cx.notify();
     }
 
@@ -366,9 +432,19 @@ impl ChatStore {
     }
 
     /// Queues a message; the core answers with the pending copy. Sending replaces the chat's draft.
-    pub fn send_text(&mut self, chat: ChatId, text: String, reply_to: Option<ReplyTarget>, cx: &mut Context<Self>) {
+    pub fn send_text(
+        &mut self,
+        chat: ChatId,
+        text: String,
+        reply_to: Option<ReplyTarget>,
+        cx: &mut Context<Self>,
+    ) {
         self.drafts.remove(&chat);
-        self.send(Command::Send { chat, text, reply_to });
+        self.send(Command::Send {
+            chat,
+            text,
+            reply_to,
+        });
         cx.notify();
     }
 
@@ -377,7 +453,11 @@ impl ChatStore {
     }
 
     pub fn edit(&self, chat: ChatId, timestamp: MessageTs, text: String) {
-        self.send(Command::Edit { chat, timestamp, text });
+        self.send(Command::Edit {
+            chat,
+            timestamp,
+            text,
+        });
     }
 
     pub fn delete_message(&self, chat: ChatId, timestamp: MessageTs) {
@@ -386,7 +466,11 @@ impl ChatStore {
 
     /// The user chose `code` on a message: the core decides between add, replace and remove.
     pub fn toggle_reaction(&self, chat: ChatId, timestamp: MessageTs, code: ReactionCode) {
-        self.send(Command::ToggleReaction { chat, timestamp, code });
+        self.send(Command::ToggleReaction {
+            chat,
+            timestamp,
+            code,
+        });
     }
 
     pub fn mark_read(&self, chat: ChatId, timestamp: MessageTs) {
@@ -421,7 +505,11 @@ impl ChatStore {
     /// Who is typing in `chat`, as shown in the header and the chat row.
     pub fn typing_text(&self, chat: &ChatId) -> Option<String> {
         let typists = self.typing.get(chat).filter(|t| !t.is_empty())?;
-        if self.chats.get(chat).is_some_and(|c| c.kind == ChatKind::Private) {
+        if self
+            .chats
+            .get(chat)
+            .is_some_and(|c| c.kind == ChatKind::Private)
+        {
             return Some("печатает…".into());
         }
         let first = typists[0].name.as_deref().unwrap_or("Кто-то");
@@ -431,7 +519,14 @@ impl ChatStore {
         })
     }
 
-    fn typing_started(&mut self, chat: ChatId, user: UserId, name: Option<String>, until: Instant, cx: &mut Context<Self>) {
+    fn typing_started(
+        &mut self,
+        chat: ChatId,
+        user: UserId,
+        name: Option<String>,
+        until: Instant,
+        cx: &mut Context<Self>,
+    ) {
         let now = cx.background_executor().now();
         if until <= now {
             return;
@@ -473,11 +568,18 @@ impl ChatStore {
 
     /// Drops the local copy of a send the server has confirmed or echoed; its server copy follows.
     fn settle(&mut self, chat: &ChatId, payload: &PayloadId, cx: &mut Context<Self>) {
-        let Some(timeline) = self.timelines.get_mut(chat) else { return };
+        let Some(timeline) = self.timelines.get_mut(chat) else {
+            return;
+        };
         let pending = |m: &Message| matches!(&m.delivery, Delivery::Pending(p) | Delivery::Failed { payload: p, .. } if p == payload);
-        let Some(at) = timeline.messages.iter().position(pending) else { return };
+        let Some(at) = timeline.messages.iter().position(pending) else {
+            return;
+        };
         timeline.messages.remove(at);
-        cx.emit(StoreEvent::Timeline { chat: chat.clone(), change: TimelineChange::Removed { at } });
+        cx.emit(StoreEvent::Timeline {
+            chat: chat.clone(),
+            change: TimelineChange::Removed { at },
+        });
     }
 
     pub fn chat(&self, id: &ChatId) -> Option<&ChatSummary> {
@@ -508,22 +610,42 @@ impl ChatStore {
     /// when the connection is not online nothing is sent and the state is `Failed(Offline)`. A download
     /// already running for the same file is not started twice.
     pub fn download(&mut self, original: MediaRef, name: Option<String>, cx: &mut Context<Self>) {
-        if matches!(self.downloads.get(&original), Some(DownloadState::Running { .. })) {
+        if matches!(
+            self.downloads.get(&original),
+            Some(DownloadState::Running { .. })
+        ) {
             return;
         }
         if self.connection != ConnectionState::Online {
-            self.set_download(original, Some(DownloadState::Failed(DownloadFailure::Offline)), cx);
+            self.set_download(
+                original,
+                Some(DownloadState::Failed(DownloadFailure::Offline)),
+                cx,
+            );
             cx.notify();
             return;
         }
-        self.set_download(original.clone(), Some(DownloadState::Running { received: 0, total: None }), cx);
-        self.send(Command::Download { media: original, name });
+        self.set_download(
+            original.clone(),
+            Some(DownloadState::Running {
+                received: 0,
+                total: None,
+            }),
+            cx,
+        );
+        self.send(Command::Download {
+            media: original,
+            name,
+        });
         cx.notify();
     }
 
     /// Asks the core to stop a running download; the state clears when `DownloadCancelled` arrives.
     pub fn cancel_download(&self, original: &MediaRef) {
-        if matches!(self.downloads.get(original), Some(DownloadState::Running { .. })) {
+        if matches!(
+            self.downloads.get(original),
+            Some(DownloadState::Running { .. })
+        ) {
             self.send(Command::CancelDownload(original.clone()));
         }
     }
@@ -538,7 +660,12 @@ impl ChatStore {
         self.last_search = SearchId(self.last_search.0 + 1);
         let id = self.last_search;
         let hits = self.search.take().map(|s| s.hits).unwrap_or_default();
-        self.search = Some(SearchState { id, query: query.clone(), status: SearchStatus::Loading, hits });
+        self.search = Some(SearchState {
+            id,
+            query: query.clone(),
+            status: SearchStatus::Loading,
+            hits,
+        });
         self.send(Command::Search { id, query });
         cx.emit(StoreEvent::Search);
         cx.notify();
@@ -560,7 +687,11 @@ impl ChatStore {
     /// change the view); the hits already shown stay until the new reply. The state gets the id 0, which
     /// is never issued, and no query, so the next `search` is not mistaken for a repeat.
     pub fn supersede_search(&mut self, next: &str) {
-        if let Some(state) = self.search.as_mut().filter(|s| s.status == SearchStatus::Loading && s.query != next) {
+        if let Some(state) = self
+            .search
+            .as_mut()
+            .filter(|s| s.status == SearchStatus::Loading && s.query != next)
+        {
             state.id = SearchId(0);
             state.query.clear();
         }
@@ -572,8 +703,16 @@ impl ChatStore {
 
     /// Stores the outcome of search `id`; an outcome of any other id (superseded or cancelled) is ignored.
     /// A failure keeps the hits already shown.
-    fn finish_search(&mut self, id: SearchId, hits: Option<SearchHits>, status: SearchStatus, cx: &mut Context<Self>) {
-        let Some(state) = self.search.as_mut().filter(|s| s.id == id) else { return };
+    fn finish_search(
+        &mut self,
+        id: SearchId,
+        hits: Option<SearchHits>,
+        status: SearchStatus,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.search.as_mut().filter(|s| s.id == id) else {
+            return;
+        };
         state.status = status;
         if let Some(hits) = hits {
             let avatars: Vec<MediaRef> = (hits.chats.iter().filter_map(|h| h.avatar.clone()))
@@ -667,7 +806,10 @@ impl ChatStore {
     /// Forgets a failure (the dialog closed or the user edited the choice). A creation that is in
     /// flight cannot be recalled and stays, so its outcome still reaches the UI.
     pub fn dismiss_creation(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.creation, Some(CreationState::Failed { .. } | CreationState::Unverified { .. })) {
+        if matches!(
+            self.creation,
+            Some(CreationState::Failed { .. } | CreationState::Unverified { .. })
+        ) {
             self.creation = None;
             cx.emit(StoreEvent::Creation);
             cx.notify();
@@ -717,7 +859,12 @@ impl ChatStore {
         }
     }
 
-    fn set_download(&mut self, media: MediaRef, state: Option<DownloadState>, cx: &mut Context<Self>) {
+    fn set_download(
+        &mut self,
+        media: MediaRef,
+        state: Option<DownloadState>,
+        cx: &mut Context<Self>,
+    ) {
         match state {
             Some(state) => self.downloads.insert(media.clone(), state),
             None => self.downloads.remove(&media),
@@ -740,12 +887,26 @@ impl ChatStore {
         let mut chats: Vec<&ChatSummary> = self
             .chats
             .values()
-            .filter(|c| filter.accepts(c) && (query.is_empty() || c.title.to_lowercase().contains(&query)))
+            .filter(|c| {
+                filter.accepts(c) && (query.is_empty() || c.title.to_lowercase().contains(&query))
+            })
             .collect();
         chats.sort_by(|a, b| {
             let activity = |c: &ChatSummary| c.last_message.as_ref().map(|m| m.timestamp);
-            (a.pinned_rank.is_none(), a.pinned_rank, Reverse(activity(a)), &a.title, &a.id)
-                .cmp(&(b.pinned_rank.is_none(), b.pinned_rank, Reverse(activity(b)), &b.title, &b.id))
+            (
+                a.pinned_rank.is_none(),
+                a.pinned_rank,
+                Reverse(activity(a)),
+                &a.title,
+                &a.id,
+            )
+                .cmp(&(
+                    b.pinned_rank.is_none(),
+                    b.pinned_rank,
+                    Reverse(activity(b)),
+                    &b.title,
+                    &b.id,
+                ))
         });
         chats
     }
@@ -806,7 +967,10 @@ impl ChatStore {
             TimelineChange::Reset
         };
         timeline.loaded = true;
-        cx.emit(StoreEvent::Timeline { chat: chunk.chat, change });
+        cx.emit(StoreEvent::Timeline {
+            chat: chunk.chat,
+            change,
+        });
     }
 
     fn upsert(&mut self, message: Message, cx: &mut Context<Self>) {
@@ -814,14 +978,20 @@ impl ChatStore {
         if message.delivery == Delivery::Sent {
             self.typing_stopped(&message.chat, &message.author);
         }
-        let Some(timeline) = self.timelines.get_mut(&message.chat).filter(|t| t.loaded) else { return };
+        let Some(timeline) = self.timelines.get_mut(&message.chat).filter(|t| t.loaded) else {
+            return;
+        };
         let chat = message.chat.clone();
         let ts = message.timestamp;
         let change = match timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) {
             Ok(i) if timeline.messages[i] == message => return,
             Ok(i) => {
                 timeline.messages[i] = message;
-                TimelineChange::Delta { prepended: 0, appended: 0, touched: vec![i] }
+                TimelineChange::Delta {
+                    prepended: 0,
+                    appended: 0,
+                    touched: vec![i],
+                }
             }
             Err(i) if i == timeline.messages.len() => {
                 let was_empty = i == 0;
@@ -829,12 +999,20 @@ impl ChatStore {
                 if was_empty {
                     TimelineChange::Reset
                 } else {
-                    TimelineChange::Delta { prepended: 0, appended: 1, touched: vec![] }
+                    TimelineChange::Delta {
+                        prepended: 0,
+                        appended: 1,
+                        touched: vec![],
+                    }
                 }
             }
             Err(0) if timeline.reached_start => {
                 timeline.messages.insert(0, message);
-                TimelineChange::Delta { prepended: 1, appended: 0, touched: vec![] }
+                TimelineChange::Delta {
+                    prepended: 1,
+                    appended: 0,
+                    touched: vec![],
+                }
             }
             // Older than the loaded window: it will arrive with its page.
             Err(0) => return,
@@ -847,8 +1025,12 @@ impl ChatStore {
     }
 
     fn delete(&mut self, chat: &ChatId, ts: MessageTs, cx: &mut Context<Self>) {
-        let Some(timeline) = self.timelines.get_mut(chat) else { return };
-        let Ok(i) = timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) else { return };
+        let Some(timeline) = self.timelines.get_mut(chat) else {
+            return;
+        };
+        let Ok(i) = timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) else {
+            return;
+        };
         let message = &mut timeline.messages[i];
         if message.body == MessageBody::Deleted {
             return;
@@ -858,15 +1040,29 @@ impl ChatStore {
         message.forwarded_from = None;
         cx.emit(StoreEvent::Timeline {
             chat: chat.clone(),
-            change: TimelineChange::Delta { prepended: 0, appended: 0, touched: vec![i] },
+            change: TimelineChange::Delta {
+                prepended: 0,
+                appended: 0,
+                touched: vec![i],
+            },
         });
     }
 
     /// Replaces the reactions of a loaded message in place. Unlike `upsert` this leaves the author's
     /// typing indicator and the media requests alone: a reaction update carries no message body.
-    fn set_reactions(&mut self, chat: &ChatId, ts: MessageTs, reactions: Reactions, cx: &mut Context<Self>) {
-        let Some(timeline) = self.timelines.get_mut(chat).filter(|t| t.loaded) else { return };
-        let Ok(i) = timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) else { return };
+    fn set_reactions(
+        &mut self,
+        chat: &ChatId,
+        ts: MessageTs,
+        reactions: Reactions,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(timeline) = self.timelines.get_mut(chat).filter(|t| t.loaded) else {
+            return;
+        };
+        let Ok(i) = timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) else {
+            return;
+        };
         let message = &mut timeline.messages[i];
         if message.reactions == reactions {
             return;
@@ -874,7 +1070,11 @@ impl ChatStore {
         message.reactions = reactions;
         cx.emit(StoreEvent::Timeline {
             chat: chat.clone(),
-            change: TimelineChange::Delta { prepended: 0, appended: 0, touched: vec![i] },
+            change: TimelineChange::Delta {
+                prepended: 0,
+                appended: 0,
+                touched: vec![i],
+            },
         });
     }
 }
@@ -900,7 +1100,12 @@ fn merge_chunk(
     replaces: Option<(Option<MessageTs>, Option<MessageTs>)>,
 ) -> TimelineChange {
     let incoming = normalized(incoming);
-    let span = replaces.or_else(|| incoming.first().zip(incoming.last()).map(|(a, b)| (Some(a.timestamp), Some(b.timestamp))));
+    let span = replaces.or_else(|| {
+        incoming
+            .first()
+            .zip(incoming.last())
+            .map(|(a, b)| (Some(a.timestamp), Some(b.timestamp)))
+    });
     let Some((from, to)) = span else {
         return TimelineChange::Status;
     };
@@ -908,10 +1113,16 @@ fn merge_chunk(
     let mut merged = Vec::with_capacity(old.len() + incoming.len());
     let mut incoming = incoming.into_iter().peekable();
     for existing in old.iter() {
-        while incoming.peek().is_some_and(|m| m.timestamp < existing.timestamp) {
+        while incoming
+            .peek()
+            .is_some_and(|m| m.timestamp < existing.timestamp)
+        {
             merged.extend(incoming.next());
         }
-        if incoming.peek().is_some_and(|m| m.timestamp == existing.timestamp) {
+        if incoming
+            .peek()
+            .is_some_and(|m| m.timestamp == existing.timestamp)
+        {
             merged.extend(incoming.next());
         } else if !covered(existing.timestamp) {
             merged.push(existing.clone());
@@ -930,7 +1141,12 @@ fn diff(old: &[Message], new: &[Message]) -> TimelineChange {
     let prepended = new.partition_point(|m| m.timestamp < first.timestamp);
     let end = new.partition_point(|m| m.timestamp <= last.timestamp);
     let middle = &new[prepended..end];
-    if middle.len() != old.len() || middle.iter().zip(old).any(|(n, o)| n.timestamp != o.timestamp) {
+    if middle.len() != old.len()
+        || middle
+            .iter()
+            .zip(old)
+            .any(|(n, o)| n.timestamp != o.timestamp)
+    {
         return TimelineChange::Reset;
     }
     let touched = middle
@@ -940,7 +1156,11 @@ fn diff(old: &[Message], new: &[Message]) -> TimelineChange {
         .filter(|(_, (n, o))| n != o)
         .map(|(i, _)| prepended + i)
         .collect();
-    TimelineChange::Delta { prepended, appended: new.len() - end, touched }
+    TimelineChange::Delta {
+        prepended,
+        appended: new.len() - end,
+        touched,
+    }
 }
 
 #[cfg(test)]
@@ -972,7 +1192,14 @@ mod tests {
     fn older_page_is_a_prepend() {
         let mut old = vec![msg(3, "c"), msg(4, "d")];
         let change = merge_chunk(&mut old, vec![msg(1, "a"), msg(2, "b")], None);
-        assert_eq!(change, TimelineChange::Delta { prepended: 2, appended: 0, touched: vec![] });
+        assert_eq!(
+            change,
+            TimelineChange::Delta {
+                prepended: 2,
+                appended: 0,
+                touched: vec![]
+            }
+        );
         assert_eq!(texts(&old), [1, 2, 3, 4]);
     }
 
@@ -980,7 +1207,14 @@ mod tests {
     fn catch_up_chunk_appends_and_updates() {
         let mut old = vec![msg(1, "a"), msg(2, "b"), msg(3, "c")];
         let change = merge_chunk(&mut old, vec![msg(2, "b"), msg(3, "C"), msg(4, "d")], None);
-        assert_eq!(change, TimelineChange::Delta { prepended: 0, appended: 1, touched: vec![2] });
+        assert_eq!(
+            change,
+            TimelineChange::Delta {
+                prepended: 0,
+                appended: 1,
+                touched: vec![2]
+            }
+        );
         assert_eq!(texts(&old), [1, 2, 3, 4]);
     }
 
@@ -1029,9 +1263,17 @@ mod tests {
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let log = events.clone();
                 let subscription = cx.update(|cx| {
-                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                        log.borrow_mut().push(event.clone())
+                    })
                 });
-                Self { store, commands, events, _client: client, _subscription: subscription }
+                Self {
+                    store,
+                    commands,
+                    events,
+                    _client: client,
+                    _subscription: subscription,
+                }
             }
 
             /// A rig whose chat `c` holds the messages 1 and 2, loaded.
@@ -1054,7 +1296,11 @@ mod tests {
             }
 
             fn messages(&self, cx: &mut TestAppContext) -> Vec<Message> {
-                self.store.read_with(cx, |s, _| s.timeline(&chat()).map(|t| t.messages.clone()).unwrap_or_default())
+                self.store.read_with(cx, |s, _| {
+                    s.timeline(&chat())
+                        .map(|t| t.messages.clone())
+                        .unwrap_or_default()
+                })
             }
 
             fn commands(&self) -> Vec<Command> {
@@ -1072,18 +1318,35 @@ mod tests {
 
         fn reactions(pairs: &[(i64, u32)], mine: Option<i64>, version: i64) -> Reactions {
             Reactions {
-                counts: pairs.iter().map(|&(c, count)| ReactionCount { code: ReactionCode(c), count }).collect(),
+                counts: pairs
+                    .iter()
+                    .map(|&(c, count)| ReactionCount {
+                        code: ReactionCode(c),
+                        count,
+                    })
+                    .collect(),
                 mine: mine.map(ReactionCode),
                 version: Some(version),
             }
         }
 
         fn changed(ts: i64, reactions: Reactions) -> ClientEvent {
-            ClientEvent::ReactionsChanged { chat: chat(), timestamp: ts, reactions }
+            ClientEvent::ReactionsChanged {
+                chat: chat(),
+                timestamp: ts,
+                reactions,
+            }
         }
 
         fn delta(touched: Vec<usize>) -> StoreEvent {
-            StoreEvent::Timeline { chat: chat(), change: TimelineChange::Delta { prepended: 0, appended: 0, touched } }
+            StoreEvent::Timeline {
+                chat: chat(),
+                change: TimelineChange::Delta {
+                    prepended: 0,
+                    appended: 0,
+                    touched,
+                },
+            }
         }
 
         #[gpui::test]
@@ -1117,36 +1380,71 @@ mod tests {
             let rig = Rig::new(cx);
             rig.apply(cx, changed(2, reactions(&[(7, 1)], None, 1)));
             assert!(rig.take_events().is_empty());
-            assert!(rig.store.read_with(cx, |s, _| s.timeline(&chat()).is_none()), "no timeline is made up");
+            assert!(
+                rig.store
+                    .read_with(cx, |s, _| s.timeline(&chat()).is_none()),
+                "no timeline is made up"
+            );
 
             let rig = Rig::loaded(cx);
             rig.apply(cx, changed(99, reactions(&[(7, 1)], None, 1)));
             rig.apply(
                 cx,
-                ClientEvent::ReactionsChanged { chat: ChatId("other".into()), timestamp: 2, reactions: reactions(&[(7, 1)], None, 1) },
+                ClientEvent::ReactionsChanged {
+                    chat: ChatId("other".into()),
+                    timestamp: 2,
+                    reactions: reactions(&[(7, 1)], None, 1),
+                },
             );
             assert!(rig.take_events().is_empty());
-            assert!(rig.messages(cx).iter().all(|m| m.reactions == Reactions::default()));
+            assert!(
+                rig.messages(cx)
+                    .iter()
+                    .all(|m| m.reactions == Reactions::default())
+            );
         }
 
         #[gpui::test]
         fn the_authors_typing_indicator_survives_an_update(cx: &mut TestAppContext) {
             let rig = Rig::loaded(cx);
             let until = cx.executor().now() + Duration::from_secs(60);
-            rig.apply(cx, ClientEvent::Typing { chat: chat(), user: UserId("u".into()), name: None, until });
-            let typing = |cx: &mut TestAppContext| rig.store.read_with(cx, |s, _| s.typing_text(&chat()));
+            rig.apply(
+                cx,
+                ClientEvent::Typing {
+                    chat: chat(),
+                    user: UserId("u".into()),
+                    name: None,
+                    until,
+                },
+            );
+            let typing =
+                |cx: &mut TestAppContext| rig.store.read_with(cx, |s, _| s.typing_text(&chat()));
             assert!(typing(cx).is_some());
 
             rig.apply(cx, changed(1, reactions(&[(7, 1)], None, 1)));
-            assert!(typing(cx).is_some(), "an upsert of the author's message would have cleared it");
+            assert!(
+                typing(cx).is_some(),
+                "an upsert of the author's message would have cleared it"
+            );
         }
 
         #[gpui::test]
         fn toggling_sends_the_command_without_touching_the_timeline(cx: &mut TestAppContext) {
             let rig = Rig::loaded(cx);
-            rig.store.update(cx, |s, _| s.toggle_reaction(chat(), 2, ReactionCode(7)));
-            assert_eq!(rig.commands(), [Command::ToggleReaction { chat: chat(), timestamp: 2, code: ReactionCode(7) }]);
-            assert!(rig.take_events().is_empty(), "the overlay arrives from the core as an event");
+            rig.store
+                .update(cx, |s, _| s.toggle_reaction(chat(), 2, ReactionCode(7)));
+            assert_eq!(
+                rig.commands(),
+                [Command::ToggleReaction {
+                    chat: chat(),
+                    timestamp: 2,
+                    code: ReactionCode(7)
+                }]
+            );
+            assert!(
+                rig.take_events().is_empty(),
+                "the overlay arrives from the core as an event"
+            );
         }
     }
 
@@ -1174,9 +1472,17 @@ mod tests {
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let log = events.clone();
                 let subscription = cx.update(|cx| {
-                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                        log.borrow_mut().push(event.clone())
+                    })
                 });
-                Self { store, commands, events, _client: client, _subscription: subscription }
+                Self {
+                    store,
+                    commands,
+                    events,
+                    _client: client,
+                    _subscription: subscription,
+                }
             }
 
             fn search(&self, cx: &mut TestAppContext, query: &str) {
@@ -1206,8 +1512,18 @@ mod tests {
 
         fn hits(tag: &str) -> SearchHits {
             SearchHits {
-                chats: vec![ChatHit { id: ChatId(format!("c-{tag}")), kind: ChatKind::Group, title: tag.into(), avatar: None }],
-                people: vec![PersonHit { user: UserId(format!("u-{tag}")), name: tag.into(), avatar: None, chat: None }],
+                chats: vec![ChatHit {
+                    id: ChatId(format!("c-{tag}")),
+                    kind: ChatKind::Group,
+                    title: tag.into(),
+                    avatar: None,
+                }],
+                people: vec![PersonHit {
+                    user: UserId(format!("u-{tag}")),
+                    name: tag.into(),
+                    avatar: None,
+                    chat: None,
+                }],
                 messages: vec![MessageHit {
                     chat: ChatId(format!("c-{tag}")),
                     chat_title: tag.into(),
@@ -1219,7 +1535,10 @@ mod tests {
         }
 
         fn results(id: u64, tag: &str) -> ClientEvent {
-            ClientEvent::SearchResults { id: SearchId(id), hits: hits(tag) }
+            ClientEvent::SearchResults {
+                id: SearchId(id),
+                hits: hits(tag),
+            }
         }
 
         #[gpui::test]
@@ -1227,7 +1546,13 @@ mod tests {
             let rig = Rig::new(cx);
             assert_eq!(rig.state(cx), None);
             rig.search(cx, "ab");
-            assert_eq!(rig.commands(), [Command::Search { id: SearchId(1), query: "ab".into() }]);
+            assert_eq!(
+                rig.commands(),
+                [Command::Search {
+                    id: SearchId(1),
+                    query: "ab".into()
+                }]
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Search]);
             assert_eq!(
                 rig.state(cx),
@@ -1256,15 +1581,30 @@ mod tests {
             rig.commands();
 
             rig.apply(cx, results(1, "ab"));
-            rig.apply(cx, ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed });
-            assert!(rig.take_events().is_empty(), "a superseded reply announces nothing");
+            rig.apply(
+                cx,
+                ClientEvent::SearchFailed {
+                    id: SearchId(1),
+                    reason: SearchFailure::Failed,
+                },
+            );
+            assert!(
+                rig.take_events().is_empty(),
+                "a superseded reply announces nothing"
+            );
             let state = rig.state(cx).unwrap();
-            assert_eq!((state.id, state.query.as_str(), state.status), (SearchId(2), "abc", SearchStatus::Loading));
+            assert_eq!(
+                (state.id, state.query.as_str(), state.status),
+                (SearchId(2), "abc", SearchStatus::Loading)
+            );
             assert_eq!(state.hits, SearchHits::default());
 
             rig.apply(cx, results(2, "abc"));
             let state = rig.state(cx).unwrap();
-            assert_eq!((state.status, state.hits), (SearchStatus::Ready, hits("abc")));
+            assert_eq!(
+                (state.status, state.hits),
+                (SearchStatus::Ready, hits("abc"))
+            );
         }
 
         #[gpui::test]
@@ -1274,13 +1614,22 @@ mod tests {
             rig.apply(cx, results(1, "ab"));
             rig.search(cx, "abc");
             let state = rig.state(cx).unwrap();
-            assert_eq!((state.id, state.status), (SearchId(2), SearchStatus::Loading));
+            assert_eq!(
+                (state.id, state.status),
+                (SearchId(2), SearchStatus::Loading)
+            );
             assert_eq!(state.hits, hits("ab"));
             assert_eq!(
                 rig.commands(),
                 [
-                    Command::Search { id: SearchId(1), query: "ab".into() },
-                    Command::Search { id: SearchId(2), query: "abc".into() }
+                    Command::Search {
+                        id: SearchId(1),
+                        query: "ab".into()
+                    },
+                    Command::Search {
+                        id: SearchId(2),
+                        query: "abc".into()
+                    }
                 ]
             );
 
@@ -1296,7 +1645,13 @@ mod tests {
             rig.search(cx, "abc");
             rig.take_events();
 
-            rig.apply(cx, ClientEvent::SearchFailed { id: SearchId(2), reason: SearchFailure::Offline });
+            rig.apply(
+                cx,
+                ClientEvent::SearchFailed {
+                    id: SearchId(2),
+                    reason: SearchFailure::Offline,
+                },
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Search]);
             let state = rig.state(cx).unwrap();
             assert_eq!(state.status, SearchStatus::Failed(SearchFailure::Offline));
@@ -1304,7 +1659,9 @@ mod tests {
         }
 
         #[gpui::test]
-        fn cancelling_clears_the_state_sends_the_command_and_drops_late_replies(cx: &mut TestAppContext) {
+        fn cancelling_clears_the_state_sends_the_command_and_drops_late_replies(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.search(cx, "ab");
             rig.apply(cx, results(1, "ab"));
@@ -1326,7 +1683,14 @@ mod tests {
             assert!(rig.take_events().is_empty());
 
             rig.search(cx, "xy");
-            assert_eq!(rig.commands(), [Command::Search { id: SearchId(3), query: "xy".into() }], "ids never repeat");
+            assert_eq!(
+                rig.commands(),
+                [Command::Search {
+                    id: SearchId(3),
+                    query: "xy".into()
+                }],
+                "ids never repeat"
+            );
             rig.apply(cx, results(2, "abc"));
             assert_eq!(rig.state(cx).unwrap().status, SearchStatus::Loading);
         }
@@ -1334,17 +1698,38 @@ mod tests {
         #[gpui::test]
         fn avatars_of_chat_and_person_hits_are_requested_once(cx: &mut TestAppContext) {
             let rig = Rig::new(cx);
-            let avatar = |id: &str| Some(MediaRef { id: id.into(), kind: MediaKind::Avatar });
+            let avatar = |id: &str| {
+                Some(MediaRef {
+                    id: id.into(),
+                    kind: MediaKind::Avatar,
+                })
+            };
             let mut found = hits("ab");
             found.chats[0].avatar = avatar("chat-av");
             found.people[0].avatar = avatar("person-av");
             rig.search(cx, "ab");
             rig.commands();
 
-            rig.apply(cx, ClientEvent::SearchResults { id: SearchId(1), hits: found.clone() });
+            rig.apply(
+                cx,
+                ClientEvent::SearchResults {
+                    id: SearchId(1),
+                    hits: found.clone(),
+                },
+            );
             rig.search(cx, "abc");
-            rig.apply(cx, ClientEvent::SearchResults { id: SearchId(2), hits: found });
-            let fetched: Vec<Command> = rig.commands().into_iter().filter(|c| matches!(c, Command::FetchMedia(_))).collect();
+            rig.apply(
+                cx,
+                ClientEvent::SearchResults {
+                    id: SearchId(2),
+                    hits: found,
+                },
+            );
+            let fetched: Vec<Command> = rig
+                .commands()
+                .into_iter()
+                .filter(|c| matches!(c, Command::FetchMedia(_)))
+                .collect();
             assert_eq!(
                 fetched,
                 [
@@ -1387,13 +1772,22 @@ mod tests {
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let log = events.clone();
                 let subscription = cx.update(|cx| {
-                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                        log.borrow_mut().push(event.clone())
+                    })
                 });
-                Self { store, commands, events, _client: client, _subscription: subscription }
+                Self {
+                    store,
+                    commands,
+                    events,
+                    _client: client,
+                    _subscription: subscription,
+                }
             }
 
             fn load(&self, cx: &mut TestAppContext, chat: &ChatId) {
-                self.store.update(cx, |s, cx| s.load_members(chat.clone(), cx));
+                self.store
+                    .update(cx, |s, cx| s.load_members(chat.clone(), cx));
             }
 
             fn load_profile(&self, cx: &mut TestAppContext) {
@@ -1405,7 +1799,8 @@ mod tests {
             }
 
             fn state(&self, cx: &mut TestAppContext, chat: &ChatId) -> Option<MembersState> {
-                self.store.read_with(cx, |s, _| s.members_state(chat).cloned())
+                self.store
+                    .read_with(cx, |s, _| s.members_state(chat).cloned())
             }
 
             fn profile(&self, cx: &mut TestAppContext) -> Option<ProfileState> {
@@ -1426,22 +1821,41 @@ mod tests {
         }
 
         fn avatar(id: &str) -> Option<MediaRef> {
-            Some(MediaRef { id: id.into(), kind: MediaKind::Avatar })
+            Some(MediaRef {
+                id: id.into(),
+                kind: MediaKind::Avatar,
+            })
         }
 
         fn listed(tag: &str) -> ChatMembers {
             ChatMembers {
                 chat: chat(tag),
                 users: vec![
-                    Member { user: UserId("u1".into()), name: Some("Анна".into()), avatar: avatar("av1"), role: MemberRole::Admin, me: false },
-                    Member { user: UserId("u2".into()), name: Some("Борис".into()), avatar: None, role: MemberRole::Member, me: true },
+                    Member {
+                        user: UserId("u1".into()),
+                        name: Some("Анна".into()),
+                        avatar: avatar("av1"),
+                        role: MemberRole::Admin,
+                        me: false,
+                    },
+                    Member {
+                        user: UserId("u2".into()),
+                        name: Some("Борис".into()),
+                        avatar: None,
+                        role: MemberRole::Member,
+                        me: true,
+                    },
                 ],
                 partial: false,
             }
         }
 
         fn failed(chat_tag: &str, reason: &str, offline: bool) -> ClientEvent {
-            ClientEvent::MembersFailed { chat: chat(chat_tag), reason: reason.into(), offline }
+            ClientEvent::MembersFailed {
+                chat: chat(chat_tag),
+                reason: reason.into(),
+                offline,
+            }
         }
 
         #[gpui::test]
@@ -1455,9 +1869,15 @@ mod tests {
             assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
 
             rig.apply(cx, ClientEvent::Members(listed("a")));
-            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Ready(listed("a"))));
+            assert_eq!(
+                rig.state(cx, &chat("a")),
+                Some(MembersState::Ready(listed("a")))
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
-            assert_eq!(rig.commands(), [Command::FetchMedia(avatar("av1").unwrap())]);
+            assert_eq!(
+                rig.commands(),
+                [Command::FetchMedia(avatar("av1").unwrap())]
+            );
         }
 
         #[gpui::test]
@@ -1467,16 +1887,30 @@ mod tests {
             rig.take_events();
 
             rig.apply(cx, failed("a", "нет прав", false));
-            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Failed { reason: "нет прав".into(), offline: false }));
+            assert_eq!(
+                rig.state(cx, &chat("a")),
+                Some(MembersState::Failed {
+                    reason: "нет прав".into(),
+                    offline: false
+                })
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Members(chat("a"))]);
 
             rig.load(cx, &chat("a"));
             rig.apply(cx, failed("a", "Нет соединения", true));
-            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Failed { reason: "Нет соединения".into(), offline: true }));
+            assert_eq!(
+                rig.state(cx, &chat("a")),
+                Some(MembersState::Failed {
+                    reason: "Нет соединения".into(),
+                    offline: true
+                })
+            );
         }
 
         #[gpui::test]
-        fn a_retry_after_a_failure_or_a_list_goes_back_to_loading_and_asks_again(cx: &mut TestAppContext) {
+        fn a_retry_after_a_failure_or_a_list_goes_back_to_loading_and_asks_again(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.load(cx, &chat("a"));
             rig.apply(cx, failed("a", "x", false));
@@ -1490,8 +1924,18 @@ mod tests {
 
             rig.apply(cx, ClientEvent::Members(listed("a")));
             rig.load(cx, &chat("a"));
-            assert_eq!(rig.state(cx, &chat("a")), Some(MembersState::Loading), "a list is never shown as current again");
-            assert_eq!(rig.commands().iter().filter(|c| **c == Command::LoadMembers(chat("a"))).count(), 1);
+            assert_eq!(
+                rig.state(cx, &chat("a")),
+                Some(MembersState::Loading),
+                "a list is never shown as current again"
+            );
+            assert_eq!(
+                rig.commands()
+                    .iter()
+                    .filter(|c| **c == Command::LoadMembers(chat("a")))
+                    .count(),
+                1
+            );
         }
 
         #[gpui::test]
@@ -1516,12 +1960,20 @@ mod tests {
 
             rig.load(cx, &chat("b"));
             rig.apply(cx, ClientEvent::Members(listed("a")));
-            assert_eq!(rig.state(cx, &chat("a")), None, "the answer for another chat changes nothing");
+            assert_eq!(
+                rig.state(cx, &chat("a")),
+                None,
+                "the answer for another chat changes nothing"
+            );
             assert_eq!(rig.state(cx, &chat("b")), Some(MembersState::Loading));
 
             rig.apply(cx, ClientEvent::Members(listed("b")));
             rig.apply(cx, failed("b", "late", false));
-            assert_eq!(rig.state(cx, &chat("b")), Some(MembersState::Ready(listed("b"))), "a late duplicate does not overwrite");
+            assert_eq!(
+                rig.state(cx, &chat("b")),
+                Some(MembersState::Ready(listed("b"))),
+                "a late duplicate does not overwrite"
+            );
         }
 
         #[gpui::test]
@@ -1533,30 +1985,75 @@ mod tests {
             assert_eq!(rig.commands(), [Command::LoadProfile]);
             assert_eq!(rig.take_events(), [StoreEvent::Profile]);
 
-            let own = Profile { user: UserId("me".into()), name: Some("Ян".into()), avatar: avatar("me-av"), status_text: None };
+            let own = Profile {
+                user: UserId("me".into()),
+                name: Some("Ян".into()),
+                avatar: avatar("me-av"),
+                status_text: None,
+            };
             rig.apply(cx, ClientEvent::Profile(own.clone()));
             assert_eq!(rig.profile(cx), Some(ProfileState::Ready(own)));
             assert_eq!(rig.take_events(), [StoreEvent::Profile]);
-            assert_eq!(rig.commands(), [Command::FetchMedia(avatar("me-av").unwrap())]);
+            assert_eq!(
+                rig.commands(),
+                [Command::FetchMedia(avatar("me-av").unwrap())]
+            );
         }
 
         #[gpui::test]
         fn the_profile_goes_loading_to_failed_and_a_retry_asks_again(cx: &mut TestAppContext) {
             let rig = Rig::new(cx);
             rig.load_profile(cx);
-            rig.apply(cx, ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true });
-            assert_eq!(rig.profile(cx), Some(ProfileState::Failed { reason: "Нет соединения".into(), offline: true }));
+            rig.apply(
+                cx,
+                ClientEvent::ProfileFailed {
+                    reason: "Нет соединения".into(),
+                    offline: true,
+                },
+            );
+            assert_eq!(
+                rig.profile(cx),
+                Some(ProfileState::Failed {
+                    reason: "Нет соединения".into(),
+                    offline: true
+                })
+            );
             rig.commands();
 
             rig.load_profile(cx);
-            assert_eq!(rig.profile(cx), Some(ProfileState::Loading), "no data of the failed request stays");
+            assert_eq!(
+                rig.profile(cx),
+                Some(ProfileState::Loading),
+                "no data of the failed request stays"
+            );
             assert_eq!(rig.commands(), [Command::LoadProfile]);
             rig.load_profile(cx);
-            assert!(rig.commands().is_empty(), "a running load is not sent twice");
+            assert!(
+                rig.commands().is_empty(),
+                "a running load is not sent twice"
+            );
 
-            rig.apply(cx, ClientEvent::ProfileFailed { reason: "x".into(), offline: false });
-            rig.apply(cx, ClientEvent::ProfileFailed { reason: "y".into(), offline: false });
-            assert_eq!(rig.profile(cx), Some(ProfileState::Failed { reason: "x".into(), offline: false }));
+            rig.apply(
+                cx,
+                ClientEvent::ProfileFailed {
+                    reason: "x".into(),
+                    offline: false,
+                },
+            );
+            rig.apply(
+                cx,
+                ClientEvent::ProfileFailed {
+                    reason: "y".into(),
+                    offline: false,
+                },
+            );
+            assert_eq!(
+                rig.profile(cx),
+                Some(ProfileState::Failed {
+                    reason: "x".into(),
+                    offline: false
+                })
+            );
         }
 
         #[gpui::test]
@@ -1593,13 +2090,22 @@ mod tests {
                 let events = Rc::new(RefCell::new(Vec::new()));
                 let log = events.clone();
                 let subscription = cx.update(|cx| {
-                    cx.subscribe(&store, move |_, event: &StoreEvent, _| log.borrow_mut().push(event.clone()))
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                        log.borrow_mut().push(event.clone())
+                    })
                 });
-                Self { store, commands, events, _client: client, _subscription: subscription }
+                Self {
+                    store,
+                    commands,
+                    events,
+                    _client: client,
+                    _subscription: subscription,
+                }
             }
 
             fn create(&self, cx: &mut TestAppContext, user: &str) {
-                self.store.update(cx, |s, cx| s.create_private_chat(UserId(user.into()), cx));
+                self.store
+                    .update(cx, |s, cx| s.create_private_chat(UserId(user.into()), cx));
             }
 
             fn dismiss(&self, cx: &mut TestAppContext) {
@@ -1615,7 +2121,10 @@ mod tests {
             }
 
             fn list(&self, cx: &mut TestAppContext, tags: &[&str]) {
-                self.apply(cx, ClientEvent::ChatsReplaced(tags.iter().map(|t| row(t)).collect()));
+                self.apply(
+                    cx,
+                    ClientEvent::ChatsReplaced(tags.iter().map(|t| row(t)).collect()),
+                );
             }
 
             fn state(&self, cx: &mut TestAppContext) -> Option<CreationState> {
@@ -1654,7 +2163,10 @@ mod tests {
         }
 
         fn created(tag: &str, existing: bool) -> ClientEvent {
-            ClientEvent::ChatCreated { chat: Some(chat(tag)), existing }
+            ClientEvent::ChatCreated {
+                chat: Some(chat(tag)),
+                existing,
+            }
         }
 
         fn user(tag: &str) -> UserId {
@@ -1662,12 +2174,17 @@ mod tests {
         }
 
         #[gpui::test]
-        fn starting_goes_in_flight_sends_one_command_and_ignores_a_second_press(cx: &mut TestAppContext) {
+        fn starting_goes_in_flight_sends_one_command_and_ignores_a_second_press(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             assert_eq!(rig.state(cx), None);
             rig.create(cx, "u9");
             assert_eq!(rig.state(cx), Some(CreationState::InFlight));
-            assert_eq!(rig.commands(), [Command::CreatePrivateChat { user: user("u9") }]);
+            assert_eq!(
+                rig.commands(),
+                [Command::CreatePrivateChat { user: user("u9") }]
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Creation]);
 
             rig.create(cx, "u9");
@@ -1688,7 +2205,16 @@ mod tests {
             assert_eq!(rig.state(cx), None);
             assert_eq!(rig.selected(cx), Some(chat("p")));
             assert_eq!(rig.commands(), [Command::OpenChat(chat("p"))]);
-            assert_eq!(rig.take_events(), [StoreEvent::Creation, StoreEvent::ChatCreated { chat: Some(chat("p")), existing: false }]);
+            assert_eq!(
+                rig.take_events(),
+                [
+                    StoreEvent::Creation,
+                    StoreEvent::ChatCreated {
+                        chat: Some(chat("p")),
+                        existing: false
+                    }
+                ]
+            );
         }
 
         #[gpui::test]
@@ -1722,24 +2248,58 @@ mod tests {
             rig.take_events();
             rig.apply(cx, created("p", true));
             assert_eq!(rig.selected(cx), Some(chat("p")));
-            assert_eq!(rig.take_events(), [StoreEvent::Creation, StoreEvent::ChatCreated { chat: Some(chat("p")), existing: true }]);
+            assert_eq!(
+                rig.take_events(),
+                [
+                    StoreEvent::Creation,
+                    StoreEvent::ChatCreated {
+                        chat: Some(chat("p")),
+                        existing: true
+                    }
+                ]
+            );
         }
 
         #[gpui::test]
-        fn a_created_chat_without_an_id_is_selected_once_the_list_shows_the_person(cx: &mut TestAppContext) {
+        fn a_created_chat_without_an_id_is_selected_once_the_list_shows_the_person(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.list(cx, &["a"]);
             rig.create(cx, "u-p");
             rig.commands();
             rig.take_events();
-            rig.apply(cx, ClientEvent::ChatCreated { chat: None, existing: false });
+            rig.apply(
+                cx,
+                ClientEvent::ChatCreated {
+                    chat: None,
+                    existing: false,
+                },
+            );
             assert_eq!(rig.state(cx), None);
-            assert_eq!(rig.selected(cx), None, "the list does not show the person yet");
+            assert_eq!(
+                rig.selected(cx),
+                None,
+                "the list does not show the person yet"
+            );
             assert!(rig.commands().is_empty());
-            assert_eq!(rig.take_events(), [StoreEvent::Creation, StoreEvent::ChatCreated { chat: None, existing: false }]);
+            assert_eq!(
+                rig.take_events(),
+                [
+                    StoreEvent::Creation,
+                    StoreEvent::ChatCreated {
+                        chat: None,
+                        existing: false
+                    }
+                ]
+            );
 
             rig.list(cx, &["a", "b"]);
-            assert_eq!(rig.selected(cx), None, "other chats are not the created one");
+            assert_eq!(
+                rig.selected(cx),
+                None,
+                "other chats are not the created one"
+            );
 
             rig.list(cx, &["a", "b", "p"]);
             assert_eq!(rig.selected(cx), Some(chat("p")));
@@ -1750,11 +2310,19 @@ mod tests {
         }
 
         #[gpui::test]
-        fn the_wait_for_an_unnamed_created_chat_ends_with_any_choice_of_the_user(cx: &mut TestAppContext) {
+        fn the_wait_for_an_unnamed_created_chat_ends_with_any_choice_of_the_user(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.list(cx, &["a"]);
             rig.create(cx, "u-p");
-            rig.apply(cx, ClientEvent::ChatCreated { chat: None, existing: false });
+            rig.apply(
+                cx,
+                ClientEvent::ChatCreated {
+                    chat: None,
+                    existing: false,
+                },
+            );
             rig.select(cx, "a");
             rig.commands();
 
@@ -1764,34 +2332,72 @@ mod tests {
         }
 
         #[gpui::test]
-        fn an_unverified_creation_is_kept_until_dismissed_and_allows_another_attempt(cx: &mut TestAppContext) {
+        fn an_unverified_creation_is_kept_until_dismissed_and_allows_another_attempt(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.create(cx, "u9");
             rig.commands();
             rig.take_events();
 
-            rig.apply(cx, ClientEvent::CreationUnverified { reason: "список не прочитан".into() });
-            assert_eq!(rig.state(cx), Some(CreationState::Unverified { reason: "список не прочитан".into() }));
+            rig.apply(
+                cx,
+                ClientEvent::CreationUnverified {
+                    reason: "список не прочитан".into(),
+                },
+            );
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::Unverified {
+                    reason: "список не прочитан".into()
+                })
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Creation]);
             assert_eq!(rig.selected(cx), None);
 
             rig.create(cx, "u9");
-            assert_eq!(rig.state(cx), Some(CreationState::InFlight), "the next attempt is the user's");
-            assert_eq!(rig.commands(), [Command::CreatePrivateChat { user: user("u9") }]);
-            rig.apply(cx, ClientEvent::CreationUnverified { reason: "список не прочитан".into() });
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::InFlight),
+                "the next attempt is the user's"
+            );
+            assert_eq!(
+                rig.commands(),
+                [Command::CreatePrivateChat { user: user("u9") }]
+            );
+            rig.apply(
+                cx,
+                ClientEvent::CreationUnverified {
+                    reason: "список не прочитан".into(),
+                },
+            );
             rig.dismiss(cx);
             assert_eq!(rig.state(cx), None);
         }
 
         #[gpui::test]
-        fn a_failure_is_kept_until_dismissed_and_another_attempt_is_allowed(cx: &mut TestAppContext) {
+        fn a_failure_is_kept_until_dismissed_and_another_attempt_is_allowed(
+            cx: &mut TestAppContext,
+        ) {
             let rig = Rig::new(cx);
             rig.create(cx, "u9");
             rig.commands();
             rig.take_events();
 
-            rig.apply(cx, ClientEvent::CreationFailed { reason: "нет прав".into(), unknown: false });
-            assert_eq!(rig.state(cx), Some(CreationState::Failed { reason: "нет прав".into(), unknown: false }));
+            rig.apply(
+                cx,
+                ClientEvent::CreationFailed {
+                    reason: "нет прав".into(),
+                    unknown: false,
+                },
+            );
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::Failed {
+                    reason: "нет прав".into(),
+                    unknown: false
+                })
+            );
             assert_eq!(rig.take_events(), [StoreEvent::Creation]);
 
             rig.dismiss(cx);
@@ -1801,12 +2407,31 @@ mod tests {
             assert!(rig.take_events().is_empty(), "nothing to dismiss");
 
             rig.create(cx, "u9");
-            rig.apply(cx, ClientEvent::CreationFailed { reason: "результат неизвестен".into(), unknown: true });
-            assert_eq!(rig.state(cx), Some(CreationState::Failed { reason: "результат неизвестен".into(), unknown: true }));
+            rig.apply(
+                cx,
+                ClientEvent::CreationFailed {
+                    reason: "результат неизвестен".into(),
+                    unknown: true,
+                },
+            );
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::Failed {
+                    reason: "результат неизвестен".into(),
+                    unknown: true
+                })
+            );
             rig.commands();
             rig.create(cx, "u9");
-            assert_eq!(rig.state(cx), Some(CreationState::InFlight), "the next attempt is the user's");
-            assert_eq!(rig.commands(), [Command::CreatePrivateChat { user: user("u9") }]);
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::InFlight),
+                "the next attempt is the user's"
+            );
+            assert_eq!(
+                rig.commands(),
+                [Command::CreatePrivateChat { user: user("u9") }]
+            );
         }
 
         #[gpui::test]
@@ -1825,7 +2450,13 @@ mod tests {
             rig.list(cx, &["p"]);
             rig.take_events();
             rig.apply(cx, created("p", false));
-            rig.apply(cx, ClientEvent::CreationFailed { reason: "x".into(), unknown: false });
+            rig.apply(
+                cx,
+                ClientEvent::CreationFailed {
+                    reason: "x".into(),
+                    unknown: false,
+                },
+            );
             assert_eq!(rig.state(cx), None);
             assert_eq!(rig.selected(cx), None);
             assert!(rig.take_events().is_empty());
@@ -1858,7 +2489,11 @@ mod tests {
             rig.apply(cx, ClientEvent::SignedOut);
             assert_eq!(rig.state(cx), None);
             rig.apply(cx, ClientEvent::ChatUpdated(row("p")));
-            assert_eq!(rig.selected(cx), None, "a chat awaited before the sign out is not opened");
+            assert_eq!(
+                rig.selected(cx),
+                None,
+                "a chat awaited before the sign out is not opened"
+            );
         }
     }
 }

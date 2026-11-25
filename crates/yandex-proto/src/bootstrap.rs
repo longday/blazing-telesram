@@ -80,7 +80,10 @@ pub async fn bootstrap(
     // Steps log status only: bodies carry the CSRF token and user data.
     let started = Instant::now();
     let fail = |started| failed("csrf-token", "POST", &endpoints.csrf_url, started);
-    let response = common(client.post(&endpoints.csrf_url)).send().await.map_err(fail(started))?;
+    let response = common(client.post(&endpoints.csrf_url))
+        .send()
+        .await
+        .map_err(fail(started))?;
     let status = response.status().as_u16();
     let body = response.bytes().await.map_err(fail(started))?;
     info!(step = "csrf-token", url = %redact_url(&endpoints.csrf_url), status, elapsed_ms = millis(started.elapsed()), "bootstrap");
@@ -108,7 +111,11 @@ fn parse_csrf_response(status: u16, body: &[u8]) -> Result<String, BootstrapErro
     match status {
         401 | 403 => return Err(BootstrapError::SessionRejected),
         200..=299 => {}
-        _ => return Err(BootstrapError::Protocol(format!("csrf-token returned HTTP {status}"))),
+        _ => {
+            return Err(BootstrapError::Protocol(format!(
+                "csrf-token returned HTTP {status}"
+            )));
+        }
     }
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -121,8 +128,11 @@ fn parse_request_user_response(status: u16, body: &[u8]) -> Result<Identity, Boo
     if status == 401 {
         return Err(BootstrapError::SessionRejected);
     }
-    let payload: Value = serde_json::from_slice(body)
-        .map_err(|_| BootstrapError::Protocol(format!("request_user returned HTTP {status} with a non-JSON body")))?;
+    let payload: Value = serde_json::from_slice(body).map_err(|_| {
+        BootstrapError::Protocol(format!(
+            "request_user returned HTTP {status} with a non-JSON body"
+        ))
+    })?;
     let data = payload.get("data");
 
     if payload.get("status").and_then(Value::as_str) != Some("ok") {
@@ -139,7 +149,8 @@ fn parse_request_user_response(status: u16, body: &[u8]) -> Result<Identity, Boo
         });
     }
 
-    let data = data.ok_or_else(|| BootstrapError::Protocol("request_user response has no data".into()))?;
+    let data =
+        data.ok_or_else(|| BootstrapError::Protocol("request_user response has no data".into()))?;
     let Some(user) = data.get("user") else {
         // Without a `user` object the server answered as for an anonymous guest.
         return Err(if data.get("guid").is_some() {
@@ -162,7 +173,11 @@ fn parse_request_user_response(status: u16, body: &[u8]) -> Result<Identity, Boo
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
-    Ok(Identity { uid, guid: guid.to_owned(), display_name })
+    Ok(Identity {
+        uid,
+        guid: guid.to_owned(),
+        display_name,
+    })
 }
 
 #[cfg(test)]
@@ -187,10 +202,18 @@ mod tests {
 
     #[test]
     fn parses_numeric_and_string_uid() {
-        let id = parse(200, &ok_body(r#"{"guid":"g1","uid":4001,"display_name":"Ivan"}"#)).unwrap();
+        let id = parse(
+            200,
+            &ok_body(r#"{"guid":"g1","uid":4001,"display_name":"Ivan"}"#),
+        )
+        .unwrap();
         assert_eq!(
             id,
-            Identity { uid: Some("4001".into()), guid: "g1".into(), display_name: Some("Ivan".into()) }
+            Identity {
+                uid: Some("4001".into()),
+                guid: "g1".into(),
+                display_name: Some("Ivan".into())
+            }
         );
         let id = parse(200, &ok_body(r#"{"guid":"g2","uid":"77"}"#)).unwrap();
         assert_eq!(id.uid.as_deref(), Some("77"));
@@ -202,10 +225,16 @@ mod tests {
 
     #[test]
     fn maps_cookie_rejection() {
-        assert!(matches!(parse(401, ""), Err(BootstrapError::SessionRejected)));
+        assert!(matches!(
+            parse(401, ""),
+            Err(BootstrapError::SessionRejected)
+        ));
         for code in COOKIE_ERROR_CODES {
             assert!(
-                matches!(parse(403, &err_body(code)), Err(BootstrapError::SessionRejected)),
+                matches!(
+                    parse(403, &err_body(code)),
+                    Err(BootstrapError::SessionRejected)
+                ),
                 "{code}"
             );
         }
@@ -214,31 +243,70 @@ mod tests {
     #[test]
     fn guest_answer_is_rejection() {
         let body = r#"{"status":"ok","data":{"guid":"guest"}}"#;
-        assert!(matches!(parse(200, body), Err(BootstrapError::SessionRejected)));
+        assert!(matches!(
+            parse(200, body),
+            Err(BootstrapError::SessionRejected)
+        ));
     }
 
     #[test]
     fn maps_bad_csrf() {
-        assert!(matches!(parse(403, &err_body("bad_csrf_token")), Err(BootstrapError::BadCsrf)));
+        assert!(matches!(
+            parse(403, &err_body("bad_csrf_token")),
+            Err(BootstrapError::BadCsrf)
+        ));
     }
 
     #[test]
     fn maps_protocol_errors() {
-        assert!(matches!(parse(200, &ok_body(r#"{"uid":1}"#)), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse(500, &err_body("internal")), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse(500, r#"{"status":"error"}"#), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse(502, "<html>"), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse(200, r#"{"status":"ok"}"#), Err(BootstrapError::Protocol(_))));
+        assert!(matches!(
+            parse(200, &ok_body(r#"{"uid":1}"#)),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse(500, &err_body("internal")),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse(500, r#"{"status":"error"}"#),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse(502, "<html>"),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse(200, r#"{"status":"ok"}"#),
+            Err(BootstrapError::Protocol(_))
+        ));
     }
 
     #[test]
     fn csrf_response_mapping() {
-        assert_eq!(parse_csrf_response(200, br#"{"token":"t1"}"#).unwrap(), "t1");
-        assert!(matches!(parse_csrf_response(401, b""), Err(BootstrapError::SessionRejected)));
-        assert!(matches!(parse_csrf_response(403, b""), Err(BootstrapError::SessionRejected)));
-        assert!(matches!(parse_csrf_response(500, b""), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse_csrf_response(200, b"{}"), Err(BootstrapError::Protocol(_))));
-        assert!(matches!(parse_csrf_response(200, br#"{"token":""}"#), Err(BootstrapError::Protocol(_))));
+        assert_eq!(
+            parse_csrf_response(200, br#"{"token":"t1"}"#).unwrap(),
+            "t1"
+        );
+        assert!(matches!(
+            parse_csrf_response(401, b""),
+            Err(BootstrapError::SessionRejected)
+        ));
+        assert!(matches!(
+            parse_csrf_response(403, b""),
+            Err(BootstrapError::SessionRejected)
+        ));
+        assert!(matches!(
+            parse_csrf_response(500, b""),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_csrf_response(200, b"{}"),
+            Err(BootstrapError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_csrf_response(200, br#"{"token":""}"#),
+            Err(BootstrapError::Protocol(_))
+        ));
     }
 
     /// Serves one canned `(status, body)` per incoming connection, then returns
@@ -283,7 +351,9 @@ mod tests {
                     .map(|v| v.trim().parse::<usize>().unwrap())
                 {
                     Some(len) => body.len() >= len,
-                    None if head.contains("transfer-encoding: chunked") => body.ends_with("0\r\n\r\n"),
+                    None if head.contains("transfer-encoding: chunked") => {
+                        body.ends_with("0\r\n\r\n")
+                    }
                     None => true,
                 };
                 if done {
@@ -310,7 +380,10 @@ mod tests {
     async fn bootstrap_success_sends_expected_requests() {
         let (endpoints, server) = stub(vec![
             (200, r#"{"token":"tok-1"}"#.into()),
-            (200, ok_body(r#"{"guid":"g1","uid":4001,"display_name":"Ivan"}"#)),
+            (
+                200,
+                ok_body(r#"{"guid":"g1","uid":4001,"display_name":"Ivan"}"#),
+            ),
         ]);
         let id = bootstrap(&endpoints, &local_cookies()).await.unwrap();
         assert_eq!(id.uid.as_deref(), Some("4001"));
@@ -361,7 +434,10 @@ mod tests {
     #[tokio::test]
     async fn bootstrap_maps_transport_failure() {
         // Bind then drop to get a port with nothing listening.
-        let addr = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
         let endpoints = RegistryEndpoints {
             api_url: format!("http://{addr}/api/"),
             csrf_url: format!("http://{addr}/csrf-token/"),
@@ -383,11 +459,25 @@ mod tests {
         };
         let capture = crate::test_log::Capture::default();
         let _guard = capture.install();
-        let result = tokio::time::timeout(Duration::from_secs(5), bootstrap(&endpoints, &local_cookies())).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            bootstrap(&endpoints, &local_cookies()),
+        )
+        .await;
         assert!(matches!(result, Ok(Err(BootstrapError::Network(_)))));
         let text = capture.text();
-        let line = text.lines().find(|l| l.contains("http exchange failed")).unwrap_or_else(|| panic!("no failure line:\n{text}"));
-        for needle in ["WARN", "call=\"csrf-token\"", "method=\"POST\"", "/csrf-token/", "elapsed_ms=", "timeout=true"] {
+        let line = text
+            .lines()
+            .find(|l| l.contains("http exchange failed"))
+            .unwrap_or_else(|| panic!("no failure line:\n{text}"));
+        for needle in [
+            "WARN",
+            "call=\"csrf-token\"",
+            "method=\"POST\"",
+            "/csrf-token/",
+            "elapsed_ms=",
+            "timeout=true",
+        ] {
             assert!(line.contains(needle), "{needle}: {line}");
         }
         drop(listener);
@@ -401,7 +491,10 @@ mod tests {
         let _guard = capture.install();
         let (mut endpoints, server) = stub(vec![
             (200, r#"{"token":"tok-CSRF-1"}"#.into()),
-            (200, ok_body(r#"{"guid":"g-body","uid":4001,"display_name":"Ivan-BODY"}"#)),
+            (
+                200,
+                ok_body(r#"{"guid":"g-body","uid":4001,"display_name":"Ivan-BODY"}"#),
+            ),
         ]);
         endpoints.csrf_url.push_str("?uid=Q-VALUE-1");
         endpoints.api_url.push_str("?uid=Q-VALUE-2");
@@ -409,9 +502,22 @@ mod tests {
         server.join().unwrap();
 
         let text = capture.text();
-        for needle in ["csrf-token", "request_user", "127.0.0.1/csrf-token/", "127.0.0.1/api/", "status=200"] {
+        for needle in [
+            "csrf-token",
+            "request_user",
+            "127.0.0.1/csrf-token/",
+            "127.0.0.1/api/",
+            "status=200",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
-        capture.assert_absent(&["SECRET", "tok-CSRF-1", "Q-VALUE-1", "Q-VALUE-2", "g-body", "Ivan-BODY"]);
+        capture.assert_absent(&[
+            "SECRET",
+            "tok-CSRF-1",
+            "Q-VALUE-1",
+            "Q-VALUE-2",
+            "g-body",
+            "Ivan-BODY",
+        ]);
     }
 }

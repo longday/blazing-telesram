@@ -38,7 +38,10 @@ pub fn body(state: Option<&MembersState>, connection: ConnectionState) -> Body {
         Some(MembersState::Failed { offline: true, .. }) => Body::Offline,
         Some(MembersState::Failed { reason, .. }) => Body::Failed(reason.clone()),
         Some(MembersState::Ready(_)) if connection != ConnectionState::Online => Body::Offline,
-        Some(MembersState::Ready(members)) => Body::Ready { shown: members.users.len(), partial: members.partial },
+        Some(MembersState::Ready(members)) => Body::Ready {
+            shown: members.users.len(),
+            partial: members.partial,
+        },
     }
 }
 
@@ -52,7 +55,12 @@ pub fn count_text(shown: usize, partial: bool) -> String {
 }
 
 fn notice(selector: &'static str, text: impl Into<SharedString>) -> Div {
-    div().debug_selector(move || selector.into()).px(px(16.)).py(px(10.)).text_color(rgb(MUTED)).child(text.into())
+    div()
+        .debug_selector(move || selector.into())
+        .px(px(16.))
+        .py(px(10.))
+        .text_color(rgb(MUTED))
+        .child(text.into())
 }
 
 fn retry(cx: &mut Context<Desktop>) -> Stateful<Div> {
@@ -80,7 +88,14 @@ fn member_row(store: &ChatStore, member: &Member, cx: &Context<Desktop>) -> Div 
         .flex()
         .items_center()
         .gap(px(12.))
-        .child(avatar(store, member.avatar.as_ref(), &member.user.0, &name, 36., format!("{tag}-avatar")))
+        .child(avatar(
+            store,
+            member.avatar.as_ref(),
+            &member.user.0,
+            &name,
+            36.,
+            format!("{tag}-avatar"),
+        ))
         .child(div().flex_1().min_w_0().truncate().child(name))
         .when(admin, |row| {
             row.child(
@@ -105,15 +120,22 @@ fn member_row(store: &ChatStore, member: &Member, cx: &Context<Desktop>) -> Div 
                     .py(px(3.))
                     .text_size(px(12.))
                     .text_color(rgb(ACCENT))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_new_chat(Some(user.clone()), cx))),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_new_chat(Some(user.clone()), cx)
+                    })),
             )
         })
 }
 
 /// The rows of `range` of the loaded list of `chat`; nothing while there is no list.
 fn rows(store: &ChatStore, chat: &ChatId, range: Range<usize>, cx: &Context<Desktop>) -> Vec<Div> {
-    let Some(MembersState::Ready(members)) = store.members_state(chat) else { return Vec::new() };
-    range.filter_map(|ix| members.users.get(ix)).map(|member| member_row(store, member, cx)).collect()
+    let Some(MembersState::Ready(members)) = store.members_state(chat) else {
+        return Vec::new();
+    };
+    range
+        .filter_map(|ix| members.users.get(ix))
+        .map(|member| member_row(store, member, cx))
+        .collect()
 }
 
 /// The panel of `chat`. Debug selectors: `info-panel`, `info-close`, `info-loading`, `info-offline`,
@@ -128,7 +150,11 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
             ChatKind::Group => "Группа",
             ChatKind::Channel => "Канал",
         });
-        (title, kind, body(state.members_state(chat), state.connection()))
+        (
+            title,
+            kind,
+            body(state.members_state(chat), state.connection()),
+        )
     };
     let content = match body {
         Body::Loading => notice("info-loading", "Загрузка участников…").into_any_element(),
@@ -136,7 +162,10 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
             .flex()
             .flex_col()
             .items_start()
-            .child(notice("info-offline", "Список участников недоступен без сети"))
+            .child(notice(
+                "info-offline",
+                "Список участников недоступен без сети",
+            ))
             .child(div().px(px(16.)).child(retry(cx)))
             .into_any_element(),
         Body::Failed(reason) => div()
@@ -163,21 +192,36 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
                 .flex()
                 .flex_col()
                 .child(
-                    notice(if partial { "info-partial" } else { "info-count" }, count_text(shown, partial))
-                        .flex_none()
-                        .text_size(px(13.)),
+                    notice(
+                        if partial {
+                            "info-partial"
+                        } else {
+                            "info-count"
+                        },
+                        count_text(shown, partial),
+                    )
+                    .flex_none()
+                    .text_size(px(13.)),
                 )
-                .when(shown == 0, |d| d.child(notice("info-empty", "Нет данных об участниках")))
+                .when(shown == 0, |d| {
+                    d.child(notice("info-empty", "Нет данных об участниках"))
+                })
                 .when(shown > 0, |d| {
                     d.child(
-                        div().debug_selector(|| "info-members".into()).flex_1().min_h_0().child(
-                            uniform_list(
-                                "info-members",
-                                shown,
-                                cx.processor(move |this, range: Range<usize>, _, cx| rows(this.store.read(cx), &chat, range, cx)),
-                            )
-                            .size_full(),
-                        ),
+                        div()
+                            .debug_selector(|| "info-members".into())
+                            .flex_1()
+                            .min_h_0()
+                            .child(
+                                uniform_list(
+                                    "info-members",
+                                    shown,
+                                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                                        rows(this.store.read(cx), &chat, range, cx)
+                                    }),
+                                )
+                                .size_full(),
+                            ),
                     )
                 })
                 .into_any_element()
@@ -209,7 +253,12 @@ pub fn render(chat: &ChatId, store: &Entity<ChatStore>, cx: &mut Context<Desktop
                         .min_w_0()
                         .flex()
                         .flex_col()
-                        .child(div().truncate().font_weight(FontWeight::MEDIUM).child(title))
+                        .child(
+                            div()
+                                .truncate()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(title),
+                        )
                         .child(div().text_size(px(13.)).text_color(rgb(MUTED)).child(kind)),
                 )
                 .child(

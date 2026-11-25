@@ -40,7 +40,10 @@ const SANDBOX_PROFILE: &str = r#"(version 1)
 /// Whether `sandbox-exec` exists. One that exists but cannot apply the profile panics instead of
 /// silently dropping the guard coverage.
 static SANDBOX_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
-    match Command::new(SANDBOX_EXEC).args(["-p", SANDBOX_PROFILE, "/usr/bin/true"]).output() {
+    match Command::new(SANDBOX_EXEC)
+        .args(["-p", SANDBOX_PROFILE, "/usr/bin/true"])
+        .output()
+    {
         Ok(out) => {
             assert!(
                 out.status.success(),
@@ -60,7 +63,9 @@ static SANDBOX_AVAILABLE: LazyLock<bool> = LazyLock::new(|| {
 fn sandbox_ready() -> bool {
     let ready = *SANDBOX_AVAILABLE;
     if !ready {
-        eprintln!("SKIPPED: {SANDBOX_EXEC} is unavailable; the probe is not run without the network sandbox");
+        eprintln!(
+            "SKIPPED: {SANDBOX_EXEC} is unavailable; the probe is not run without the network sandbox"
+        );
     }
     ready
 }
@@ -76,7 +81,11 @@ fn dummy_session(dir: &RuntimeDir) {
             secure: true,
             http_only: true,
         }],
-        identity: Identity { uid: Some("1".into()), guid: GUID.into(), display_name: None },
+        identity: Identity {
+            uid: Some("1".into()),
+            guid: GUID.into(),
+            display_name: None,
+        },
     }
     .save(dir)
     .unwrap();
@@ -95,9 +104,19 @@ impl Run {
     fn assert_refused(&self, args: &[&str], needle: &str) {
         let stderr = self.stderr();
         assert_eq!(self.output.status.code(), Some(2), "{args:?}: {stderr}");
-        assert!(stderr.contains("BT_WRITE_ONLY_CHAT") && stderr.contains(needle), "{args:?}: {stderr}");
-        assert!(self.output.stdout.is_empty(), "{args:?}: {}", String::from_utf8_lossy(&self.output.stdout));
-        assert_eq!(self.connections, 0, "{args:?}: the probe sent an HTTP request through the proxy");
+        assert!(
+            stderr.contains("BT_WRITE_ONLY_CHAT") && stderr.contains(needle),
+            "{args:?}: {stderr}"
+        );
+        assert!(
+            self.output.stdout.is_empty(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&self.output.stdout)
+        );
+        assert_eq!(
+            self.connections, 0,
+            "{args:?}: the probe sent an HTTP request through the proxy"
+        );
     }
 }
 
@@ -130,7 +149,10 @@ fn probe(args: &[&str], limit: &str, with_session: bool) -> Run {
     while sentinel.accept().is_ok() {
         connections += 1;
     }
-    Run { output, connections }
+    Run {
+        output,
+        connections,
+    }
 }
 
 fn own_chat() -> String {
@@ -175,7 +197,10 @@ fn both_creation_commands_are_refused_whatever_the_limit_names() {
         return;
     }
     let own = own_chat();
-    let commands: [&[&str]; 2] = [&["create-private", GUID, "--confirm-create"], &["create-chat", "Team", GUID, "--confirm-create"]];
+    let commands: [&[&str]; 2] = [
+        &["create-private", GUID, "--confirm-create"],
+        &["create-chat", "Team", GUID, "--confirm-create"],
+    ];
     for args in commands {
         for limit in [OTHER_CHAT, own.as_str()] {
             // With and without a stored session: the guard runs before the session is read.

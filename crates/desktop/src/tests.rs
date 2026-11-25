@@ -1,26 +1,31 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
-use crate::desktop::{chat_preview, AccountMenu, Desktop, Dismiss, Preview, Search, ToggleLog, ViewerNext, ViewerPrev};
-use crate::format::{fit_thumbnail, Clock};
+use crate::desktop::{
+    AccountMenu, Desktop, Dismiss, Preview, Search, ToggleLog, ViewerNext, ViewerPrev, chat_preview,
+};
+use crate::format::{Clock, fit_thumbnail};
 use crate::logging::{LogBuffer, LogLine};
 use crate::search_results::StatusLine;
-use crate::store::{ChatFilter, ChatStore, DownloadState, SearchStatus, SessionState, SEARCH_DEBOUNCE};
+use crate::store::{
+    ChatFilter, ChatStore, DownloadState, SEARCH_DEBOUNCE, SearchStatus, SessionState,
+};
 use crate::timeline::gallery_columns;
 use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
-use bt_chat_core::reactions::{ReactionCode, ReactionCount, Reactions, KNOWN};
+use bt_chat_core::reactions::{KNOWN, ReactionCode, ReactionCount, Reactions};
 use gpui::{
-    point, px, size, AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, MouseButton, Pixels,
-    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
+    AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, MouseButton, Pixels,
+    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
 };
 use std::path::PathBuf;
 use std::time::Duration;
 
 const PNG_1X1: &[u8] = &[
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0d, 0x49,
-    0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0, 0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d,
-    0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0xf0,
+    0x1f, 0x00, 0x05, 0x00, 0x01, 0xff, 0x89, 0x99, 0x3d, 0x1d, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
 /// Fixture message `i` has timestamp `i` microseconds, so its debug selectors (`msg-<ts>`) can be literals:
@@ -56,7 +61,11 @@ fn chat(id: &str, kind: ChatKind, title: &str, last: Option<i64>) -> ChatSummary
         kind,
         title: title.into(),
         avatar: None,
-        last_message: last.map(|i| MessagePreview { author: None, text: format!("превью {i}"), timestamp: ts(i) }),
+        last_message: last.map(|i| MessagePreview {
+            author: None,
+            text: format!("превью {i}"),
+            timestamp: ts(i),
+        }),
         unread: 0,
         muted: false,
         pinned_rank: None,
@@ -82,7 +91,13 @@ fn message(chat: &str, i: i64, author: &str, outgoing: bool, body: MessageBody) 
 }
 
 fn text(chat_id: &str, i: i64) -> Message {
-    message(chat_id, i, "alice", false, MessageBody::Text(format!("сообщение {i}")))
+    message(
+        chat_id,
+        i,
+        "alice",
+        false,
+        MessageBody::Text(format!("сообщение {i}")),
+    )
 }
 
 fn chunk(chat_id: &str, range: std::ops::RangeInclusive<i64>, reached_start: bool) -> ClientEvent {
@@ -106,7 +121,10 @@ fn history(chat_id: &str, messages: Vec<Message>, reached_start: bool) -> Client
 }
 
 fn media(id: &str, kind: MediaKind) -> MediaRef {
-    MediaRef { id: id.into(), kind }
+    MediaRef {
+        id: id.into(),
+        kind,
+    }
 }
 
 struct Harness {
@@ -159,7 +177,15 @@ fn harness_with(
         }
     });
     vcx.simulate_resize(size(px(1200.), px(1400.)));
-    (Harness { events: events_tx, commands, store, desktop }, vcx)
+    (
+        Harness {
+            events: events_tx,
+            commands,
+            store,
+            desktop,
+        },
+        vcx,
+    )
 }
 
 impl Harness {
@@ -175,7 +201,8 @@ impl Harness {
     }
 
     fn list(&self, cx: &mut VisualTestContext) -> ListState {
-        self.desktop.read_with(cx, |d, _| d.list_state().expect("a chat is open").clone())
+        self.desktop
+            .read_with(cx, |d, _| d.list_state().expect("a chat is open").clone())
     }
 }
 
@@ -202,7 +229,12 @@ fn scroll(cx: &mut VisualTestContext, dy: f32) {
 }
 
 fn y(cx: &mut VisualTestContext, selector: &'static str) -> f32 {
-    f32::from(bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen")).origin.y)
+    f32::from(
+        bounds(cx, selector)
+            .unwrap_or_else(|| panic!("{selector} is not on screen"))
+            .origin
+            .y,
+    )
 }
 
 fn scroll_to_top(h: &Harness, cx: &mut VisualTestContext) {
@@ -218,7 +250,9 @@ fn scroll_to_top(h: &Harness, cx: &mut VisualTestContext) {
 }
 
 fn loading_older(h: &Harness, cx: &mut VisualTestContext, chat: &str) -> bool {
-    h.store.read_with(cx, |s, _| s.timeline(&ChatId(chat.into())).unwrap().loading_older)
+    h.store.read_with(cx, |s, _| {
+        s.timeline(&ChatId(chat.into())).unwrap().loading_older
+    })
 }
 
 // ---- 6.1 store ----
@@ -233,14 +267,30 @@ fn store_applies_events_and_issues_commands(cx: &mut TestAppContext) {
 
     let mut a = chat("a", ChatKind::Private, "Анна", Some(1));
     a.avatar = Some(media("av-a", MediaKind::Avatar));
-    h.feed(cx, [ClientEvent::ChatsReplaced(vec![a.clone(), chat("b", ChatKind::Group, "Группа", None)])]);
-    h.feed(cx, [ClientEvent::ChatUpdated(a), ClientEvent::Connection(ConnectionState::Online)]);
+    h.feed(
+        cx,
+        [ClientEvent::ChatsReplaced(vec![
+            a.clone(),
+            chat("b", ChatKind::Group, "Группа", None),
+        ])],
+    );
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatUpdated(a),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+    );
     h.store.read_with(cx, |s, _| {
         assert!(s.chats_loaded());
         assert_eq!(s.chat_count(), 2);
         assert_eq!(s.connection(), ConnectionState::Online);
     });
-    assert_eq!(h.commands(), [Command::FetchMedia(media("av-a", MediaKind::Avatar))], "avatar requested once");
+    assert_eq!(
+        h.commands(),
+        [Command::FetchMedia(media("av-a", MediaKind::Avatar))],
+        "avatar requested once"
+    );
 
     h.store.update(cx, |s, cx| s.select(ChatId("b".into()), cx));
     h.store.update(cx, |s, cx| s.select(ChatId("b".into()), cx));
@@ -254,27 +304,43 @@ fn store_applies_events_and_issues_commands(cx: &mut TestAppContext) {
         [
             ClientEvent::MessageUpserted(text("b", 4)),
             ClientEvent::MessageUpserted(edited),
-            ClientEvent::MessageDeleted { chat: ChatId("b".into()), timestamp: ts(1) },
+            ClientEvent::MessageDeleted {
+                chat: ChatId("b".into()),
+                timestamp: ts(1),
+            },
             // Never opened: ignored.
             ClientEvent::MessageUpserted(text("a", 9)),
         ],
     );
     h.store.read_with(cx, |s, _| {
         let tl = s.timeline(&ChatId("b".into())).unwrap();
-        assert_eq!(tl.messages.iter().map(|m| m.timestamp).collect::<Vec<_>>(), [1, 2, 3, 4]);
+        assert_eq!(
+            tl.messages.iter().map(|m| m.timestamp).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
         assert_eq!(tl.messages[0].body, MessageBody::Deleted);
         assert!(tl.messages[1].edited);
         assert!(s.timeline(&ChatId("a".into())).is_none());
     });
 
     let path = PathBuf::from("/tmp/av-a.png");
-    h.feed(cx, [ClientEvent::MediaReady { media: media("av-a", MediaKind::Avatar), path: path.clone() }]);
+    h.feed(
+        cx,
+        [ClientEvent::MediaReady {
+            media: media("av-a", MediaKind::Avatar),
+            path: path.clone(),
+        }],
+    );
     h.store.read_with(cx, |s, _| {
-        assert_eq!(s.media_path(&media("av-a", MediaKind::Avatar)), Some(path.as_path()));
+        assert_eq!(
+            s.media_path(&media("av-a", MediaKind::Avatar)),
+            Some(path.as_path())
+        );
     });
 
     h.feed(cx, [ClientEvent::SessionExpired]);
-    h.store.read_with(cx, |s, _| assert_eq!(s.session(), SessionState::Expired));
+    h.store
+        .read_with(cx, |s, _| assert_eq!(s.session(), SessionState::Expired));
     h.feed(cx, [ClientEvent::SignedOut]);
     h.store.read_with(cx, |s, _| {
         assert_eq!(s.session(), SessionState::SignedOut);
@@ -296,7 +362,10 @@ fn unavailable_media_is_requested_again_on_the_next_refresh(cx: &mut TestAppCont
     assert!(h.commands().is_empty(), "still in flight");
 
     h.feed(cx, [ClientEvent::MediaUnavailable(avatar.clone())]);
-    assert!(h.commands().is_empty(), "no retry loop: waits for the next refresh");
+    assert!(
+        h.commands().is_empty(),
+        "no retry loop: waits for the next refresh"
+    );
     h.feed(cx, [ClientEvent::ChatUpdated(a)]);
     assert_eq!(h.commands(), [Command::FetchMedia(avatar)]);
 }
@@ -308,14 +377,28 @@ fn catch_up_drops_messages_deleted_beyond_the_returned_span(cx: &mut TestAppCont
     h.feed(cx, [chunk("b", 1..=3, true)]);
     let stamps = |h: &Harness, cx: &mut VisualTestContext| {
         h.store.read_with(cx, |s, _| {
-            s.timeline(&ChatId("b".into())).unwrap().messages.iter().map(|m| m.timestamp).collect::<Vec<_>>()
+            s.timeline(&ChatId("b".into()))
+                .unwrap()
+                .messages
+                .iter()
+                .map(|m| m.timestamp)
+                .collect::<Vec<_>>()
         })
     };
     // Messages 2 and 3 were deleted while offline; the core replaced everything from 1 on.
     let catch_up = |messages, replaces| {
-        ClientEvent::History(HistoryChunk { chat: ChatId("b".into()), messages, reached_start: false, replaces, payloads: Vec::new() })
+        ClientEvent::History(HistoryChunk {
+            chat: ChatId("b".into()),
+            messages,
+            reached_start: false,
+            replaces,
+            payloads: Vec::new(),
+        })
     };
-    h.feed(cx, [catch_up(vec![text("b", 1)], Some((Some(ts(1)), None)))]);
+    h.feed(
+        cx,
+        [catch_up(vec![text("b", 1)], Some((Some(ts(1)), None)))],
+    );
     assert_eq!(stamps(&h, cx), [ts(1)]);
     // An empty chunk that replaced the whole history clears it.
     h.feed(cx, [catch_up(vec![], Some((None, None)))]);
@@ -328,17 +411,28 @@ fn replacement_over_a_gap_reopens_older_loading(cx: &mut TestAppContext) {
     let b = ChatId("b".into());
     h.store.update(cx, |s, cx| s.select(b.clone(), cx));
     h.feed(cx, [chunk("b", 1..=2, true)]);
-    assert!(h.commands().iter().all(|c| !matches!(c, Command::LoadOlder { .. })), "start known: no paging");
+    assert!(
+        h.commands()
+            .iter()
+            .all(|c| !matches!(c, Command::LoadOlder { .. })),
+        "start known: no paging"
+    );
     // The core dropped the cached history: the new chunk does not reach the start, so the
     // short timeline pages backwards again.
-    h.feed(cx, [ClientEvent::History(HistoryChunk {
-        chat: b.clone(),
-        messages: vec![text("b", 5), text("b", 6)],
-        reached_start: false,
-        replaces: Some((None, None)),
-        payloads: Vec::new(),
-    })]);
-    assert!(h.commands().contains(&Command::LoadOlder { chat: b, before: ts(5) }));
+    h.feed(
+        cx,
+        [ClientEvent::History(HistoryChunk {
+            chat: b.clone(),
+            messages: vec![text("b", 5), text("b", 6)],
+            reached_start: false,
+            replaces: Some((None, None)),
+            payloads: Vec::new(),
+        })],
+    );
+    assert!(h.commands().contains(&Command::LoadOlder {
+        chat: b,
+        before: ts(5)
+    }));
 }
 
 // ---- 6.2 chat list ----
@@ -349,9 +443,21 @@ fn empty_account_shows_empty_state(cx: &mut TestAppContext) {
         let (_h, cx) = harness_with(cx, events, |_, _| {});
         (shown(cx, "chat-list"), shown(cx, "chat-list-empty"))
     };
-    assert_eq!(list_or_empty(cx, vec![]), (false, true), "placeholder while loading");
-    assert_eq!(list_or_empty(cx, vec![ClientEvent::ChatsReplaced(vec![])]), (false, true));
-    let one = vec![ClientEvent::ChatsReplaced(vec![chat("a", ChatKind::Private, "Анна", Some(1))])];
+    assert_eq!(
+        list_or_empty(cx, vec![]),
+        (false, true),
+        "placeholder while loading"
+    );
+    assert_eq!(
+        list_or_empty(cx, vec![ClientEvent::ChatsReplaced(vec![])]),
+        (false, true)
+    );
+    let one = vec![ClientEvent::ChatsReplaced(vec![chat(
+        "a",
+        ChatKind::Private,
+        "Анна",
+        Some(1),
+    )])];
     assert_eq!(list_or_empty(cx, one), (true, false));
 }
 
@@ -384,7 +490,13 @@ fn rows_show_avatar_badges_and_markers(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("loud.png");
     std::fs::write(&path, PNG_1X1).unwrap();
-    h.feed(cx, [ClientEvent::MediaReady { media: media("av-loud", MediaKind::Avatar), path }]);
+    h.feed(
+        cx,
+        [ClientEvent::MediaReady {
+            media: media("av-loud", MediaKind::Avatar),
+            path,
+        }],
+    );
     assert!(shown(cx, part!("loud", "avatar-image")));
     assert!(!shown(cx, part!("loud", "avatar-initials")));
     assert!(shown(cx, part!("plain", "avatar-initials")));
@@ -418,8 +530,20 @@ fn rows_are_ordered_and_reorder_on_activity(cx: &mut TestAppContext) {
     };
     assert_eq!(order(cx), "dcba");
 
-    h.feed(cx, [ClientEvent::ChatUpdated(chat("a", ChatKind::Private, "A", Some(40)))]);
-    assert_eq!(order(cx), "dcab", "newer activity moves an unpinned chat up, but not above pinned ones");
+    h.feed(
+        cx,
+        [ClientEvent::ChatUpdated(chat(
+            "a",
+            ChatKind::Private,
+            "A",
+            Some(40),
+        ))],
+    );
+    assert_eq!(
+        order(cx),
+        "dcab",
+        "newer activity moves an unpinned chat up, but not above pinned ones"
+    );
 }
 
 fn rendered_rows(
@@ -439,11 +563,16 @@ fn rendered_rows(
         d.filter = filter;
         d.search.update(cx, |input, cx| input.set_text(query, cx));
     });
-    let rows = [("p1", row!("p1")), ("p2", row!("p2")), ("g", row!("g")), ("ch", row!("ch"))]
-        .into_iter()
-        .filter(|(_, selector)| shown(cx, *selector))
-        .map(|(id, _)| id)
-        .collect();
+    let rows = [
+        ("p1", row!("p1")),
+        ("p2", row!("p2")),
+        ("g", row!("g")),
+        ("ch", row!("ch")),
+    ]
+    .into_iter()
+    .filter(|(_, selector)| shown(cx, *selector))
+    .map(|(id, _)| id)
+    .collect();
     (rows, shown(cx, "chat-list-empty"))
 }
 
@@ -451,20 +580,39 @@ fn rendered_rows(
 fn search_and_filters_narrow_the_list(cx: &mut TestAppContext) {
     use ChatFilter::*;
     // Rows are reported in the fixed order p1, p2, g, ch (not screen order).
-    assert_eq!(rendered_rows(cx, "", All), (vec!["p1", "p2", "g", "ch"], false));
-    assert_eq!(rendered_rows(cx, "ПЕТР", All).0, ["p1"], "case-insensitive substring match");
+    assert_eq!(
+        rendered_rows(cx, "", All),
+        (vec!["p1", "p2", "g", "ch"], false)
+    );
+    assert_eq!(
+        rendered_rows(cx, "ПЕТР", All).0,
+        ["p1"],
+        "case-insensitive substring match"
+    );
     assert_eq!(rendered_rows(cx, "нет такого", All), (vec![], true));
     assert_eq!(rendered_rows(cx, "", Unread).0, ["g"]);
     assert_eq!(rendered_rows(cx, "", Private).0, ["p1", "p2"]);
     assert_eq!(rendered_rows(cx, "", Groups).0, ["g"]);
     assert_eq!(rendered_rows(cx, "", Channels).0, ["ch"]);
-    assert_eq!(rendered_rows(cx, "команда", Private), (vec![], true), "search and filter combine");
+    assert_eq!(
+        rendered_rows(cx, "команда", Private),
+        (vec![], true),
+        "search and filter combine"
+    );
 }
 
 #[gpui::test]
 fn filter_chips_select_one_filter(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    h.feed(cx, [ClientEvent::ChatsReplaced(vec![chat("a", ChatKind::Private, "Анна", Some(1))])]);
+    h.feed(
+        cx,
+        [ClientEvent::ChatsReplaced(vec![chat(
+            "a",
+            ChatKind::Private,
+            "Анна",
+            Some(1),
+        )])],
+    );
     let filter = |cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.filter);
     assert_eq!(filter(cx), ChatFilter::All);
     click(cx, "filter-unread");
@@ -496,20 +644,35 @@ fn clicking_a_row_opens_the_chat_without_marking_it_read(cx: &mut TestAppContext
     h.feed(cx, [chunk("c", 1..=2, true)]);
     assert!(shown(cx, "timeline"));
     assert!(shown(cx, part!("c", "badge")), "unread counter stays");
-    h.store.read_with(cx, |s, _| assert_eq!(s.chat(&ChatId("c".into())).unwrap().unread, 2));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(s.chat(&ChatId("c".into())).unwrap().unread, 2)
+    });
     assert!(h.commands().is_empty());
 }
 
 // ---- global search ----
 
 fn search_chats() -> Vec<ChatSummary> {
-    vec![chat("g", ChatKind::Group, "Команда", Some(1)), chat("a", ChatKind::Private, "Анна", Some(2))]
+    vec![
+        chat("g", ChatKind::Group, "Команда", Some(1)),
+        chat("a", ChatKind::Private, "Анна", Some(2)),
+    ]
 }
 
 fn search_hits() -> SearchHits {
     SearchHits {
-        chats: vec![ChatHit { id: ChatId("srv".into()), kind: ChatKind::Group, title: "Сервер".into(), avatar: None }],
-        people: vec![PersonHit { user: UserId("u1".into()), name: "Борис".into(), avatar: None, chat: None }],
+        chats: vec![ChatHit {
+            id: ChatId("srv".into()),
+            kind: ChatKind::Group,
+            title: "Сервер".into(),
+            avatar: None,
+        }],
+        people: vec![PersonHit {
+            user: UserId("u1".into()),
+            name: "Борис".into(),
+            avatar: None,
+            chat: None,
+        }],
         messages: vec![MessageHit {
             chat: ChatId("g".into()),
             chat_title: "Команда".into(),
@@ -521,7 +684,10 @@ fn search_hits() -> SearchHits {
 }
 
 fn search_command(id: u64, query: &str) -> Command {
-    Command::Search { id: SearchId(id), query: query.into() }
+    Command::Search {
+        id: SearchId(id),
+        query: query.into(),
+    }
 }
 
 /// Types into the search field: the `Search` action focuses it first.
@@ -536,30 +702,48 @@ fn pass(cx: &mut VisualTestContext, time: Duration) {
 }
 
 fn search_status(h: &Harness, cx: &mut VisualTestContext) -> Option<StatusLine> {
-    h.desktop.read_with(cx, |d, cx| d.search_listing(cx).and_then(|view| view.status))
+    h.desktop.read_with(cx, |d, cx| {
+        d.search_listing(cx).and_then(|view| view.status)
+    })
 }
 
 fn search_sections(h: &Harness, cx: &mut VisualTestContext) -> Vec<&'static str> {
     h.desktop.read_with(cx, |d, cx| {
-        d.search_listing(cx).map(|view| view.sections.iter().map(|s| s.title).collect()).unwrap_or_default()
+        d.search_listing(cx)
+            .map(|view| view.sections.iter().map(|s| s.title).collect())
+            .unwrap_or_default()
     })
 }
 
 fn online_with_chats(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
     let (h, cx) = harness(cx);
-    h.feed(cx, [ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Online)]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(search_chats()),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+    );
     (h, cx)
 }
 
 #[gpui::test]
-fn a_short_query_sends_nothing_and_two_characters_send_one_search_after_the_pause(cx: &mut TestAppContext) {
+fn a_short_query_sends_nothing_and_two_characters_send_one_search_after_the_pause(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = online_with_chats(cx);
     type_search(cx, "a");
     pass(cx, SEARCH_DEBOUNCE * 3);
-    assert!(h.commands().is_empty(), "one character is below the minimum");
+    assert!(
+        h.commands().is_empty(),
+        "one character is below the minimum"
+    );
     type_search(cx, "   ");
     pass(cx, SEARCH_DEBOUNCE * 3);
-    assert!(h.commands().is_empty(), "the minimum counts the trimmed text");
+    assert!(
+        h.commands().is_empty(),
+        "the minimum counts the trimmed text"
+    );
 
     // Keystrokes inside the pause restart it: only the last text is sent, once, 300 ms after the last keystroke.
     cx.simulate_keystrokes("cmd-a backspace");
@@ -574,7 +758,12 @@ fn a_short_query_sends_nothing_and_two_characters_send_one_search_after_the_paus
     assert_eq!(h.commands(), [search_command(1, "abc")]);
     pass(cx, SEARCH_DEBOUNCE * 3);
     assert!(h.commands().is_empty(), "exactly one request");
-    h.store.read_with(cx, |s, _| assert_eq!(s.search_state().map(|s| s.status), Some(SearchStatus::Loading)));
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(
+            s.search_state().map(|s| s.status),
+            Some(SearchStatus::Loading)
+        )
+    });
     assert_eq!(search_status(&h, cx), Some(StatusLine::Loading));
 }
 
@@ -592,19 +781,37 @@ fn results_list_below_the_local_rows_and_clearing_cancels_the_search(cx: &mut Te
     type_search(cx, "ан");
     pass(cx, SEARCH_DEBOUNCE);
     assert_eq!(h.commands(), [search_command(1, "ан")]);
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
     assert!(shown(cx, row!("a")), "the local name match stays listed");
     assert!(shown(cx, "search-section-Чаты"));
     assert!(shown(cx, "search-section-Люди"));
     assert!(shown(cx, "search-section-Сообщения"));
-    assert!(y(cx, "search-section-Сообщения") > y(cx, row!("a")), "server results sit below the local rows");
+    assert!(
+        y(cx, "search-section-Сообщения") > y(cx, row!("a")),
+        "server results sit below the local rows"
+    );
     assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"]);
     assert_eq!(search_status(&h, cx), None);
 
     cx.simulate_keystrokes("cmd-a backspace");
-    assert_eq!(h.commands(), [Command::CancelSearch], "an empty query cancels at once, without waiting");
-    assert_eq!(search_sections(&h, cx), Vec::<&str>::new(), "the sections are gone");
-    h.store.read_with(cx, |s, _| assert!(s.search_state().is_none()));
+    assert_eq!(
+        h.commands(),
+        [Command::CancelSearch],
+        "an empty query cancels at once, without waiting"
+    );
+    assert_eq!(
+        search_sections(&h, cx),
+        Vec::<&str>::new(),
+        "the sections are gone"
+    );
+    h.store
+        .read_with(cx, |s, _| assert!(s.search_state().is_none()));
     pass(cx, SEARCH_DEBOUNCE * 3);
     assert!(h.commands().is_empty());
 }
@@ -615,13 +822,22 @@ fn shortening_the_query_cancels_the_search_and_a_pending_timer(cx: &mut TestAppC
     type_search(cx, "ab");
     pass(cx, SEARCH_DEBOUNCE);
     assert_eq!(h.commands(), [search_command(1, "ab")]);
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
 
     type_search(cx, "c");
     cx.simulate_keystrokes("backspace backspace");
     assert_eq!(h.commands(), [Command::CancelSearch]);
     pass(cx, SEARCH_DEBOUNCE * 3);
-    assert!(h.commands().is_empty(), "the timer of the longer text never fires");
+    assert!(
+        h.commands().is_empty(),
+        "the timer of the longer text never fires"
+    );
     assert_eq!(search_sections(&h, cx), Vec::<&str>::new());
 }
 
@@ -629,7 +845,10 @@ fn shortening_the_query_cancels_the_search_and_a_pending_timer(cx: &mut TestAppC
 fn offline_sends_nothing_and_says_a_connection_is_needed(cx: &mut TestAppContext) {
     let (h, cx) = harness_with(
         cx,
-        vec![ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Offline)],
+        vec![
+            ClientEvent::ChatsReplaced(search_chats()),
+            ClientEvent::Connection(ConnectionState::Offline),
+        ],
         |d, cx| d.search.update(cx, |input, cx| input.set_text("анн", cx)),
     );
     pass(cx, SEARCH_DEBOUNCE * 3);
@@ -643,7 +862,13 @@ fn offline_sends_nothing_and_says_a_connection_is_needed(cx: &mut TestAppContext
 #[gpui::test]
 fn going_online_sends_the_query_that_waited_for_a_connection(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    h.feed(cx, [ClientEvent::ChatsReplaced(search_chats()), ClientEvent::Connection(ConnectionState::Offline)]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(search_chats()),
+            ClientEvent::Connection(ConnectionState::Offline),
+        ],
+    );
     type_search(cx, "ab");
     pass(cx, SEARCH_DEBOUNCE);
     assert!(h.commands().is_empty());
@@ -665,16 +890,34 @@ fn a_stale_result_after_a_newer_query_changes_nothing(cx: &mut TestAppContext) {
     pass(cx, SEARCH_DEBOUNCE);
     type_search(cx, "c");
     pass(cx, SEARCH_DEBOUNCE);
-    assert_eq!(h.commands(), [search_command(1, "ab"), search_command(2, "abc")]);
+    assert_eq!(
+        h.commands(),
+        [search_command(1, "ab"), search_command(2, "abc")]
+    );
 
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
     h.store.read_with(cx, |s, _| {
         let state = s.search_state().unwrap();
-        assert_eq!((state.id, state.status, state.hits.clone()), (SearchId(2), SearchStatus::Loading, SearchHits::default()));
+        assert_eq!(
+            (state.id, state.status, state.hits.clone()),
+            (SearchId(2), SearchStatus::Loading, SearchHits::default())
+        );
     });
     assert_eq!(search_sections(&h, cx), Vec::<&str>::new());
 
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(2), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(2),
+            hits: search_hits(),
+        }],
+    );
     assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"]);
 }
 
@@ -683,12 +926,24 @@ fn clicking_a_message_hit_opens_its_chat_without_marking_it_read(cx: &mut TestAp
     let (h, cx) = online_with_chats(cx);
     type_search(cx, "ab");
     pass(cx, SEARCH_DEBOUNCE);
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
     h.commands();
 
     click(cx, "search-message-g-7-row");
-    assert_eq!(h.commands(), [Command::OpenChat(ChatId("g".into()))], "opening the chat is the only effect");
-    h.store.read_with(cx, |s, _| assert_eq!(s.selected(), Some(&ChatId("g".into()))));
+    assert_eq!(
+        h.commands(),
+        [Command::OpenChat(ChatId("g".into()))],
+        "opening the chat is the only effect"
+    );
+    h.store.read_with(cx, |s, _| {
+        assert_eq!(s.selected(), Some(&ChatId("g".into())))
+    });
     assert!(shown(cx, "chat-header"));
 }
 
@@ -697,24 +952,67 @@ fn a_failed_search_keeps_the_local_rows(cx: &mut TestAppContext) {
     let (h, cx) = online_with_chats(cx);
     type_search(cx, "ан");
     pass(cx, SEARCH_DEBOUNCE);
-    h.feed(cx, [ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchFailed {
+            id: SearchId(1),
+            reason: SearchFailure::Failed,
+        }],
+    );
     assert_eq!(search_status(&h, cx), Some(StatusLine::Failed));
     assert!(shown(cx, "search-status"));
     assert!(shown(cx, row!("a")), "the local match is still listed");
-    assert_eq!(h.commands(), [search_command(1, "ан")], "a failure is not retried by itself");
+    assert_eq!(
+        h.commands(),
+        [search_command(1, "ан")],
+        "a failure is not retried by itself"
+    );
 }
 
 #[gpui::test]
 fn every_local_match_stays_above_the_server_results(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let chats = (0..8).map(|i| chat(&format!("c{i}"), ChatKind::Group, &format!("Чат {i}"), Some(i + 1))).collect();
-    h.feed(cx, [ClientEvent::ChatsReplaced(chats), ClientEvent::Connection(ConnectionState::Online)]);
+    let chats = (0..8)
+        .map(|i| {
+            chat(
+                &format!("c{i}"),
+                ChatKind::Group,
+                &format!("Чат {i}"),
+                Some(i + 1),
+            )
+        })
+        .collect();
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(chats),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+    );
     type_search(cx, "чат");
     pass(cx, SEARCH_DEBOUNCE);
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
-    for row in [row!("c0"), row!("c1"), row!("c2"), row!("c3"), row!("c4"), row!("c5"), row!("c6"), row!("c7")] {
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
+    for row in [
+        row!("c0"),
+        row!("c1"),
+        row!("c2"),
+        row!("c3"),
+        row!("c4"),
+        row!("c5"),
+        row!("c6"),
+        row!("c7"),
+    ] {
         assert!(shown(cx, row), "{row} is listed");
-        assert!(y(cx, row) < y(cx, "search-section-Сообщения"), "{row} is above the server sections");
+        assert!(
+            y(cx, row) < y(cx, "search-section-Сообщения"),
+            "{row} is above the server sections"
+        );
     }
 }
 
@@ -723,27 +1021,65 @@ fn a_reply_arriving_while_the_next_query_waits_for_its_pause_is_dropped(cx: &mut
     let (h, cx) = online_with_chats(cx);
     type_search(cx, "ab");
     pass(cx, SEARCH_DEBOUNCE);
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(1), hits: search_hits() }]);
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(1),
+            hits: search_hits(),
+        }],
+    );
     type_search(cx, "c");
     pass(cx, SEARCH_DEBOUNCE);
-    assert_eq!(h.commands(), [search_command(1, "ab"), search_command(2, "abc")]);
+    assert_eq!(
+        h.commands(),
+        [search_command(1, "ab"), search_command(2, "abc")]
+    );
 
     // The reply to "abc" is in flight; the text changes again and the new request is still waiting.
     type_search(cx, "d");
-    let late = SearchHits { messages: search_hits().messages, ..SearchHits::default() };
-    h.feed(cx, [ClientEvent::SearchResults { id: SearchId(2), hits: late.clone() }]);
+    let late = SearchHits {
+        messages: search_hits().messages,
+        ..SearchHits::default()
+    };
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: SearchId(2),
+            hits: late.clone(),
+        }],
+    );
     h.store.read_with(cx, |s, _| {
         let state = s.search_state().unwrap();
-        assert_eq!((state.status, state.hits.clone()), (SearchStatus::Loading, search_hits()), "the old reply changed nothing");
+        assert_eq!(
+            (state.status, state.hits.clone()),
+            (SearchStatus::Loading, search_hits()),
+            "the old reply changed nothing"
+        );
     });
-    assert_eq!(search_sections(&h, cx), ["Чаты", "Люди", "Сообщения"], "what was shown stays");
+    assert_eq!(
+        search_sections(&h, cx),
+        ["Чаты", "Люди", "Сообщения"],
+        "what was shown stays"
+    );
 
     pass(cx, SEARCH_DEBOUNCE);
     let commands = h.commands();
-    let [Command::Search { id, query }] = commands.as_slice() else { panic!("one request expected: {commands:?}") };
+    let [Command::Search { id, query }] = commands.as_slice() else {
+        panic!("one request expected: {commands:?}")
+    };
     assert_eq!(query, "abcd");
-    h.feed(cx, [ClientEvent::SearchResults { id: *id, hits: late }]);
-    assert_eq!(search_sections(&h, cx), ["Сообщения"], "the reply to the current text is shown");
+    h.feed(
+        cx,
+        [ClientEvent::SearchResults {
+            id: *id,
+            hits: late,
+        }],
+    );
+    assert_eq!(
+        search_sections(&h, cx),
+        ["Сообщения"],
+        "the reply to the current text is shown"
+    );
 }
 
 // ---- 6.3 timeline ----
@@ -779,10 +1115,19 @@ fn reaching_the_top_loads_older_and_keeps_the_anchor(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_group(&h, cx);
     h.feed(cx, [chunk("g", 41..=100, false)]);
-    assert!(h.commands().is_empty(), "no loading while the top is off screen");
+    assert!(
+        h.commands().is_empty(),
+        "no loading while the top is off screen"
+    );
 
     scroll_to_top(&h, cx);
-    assert_eq!(h.commands(), [Command::LoadOlder { chat: ChatId("g".into()), before: ts(41) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadOlder {
+            chat: ChatId("g".into()),
+            before: ts(41)
+        }]
+    );
     assert!(shown(cx, "timeline-loading"));
     assert!(loading_older(&h, cx, "g"));
     // Staying at the top must not request the same page again.
@@ -793,14 +1138,29 @@ fn reaching_the_top_loads_older_and_keeps_the_anchor(cx: &mut TestAppContext) {
     assert!(!loading_older(&h, cx, "g"));
     let list = h.list(cx);
     assert_eq!(list.item_count(), 80);
-    assert_eq!(list.logical_scroll_top().item_ix, 20, "the message that was on top is still the anchor");
-    let anchor = list.bounds_for_item(20).expect("anchor message is laid out");
+    assert_eq!(
+        list.logical_scroll_top().item_ix,
+        20,
+        "the message that was on top is still the anchor"
+    );
+    let anchor = list
+        .bounds_for_item(20)
+        .expect("anchor message is laid out");
     let top = bounds(cx, "timeline").unwrap().origin.y;
-    assert_eq!(anchor.origin.y, top, "and stays at the same place on screen");
+    assert_eq!(
+        anchor.origin.y, top,
+        "and stays at the same place on screen"
+    );
     assert!(h.commands().is_empty());
 
     scroll_to_top(&h, cx);
-    assert_eq!(h.commands(), [Command::LoadOlder { chat: ChatId("g".into()), before: ts(21) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadOlder {
+            chat: ChatId("g".into()),
+            before: ts(21)
+        }]
+    );
 }
 
 #[gpui::test]
@@ -817,7 +1177,9 @@ fn start_of_history_stops_loading(cx: &mut TestAppContext) {
     assert!(shown(cx, msg!(1)), "first message is on screen");
     assert!(h.commands().is_empty(), "nothing left to load");
     assert!(!loading_older(&h, cx, "g"), "no loading indicator remains");
-    h.store.read_with(cx, |s, _| assert!(s.timeline(&ChatId("g".into())).unwrap().reached_start));
+    h.store.read_with(cx, |s, _| {
+        assert!(s.timeline(&ChatId("g".into())).unwrap().reached_start)
+    });
 }
 
 #[gpui::test]
@@ -827,7 +1189,10 @@ fn short_history_asks_for_more_until_the_start(cx: &mut TestAppContext) {
     h.feed(cx, [chunk("g", 10..=12, false)]);
     assert_eq!(
         h.commands(),
-        [Command::LoadOlder { chat: ChatId("g".into()), before: ts(10) }],
+        [Command::LoadOlder {
+            chat: ChatId("g".into()),
+            before: ts(10)
+        }],
         "everything fits on screen, so the top is already in view"
     );
     // An empty page means there is nothing older.
@@ -841,7 +1206,11 @@ fn author_lines_avatars_and_bubble_sides(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_group(&h, cx);
     let mut reply = message("g", 2, "alice", false, MessageBody::Text("ответ".into()));
-    reply.reply_to = Some(ReplyQuote { author: Some("BOB".into()), text: "исходное".into(), timestamp: Some(ts(0)) });
+    reply.reply_to = Some(ReplyQuote {
+        author: Some("BOB".into()),
+        text: "исходное".into(),
+        timestamp: Some(ts(0)),
+    });
     reply.forwarded_from = Some("Новости".into());
     let mut edited = message("g", 3, "bob", false, MessageBody::Text("правка".into()));
     edited.edited = true;
@@ -850,12 +1219,24 @@ fn author_lines_avatars_and_bubble_sides(cx: &mut TestAppContext) {
         [history(
             "g",
             vec![
-                message("g", 1, "alice", false, MessageBody::Text("первая\nвторая строка".into())),
+                message(
+                    "g",
+                    1,
+                    "alice",
+                    false,
+                    MessageBody::Text("первая\nвторая строка".into()),
+                ),
                 reply,
                 edited,
                 message("g", 4, "me", true, MessageBody::Text("мой ответ".into())),
                 message("g", 5, "me", true, MessageBody::Deleted),
-                message("g", 6, "bob", false, MessageBody::Unsupported("sticker".into())),
+                message(
+                    "g",
+                    6,
+                    "bob",
+                    false,
+                    MessageBody::Unsupported("sticker".into()),
+                ),
             ],
             true,
         )],
@@ -886,7 +1267,10 @@ fn author_lines_avatars_and_bubble_sides(cx: &mut TestAppContext) {
     assert!(!shown(cx, msg!(1, "edited")));
     assert!(shown(cx, msg!(5, "deleted")));
     assert!(shown(cx, msg!(6, "unsupported")));
-    assert!(shown(cx, msg!(1, "day")), "date separator before the first message of a day");
+    assert!(
+        shown(cx, msg!(1, "day")),
+        "date separator before the first message of a day"
+    );
     assert!(!shown(cx, msg!(2, "day")));
 }
 
@@ -894,8 +1278,12 @@ fn author_lines_avatars_and_bubble_sides(cx: &mut TestAppContext) {
 fn long_text_wraps_inside_its_own_row(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_group(&h, cx);
-    let url = format!("https://gitlab.com/signax/hub/-/merge_requests/{}", "a1b2c3".repeat(60));
-    let words = "длинное сообщение из обычных слов, которое не помещается в одну строку пузыря ".repeat(6);
+    let url = format!(
+        "https://gitlab.com/signax/hub/-/merge_requests/{}",
+        "a1b2c3".repeat(60)
+    );
+    let words =
+        "длинное сообщение из обычных слов, которое не помещается в одну строку пузыря ".repeat(6);
     let image = MessageBody::Image {
         media: media("m1", MediaKind::Thumbnail),
         width: 800,
@@ -917,14 +1305,36 @@ fn long_text_wraps_inside_its_own_row(cx: &mut TestAppContext) {
         )],
     );
 
-    let bubbles = [msg!(1), msg!(2), msg!(3), msg!(4)].map(|s| bounds(cx, s).unwrap_or_else(|| panic!("{s} on screen")));
+    let bubbles = [msg!(1), msg!(2), msg!(3), msg!(4)]
+        .map(|s| bounds(cx, s).unwrap_or_else(|| panic!("{s} on screen")));
     for pair in bubbles.windows(2) {
-        assert!(pair[0].bottom() <= pair[1].top(), "bubble {:?} overlaps the next one {:?}", pair[0], pair[1]);
+        assert!(
+            pair[0].bottom() <= pair[1].top(),
+            "bubble {:?} overlaps the next one {:?}",
+            pair[0],
+            pair[1]
+        );
     }
-    assert!(bubbles[0].size.height > px(80.), "an unbreakable URL wraps over several lines: {:?}", bubbles[0]);
-    assert!(bubbles[1].size.height > px(80.), "long text wraps at word boundaries: {:?}", bubbles[1]);
-    assert!(bubbles[0].size.width <= px(480.), "the URL bubble keeps the max width: {:?}", bubbles[0]);
-    assert!(bubbles[3].size.width < px(120.), "a short message keeps a narrow bubble: {:?}", bubbles[3]);
+    assert!(
+        bubbles[0].size.height > px(80.),
+        "an unbreakable URL wraps over several lines: {:?}",
+        bubbles[0]
+    );
+    assert!(
+        bubbles[1].size.height > px(80.),
+        "long text wraps at word boundaries: {:?}",
+        bubbles[1]
+    );
+    assert!(
+        bubbles[0].size.width <= px(480.),
+        "the URL bubble keeps the max width: {:?}",
+        bubbles[0]
+    );
+    assert!(
+        bubbles[3].size.width < px(120.),
+        "a short message keeps a narrow bubble: {:?}",
+        bubbles[3]
+    );
 }
 
 #[gpui::test]
@@ -933,13 +1343,39 @@ fn private_chats_and_channels_do_not_label_authors(cx: &mut TestAppContext) {
     open_group(&h, cx);
 
     click(cx, row!("p"));
-    h.feed(cx, [history("p", vec![message("p", 11, "alice", false, MessageBody::Text("привет".into()))], true)]);
+    h.feed(
+        cx,
+        [history(
+            "p",
+            vec![message(
+                "p",
+                11,
+                "alice",
+                false,
+                MessageBody::Text("привет".into()),
+            )],
+            true,
+        )],
+    );
     assert!(shown(cx, msg!(11)));
     assert!(!shown(cx, msg!(11, "author")));
     assert!(!shown(cx, msg!(11, "avatar")));
 
     click(cx, row!("ch"));
-    h.feed(cx, [history("ch", vec![message("ch", 12, "alice", false, MessageBody::Text("новость".into()))], true)]);
+    h.feed(
+        cx,
+        [history(
+            "ch",
+            vec![message(
+                "ch",
+                12,
+                "alice",
+                false,
+                MessageBody::Text("новость".into()),
+            )],
+            true,
+        )],
+    );
     assert!(shown(cx, msg!(12)));
     assert!(!shown(cx, msg!(12, "author")));
     assert!(!shown(cx, msg!(12, "avatar")));
@@ -958,7 +1394,13 @@ fn live_updates_follow_only_at_the_bottom(cx: &mut TestAppContext) {
     edited.edited = true;
     h.feed(cx, [ClientEvent::MessageUpserted(edited)]);
     assert!(shown(cx, msg!(2, "edited")));
-    h.feed(cx, [ClientEvent::MessageDeleted { chat: ChatId("g".into()), timestamp: ts(3) }]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: ChatId("g".into()),
+            timestamp: ts(3),
+        }],
+    );
     assert!(shown(cx, msg!(3, "deleted")));
     assert!(h.commands().is_empty());
 
@@ -983,9 +1425,18 @@ fn activity_in_another_chat_updates_its_row_only(cx: &mut TestAppContext) {
     let mut updated = chat("p", ChatKind::Private, "Анна", Some(50));
     updated.unread = 1;
     assert!(!shown(cx, part!("p", "badge")));
-    h.feed(cx, [ClientEvent::MessageUpserted(text("p", 50)), ClientEvent::ChatUpdated(updated)]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::MessageUpserted(text("p", 50)),
+            ClientEvent::ChatUpdated(updated),
+        ],
+    );
     assert!(shown(cx, part!("p", "badge")));
-    assert!(y(cx, row!("p")) < y(cx, row!("g")), "moved above the older chat");
+    assert!(
+        y(cx, row!("p")) < y(cx, row!("g")),
+        "moved above the older chat"
+    );
     assert!(!shown(cx, msg!(50)), "the open timeline is untouched");
 }
 
@@ -1009,14 +1460,26 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
                     1,
                     "bob",
                     false,
-                    MessageBody::Image { media: landscape.clone(), width: 1600, height: 800, caption: Some("подпись".into()), name: None },
+                    MessageBody::Image {
+                        media: landscape.clone(),
+                        width: 1600,
+                        height: 800,
+                        caption: Some("подпись".into()),
+                        name: None,
+                    },
                 ),
                 message(
                     "g",
                     2,
                     "bob",
                     true,
-                    MessageBody::Image { media: portrait.clone(), width: 600, height: 1200, caption: None, name: None },
+                    MessageBody::Image {
+                        media: portrait.clone(),
+                        width: 600,
+                        height: 1200,
+                        caption: None,
+                        name: None,
+                    },
                 ),
                 with_avatar,
                 message(
@@ -1024,7 +1487,11 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
                     4,
                     "bob",
                     false,
-                    MessageBody::File { media: media("doc", MediaKind::File), name: "отчёт.pdf".into(), size: 3_500_000 },
+                    MessageBody::File {
+                        media: media("doc", MediaKind::File),
+                        name: "отчёт.pdf".into(),
+                        size: 3_500_000,
+                    },
                 ),
             ],
             true,
@@ -1041,7 +1508,10 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
         let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} missing"));
         (f32::from(b.size.width), f32::from(b.size.height))
     };
-    assert_eq!(size_of(cx, msg!(1, "image")), fit_thumbnail(1600, 800, 320.0));
+    assert_eq!(
+        size_of(cx, msg!(1, "image")),
+        fit_thumbnail(1600, 800, 320.0)
+    );
     assert_eq!(size_of(cx, msg!(1, "image")), (320.0, 160.0));
     assert_eq!(size_of(cx, msg!(2, "image")), (160.0, 320.0));
     assert!(!shown(cx, msg!(1, "image-loaded")));
@@ -1057,13 +1527,26 @@ fn image_thumbnails_keep_aspect_ratio_and_load_lazily(cx: &mut TestAppContext) {
     h.feed(
         cx,
         [
-            ClientEvent::MediaReady { media: landscape, path: write("wide.png") },
-            ClientEvent::MediaReady { media: media("av-alice", MediaKind::Avatar), path: write("alice.png") },
+            ClientEvent::MediaReady {
+                media: landscape,
+                path: write("wide.png"),
+            },
+            ClientEvent::MediaReady {
+                media: media("av-alice", MediaKind::Avatar),
+                path: write("alice.png"),
+            },
         ],
     );
     assert!(shown(cx, msg!(1, "image-loaded")));
-    assert!(!shown(cx, msg!(2, "image-loaded")), "portrait is still downloading");
-    assert_eq!(size_of(cx, msg!(1, "image")), (320.0, 160.0), "row size does not change when the file arrives");
+    assert!(
+        !shown(cx, msg!(2, "image-loaded")),
+        "portrait is still downloading"
+    );
+    assert_eq!(
+        size_of(cx, msg!(1, "image")),
+        (320.0, 160.0),
+        "row size does not change when the file arrives"
+    );
     assert!(shown(cx, msg!(3, "avatar-image")));
 }
 
@@ -1082,7 +1565,10 @@ fn connection_indicator_follows_state(cx: &mut TestAppContext) {
     assert!(shown(vcx, "connection-indicator"));
     let top_offline = y(vcx, "menu-button");
     h.feed(vcx, [ClientEvent::Connection(ConnectionState::Online)]);
-    assert!(y(vcx, "menu-button") < top_offline, "the banner is gone and the header moved up");
+    assert!(
+        y(vcx, "menu-button") < top_offline,
+        "the banner is gone and the header moved up"
+    );
 
     assert!(indicator_shown(cx, ConnectionState::Connecting));
     assert!(indicator_shown(cx, ConnectionState::Offline));
@@ -1092,7 +1578,15 @@ fn connection_indicator_follows_state(cx: &mut TestAppContext) {
 #[gpui::test]
 fn sign_out_asks_for_confirmation_then_sends_the_command(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    h.feed(cx, [ClientEvent::ChatsReplaced(vec![chat("a", ChatKind::Private, "Анна", Some(1))])]);
+    h.feed(
+        cx,
+        [ClientEvent::ChatsReplaced(vec![chat(
+            "a",
+            ChatKind::Private,
+            "Анна",
+            Some(1),
+        )])],
+    );
     assert!(!shown(cx, "menu-sign-out"));
     click(cx, "menu-button");
     assert!(shown(cx, "menu-sign-out"));
@@ -1118,17 +1612,33 @@ fn sign_out_asks_for_confirmation_then_sends_the_command(cx: &mut TestAppContext
 #[gpui::test]
 fn expired_session_blocks_the_window_and_offers_sign_out(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    h.feed(cx, [ClientEvent::ChatsReplaced(vec![chat("a", ChatKind::Private, "Анна", Some(1))])]);
+    h.feed(
+        cx,
+        [ClientEvent::ChatsReplaced(vec![chat(
+            "a",
+            ChatKind::Private,
+            "Анна",
+            Some(1),
+        )])],
+    );
     h.feed(cx, [ClientEvent::SessionExpired]);
     assert!(shown(cx, "session-expired"));
     click(cx, row!("a"));
-    assert!(h.commands().is_empty(), "the overlay swallows clicks on the list");
+    assert!(
+        h.commands().is_empty(),
+        "the overlay swallows clicks on the list"
+    );
     click(cx, "expired-sign-out");
     assert_eq!(h.commands(), [Command::SignOut]);
 }
 
 fn log_line(text: &str) -> LogLine {
-    LogLine { time_us: ts(1_000), level: tracing::Level::WARN, target: "yandex_proto::xiva".into(), text: text.into() }
+    LogLine {
+        time_us: ts(1_000),
+        level: tracing::Level::WARN,
+        target: "yandex_proto::xiva".into(),
+        text: text.into(),
+    }
 }
 
 #[gpui::test]
@@ -1137,7 +1647,11 @@ fn log_window_opens_by_shortcut_follows_new_records_and_copies(cx: &mut TestAppC
     buffer.push(log_line("disconnected reason=closed"));
     cx.update(|cx| {
         cx.set_global(buffer.clone());
-        cx.bind_keys([KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram"))]);
+        cx.bind_keys([KeyBinding::new(
+            "cmd-shift-l",
+            ToggleLog,
+            Some("BlazingTelesram"),
+        )]);
     });
     let (h, cx) = harness(cx);
     let text = |cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.log_text());
@@ -1145,12 +1659,20 @@ fn log_window_opens_by_shortcut_follows_new_records_and_copies(cx: &mut TestAppC
 
     cx.simulate_keystrokes("cmd-shift-l");
     assert!(shown(cx, "log-view"));
-    assert_eq!(text(cx).unwrap(), "00:00:00.001 WARN  yandex_proto::xiva disconnected reason=closed\n");
+    assert_eq!(
+        text(cx).unwrap(),
+        "00:00:00.001 WARN  yandex_proto::xiva disconnected reason=closed\n"
+    );
 
     buffer.push(log_line("connecting"));
     cx.executor().advance_clock(Duration::from_millis(300));
     cx.run_until_parked();
-    assert!(text(cx).unwrap().ends_with("yandex_proto::xiva connecting\n"), "picked up without reopening");
+    assert!(
+        text(cx)
+            .unwrap()
+            .ends_with("yandex_proto::xiva connecting\n"),
+        "picked up without reopening"
+    );
 
     click(cx, "log-copy");
     let copied = cx.read_from_clipboard().and_then(|item| item.text());
@@ -1178,17 +1700,27 @@ fn pending(chat_id: &str, i: i64, payload: &str, body: &str) -> Message {
 
 fn failed(chat_id: &str, i: i64, payload: &str, body: &str, reason: &str) -> Message {
     let mut m = own(chat_id, i, body);
-    m.delivery = Delivery::Failed { payload: PayloadId(payload.into()), reason: reason.into() };
+    m.delivery = Delivery::Failed {
+        payload: PayloadId(payload.into()),
+        reason: reason.into(),
+    };
     m
 }
 
 fn send_command(body: &str, reply_to: Option<ReplyTarget>) -> Command {
-    Command::Send { chat: chat_g(), text: body.into(), reply_to }
+    Command::Send {
+        chat: chat_g(),
+        text: body.into(),
+        reply_to,
+    }
 }
 
 /// Everything the UI asked of the core except typing notices, which every composer edit produces.
 fn writes(h: &Harness) -> Vec<Command> {
-    h.commands().into_iter().filter(|c| !matches!(c, Command::Typing(_))).collect()
+    h.commands()
+        .into_iter()
+        .filter(|c| !matches!(c, Command::Typing(_)))
+        .collect()
 }
 
 /// Opens the group chat "g" and loads `messages` as its newest chunk; pending commands are dropped.
@@ -1199,7 +1731,8 @@ fn open_with(h: &Harness, cx: &mut VisualTestContext, messages: Vec<Message>) {
 }
 
 fn composer_text(h: &Harness, cx: &mut VisualTestContext) -> String {
-    h.desktop.read_with(cx, |d, cx| d.composer_input().read(cx).content.to_string())
+    h.desktop
+        .read_with(cx, |d, cx| d.composer_input().read(cx).content.to_string())
 }
 
 fn composer_reply(h: &Harness, cx: &mut VisualTestContext) -> Option<ReplyTarget> {
@@ -1207,11 +1740,15 @@ fn composer_reply(h: &Harness, cx: &mut VisualTestContext) -> Option<ReplyTarget
 }
 
 fn composer_cursor(h: &Harness, cx: &mut VisualTestContext) -> usize {
-    h.desktop.read_with(cx, |d, cx| d.composer_input().read(cx).cursor())
+    h.desktop
+        .read_with(cx, |d, cx| d.composer_input().read(cx).cursor())
 }
 
 fn composer_height(cx: &mut VisualTestContext) -> Pixels {
-    bounds(cx, "composer-input").expect("composer is on screen").size.height
+    bounds(cx, "composer-input")
+        .expect("composer is on screen")
+        .size
+        .height
 }
 
 fn right_click(cx: &mut VisualTestContext, selector: &'static str) {
@@ -1226,17 +1763,35 @@ fn activate(cx: &mut VisualTestContext) {
 }
 
 fn stamps(h: &Harness, cx: &mut VisualTestContext) -> Vec<i64> {
-    h.store.read_with(cx, |s, _| s.timeline(&chat_g()).unwrap().messages.iter().map(|m| m.timestamp).collect())
+    h.store.read_with(cx, |s, _| {
+        s.timeline(&chat_g())
+            .unwrap()
+            .messages
+            .iter()
+            .map(|m| m.timestamp)
+            .collect()
+    })
 }
 
 fn delivery_of(h: &Harness, cx: &mut VisualTestContext, i: i64) -> Delivery {
     h.store.read_with(cx, |s, _| {
-        s.timeline(&chat_g()).unwrap().messages.iter().find(|m| m.timestamp == ts(i)).unwrap().delivery.clone()
+        s.timeline(&chat_g())
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.timestamp == ts(i))
+            .unwrap()
+            .delivery
+            .clone()
     })
 }
 
 fn reply_target_2() -> ReplyTarget {
-    ReplyTarget { timestamp: ts(2), author: Some("ALICE".into()), text: "сообщение 2".into() }
+    ReplyTarget {
+        timestamp: ts(2),
+        author: Some("ALICE".into()),
+        text: "сообщение 2".into(),
+    }
 }
 
 fn choose_reply_to_2(cx: &mut VisualTestContext) {
@@ -1279,7 +1834,11 @@ fn shift_enter_inserts_a_line_break_and_sends_nothing(cx: &mut TestAppContext) {
     assert_eq!(composer_text(&h, cx), "раз\nдва");
     assert!(writes(&h).is_empty());
     cx.simulate_keystrokes("enter");
-    assert_eq!(writes(&h), [send_command("раз\nдва", None)], "line breaks inside the text are kept");
+    assert_eq!(
+        writes(&h),
+        [send_command("раз\nдва", None)],
+        "line breaks inside the text are kept"
+    );
 }
 
 #[gpui::test]
@@ -1307,7 +1866,10 @@ fn composer_wraps_and_grows_up_to_eight_rows(cx: &mut TestAppContext) {
     cx.simulate_input(&"слово ".repeat(60));
     cx.run_until_parked();
     let wrapped = composer_height(cx);
-    assert!(wrapped > one_row && wrapped < px(22. * 8.), "wrapped text takes a few rows: {wrapped:?}");
+    assert!(
+        wrapped > one_row && wrapped < px(22. * 8.),
+        "wrapped text takes a few rows: {wrapped:?}"
+    );
     assert_eq!(f32::from(wrapped) % 22., 0., "whole rows");
 
     cx.simulate_keystrokes("cmd-a backspace");
@@ -1317,7 +1879,11 @@ fn composer_wraps_and_grows_up_to_eight_rows(cx: &mut TestAppContext) {
         cx.simulate_input("x");
     }
     cx.run_until_parked();
-    assert_eq!(composer_height(cx), px(22. * 8.), "twenty rows are capped and scroll inside");
+    assert_eq!(
+        composer_height(cx),
+        px(22. * 8.),
+        "twenty rows are capped and scroll inside"
+    );
 
     // Backspace until empty: the field shrinks back to one row.
     cx.simulate_keystrokes("cmd-a backspace");
@@ -1329,7 +1895,10 @@ fn composer_wraps_and_grows_up_to_eight_rows(cx: &mut TestAppContext) {
 fn clicks_and_vertical_keys_move_the_caret_between_rows(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    h.desktop.update(cx, |d, cx| d.composer_input().update(cx, |input, cx| input.set_text("aaa\naa", cx)));
+    h.desktop.update(cx, |d, cx| {
+        d.composer_input()
+            .update(cx, |input, cx| input.set_text("aaa\naa", cx))
+    });
     cx.run_until_parked();
     assert_eq!(composer_cursor(&h, cx), 6);
 
@@ -1343,10 +1912,24 @@ fn clicks_and_vertical_keys_move_the_caret_between_rows(cx: &mut TestAppContext)
     assert_eq!(composer_cursor(&h, cx), 3, "row end");
 
     let field = bounds(cx, "composer-input").unwrap();
-    cx.simulate_click(point(field.left() + px(1.), field.top() + px(22. + 11.)), Modifiers::none());
-    assert_eq!(composer_cursor(&h, cx), 4, "a click on the second row lands in it");
-    cx.simulate_click(point(field.right() - px(1.), field.top() + px(11.)), Modifiers::none());
-    assert_eq!(composer_cursor(&h, cx), 3, "a click past the end of the first row lands at its end");
+    cx.simulate_click(
+        point(field.left() + px(1.), field.top() + px(22. + 11.)),
+        Modifiers::none(),
+    );
+    assert_eq!(
+        composer_cursor(&h, cx),
+        4,
+        "a click on the second row lands in it"
+    );
+    cx.simulate_click(
+        point(field.right() - px(1.), field.top() + px(11.)),
+        Modifiers::none(),
+    );
+    assert_eq!(
+        composer_cursor(&h, cx),
+        3,
+        "a click past the end of the first row lands at its end"
+    );
 }
 
 // ---- 5.2 delivery states ----
@@ -1355,34 +1938,71 @@ fn clicks_and_vertical_keys_move_the_caret_between_rows(cx: &mut TestAppContext)
 fn a_sent_message_is_pending_then_confirmed_exactly_once(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
-    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(pending(
+            "g",
+            50,
+            "p1",
+            "привет",
+        ))],
+    );
     assert!(shown(cx, msg!(50, "pending")));
-    assert!(y(cx, msg!(50)) > y(cx, msg!(2)), "at the bottom of the timeline at once");
+    assert!(
+        y(cx, msg!(50)) > y(cx, msg!(2)),
+        "at the bottom of the timeline at once"
+    );
     assert!(h.commands().is_empty());
 
-    let settled = ClientEvent::PendingSettled { chat: chat_g(), payload: PayloadId("p1".into()) };
+    let settled = ClientEvent::PendingSettled {
+        chat: chat_g(),
+        payload: PayloadId("p1".into()),
+    };
     let server = ClientEvent::MessageUpserted(own("g", 60, "привет"));
     h.feed(cx, [settled.clone(), server.clone()]);
     assert!(shown(cx, msg!(60, "sent")));
-    assert_eq!(stamps(&h, cx), [1, 2, 60], "one copy: the pending one is gone");
+    assert_eq!(
+        stamps(&h, cx),
+        [1, 2, 60],
+        "one copy: the pending one is gone"
+    );
 
     h.feed(cx, [settled, server]);
-    assert_eq!(stamps(&h, cx), [1, 2, 60], "a repeated signal changes nothing");
+    assert_eq!(
+        stamps(&h, cx),
+        [1, 2, 60],
+        "a repeated signal changes nothing"
+    );
 }
 
 #[gpui::test]
 fn the_echo_may_come_first_and_still_leaves_one_copy(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(pending(
+            "g",
+            50,
+            "p1",
+            "привет",
+        ))],
+    );
     h.feed(
         cx,
         [
-            ClientEvent::PendingSettled { chat: chat_g(), payload: PayloadId("p1".into()) },
+            ClientEvent::PendingSettled {
+                chat: chat_g(),
+                payload: PayloadId("p1".into()),
+            },
             ClientEvent::MessageUpserted(own("g", 40, "привет")),
         ],
     );
-    assert_eq!(stamps(&h, cx), [1, 40], "the server copy may sort before the local time");
+    assert_eq!(
+        stamps(&h, cx),
+        [1, 40],
+        "the server copy may sort before the local time"
+    );
     assert_eq!(delivery_of(&h, cx, 40), Delivery::Sent);
     assert!(shown(cx, msg!(40, "sent")));
 }
@@ -1393,20 +2013,55 @@ fn a_new_pending_message_scrolls_into_view(cx: &mut TestAppContext) {
     open_with(&h, cx, (1..=80).map(|i| text("g", i)).collect());
     scroll(cx, 800.);
     let list = h.list(cx);
-    assert!(list.logical_scroll_top().item_ix < list.item_count(), "scrolled up");
-    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 90, "p1", "привет"))]);
-    assert!(shown(cx, msg!(90, "pending")), "the user's own message is brought into view");
+    assert!(
+        list.logical_scroll_top().item_ix < list.item_count(),
+        "scrolled up"
+    );
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(pending(
+            "g",
+            90,
+            "p1",
+            "привет",
+        ))],
+    );
+    assert!(
+        shown(cx, msg!(90, "pending")),
+        "the user's own message is brought into view"
+    );
 }
 
 #[gpui::test]
 fn a_rejected_message_shows_the_reason_and_retry_sends_it_again(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    h.feed(cx, [ClientEvent::MessageUpserted(pending("g", 50, "p1", "привет"))]);
-    h.feed(cx, [ClientEvent::MessageUpserted(failed("g", 50, "p1", "привет", "нет прав"))]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(pending(
+            "g",
+            50,
+            "p1",
+            "привет",
+        ))],
+    );
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(failed(
+            "g",
+            50,
+            "p1",
+            "привет",
+            "нет прав",
+        ))],
+    );
     assert!(shown(cx, msg!(50, "failed")));
     assert!(shown(cx, msg!(50, "failed-reason")));
-    assert_eq!(stamps(&h, cx), [1, 50], "the failed message replaces the pending one in place");
+    assert_eq!(
+        stamps(&h, cx),
+        [1, 50],
+        "the failed message replaces the pending one in place"
+    );
 
     click(cx, msg!(50, "retry"));
     assert_eq!(h.commands(), [Command::Retry(PayloadId("p1".into()))]);
@@ -1425,7 +2080,11 @@ fn reply_quotes_the_chosen_message_in_the_sent_one(cx: &mut TestAppContext) {
     cx.simulate_input("ответ");
     cx.simulate_keystrokes("enter");
     assert_eq!(writes(&h), [send_command("ответ", Some(reply_target_2()))]);
-    assert_eq!(composer_reply(&h, cx), None, "the bar goes away once the message is sent");
+    assert_eq!(
+        composer_reply(&h, cx),
+        None,
+        "the bar goes away once the message is sent"
+    );
 }
 
 #[gpui::test]
@@ -1444,7 +2103,11 @@ fn escape_and_the_close_button_cancel_the_reply(cx: &mut TestAppContext) {
     assert_eq!(composer_reply(&h, cx), None);
     cx.simulate_input("после закрытия");
     cx.simulate_keystrokes("enter");
-    assert_eq!(writes(&h), [send_command("после закрытия", None)], "the composer keeps focus after the click");
+    assert_eq!(
+        writes(&h),
+        [send_command("после закрытия", None)],
+        "the composer keeps focus after the click"
+    );
 }
 
 // ---- 5.4 drafts ----
@@ -1458,9 +2121,20 @@ fn text_and_reply_target_are_restored_after_a_chat_switch(cx: &mut TestAppContex
 
     click(cx, row!("p"));
     let commands = h.commands();
-    let draft = Draft { chat: chat_g(), text: "черновик".into(), reply_to: Some(reply_target_2()) };
-    assert!(commands.contains(&Command::SaveDraft(draft)), "saved when the chat is left: {commands:?}");
-    assert_eq!(composer_text(&h, cx), "", "the other chat starts with an empty composer");
+    let draft = Draft {
+        chat: chat_g(),
+        text: "черновик".into(),
+        reply_to: Some(reply_target_2()),
+    };
+    assert!(
+        commands.contains(&Command::SaveDraft(draft)),
+        "saved when the chat is left: {commands:?}"
+    );
+    assert_eq!(
+        composer_text(&h, cx),
+        "",
+        "the other chat starts with an empty composer"
+    );
     assert_eq!(composer_reply(&h, cx), None);
 
     click(cx, row!("g"));
@@ -1477,7 +2151,10 @@ fn a_chat_with_a_draft_shows_it_instead_of_the_last_message(cx: &mut TestAppCont
     assert!(shown(cx, part!("g", "draft")));
     h.store.read_with(cx, |s, _| {
         let summary = s.chat(&chat_g()).unwrap();
-        assert_eq!(chat_preview(s, summary), Preview::Draft("привет мир".into()));
+        assert_eq!(
+            chat_preview(s, summary),
+            Preview::Draft("привет мир".into())
+        );
     });
 
     click(cx, row!("g"));
@@ -1485,7 +2162,11 @@ fn a_chat_with_a_draft_shows_it_instead_of_the_last_message(cx: &mut TestAppCont
     click(cx, row!("p"));
     h.store.read_with(cx, |s, _| {
         let summary = s.chat(&chat_g()).unwrap();
-        assert_eq!(chat_preview(s, summary), Preview::Message("превью 1".into()), "an emptied draft is gone");
+        assert_eq!(
+            chat_preview(s, summary),
+            Preview::Message("превью 1".into()),
+            "an emptied draft is gone"
+        );
     });
 }
 
@@ -1493,7 +2174,15 @@ fn a_chat_with_a_draft_shows_it_instead_of_the_last_message(cx: &mut TestAppCont
 fn a_draft_is_saved_one_second_after_the_last_keystroke(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    let saved = |h: &Harness| writes(h).into_iter().find_map(|c| if let Command::SaveDraft(d) = c { Some(d.text) } else { None });
+    let saved = |h: &Harness| {
+        writes(h).into_iter().find_map(|c| {
+            if let Command::SaveDraft(d) = c {
+                Some(d.text)
+            } else {
+                None
+            }
+        })
+    };
 
     cx.simulate_input("а");
     cx.executor().advance_clock(Duration::from_millis(900));
@@ -1518,15 +2207,23 @@ fn sending_discards_the_draft_without_a_second_command(cx: &mut TestAppContext) 
     h.commands();
     cx.simulate_keystrokes("enter");
     assert_eq!(writes(&h), [send_command("привет", None)]);
-    h.store.read_with(cx, |s, _| assert!(s.draft(&chat_g()).is_none()));
+    h.store
+        .read_with(cx, |s, _| assert!(s.draft(&chat_g()).is_none()));
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
-    assert!(writes(&h).is_empty(), "the core deletes the draft when it takes the message");
+    assert!(
+        writes(&h).is_empty(),
+        "the core deletes the draft when it takes the message"
+    );
 }
 
 #[gpui::test]
 fn persisted_drafts_fill_the_composer_and_the_chat_row(cx: &mut TestAppContext) {
-    let draft = Draft { chat: chat_g(), text: "из прошлого".into(), reply_to: None };
+    let draft = Draft {
+        chat: chat_g(),
+        text: "из прошлого".into(),
+        reply_to: None,
+    };
     let events = vec![
         ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
         ClientEvent::Drafts(vec![draft]),
@@ -1541,14 +2238,24 @@ fn persisted_drafts_fill_the_composer_and_the_chat_row(cx: &mut TestAppContext) 
 fn a_draft_that_arrives_late_fills_an_untouched_composer_only(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    let draft = |text: &str| ClientEvent::Drafts(vec![Draft { chat: chat_g(), text: text.into(), reply_to: None }]);
+    let draft = |text: &str| {
+        ClientEvent::Drafts(vec![Draft {
+            chat: chat_g(),
+            text: text.into(),
+            reply_to: None,
+        }])
+    };
     h.feed(cx, [draft("пришёл позже")]);
     assert_eq!(composer_text(&h, cx), "пришёл позже");
 
     cx.simulate_keystrokes("cmd-a backspace");
     cx.simulate_input("мой текст");
     h.feed(cx, [draft("чужой")]);
-    assert_eq!(composer_text(&h, cx), "мой текст", "typed text is never overwritten");
+    assert_eq!(
+        composer_text(&h, cx),
+        "мой текст",
+        "typed text is never overwritten"
+    );
 }
 
 // ---- 5.5 message menu, edit, delete ----
@@ -1587,7 +2294,10 @@ fn copy_text_puts_the_message_on_the_clipboard(cx: &mut TestAppContext) {
     open_with(&h, cx, vec![text("g", 1)]);
     right_click(cx, msg!(1));
     click(cx, "menu-copy");
-    assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), Some("сообщение 1".into()));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("сообщение 1".into())
+    );
     assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()));
 }
 
@@ -1595,7 +2305,8 @@ fn copy_text_puts_the_message_on_the_clipboard(cx: &mut TestAppContext) {
 fn escape_and_an_outside_click_close_the_menu(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
-    let open = |h: &Harness, cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.menu_is_open());
+    let open =
+        |h: &Harness, cx: &mut VisualTestContext| h.desktop.read_with(cx, |d, _| d.menu_is_open());
     right_click(cx, msg!(1));
     assert!(open(&h, cx));
     cx.simulate_keystrokes("escape");
@@ -1615,14 +2326,24 @@ fn edit_loads_the_message_and_enter_saves_the_new_text(cx: &mut TestAppContext) 
     right_click(cx, msg!(2));
     click(cx, "menu-edit");
     assert!(shown(cx, "edit-bar"));
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(2))
+    );
     assert_eq!(composer_text(&h, cx), "старый");
 
     cx.simulate_keystrokes("cmd-a");
     cx.simulate_input("новый");
     assert!(h.commands().is_empty(), "no typing notice while editing");
     cx.simulate_keystrokes("enter");
-    assert_eq!(h.commands(), [Command::Edit { chat: chat_g(), timestamp: ts(2), text: "новый".into() }]);
+    assert_eq!(
+        h.commands(),
+        [Command::Edit {
+            chat: chat_g(),
+            timestamp: ts(2),
+            text: "новый".into()
+        }]
+    );
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
     assert_eq!(composer_text(&h, cx), "");
 
@@ -1646,17 +2367,30 @@ fn saving_an_unchanged_text_sends_no_edit(cx: &mut TestAppContext) {
 #[gpui::test]
 fn up_in_an_empty_composer_edits_the_newest_own_sent_message(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let messages = vec![own("g", 2, "первое"), text("g", 3), own("g", 4, "второе"), pending("g", 9, "p1", "жду")];
+    let messages = vec![
+        own("g", 2, "первое"),
+        text("g", 3),
+        own("g", 4, "второе"),
+        pending("g", 9, "p1", "жду"),
+    ];
     open_with(&h, cx, messages);
     cx.simulate_keystrokes("up");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(4)), "pending messages are skipped");
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(4)),
+        "pending messages are skipped"
+    );
     assert_eq!(composer_text(&h, cx), "второе");
     assert!(shown(cx, "edit-bar"));
 
     cx.simulate_keystrokes("escape");
     cx.simulate_input("а");
     cx.simulate_keystrokes("up");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None, "with text in the composer Up only moves the caret");
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        None,
+        "with text in the composer Up only moves the caret"
+    );
 }
 
 #[gpui::test]
@@ -1671,7 +2405,12 @@ fn escape_cancels_an_edit_and_brings_back_the_draft(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     assert_eq!(composer_text(&h, cx), "черновик");
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
-    assert!(!h.commands().iter().any(|c| matches!(c, Command::Edit { .. })), "the message stays unchanged");
+    assert!(
+        !h.commands()
+            .iter()
+            .any(|c| matches!(c, Command::Edit { .. })),
+        "the message stays unchanged"
+    );
 }
 
 #[gpui::test]
@@ -1684,10 +2423,22 @@ fn delete_asks_for_confirmation_and_then_deletes(cx: &mut TestAppContext) {
     assert!(h.commands().is_empty(), "confirmation first");
 
     click(cx, "confirm-delete");
-    assert_eq!(h.commands(), [Command::Delete { chat: chat_g(), timestamp: ts(2) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::Delete {
+            chat: chat_g(),
+            timestamp: ts(2)
+        }]
+    );
     assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
 
-    h.feed(cx, [ClientEvent::MessageDeleted { chat: chat_g(), timestamp: ts(2) }]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(2),
+        }],
+    );
     assert!(shown(cx, msg!(2, "deleted")));
 }
 
@@ -1705,22 +2456,45 @@ fn cancelling_the_confirmation_keeps_the_message(cx: &mut TestAppContext) {
     right_click(cx, msg!(2));
     click(cx, "menu-delete");
     cx.simulate_keystrokes("escape");
-    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()), "Escape also cancels");
+    assert!(
+        !h.desktop.read_with(cx, |d, _| d.delete_is_pending()),
+        "Escape also cancels"
+    );
 }
 
 #[gpui::test]
 fn a_rejected_edit_or_deletion_shows_the_reason_for_a_while(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![own("g", 2, "старый")]);
-    h.feed(cx, [ClientEvent::ActionFailed { chat: chat_g(), reason: "слишком поздно".into() }]);
+    h.feed(
+        cx,
+        [ClientEvent::ActionFailed {
+            chat: chat_g(),
+            reason: "слишком поздно".into(),
+        }],
+    );
     assert!(shown(cx, "toast"));
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), Some("слишком поздно".into()));
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, _| d.toast_text().map(str::to_string)),
+        Some("слишком поздно".into())
+    );
     assert_eq!(stamps(&h, cx), [2]);
-    assert_eq!(h.store.read_with(cx, |s, _| s.timeline(&chat_g()).unwrap().messages[0].body.clone()), MessageBody::Text("старый".into()));
+    assert_eq!(
+        h.store
+            .read_with(cx, |s, _| s.timeline(&chat_g()).unwrap().messages[0]
+                .body
+                .clone()),
+        MessageBody::Text("старый".into())
+    );
 
     cx.executor().advance_clock(Duration::from_secs(6));
     cx.run_until_parked();
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), None);
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, _| d.toast_text().map(str::to_string)),
+        None
+    );
 }
 
 // ---- 6.1 read markers ----
@@ -1730,23 +2504,50 @@ fn the_newest_visible_message_is_reported_once_while_the_window_is_active(cx: &m
     let (h, cx) = harness(cx);
     open_group(&h, cx);
     h.feed(cx, [chunk("g", 1..=3, true)]);
-    assert!(h.commands().is_empty(), "an inactive window reports nothing");
+    assert!(
+        h.commands().is_empty(),
+        "an inactive window reports nothing"
+    );
 
     activate(cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(3) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(3)
+        }]
+    );
 
     h.feed(cx, [ClientEvent::MessageUpserted(text("g", 4))]);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(4) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(4)
+        }]
+    );
     let mut edited = text("g", 4);
     edited.edited = true;
     h.feed(cx, [ClientEvent::MessageUpserted(edited)]);
-    assert!(h.commands().is_empty(), "the same position is not reported twice");
+    assert!(
+        h.commands().is_empty(),
+        "the same position is not reported twice"
+    );
 
     cx.deactivate_window();
     h.feed(cx, [ClientEvent::MessageUpserted(text("g", 5))]);
-    assert!(h.commands().is_empty(), "nothing is reported while the window is in the background");
+    assert!(
+        h.commands().is_empty(),
+        "nothing is reported while the window is in the background"
+    );
     activate(cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(5) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(5)
+        }]
+    );
 }
 
 #[gpui::test]
@@ -1757,26 +2558,60 @@ fn only_messages_in_view_are_reported_when_scrolled_up(cx: &mut TestAppContext) 
     scroll(cx, 800.);
     activate(cx);
     let marks = h.commands();
-    let [Command::MarkRead { timestamp, .. }] = marks.as_slice() else { panic!("one marker expected: {marks:?}") };
-    assert!((1..80).contains(timestamp), "a message above the newest one: {timestamp}");
+    let [Command::MarkRead { timestamp, .. }] = marks.as_slice() else {
+        panic!("one marker expected: {marks:?}")
+    };
+    assert!(
+        (1..80).contains(timestamp),
+        "a message above the newest one: {timestamp}"
+    );
 
     scroll(cx, -1_000_000.);
     cx.run_until_parked();
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(80) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(80)
+        }]
+    );
 }
 
 #[gpui::test]
 fn pending_and_failed_messages_are_never_reported(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_group(&h, cx);
-    h.feed(cx, [history("g", vec![text("g", 1), pending("g", 9, "p1", "жду"), failed("g", 10, "p2", "не вышло", "нет прав")], true)]);
+    h.feed(
+        cx,
+        [history(
+            "g",
+            vec![
+                text("g", 1),
+                pending("g", 9, "p1", "жду"),
+                failed("g", 10, "p2", "не вышло", "нет прав"),
+            ],
+            true,
+        )],
+    );
     activate(cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(1)
+        }]
+    );
 }
 
 // ---- 6.2 typing ----
 
-fn typing_event(cx: &mut VisualTestContext, chat_id: &str, user: &str, name: Option<&str>, secs: u64) -> ClientEvent {
+fn typing_event(
+    cx: &mut VisualTestContext,
+    chat_id: &str,
+    user: &str,
+    name: Option<&str>,
+    secs: u64,
+) -> ClientEvent {
     ClientEvent::Typing {
         chat: ChatId(chat_id.into()),
         user: UserId(user.into()),
@@ -1786,7 +2621,8 @@ fn typing_event(cx: &mut VisualTestContext, chat_id: &str, user: &str, name: Opt
 }
 
 fn typing_text(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Option<String> {
-    h.store.read_with(cx, |s, _| s.typing_text(&ChatId(chat_id.into())))
+    h.store
+        .read_with(cx, |s, _| s.typing_text(&ChatId(chat_id.into())))
 }
 
 #[gpui::test]
@@ -1821,15 +2657,41 @@ fn typing_is_withheld_while_newer_messages_are_unseen(cx: &mut TestAppContext) {
     cx.simulate_input("привет");
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
-    let draft = Draft { chat: chat_g(), text: "привет".into(), reply_to: None };
-    assert_eq!(h.commands(), [Command::SaveDraft(draft)], "the draft is still saved");
+    let draft = Draft {
+        chat: chat_g(),
+        text: "привет".into(),
+        reply_to: None,
+    };
+    assert_eq!(
+        h.commands(),
+        [Command::SaveDraft(draft)],
+        "the draft is still saved"
+    );
 
     scroll(cx, -1_000_000.);
     cx.run_until_parked();
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(80) }]);
-    h.feed(cx, [ClientEvent::ChatUpdated(chat("g", ChatKind::Group, "Команда", Some(80)))]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(80)
+        }]
+    );
+    h.feed(
+        cx,
+        [ClientEvent::ChatUpdated(chat(
+            "g",
+            ChatKind::Group,
+            "Команда",
+            Some(80),
+        ))],
+    );
     cx.simulate_input("!");
-    assert_eq!(h.commands(), [Command::Typing(chat_g())], "typing resumes once the newest message is read");
+    assert_eq!(
+        h.commands(),
+        [Command::Typing(chat_g())],
+        "typing resumes once the newest message is read"
+    );
 }
 
 #[gpui::test]
@@ -1844,12 +2706,19 @@ fn typing_shows_in_the_header_and_the_chat_row_and_then_expires(cx: &mut TestApp
 
     cx.executor().advance_clock(Duration::from_secs(4));
     cx.run_until_parked();
-    assert_eq!(typing_text(&h, cx, "g"), Some("Алиса печатает…".into()), "still typing before the timeout");
+    assert_eq!(
+        typing_text(&h, cx, "g"),
+        Some("Алиса печатает…".into()),
+        "still typing before the timeout"
+    );
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
     assert_eq!(typing_text(&h, cx, "g"), None);
     h.store.read_with(cx, |s, _| {
-        assert_eq!(chat_preview(s, s.chat(&chat_g()).unwrap()), Preview::Message("превью 1".into()));
+        assert_eq!(
+            chat_preview(s, s.chat(&chat_g()).unwrap()),
+            Preview::Message("превью 1".into())
+        );
     });
 }
 
@@ -1862,9 +2731,16 @@ fn typing_text_names_the_typists(cx: &mut TestAppContext) {
     let nameless = typing_event(cx, "ch", "carol", None, 5);
     let private = typing_event(cx, "p", "dave", Some("Дэйв"), 5);
     h.feed(cx, [alice, bob, nameless, private]);
-    assert_eq!(typing_text(&h, cx, "g"), Some("Алиса и ещё 1 печатают…".into()));
+    assert_eq!(
+        typing_text(&h, cx, "g"),
+        Some("Алиса и ещё 1 печатают…".into())
+    );
     assert_eq!(typing_text(&h, cx, "ch"), Some("Кто-то печатает…".into()));
-    assert_eq!(typing_text(&h, cx, "p"), Some("печатает…".into()), "a private chat needs no name");
+    assert_eq!(
+        typing_text(&h, cx, "p"),
+        Some("печатает…".into()),
+        "a private chat needs no name"
+    );
 }
 
 #[gpui::test]
@@ -1875,7 +2751,11 @@ fn a_message_from_the_typist_ends_the_indicator(cx: &mut TestAppContext) {
     let bob = typing_event(cx, "g", "bob", Some("Боб"), 5);
     h.feed(cx, [alice, bob]);
     h.feed(cx, [ClientEvent::MessageUpserted(text("g", 2))]);
-    assert_eq!(typing_text(&h, cx, "g"), Some("Боб печатает…".into()), "only alice stopped");
+    assert_eq!(
+        typing_text(&h, cx, "g"),
+        Some("Боб печатает…".into()),
+        "only alice stopped"
+    );
 }
 
 #[gpui::test]
@@ -1893,7 +2773,11 @@ fn an_already_expired_typing_event_is_ignored(cx: &mut TestAppContext) {
 fn with_log_shortcut(cx: &mut TestAppContext) {
     cx.update(|cx| {
         cx.set_global(LogBuffer::default());
-        cx.bind_keys([KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram"))]);
+        cx.bind_keys([KeyBinding::new(
+            "cmd-shift-l",
+            ToggleLog,
+            Some("BlazingTelesram"),
+        )]);
     });
 }
 
@@ -1912,12 +2796,19 @@ fn the_log_view_takes_the_keyboard_from_the_composer(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-shift-l");
     cx.simulate_keystrokes("enter");
     cx.simulate_input("ещё");
-    assert!(h.commands().is_empty(), "neither a send nor a typing notice while the log is open");
+    assert!(
+        h.commands().is_empty(),
+        "neither a send nor a typing notice while the log is open"
+    );
     assert_eq!(composer_text(&h, cx), "привет");
 
     click(cx, "log-close");
     cx.simulate_input("!");
-    assert_eq!(composer_text(&h, cx), "привет!", "the composer has the keyboard again");
+    assert_eq!(
+        composer_text(&h, cx),
+        "привет!",
+        "the composer has the keyboard again"
+    );
     assert_eq!(h.commands(), [Command::Typing(chat_g())]);
 }
 
@@ -1965,13 +2856,18 @@ fn confirmation_dialogs_take_the_keyboard_from_the_composer(cx: &mut TestAppCont
 
 fn refused(body: &str, reply_to: Option<ReplyTarget>) -> ClientEvent {
     ClientEvent::SendRefused {
-        draft: Draft { chat: chat_g(), text: body.into(), reply_to },
+        draft: Draft {
+            chat: chat_g(),
+            text: body.into(),
+            reply_to,
+        },
         reason: "диск переполнен".into(),
     }
 }
 
 fn toast(h: &Harness, cx: &mut VisualTestContext) -> Option<String> {
-    h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string))
+    h.desktop
+        .read_with(cx, |d, _| d.toast_text().map(str::to_string))
 }
 
 #[gpui::test]
@@ -2004,12 +2900,24 @@ fn a_refused_send_goes_in_front_of_what_was_typed_since(cx: &mut TestAppContext)
 
     h.feed(cx, [refused("первое", Some(reply_target_2()))]);
     assert_eq!(composer_text(&h, cx), "первое\nвторое");
-    assert_eq!(composer_reply(&h, cx), Some(reply_target_2()), "no reply was chosen since, so the refused one returns");
+    assert_eq!(
+        composer_reply(&h, cx),
+        Some(reply_target_2()),
+        "no reply was chosen since, so the refused one returns"
+    );
     assert_eq!(toast(&h, cx), Some("диск переполнен".into()));
     cx.executor().advance_clock(Duration::from_secs(2));
     cx.run_until_parked();
-    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: Some(reply_target_2()) };
-    assert_eq!(writes(&h), [Command::SaveDraft(draft)], "both texts survive the autosave");
+    let draft = Draft {
+        chat: chat_g(),
+        text: "первое\nвторое".into(),
+        reply_to: Some(reply_target_2()),
+    };
+    assert_eq!(
+        writes(&h),
+        [Command::SaveDraft(draft)],
+        "both texts survive the autosave"
+    );
 }
 
 #[gpui::test]
@@ -2021,7 +2929,11 @@ fn a_refused_send_keeps_the_reply_target_chosen_since(cx: &mut TestAppContext) {
     choose_reply_to_2(cx);
     cx.simulate_input("второе");
 
-    let other = ReplyTarget { timestamp: ts(1), author: Some("ALICE".into()), text: "сообщение 1".into() };
+    let other = ReplyTarget {
+        timestamp: ts(1),
+        author: Some("ALICE".into()),
+        text: "сообщение 1".into(),
+    };
     h.feed(cx, [refused("первое", Some(other))]);
     assert_eq!(composer_text(&h, cx), "первое\nвторое");
     assert_eq!(composer_reply(&h, cx), Some(reply_target_2()));
@@ -2038,8 +2950,13 @@ fn a_refused_send_joins_the_saved_draft_of_a_chat_that_is_not_open(cx: &mut Test
     h.commands();
 
     h.feed(cx, [refused("первое", None)]);
-    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: None };
-    h.store.read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
+    let draft = Draft {
+        chat: chat_g(),
+        text: "первое\nвторое".into(),
+        reply_to: None,
+    };
+    h.store
+        .read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
     assert_eq!(writes(&h), [Command::SaveDraft(draft)]);
     assert_eq!(composer_text(&h, cx), "", "the open chat is untouched");
 
@@ -2057,7 +2974,11 @@ fn a_refused_send_for_a_chat_that_is_not_open_becomes_its_draft(cx: &mut TestApp
     h.commands();
 
     h.feed(cx, [refused("первое", Some(reply_target_2()))]);
-    let draft = Draft { chat: chat_g(), text: "первое".into(), reply_to: Some(reply_target_2()) };
+    let draft = Draft {
+        chat: chat_g(),
+        text: "первое".into(),
+        reply_to: Some(reply_target_2()),
+    };
     assert_eq!(writes(&h), [Command::SaveDraft(draft)]);
 }
 
@@ -2068,7 +2989,10 @@ fn a_refused_send_during_an_edit_comes_back_when_the_edit_ends(cx: &mut TestAppC
     cx.simulate_input("первое");
     cx.simulate_keystrokes("enter");
     cx.simulate_keystrokes("up");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(2))
+    );
 
     h.feed(cx, [refused("первое", None)]);
     assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
@@ -2083,7 +3007,10 @@ fn a_refused_send_during_an_edit_joins_the_draft_saved_before_it(cx: &mut TestAp
     cx.simulate_input("второе");
     right_click(cx, msg!(2));
     click(cx, "menu-edit");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(2))
+    );
 
     h.feed(cx, [refused("первое", None)]);
     assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
@@ -2098,32 +3025,62 @@ fn a_refused_send_during_an_edit_saves_the_merged_pre_edit_draft_at_once(cx: &mu
     cx.simulate_input("второе");
     right_click(cx, msg!(2));
     click(cx, "menu-edit");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(2))
+    );
     h.commands();
 
     h.feed(cx, [refused("первое", None)]);
-    let draft = Draft { chat: chat_g(), text: "первое\nвторое".into(), reply_to: None };
-    assert_eq!(writes(&h), [Command::SaveDraft(draft.clone())], "persisted without further typing");
-    h.store.read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
+    let draft = Draft {
+        chat: chat_g(),
+        text: "первое\nвторое".into(),
+        reply_to: None,
+    };
+    assert_eq!(
+        writes(&h),
+        [Command::SaveDraft(draft.clone())],
+        "persisted without further typing"
+    );
+    h.store
+        .read_with(cx, |s, _| assert_eq!(s.draft(&chat_g()), Some(&draft)));
     assert_eq!(composer_text(&h, cx), "старый", "the edit is not disturbed");
 }
 
 fn tall_own(i: i64) -> Message {
-    own("g", i, &(0..150).map(|n| format!("строка {n}")).collect::<Vec<_>>().join("\n"))
+    own(
+        "g",
+        i,
+        &(0..150)
+            .map(|n| format!("строка {n}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 #[gpui::test]
-fn a_message_taller_than_the_viewport_counts_as_seen_once_its_bottom_is_visible(cx: &mut TestAppContext) {
+fn a_message_taller_than_the_viewport_counts_as_seen_once_its_bottom_is_visible(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![tall_own(2)]);
     scroll(cx, 2_000.);
     cx.run_until_parked();
     activate(cx);
-    assert!(h.commands().is_empty(), "only the top of the message is visible");
+    assert!(
+        h.commands().is_empty(),
+        "only the top of the message is visible"
+    );
 
     scroll(cx, -1_000_000.);
     cx.run_until_parked();
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(2) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(2)
+        }]
+    );
 }
 
 #[gpui::test]
@@ -2138,10 +3095,19 @@ fn a_row_clipped_at_the_top_counts_as_seen_while_its_bottom_is_visible(cx: &mut 
     let list = h.list(cx);
     let row = list.bounds_for_item(0).expect("the first row is laid out");
     let viewport = list.viewport_bounds();
-    assert!(row.top() < viewport.top() && row.bottom() > viewport.top(), "clipped at the top: {row:?} in {viewport:?}");
+    assert!(
+        row.top() < viewport.top() && row.bottom() > viewport.top(),
+        "clipped at the top: {row:?} in {viewport:?}"
+    );
 
     activate(cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(1)
+        }]
+    );
 }
 
 #[gpui::test]
@@ -2156,7 +3122,10 @@ fn opening_the_log_closes_an_open_message_menu(cx: &mut TestAppContext) {
 
     cx.simulate_keystrokes("cmd-shift-l");
     assert!(log_is_open(&h, cx));
-    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()), "no menu above the log");
+    assert!(
+        !h.desktop.read_with(cx, |d, _| d.menu_is_open()),
+        "no menu above the log"
+    );
     cx.simulate_keystrokes("enter");
     cx.simulate_input("ещё");
     assert!(h.commands().is_empty());
@@ -2164,7 +3133,10 @@ fn opening_the_log_closes_an_open_message_menu(cx: &mut TestAppContext) {
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
 
     click(cx, "log-close");
-    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()), "the menu does not come back");
+    assert!(
+        !h.desktop.read_with(cx, |d, _| d.menu_is_open()),
+        "the menu does not come back"
+    );
 }
 
 #[gpui::test]
@@ -2176,10 +3148,19 @@ fn a_sent_message_above_a_viewport_of_pending_ones_is_not_reported(cx: &mut Test
     h.feed(cx, [history("g", messages, true)]);
     h.commands();
     activate(cx);
-    assert!(h.commands().is_empty(), "the only sent message is far above the viewport");
+    assert!(
+        h.commands().is_empty(),
+        "the only sent message is far above the viewport"
+    );
 
     scroll_to_top(&h, cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(1) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(1)
+        }]
+    );
 }
 
 #[gpui::test]
@@ -2189,27 +3170,45 @@ fn nothing_is_reported_while_the_log_covers_the_chat(cx: &mut TestAppContext) {
     open_group(&h, cx);
     h.feed(cx, [chunk("g", 1..=3, true)]);
     activate(cx);
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(3) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(3)
+        }]
+    );
 
     cx.simulate_keystrokes("cmd-shift-l");
     h.feed(cx, [ClientEvent::MessageUpserted(text("g", 4))]);
-    assert!(h.commands().is_empty(), "the message arrived behind the log");
+    assert!(
+        h.commands().is_empty(),
+        "the message arrived behind the log"
+    );
 
     click(cx, "log-close");
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(4) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(4)
+        }]
+    );
 }
 
 #[gpui::test]
 fn a_history_chunk_carrying_the_payload_replaces_the_local_copy(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1), pending("g", 9, "p1", "жду")]);
-    h.feed(cx, [ClientEvent::History(HistoryChunk {
-        chat: chat_g(),
-        messages: vec![text("g", 1), own("g", 5, "жду")],
-        reached_start: true,
-        replaces: None,
-        payloads: vec![PayloadId("p1".into())],
-    })]);
+    h.feed(
+        cx,
+        [ClientEvent::History(HistoryChunk {
+            chat: chat_g(),
+            messages: vec![text("g", 1), own("g", 5, "жду")],
+            reached_start: true,
+            replaces: None,
+            payloads: vec![PayloadId("p1".into())],
+        })],
+    );
     assert_eq!(stamps(&h, cx), [1, 5]);
 }
 
@@ -2221,7 +3220,11 @@ fn forwarded_own(i: i64) -> Message {
 
 fn reply_without_id() -> Message {
     let mut m = own("g", 1, "ответ");
-    m.reply_to = Some(ReplyQuote { author: None, text: "цитата".into(), timestamp: None });
+    m.reply_to = Some(ReplyQuote {
+        author: None,
+        text: "цитата".into(),
+        timestamp: None,
+    });
     m
 }
 
@@ -2247,7 +3250,11 @@ fn a_reply_without_a_quoted_message_id_cannot_be_edited(cx: &mut TestAppContext)
 fn a_reply_with_a_quoted_message_id_can_be_edited(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     let mut reply = reply_without_id();
-    reply.reply_to = Some(ReplyQuote { author: None, text: "цитата".into(), timestamp: Some(ts(1)) });
+    reply.reply_to = Some(ReplyQuote {
+        author: None,
+        text: "цитата".into(),
+        timestamp: Some(ts(1)),
+    });
     reply.timestamp = ts(2);
     open_with(&h, cx, vec![text("g", 1), reply]);
     right_click(cx, msg!(2));
@@ -2259,9 +3266,16 @@ fn up_skips_own_messages_that_cannot_be_edited(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     let mut unquotable = reply_without_id();
     unquotable.timestamp = ts(5);
-    open_with(&h, cx, vec![own("g", 2, "первое"), forwarded_own(4), unquotable]);
+    open_with(
+        &h,
+        cx,
+        vec![own("g", 2, "первое"), forwarded_own(4), unquotable],
+    );
     cx.simulate_keystrokes("up");
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), Some(ts(2)));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(2))
+    );
     assert_eq!(composer_text(&h, cx), "первое");
 }
 
@@ -2271,8 +3285,13 @@ fn original(id: &str) -> MediaRef {
     media(id, MediaKind::File)
 }
 
-fn download_state(h: &Harness, cx: &mut VisualTestContext, original: &MediaRef) -> Option<DownloadState> {
-    h.store.read_with(cx, |s, _| s.download_state(original).cloned())
+fn download_state(
+    h: &Harness,
+    cx: &mut VisualTestContext,
+    original: &MediaRef,
+) -> Option<DownloadState> {
+    h.store
+        .read_with(cx, |s, _| s.download_state(original).cloned())
 }
 
 #[gpui::test]
@@ -2280,12 +3299,31 @@ fn download_sends_one_command_and_shows_running(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     let file = original("disk/1");
-    h.store.update(cx, |s, cx| s.download(file.clone(), Some("report.pdf".into()), cx));
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("report.pdf".into()) }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    h.store.update(cx, |s, cx| {
+        s.download(file.clone(), Some("report.pdf".into()), cx)
+    });
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: Some("report.pdf".into())
+        }]
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
 
-    h.store.update(cx, |s, cx| s.download(file.clone(), Some("report.pdf".into()), cx));
-    assert!(h.commands().is_empty(), "a running download is not started twice");
+    h.store.update(cx, |s, cx| {
+        s.download(file.clone(), Some("report.pdf".into()), cx)
+    });
+    assert!(
+        h.commands().is_empty(),
+        "a running download is not started twice"
+    );
 }
 
 #[gpui::test]
@@ -2294,27 +3332,83 @@ fn download_events_update_the_state(cx: &mut TestAppContext) {
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     let file = original("disk/1");
     let other = original("disk/2");
-    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.store
+        .update(cx, |s, cx| s.download(file.clone(), None, cx));
     h.commands();
 
-    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 10, total: Some(40) }));
-    assert_eq!(download_state(&h, cx, &other), None, "other files are untouched");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: file.clone(),
+            received: 10,
+            total: Some(40),
+        }],
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 10,
+            total: Some(40)
+        })
+    );
+    assert_eq!(
+        download_state(&h, cx, &other),
+        None,
+        "other files are untouched"
+    );
 
     let saved = PathBuf::from("/tmp/Downloads/report (1).pdf");
-    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: saved.clone() }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Saved(saved)));
+    h.feed(
+        cx,
+        [ClientEvent::Downloaded {
+            media: file.clone(),
+            path: saved.clone(),
+        }],
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Saved(saved))
+    );
 
-    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Disk }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Failed(DownloadFailure::Disk)));
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: file.clone(),
+            reason: DownloadFailure::Disk,
+        }],
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Failed(DownloadFailure::Disk))
+    );
 
     // A retry after a failure starts again from zero.
-    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: None }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    h.store
+        .update(cx, |s, cx| s.download(file.clone(), None, cx));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: None
+        }]
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
     // Saved files can be fetched again.
-    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/a") }]);
-    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.feed(
+        cx,
+        [ClientEvent::Downloaded {
+            media: file.clone(),
+            path: PathBuf::from("/tmp/a"),
+        }],
+    );
+    h.store
+        .update(cx, |s, cx| s.download(file.clone(), None, cx));
     assert_eq!(h.commands().len(), 1);
 }
 
@@ -2324,9 +3418,13 @@ fn download_while_not_online_fails_without_a_command(cx: &mut TestAppContext) {
     let file = original("disk/1");
     for state in [ConnectionState::Connecting, ConnectionState::Offline] {
         h.feed(cx, [ClientEvent::Connection(state)]);
-        h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+        h.store
+            .update(cx, |s, cx| s.download(file.clone(), None, cx));
         assert!(h.commands().is_empty(), "{state:?}: nothing is sent");
-        assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Failed(DownloadFailure::Offline)));
+        assert_eq!(
+            download_state(&h, cx, &file),
+            Some(DownloadState::Failed(DownloadFailure::Offline))
+        );
         h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
     }
 }
@@ -2336,12 +3434,20 @@ fn cancel_download_asks_the_core_and_waits_for_its_answer(cx: &mut TestAppContex
     let (h, cx) = harness(cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     let file = original("disk/1");
-    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.store
+        .update(cx, |s, cx| s.download(file.clone(), None, cx));
     h.commands();
 
     h.store.read_with(cx, |s, _| s.cancel_download(&file));
     assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }), "cleared by the answer");
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        }),
+        "cleared by the answer"
+    );
     h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
     assert_eq!(download_state(&h, cx, &file), None);
 
@@ -2354,8 +3460,18 @@ fn sign_out_clears_download_states(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     let file = original("disk/1");
-    h.store.update(cx, |s, cx| s.download(file.clone(), None, cx));
-    h.feed(cx, [ClientEvent::Downloaded { media: original("disk/2"), path: PathBuf::from("/tmp/b") }, ClientEvent::SignedOut]);
+    h.store
+        .update(cx, |s, cx| s.download(file.clone(), None, cx));
+    h.feed(
+        cx,
+        [
+            ClientEvent::Downloaded {
+                media: original("disk/2"),
+                path: PathBuf::from("/tmp/b"),
+            },
+            ClientEvent::SignedOut,
+        ],
+    );
     assert_eq!(download_state(&h, cx, &file), None);
     assert_eq!(download_state(&h, cx, &original("disk/2")), None);
 }
@@ -2363,10 +3479,28 @@ fn sign_out_clears_download_states(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_gallery_requests_every_thumbnail_once_and_never_an_original(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let item = |id: &str| GalleryItem { media: media(id, MediaKind::Thumbnail), width: 4, height: 3, name: Some(format!("{id}.jpg")) };
-    let gallery = MessageBody::Gallery { items: vec![item("g/1"), item("g/2"), item("g/3")], caption: None };
-    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 4, height: 3, caption: None, name: None };
-    let file = MessageBody::File { media: original("f/1"), name: "a.zip".into(), size: 5 };
+    let item = |id: &str| GalleryItem {
+        media: media(id, MediaKind::Thumbnail),
+        width: 4,
+        height: 3,
+        name: Some(format!("{id}.jpg")),
+    };
+    let gallery = MessageBody::Gallery {
+        items: vec![item("g/1"), item("g/2"), item("g/3")],
+        caption: None,
+    };
+    let single = MessageBody::Image {
+        media: media("s/1", MediaKind::Thumbnail),
+        width: 4,
+        height: 3,
+        caption: None,
+        name: None,
+    };
+    let file = MessageBody::File {
+        media: original("f/1"),
+        name: "a.zip".into(),
+        size: 5,
+    };
     let messages = vec![
         message("a", 1, "alice", false, gallery.clone()),
         message("a", 2, "alice", false, single),
@@ -2384,24 +3518,44 @@ fn a_gallery_requests_every_thumbnail_once_and_never_an_original(cx: &mut TestAp
     );
 
     // The same gallery arriving again (a live edit or a refresh) asks for nothing new.
-    h.feed(cx, [ClientEvent::MessageUpserted(message("a", 1, "alice", false, gallery))]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(message(
+            "a", 1, "alice", false, gallery,
+        ))],
+    );
     assert!(h.commands().is_empty());
 }
 
 // ---- image viewer ----
 
 fn picture(id: &str) -> GalleryItem {
-    GalleryItem { media: media(id, MediaKind::Thumbnail), width: 1600, height: 800, name: Some(format!("{id}.jpg")) }
+    GalleryItem {
+        media: media(id, MediaKind::Thumbnail),
+        width: 1600,
+        height: 800,
+        name: Some(format!("{id}.jpg")),
+    }
 }
 
 /// Message 2 of chat "g": four pictures `v/1` … `v/4`.
 fn four_pictures() -> Message {
     let items = ["v/1", "v/2", "v/3", "v/4"].map(picture).to_vec();
-    message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })
+    message(
+        "g",
+        2,
+        "alice",
+        false,
+        MessageBody::Gallery {
+            items,
+            caption: None,
+        },
+    )
 }
 
 fn open_viewer(h: &Harness, cx: &mut VisualTestContext, ts: MessageTs, index: usize) {
-    h.desktop.update(cx, |d, cx| d.open_viewer(chat_g(), ts, index, cx));
+    h.desktop
+        .update(cx, |d, cx| d.open_viewer(chat_g(), ts, index, cx));
     cx.run_until_parked();
 }
 
@@ -2423,7 +3577,10 @@ fn the_viewer_opens_at_the_chosen_picture_with_its_position(cx: &mut TestAppCont
     assert!(shown(cx, "viewer"));
     assert!(shown(cx, "viewer-pos-3-4"));
     assert!(shown(cx, "viewer-prev") && shown(cx, "viewer-next"));
-    assert!(h.commands().is_empty(), "opening the viewer downloads nothing and asks for nothing");
+    assert!(
+        h.commands().is_empty(),
+        "opening the viewer downloads nothing and asks for nothing"
+    );
 }
 
 fn inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
@@ -2438,23 +3595,70 @@ fn inside(outer: Bounds<Pixels>, inner: Bounds<Pixels>) -> bool {
 fn the_viewer_fits_the_smallest_window(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     cx.simulate_resize(size(px(850.), px(560.)));
-    let sized = |id: &str, width, height| GalleryItem { width, height, ..picture(id) };
-    let items = vec![sized("v/1", 3000, 4000), sized("v/2", 4000, 1000), sized("v/3", 4000, 4000)];
-    open_with(&h, cx, vec![message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })]);
+    let sized = |id: &str, width, height| GalleryItem {
+        width,
+        height,
+        ..picture(id)
+    };
+    let items = vec![
+        sized("v/1", 3000, 4000),
+        sized("v/2", 4000, 1000),
+        sized("v/3", 4000, 4000),
+    ];
+    open_with(
+        &h,
+        cx,
+        vec![message(
+            "g",
+            2,
+            "alice",
+            false,
+            MessageBody::Gallery {
+                items,
+                caption: None,
+            },
+        )],
+    );
     open_viewer(&h, cx, ts(2), 0);
 
     for index in 0..3 {
         let overlay = bounds(cx, "viewer").expect("the viewer is on screen");
-        assert_eq!(overlay.size, size(px(850.), px(560.)), "the overlay covers the window");
+        assert_eq!(
+            overlay.size,
+            size(px(850.), px(560.)),
+            "the overlay covers the window"
+        );
         let picture = bounds(cx, "viewer-image").unwrap();
-        for selector in ["viewer-image", "viewer-prev", "viewer-next", "viewer-close", "viewer-download"] {
-            let part = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
-            assert!(inside(overlay, part), "picture {index}: {selector} {part:?} leaves the window {overlay:?}");
+        for selector in [
+            "viewer-image",
+            "viewer-prev",
+            "viewer-next",
+            "viewer-close",
+            "viewer-download",
+        ] {
+            let part =
+                bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+            assert!(
+                inside(overlay, part),
+                "picture {index}: {selector} {part:?} leaves the window {overlay:?}"
+            );
         }
-        let (prev, next) = (bounds(cx, "viewer-prev").unwrap(), bounds(cx, "viewer-next").unwrap());
-        assert!(prev.right() <= picture.left() && picture.right() <= next.left(), "picture {index} overlaps an arrow");
-        let (close, download) = (bounds(cx, "viewer-close").unwrap(), bounds(cx, "viewer-download").unwrap());
-        assert!(close.bottom() <= picture.top() && picture.bottom() <= download.top(), "picture {index} overlaps a bar");
+        let (prev, next) = (
+            bounds(cx, "viewer-prev").unwrap(),
+            bounds(cx, "viewer-next").unwrap(),
+        );
+        assert!(
+            prev.right() <= picture.left() && picture.right() <= next.left(),
+            "picture {index} overlaps an arrow"
+        );
+        let (close, download) = (
+            bounds(cx, "viewer-close").unwrap(),
+            bounds(cx, "viewer-download").unwrap(),
+        );
+        assert!(
+            close.bottom() <= picture.top() && picture.bottom() <= download.top(),
+            "picture {index} overlaps a bar"
+        );
         cx.simulate_keystrokes("right");
     }
 }
@@ -2464,12 +3668,17 @@ fn the_viewer_picture_follows_the_window_size(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![four_pictures()]);
     open_viewer(&h, cx, ts(2), 0);
-    let width = |cx: &mut VisualTestContext| f32::from(bounds(cx, "viewer-image").unwrap().size.width);
+    let width =
+        |cx: &mut VisualTestContext| f32::from(bounds(cx, "viewer-image").unwrap().size.width);
     assert!((width(cx) - 800.0).abs() < 0.5);
     cx.simulate_resize(size(px(850.), px(560.)));
     cx.run_until_parked();
     let expected = 850.0 - 32.0 - 2.0 * 64.0; // what the padding and the two arrows leave
-    assert!((width(cx) - expected).abs() < 0.5, "{} != {expected}", width(cx));
+    assert!(
+        (width(cx) - expected).abs() < 0.5,
+        "{} != {expected}",
+        width(cx)
+    );
 }
 
 #[gpui::test]
@@ -2479,7 +3688,9 @@ fn the_viewer_ignores_what_it_cannot_show(cx: &mut TestAppContext) {
     open_viewer(&h, cx, ts(2), 4);
     open_viewer(&h, cx, ts(1), 0);
     open_viewer(&h, cx, ts(99), 0);
-    h.desktop.update(cx, |d, cx| d.open_viewer(ChatId("other".into()), ts(2), 0, cx));
+    h.desktop.update(cx, |d, cx| {
+        d.open_viewer(ChatId("other".into()), ts(2), 0, cx)
+    });
     assert_eq!(viewer_at(&h, cx), None);
 }
 
@@ -2498,7 +3709,11 @@ fn right_and_left_move_between_pictures_and_stop_at_the_ends(cx: &mut TestAppCon
     for _ in 0..5 {
         cx.simulate_keystrokes("left");
     }
-    assert_eq!(viewer_at(&h, cx), Some((ts(2), 0)), "the start does not wrap");
+    assert_eq!(
+        viewer_at(&h, cx),
+        Some((ts(2), 0)),
+        "the start does not wrap"
+    );
     assert!(shown(cx, "viewer-pos-1-4"));
 }
 
@@ -2551,7 +3766,13 @@ fn four_pictures_at(i: i64) -> Message {
 #[gpui::test]
 fn a_single_image_has_no_previous_or_next(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 600, height: 1200, caption: None, name: None };
+    let single = MessageBody::Image {
+        media: media("s/1", MediaKind::Thumbnail),
+        width: 600,
+        height: 1200,
+        caption: None,
+        name: None,
+    };
     open_with(&h, cx, vec![message("g", 2, "alice", false, single)]);
     open_viewer(&h, cx, ts(2), 0);
     assert!(shown(cx, "viewer-pos-1-1"));
@@ -2567,16 +3788,29 @@ fn the_preview_replaces_the_placeholder_when_it_arrives(cx: &mut TestAppContext)
     open_with(&h, cx, vec![four_pictures()]);
     open_viewer(&h, cx, ts(2), 1);
     let b = bounds(cx, "viewer-image").expect("the placeholder is shown");
-    assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (800.0, 400.0));
+    assert_eq!(
+        (f32::from(b.size.width), f32::from(b.size.height)),
+        (800.0, 400.0)
+    );
     assert!(!shown(cx, "viewer-image-loaded"));
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v2.png");
     std::fs::write(&path, PNG_1X1).unwrap();
-    h.feed(cx, [ClientEvent::MediaReady { media: media("v/2", MediaKind::Thumbnail), path }]);
+    h.feed(
+        cx,
+        [ClientEvent::MediaReady {
+            media: media("v/2", MediaKind::Thumbnail),
+            path,
+        }],
+    );
     assert!(shown(cx, "viewer-image-loaded"));
     let b = bounds(cx, "viewer-image").unwrap();
-    assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (800.0, 400.0), "the box does not change");
+    assert_eq!(
+        (f32::from(b.size.width), f32::from(b.size.height)),
+        (800.0, 400.0),
+        "the box does not change"
+    );
 }
 
 #[gpui::test]
@@ -2584,7 +3818,13 @@ fn deleting_the_message_closes_the_viewer(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1), four_pictures()]);
     open_viewer(&h, cx, ts(2), 1);
-    h.feed(cx, [ClientEvent::MessageDeleted { chat: chat_g(), timestamp: ts(2) }]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(2),
+        }],
+    );
     assert_eq!(viewer_at(&h, cx), None);
     assert!(!blocked(&h, cx));
 }
@@ -2594,12 +3834,33 @@ fn a_body_without_pictures_closes_the_viewer_and_fewer_pictures_step_back(cx: &m
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![four_pictures()]);
     open_viewer(&h, cx, ts(2), 3);
-    let two = MessageBody::Gallery { items: vec![picture("v/1"), picture("v/2")], caption: None };
-    h.feed(cx, [ClientEvent::MessageUpserted(message("g", 2, "alice", false, two))]);
-    assert_eq!(viewer_at(&h, cx), Some((ts(2), 1)), "the last picture that is left");
+    let two = MessageBody::Gallery {
+        items: vec![picture("v/1"), picture("v/2")],
+        caption: None,
+    };
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(message(
+            "g", 2, "alice", false, two,
+        ))],
+    );
+    assert_eq!(
+        viewer_at(&h, cx),
+        Some((ts(2), 1)),
+        "the last picture that is left"
+    );
     assert!(shown(cx, "viewer-pos-2-2"));
 
-    h.feed(cx, [ClientEvent::MessageUpserted(message("g", 2, "alice", false, MessageBody::Deleted))]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(message(
+            "g",
+            2,
+            "alice",
+            false,
+            MessageBody::Deleted,
+        ))],
+    );
     assert_eq!(viewer_at(&h, cx), None);
 }
 
@@ -2615,13 +3876,27 @@ fn an_open_viewer_blocks_the_composer_and_read_markers(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("enter");
     cx.simulate_input("ещё");
     activate(cx);
-    assert!(h.commands().is_empty(), "no send, no typing notice, nothing read while the viewer is open");
+    assert!(
+        h.commands().is_empty(),
+        "no send, no typing notice, nothing read while the viewer is open"
+    );
     assert_eq!(composer_text(&h, cx), "привет");
 
     cx.simulate_keystrokes("escape");
-    assert_eq!(h.commands(), [Command::MarkRead { chat: chat_g(), timestamp: ts(2) }], "reading resumes after it closes");
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(2)
+        }],
+        "reading resumes after it closes"
+    );
     cx.simulate_input("!");
-    assert_eq!(composer_text(&h, cx), "привет!", "the composer has the keyboard again");
+    assert_eq!(
+        composer_text(&h, cx),
+        "привет!",
+        "the composer has the keyboard again"
+    );
 }
 
 #[gpui::test]
@@ -2633,10 +3908,29 @@ fn the_download_button_saves_the_original_under_the_items_name(cx: &mut TestAppC
     let file = original("v/3");
 
     click(cx, "viewer-download");
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("v/3.jpg".into()) }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: Some("v/3.jpg".into())
+        }]
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
 
-    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: file.clone(),
+            received: 10,
+            total: Some(40),
+        }],
+    );
     click(cx, "viewer-cancel");
     assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
     h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
@@ -2651,18 +3945,51 @@ fn the_viewer_shows_saved_and_failed_downloads_of_its_item(cx: &mut TestAppConte
     open_viewer(&h, cx, ts(2), 0);
     let file = original("v/1");
 
-    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Network }]);
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: file.clone(),
+            reason: DownloadFailure::Network,
+        }],
+    );
     assert!(shown(cx, "viewer-retry"));
     click(cx, "viewer-retry");
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("v/1.jpg".into()) }]);
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: Some("v/1.jpg".into())
+        }]
+    );
 
-    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/Downloads/v (1).jpg") }]);
+    h.feed(
+        cx,
+        [ClientEvent::Downloaded {
+            media: file.clone(),
+            path: PathBuf::from("/tmp/Downloads/v (1).jpg"),
+        }],
+    );
     assert!(shown(cx, "viewer-saved"));
     click(cx, "viewer-download");
-    assert_eq!(h.commands().len(), 1, "a saved picture can be fetched again");
+    assert_eq!(
+        h.commands().len(),
+        1,
+        "a saved picture can be fetched again"
+    );
 
-    h.feed(cx, [ClientEvent::DownloadProgress { media: original("v/2"), received: 1, total: None }]);
-    assert_eq!(h.commands(), [], "another picture's download does not touch this one");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: original("v/2"),
+            received: 1,
+            total: None,
+        }],
+    );
+    assert_eq!(
+        h.commands(),
+        [],
+        "another picture's download does not touch this one"
+    );
 }
 
 #[gpui::test]
@@ -2681,7 +4008,17 @@ fn the_download_button_is_disabled_without_a_connection(cx: &mut TestAppContext)
 // ---- file card and gallery grid ----
 
 fn file_message(i: i64) -> Message {
-    message("g", i, "bob", false, MessageBody::File { media: original("doc"), name: "отчёт.pdf".into(), size: 3_500_000 })
+    message(
+        "g",
+        i,
+        "bob",
+        false,
+        MessageBody::File {
+            media: original("doc"),
+            name: "отчёт.pdf".into(),
+            size: 3_500_000,
+        },
+    )
 }
 
 fn dims(cx: &mut VisualTestContext, selector: &'static str) -> (f32, f32) {
@@ -2697,10 +4034,25 @@ fn origin(cx: &mut VisualTestContext, selector: &'static str) -> (f32, f32) {
 /// Message 2 of chat "g": `n` pictures `v/1` … `v/n`.
 fn pictures(n: usize) -> Message {
     let items = (1..=n).map(|i| picture(&format!("v/{i}"))).collect();
-    message("g", 2, "alice", false, MessageBody::Gallery { items, caption: None })
+    message(
+        "g",
+        2,
+        "alice",
+        false,
+        MessageBody::Gallery {
+            items,
+            caption: None,
+        },
+    )
 }
 
-const CELLS: [&str; 5] = ["msg-2-image-0", "msg-2-image-1", "msg-2-image-2", "msg-2-image-3", "msg-2-image-4"];
+const CELLS: [&str; 5] = [
+    "msg-2-image-0",
+    "msg-2-image-1",
+    "msg-2-image-2",
+    "msg-2-image-3",
+    "msg-2-image-4",
+];
 
 #[test]
 fn the_grid_has_one_two_or_three_columns() {
@@ -2718,37 +4070,97 @@ fn the_file_card_offers_download_and_follows_the_transfer(cx: &mut TestAppContex
     let idle = dims(cx, msg!(5, "file"));
 
     click(cx, msg!(5, "download"));
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("отчёт.pdf".into()) }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
-    assert!(shown(cx, msg!(5, "cancel")), "a running download offers Cancel");
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: Some("отчёт.pdf".into())
+        }]
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
+    assert!(
+        shown(cx, msg!(5, "cancel")),
+        "a running download offers Cancel"
+    );
 
-    h.feed(cx, [ClientEvent::DownloadProgress { media: file.clone(), received: 10, total: Some(40) }]);
-    assert!(shown(cx, msg!(5, "status")), "the progress is written next to the button");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: file.clone(),
+            received: 10,
+            total: Some(40),
+        }],
+    );
+    assert!(
+        shown(cx, msg!(5, "status")),
+        "the progress is written next to the button"
+    );
     click(cx, msg!(5, "cancel"));
     assert_eq!(h.commands(), [Command::CancelDownload(file.clone())]);
     h.feed(cx, [ClientEvent::DownloadCancelled(file.clone())]);
     assert_eq!(download_state(&h, cx, &file), None);
 
-    h.feed(cx, [ClientEvent::Downloaded { media: file.clone(), path: PathBuf::from("/tmp/Downloads/отчёт (1).pdf") }]);
+    h.feed(
+        cx,
+        [ClientEvent::Downloaded {
+            media: file.clone(),
+            path: PathBuf::from("/tmp/Downloads/отчёт (1).pdf"),
+        }],
+    );
     assert!(shown(cx, msg!(5, "saved")), "the saved name is shown");
     click(cx, msg!(5, "download"));
     assert_eq!(h.commands().len(), 1, "a saved file can be fetched again");
 
-    h.feed(cx, [ClientEvent::DownloadFailed { media: file.clone(), reason: DownloadFailure::Network }]);
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: file.clone(),
+            reason: DownloadFailure::Network,
+        }],
+    );
     assert!(shown(cx, msg!(5, "retry")));
     click(cx, msg!(5, "retry"));
-    assert_eq!(h.commands(), [Command::Download { media: file.clone(), name: Some("отчёт.pdf".into()) }]);
-    assert_eq!(download_state(&h, cx, &file), Some(DownloadState::Running { received: 0, total: None }));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: file.clone(),
+            name: Some("отчёт.pdf".into())
+        }]
+    );
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
 
-    assert_eq!(dims(cx, msg!(5, "file")), idle, "the card keeps its size in every state");
+    assert_eq!(
+        dims(cx, msg!(5, "file")),
+        idle,
+        "the card keeps its size in every state"
+    );
 }
 
 #[gpui::test]
 fn the_file_card_cannot_start_a_download_without_a_connection(cx: &mut TestAppContext) {
-    let (h, cx) = harness_with(cx, vec![ClientEvent::Connection(ConnectionState::Offline)], |_, _| {});
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::Connection(ConnectionState::Offline)],
+        |_, _| {},
+    );
     open_with(&h, cx, vec![file_message(5)]);
     assert!(shown(cx, msg!(5, "download")));
-    assert!(shown(cx, msg!(5, "status")), "the reason is written next to the button");
+    assert!(
+        shown(cx, msg!(5, "status")),
+        "the reason is written next to the button"
+    );
     click(cx, msg!(5, "download"));
     assert!(h.commands().is_empty());
     assert_eq!(download_state(&h, cx, &original("doc")), None);
@@ -2759,7 +4171,13 @@ fn the_file_card_shows_the_reason_a_download_failed(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     open_with(&h, cx, vec![file_message(5)]);
-    h.feed(cx, [ClientEvent::DownloadFailed { media: original("doc"), reason: DownloadFailure::NotFound }]);
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: original("doc"),
+            reason: DownloadFailure::NotFound,
+        }],
+    );
     assert!(shown(cx, msg!(5, "retry")));
     assert!(shown(cx, msg!(5, "status")));
     assert!(!shown(cx, msg!(5, "saved")));
@@ -2769,7 +4187,10 @@ fn the_file_card_shows_the_reason_a_download_failed(cx: &mut TestAppContext) {
 fn a_gallery_renders_square_cells_in_order_and_keeps_its_height(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![pictures(4)]);
-    assert!(!shown(cx, msg!(2, "image")), "a gallery is not a single image");
+    assert!(
+        !shown(cx, msg!(2, "image")),
+        "a gallery is not a single image"
+    );
     let side = (456.0 - 4.0) / 2.0;
     for cell in &CELLS[..4] {
         assert_eq!(dims(cx, cell), (side, side), "{cell}");
@@ -2786,10 +4207,20 @@ fn a_gallery_renders_square_cells_in_order_and_keeps_its_height(cx: &mut TestApp
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("v2.png");
     std::fs::write(&path, PNG_1X1).unwrap();
-    h.feed(cx, [ClientEvent::MediaReady { media: media("v/2", MediaKind::Thumbnail), path }]);
+    h.feed(
+        cx,
+        [ClientEvent::MediaReady {
+            media: media("v/2", MediaKind::Thumbnail),
+            path,
+        }],
+    );
     assert!(shown(cx, "msg-2-image-1-loaded"));
     assert!(!shown(cx, "msg-2-image-0-loaded"));
-    assert_eq!(dims(cx, msg!(2)), before, "the row height does not change when a preview arrives");
+    assert_eq!(
+        dims(cx, msg!(2)),
+        before,
+        "the row height does not change when a preview arrives"
+    );
     assert_eq!(dims(cx, CELLS[1]), (side, side));
 }
 
@@ -2800,39 +4231,68 @@ fn the_last_row_of_a_grid_is_left_aligned(cx: &mut TestAppContext) {
     let side = (456.0 - 8.0) / 3.0;
     for cell in &CELLS {
         let (w, h) = dims(cx, cell);
-        assert!((w - side).abs() < 1.0 && (h - side).abs() < 1.0, "{cell}: {w}x{h}");
+        assert!(
+            (w - side).abs() < 1.0 && (h - side).abs() < 1.0,
+            "{cell}: {w}x{h}"
+        );
     }
     let at: Vec<_> = CELLS.iter().map(|c| origin(cx, c)).collect();
     assert_eq!((at[1].1, at[2].1), (at[0].1, at[0].1), "first row");
     assert_eq!(at[4].1, at[3].1, "second row");
     assert!(at[3].1 > at[0].1);
-    assert_eq!((at[3].0, at[4].0), (at[0].0, at[1].0), "the short row starts at the left edge");
+    assert_eq!(
+        (at[3].0, at[4].0),
+        (at[0].0, at[1].0),
+        "the short row starts at the left edge"
+    );
 }
 
 #[gpui::test]
 fn a_lone_picture_keeps_its_aspect_ratio_and_the_caption_goes_below(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let one = MessageBody::Gallery { items: vec![picture("v/1")], caption: Some("подпись".into()) };
+    let one = MessageBody::Gallery {
+        items: vec![picture("v/1")],
+        caption: Some("подпись".into()),
+    };
     open_with(&h, cx, vec![message("g", 2, "alice", false, one)]);
     assert_eq!(dims(cx, msg!(2, "image")), fit_thumbnail(1600, 800, 320.0));
     assert!(!shown(cx, CELLS[0]));
-    assert!(y(cx, msg!(2, "caption")) >= y(cx, msg!(2, "image")) + 160.0, "the caption sits below the picture");
+    assert!(
+        y(cx, msg!(2, "caption")) >= y(cx, msg!(2, "image")) + 160.0,
+        "the caption sits below the picture"
+    );
 }
 
 #[gpui::test]
 fn the_caption_of_a_gallery_sits_below_the_last_row(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     let items = ["v/1", "v/2", "v/3", "v/4"].map(picture).to_vec();
-    let captioned = MessageBody::Gallery { items, caption: Some("подпись".into()) };
+    let captioned = MessageBody::Gallery {
+        items,
+        caption: Some("подпись".into()),
+    };
     open_with(&h, cx, vec![message("g", 2, "alice", false, captioned)]);
-    assert!(y(cx, msg!(2, "caption")) >= y(cx, CELLS[2]) + 226.0, "the caption sits below the last row");
+    assert!(
+        y(cx, msg!(2, "caption")) >= y(cx, CELLS[2]) + 226.0,
+        "the caption sits below the last row"
+    );
 }
 
 #[gpui::test]
 fn clicking_a_cell_or_the_single_image_opens_the_viewer_at_it(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    let single = MessageBody::Image { media: media("s/1", MediaKind::Thumbnail), width: 600, height: 1200, caption: None, name: None };
-    open_with(&h, cx, vec![message("g", 1, "alice", false, single), pictures(4)]);
+    let single = MessageBody::Image {
+        media: media("s/1", MediaKind::Thumbnail),
+        width: 600,
+        height: 1200,
+        caption: None,
+        name: None,
+    };
+    open_with(
+        &h,
+        cx,
+        vec![message("g", 1, "alice", false, single), pictures(4)],
+    );
     assert_eq!(viewer_at(&h, cx), None);
 
     click(cx, CELLS[2]);
@@ -2846,7 +4306,10 @@ fn clicking_a_cell_or_the_single_image_opens_the_viewer_at_it(cx: &mut TestAppCo
     click(cx, msg!(1, "image"));
     assert_eq!(viewer_at(&h, cx), Some((ts(1), 0)));
     assert!(shown(cx, "viewer-pos-1-1"));
-    assert!(h.commands().is_empty(), "opening the viewer asks for nothing");
+    assert!(
+        h.commands().is_empty(),
+        "opening the viewer asks for nothing"
+    );
 }
 
 // ---- add-message-reactions 5.4: chips, menu row, refusals ----
@@ -2875,8 +4338,18 @@ const MENU_REACTIONS: [&str; 8] = [
 ];
 
 fn reactions_of(counts: &[(i64, u32)], mine: Option<i64>) -> Reactions {
-    let counts = counts.iter().map(|&(code, count)| ReactionCount { code: ReactionCode(code), count }).collect();
-    Reactions { counts, mine: mine.map(ReactionCode), version: Some(1) }
+    let counts = counts
+        .iter()
+        .map(|&(code, count)| ReactionCount {
+            code: ReactionCode(code),
+            count,
+        })
+        .collect();
+    Reactions {
+        counts,
+        mine: mine.map(ReactionCode),
+        version: Some(1),
+    }
 }
 
 /// An incoming message with reactions.
@@ -2887,12 +4360,23 @@ fn reacted(i: i64, counts: &[(i64, u32)], mine: Option<i64>) -> Message {
 }
 
 fn toggle_command(i: i64, code: i64) -> Command {
-    Command::ToggleReaction { chat: chat_g(), timestamp: ts(i), code: ReactionCode(code) }
+    Command::ToggleReaction {
+        chat: chat_g(),
+        timestamp: ts(i),
+        code: ReactionCode(code),
+    }
 }
 
 fn reactions_in_store(h: &Harness, cx: &mut VisualTestContext, i: i64) -> Reactions {
     h.store.read_with(cx, |s, _| {
-        s.timeline(&chat_g()).unwrap().messages.iter().find(|m| m.timestamp == ts(i)).unwrap().reactions.clone()
+        s.timeline(&chat_g())
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.timestamp == ts(i))
+            .unwrap()
+            .reactions
+            .clone()
     })
 }
 
@@ -2903,7 +4387,12 @@ fn menu_is_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
 /// The menu surface is repainted (its bounds overwritten) every time a menu opens, unlike its entries
 /// that stay in the debug map after they are closed.
 fn menu_height(cx: &mut VisualTestContext) -> f32 {
-    f32::from(bounds(cx, "message-menu").expect("a menu was painted").size.height)
+    f32::from(
+        bounds(cx, "message-menu")
+            .expect("a menu was painted")
+            .size
+            .height,
+    )
 }
 
 #[gpui::test]
@@ -2912,23 +4401,52 @@ fn chips_show_one_chip_per_type_in_the_server_order_inside_the_bubble(cx: &mut T
     let counts = [(LIKE, 3), (FIRE, 1000), (NOT_IN_TABLE, 2)];
     open_with(&h, cx, vec![text("g", 1), reacted(2, &counts, Some(FIRE))]);
 
-    let chips = [msg!(2, "reaction-100102"), msg!(2, "reaction-100104"), msg!(2, "reaction-424242")];
+    let chips = [
+        msg!(2, "reaction-100102"),
+        msg!(2, "reaction-100104"),
+        msg!(2, "reaction-424242"),
+    ];
     let bubble = bounds(cx, msg!(2)).unwrap();
     for chip in chips {
-        assert!(inside(bubble, bounds(cx, chip).unwrap_or_else(|| panic!("{chip} is not on screen"))), "{chip} sits in the bubble");
+        assert!(
+            inside(
+                bubble,
+                bounds(cx, chip).unwrap_or_else(|| panic!("{chip} is not on screen"))
+            ),
+            "{chip} sits in the bubble"
+        );
     }
-    assert!(origin(cx, chips[0]).0 < origin(cx, chips[1]).0 && origin(cx, chips[1]).0 < origin(cx, chips[2]).0, "server order");
-    assert!(!shown(cx, msg!(2, "reaction-100109")), "a type nobody chose has no chip");
-    assert!(!shown(cx, msg!(1, "reaction-100102")), "a message without reactions has no chips");
-    assert!(dims(cx, chips[1]).0 > dims(cx, chips[0]).0 + 10., "the count is part of the chip: 1000 is wider than 3");
-    assert!(h.commands().is_empty(), "showing reactions asks for nothing");
+    assert!(
+        origin(cx, chips[0]).0 < origin(cx, chips[1]).0
+            && origin(cx, chips[1]).0 < origin(cx, chips[2]).0,
+        "server order"
+    );
+    assert!(
+        !shown(cx, msg!(2, "reaction-100109")),
+        "a type nobody chose has no chip"
+    );
+    assert!(
+        !shown(cx, msg!(1, "reaction-100102")),
+        "a message without reactions has no chips"
+    );
+    assert!(
+        dims(cx, chips[1]).0 > dims(cx, chips[0]).0 + 10.,
+        "the count is part of the chip: 1000 is wider than 3"
+    );
+    assert!(
+        h.commands().is_empty(),
+        "showing reactions asks for nothing"
+    );
 }
 
 #[gpui::test]
 fn a_type_outside_the_table_is_still_a_clickable_chip(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![reacted(2, &[(NOT_IN_TABLE, 1)], None)]);
-    assert!(bt_chat_core::reactions::emoji(ReactionCode(NOT_IN_TABLE)).is_none(), "drawn with the neutral glyph");
+    assert!(
+        bt_chat_core::reactions::emoji(ReactionCode(NOT_IN_TABLE)).is_none(),
+        "drawn with the neutral glyph"
+    );
     click(cx, msg!(2, "reaction-424242"));
     assert_eq!(h.commands(), [toggle_command(2, NOT_IN_TABLE)]);
 }
@@ -2936,28 +4454,68 @@ fn a_type_outside_the_table_is_still_a_clickable_chip(cx: &mut TestAppContext) {
 #[gpui::test]
 fn clicking_a_chip_sends_a_toggle_with_its_code_and_opens_no_menu(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    open_with(&h, cx, vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))]);
+    open_with(
+        &h,
+        cx,
+        vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))],
+    );
     click(cx, msg!(2, "reaction-100102"));
-    assert_eq!(h.commands(), [toggle_command(2, LIKE)], "another type replaces the own one");
+    assert_eq!(
+        h.commands(),
+        [toggle_command(2, LIKE)],
+        "another type replaces the own one"
+    );
     click(cx, msg!(2, "reaction-100104"));
-    assert_eq!(h.commands(), [toggle_command(2, FIRE)], "the own type goes through the same command: the core removes it");
+    assert_eq!(
+        h.commands(),
+        [toggle_command(2, FIRE)],
+        "the own type goes through the same command: the core removes it"
+    );
     assert!(!menu_is_open(&h, cx));
-    assert_eq!(reactions_in_store(&h, cx, 2), reactions_of(&[(LIKE, 3), (FIRE, 1)], Some(FIRE)), "the UI waits for the core's overlay");
+    assert_eq!(
+        reactions_in_store(&h, cx, 2),
+        reactions_of(&[(LIKE, 3), (FIRE, 1)], Some(FIRE)),
+        "the UI waits for the core's overlay"
+    );
 }
 
 #[gpui::test]
 fn the_own_type_follows_the_account_reaction_in_the_store(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    open_with(&h, cx, vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))]);
+    open_with(
+        &h,
+        cx,
+        vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))],
+    );
     // The chip and the menu button of a type are filled when `mine` is that type (see the header note).
     assert_eq!(reactions_in_store(&h, cx, 2).mine, Some(ReactionCode(FIRE)));
 
-    let moved = Reactions { version: Some(2), ..reactions_of(&[(LIKE, 4)], Some(LIKE)) };
-    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: moved }]);
+    let moved = Reactions {
+        version: Some(2),
+        ..reactions_of(&[(LIKE, 4)], Some(LIKE))
+    };
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(2),
+            reactions: moved,
+        }],
+    );
     assert_eq!(reactions_in_store(&h, cx, 2).mine, Some(ReactionCode(LIKE)));
 
-    let removed = Reactions { version: Some(3), ..reactions_of(&[(LIKE, 3)], None) };
-    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: removed }]);
+    let removed = Reactions {
+        version: Some(3),
+        ..reactions_of(&[(LIKE, 3)], None)
+    };
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(2),
+            reactions: removed,
+        }],
+    );
     assert_eq!(reactions_in_store(&h, cx, 2).mine, None);
     assert!(h.commands().is_empty());
 }
@@ -2968,9 +4526,20 @@ fn a_server_update_adds_chips_in_place(cx: &mut TestAppContext) {
     open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
     assert!(!shown(cx, msg!(2, "reaction-100104")));
 
-    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: reactions_of(&[(FIRE, 2)], None) }]);
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(2),
+            reactions: reactions_of(&[(FIRE, 2)], None),
+        }],
+    );
     assert!(shown(cx, msg!(2, "reaction-100104")));
-    assert_eq!(stamps(&h, cx), [1, 2], "no message was added or moved in the list");
+    assert_eq!(
+        stamps(&h, cx),
+        [1, 2],
+        "no message was added or moved in the list"
+    );
     assert!(h.commands().is_empty());
 }
 
@@ -2984,24 +4553,40 @@ fn deleted_pending_and_failed_messages_show_no_chips(cx: &mut TestAppContext) {
     waiting.reactions = busy.clone();
     let mut broken = failed("g", 4, "p2", "не вышло", "нет прав");
     broken.reactions = busy;
-    open_with(&h, cx, vec![reacted(1, &[(LIKE, 2)], None), deleted, waiting, broken]);
+    open_with(
+        &h,
+        cx,
+        vec![reacted(1, &[(LIKE, 2)], None), deleted, waiting, broken],
+    );
 
-    assert!(shown(cx, msg!(1, "reaction-100102")), "the control message shows its chip");
-    assert!(shown(cx, msg!(2)) && shown(cx, msg!(3)) && shown(cx, msg!(4)), "the other rows are on screen");
+    assert!(
+        shown(cx, msg!(1, "reaction-100102")),
+        "the control message shows its chip"
+    );
+    assert!(
+        shown(cx, msg!(2)) && shown(cx, msg!(3)) && shown(cx, msg!(4)),
+        "the other rows are on screen"
+    );
     assert!(!shown(cx, msg!(2, "reaction-100102")), "deleted");
     assert!(!shown(cx, msg!(3, "reaction-100102")), "pending");
     assert!(!shown(cx, msg!(4, "reaction-100102")), "failed");
 }
 
 #[gpui::test]
-fn the_menu_row_has_one_button_per_known_type_in_one_line_above_the_entries(cx: &mut TestAppContext) {
+fn the_menu_row_has_one_button_per_known_type_in_one_line_above_the_entries(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![own("g", 1, "мой")]);
     // The non-empty table is the 3.3 outcome these cases are written for.
     assert!(!KNOWN.is_empty());
     assert_eq!(KNOWN.len(), MENU_REACTIONS.len());
     for (known, selector) in KNOWN.iter().zip(MENU_REACTIONS) {
-        assert_eq!(selector, format!("menu-reaction-{}", known.code.0), "the selector table follows KNOWN");
+        assert_eq!(
+            selector,
+            format!("menu-reaction-{}", known.code.0),
+            "the selector table follows KNOWN"
+        );
     }
 
     right_click(cx, msg!(1));
@@ -3010,9 +4595,18 @@ fn the_menu_row_has_one_button_per_known_type_in_one_line_above_the_entries(cx: 
     let mut left = f32::MIN;
     for selector in MENU_REACTIONS {
         assert_eq!(y(cx, selector), row_y, "{selector} is on the first line");
-        assert!(origin(cx, selector).0 > left, "{selector} follows the previous button");
+        assert!(
+            origin(cx, selector).0 > left,
+            "{selector} follows the previous button"
+        );
         left = origin(cx, selector).0;
-        assert!(inside(bounds(cx, "message-menu").unwrap(), bounds(cx, selector).unwrap()), "{selector} fits the menu");
+        assert!(
+            inside(
+                bounds(cx, "message-menu").unwrap(),
+                bounds(cx, selector).unwrap()
+            ),
+            "{selector} fits the menu"
+        );
     }
     assert!(row_y < y(cx, "menu-reply"), "the row is above the entries");
     assert!(h.commands().is_empty());
@@ -3021,7 +4615,11 @@ fn the_menu_row_has_one_button_per_known_type_in_one_line_above_the_entries(cx: 
 #[gpui::test]
 fn choosing_a_type_in_the_menu_toggles_it_and_closes_the_menu(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    open_with(&h, cx, vec![text("g", 1), reacted(2, &[(LIKE, 1)], Some(LIKE))]);
+    open_with(
+        &h,
+        cx,
+        vec![text("g", 1), reacted(2, &[(LIKE, 1)], Some(LIKE))],
+    );
     right_click(cx, msg!(2));
     click(cx, "menu-reaction-100104");
     assert_eq!(h.commands(), [toggle_command(2, FIRE)]);
@@ -3036,13 +4634,27 @@ fn choosing_a_type_in_the_menu_toggles_it_and_closes_the_menu(cx: &mut TestAppCo
 
     right_click(cx, msg!(1));
     click(cx, "menu-reaction-100109");
-    assert_eq!(h.commands(), [toggle_command(1, HEART)], "an incoming message without reactions can be reacted to");
+    assert_eq!(
+        h.commands(),
+        [toggle_command(1, HEART)],
+        "an incoming message without reactions can be reacted to"
+    );
 }
 
 #[gpui::test]
 fn a_message_with_only_a_reaction_row_still_opens_the_menu(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
-    open_with(&h, cx, vec![message("g", 1, "bob", false, MessageBody::Unsupported("sticker".into()))]);
+    open_with(
+        &h,
+        cx,
+        vec![message(
+            "g",
+            1,
+            "bob",
+            false,
+            MessageBody::Unsupported("sticker".into()),
+        )],
+    );
     right_click(cx, msg!(1));
     assert!(menu_is_open(&h, cx));
     assert!(shown(cx, "menu-reactions"));
@@ -3054,12 +4666,23 @@ fn a_message_with_only_a_reaction_row_still_opens_the_menu(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn pending_and_failed_menus_have_no_reaction_row_and_a_deleted_message_has_no_menu(cx: &mut TestAppContext) {
+fn pending_and_failed_menus_have_no_reaction_row_and_a_deleted_message_has_no_menu(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     let deleted = message("g", 2, "alice", false, MessageBody::Deleted);
     let mut own_deleted = own("g", 6, "x");
     own_deleted.body = MessageBody::Deleted;
-    open_with(&h, cx, vec![pending("g", 1, "p1", "жду"), deleted, failed("g", 3, "p2", "не вышло", "нет прав"), own_deleted]);
+    open_with(
+        &h,
+        cx,
+        vec![
+            pending("g", 1, "p1", "жду"),
+            deleted,
+            failed("g", 3, "p2", "не вышло", "нет прав"),
+            own_deleted,
+        ],
+    );
 
     right_click(cx, msg!(1));
     assert!(menu_is_open(&h, cx));
@@ -3068,7 +4691,10 @@ fn pending_and_failed_menus_have_no_reaction_row_and_a_deleted_message_has_no_me
     right_click(cx, msg!(3));
     assert!(menu_is_open(&h, cx));
     cx.simulate_keystrokes("escape");
-    assert!(!shown(cx, "menu-reactions"), "neither a pending nor a failed message offers reactions");
+    assert!(
+        !shown(cx, "menu-reactions"),
+        "neither a pending nor a failed message offers reactions"
+    );
 
     right_click(cx, msg!(2));
     assert!(!menu_is_open(&h, cx), "a deleted message has no menu");
@@ -3083,7 +4709,9 @@ fn a_toggle_for_a_chat_that_is_not_open_or_while_blocked_is_ignored(cx: &mut Tes
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![reacted(2, &[(LIKE, 1)], None)]);
     let ask = |h: &Harness, cx: &mut VisualTestContext, chat: &str| {
-        h.desktop.update(cx, |d, cx| d.toggle_reaction(ChatId(chat.into()), ts(2), ReactionCode(LIKE), cx));
+        h.desktop.update(cx, |d, cx| {
+            d.toggle_reaction(ChatId(chat.into()), ts(2), ReactionCode(LIKE), cx)
+        });
     };
     ask(&h, cx, "p");
     assert!(h.commands().is_empty(), "the chat is not the open one");
@@ -3093,11 +4721,16 @@ fn a_toggle_for_a_chat_that_is_not_open_or_while_blocked_is_ignored(cx: &mut Tes
     h.feed(cx, [ClientEvent::SessionExpired]);
     assert!(blocked(&h, cx));
     ask(&h, cx, "g");
-    assert!(h.commands().is_empty(), "an expired session asks for nothing");
+    assert!(
+        h.commands().is_empty(),
+        "an expired session asks for nothing"
+    );
 }
 
 #[gpui::test]
-fn a_refused_reaction_rolls_back_the_overlay_and_shows_the_reason_for_a_while(cx: &mut TestAppContext) {
+fn a_refused_reaction_rolls_back_the_overlay_and_shows_the_reason_for_a_while(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     let confirmed = reactions_of(&[(LIKE, 3)], None);
     open_with(&h, cx, vec![text("g", 1), reacted(2, &[(LIKE, 3)], None)]);
@@ -3106,24 +4739,50 @@ fn a_refused_reaction_rolls_back_the_overlay_and_shows_the_reason_for_a_while(cx
     assert_eq!(h.commands(), [toggle_command(2, LIKE)]);
     // What the core answers: the overlay at once, then the rollback with the reason when the server refuses.
     let overlay = reactions_of(&[(LIKE, 4)], Some(LIKE));
-    h.feed(cx, [ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: overlay.clone() }]);
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(2),
+            reactions: overlay.clone(),
+        }],
+    );
     assert_eq!(reactions_in_store(&h, cx, 2), overlay);
     assert!(!shown(cx, "toast"));
 
     h.feed(
         cx,
         [
-            ClientEvent::ReactionsChanged { chat: chat_g(), timestamp: ts(2), reactions: confirmed.clone() },
-            ClientEvent::ActionFailed { chat: chat_g(), reason: "NO_PERMISSION".into() },
+            ClientEvent::ReactionsChanged {
+                chat: chat_g(),
+                timestamp: ts(2),
+                reactions: confirmed.clone(),
+            },
+            ClientEvent::ActionFailed {
+                chat: chat_g(),
+                reason: "NO_PERMISSION".into(),
+            },
         ],
     );
-    assert_eq!(reactions_in_store(&h, cx, 2), confirmed, "back to the confirmed state");
+    assert_eq!(
+        reactions_in_store(&h, cx, 2),
+        confirmed,
+        "back to the confirmed state"
+    );
     assert!(shown(cx, "toast"));
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), Some("NO_PERMISSION".into()));
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, _| d.toast_text().map(str::to_string)),
+        Some("NO_PERMISSION".into())
+    );
 
     cx.executor().advance_clock(Duration::from_secs(6));
     cx.run_until_parked();
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.toast_text().map(str::to_string)), None);
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, _| d.toast_text().map(str::to_string)),
+        None
+    );
 }
 
 /// Observation from 5.3: right-clicking a pending message right after closing another message's menu
@@ -3134,7 +4793,9 @@ fn a_refused_reaction_rolls_back_the_overlay_and_shows_the_reason_for_a_while(cx
 /// what every opening repaints, the height of the menu surface, and through what a click does; the
 /// pending message sits below the menu's reach.
 #[gpui::test]
-fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx: &mut TestAppContext) {
+fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     let mut messages = vec![own("g", 1, "мой")];
     messages.extend((2..=9).map(|i| text("g", i)));
@@ -3146,8 +4807,14 @@ fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx:
     cx.simulate_keystrokes("escape");
     right_click(cx, msg!(1));
     let full = menu_height(cx);
-    assert!(full > copy_only * 2., "the sent message's menu is the long one: {full} against {copy_only}");
-    assert!(y(cx, msg!(10)) > y(cx, "message-menu") + full, "the pending message is outside the open menu");
+    assert!(
+        full > copy_only * 2.,
+        "the sent message's menu is the long one: {full} against {copy_only}"
+    );
+    assert!(
+        y(cx, msg!(10)) > y(cx, "message-menu") + full,
+        "the pending message is outside the open menu"
+    );
 
     // Closed with Escape, then the pending message.
     cx.simulate_keystrokes("escape");
@@ -3169,11 +4836,21 @@ fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx:
     assert!(!menu_is_open(&h, cx));
     right_click(cx, msg!(10));
     assert!(menu_is_open(&h, cx));
-    assert_eq!(menu_height(cx), copy_only, "after a right click on the occluded message");
+    assert_eq!(
+        menu_height(cx),
+        copy_only,
+        "after a right click on the occluded message"
+    );
 
     click(cx, "menu-copy");
-    assert_eq!(cx.read_from_clipboard().and_then(|item| item.text()), Some("жду".into()));
-    assert!(h.commands().is_empty(), "no reply, edit, delete or reaction came out of it");
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()),
+        Some("жду".into())
+    );
+    assert!(
+        h.commands().is_empty(),
+        "no reply, edit, delete or reaction came out of it"
+    );
     assert_eq!(composer_reply(&h, cx), None);
     assert_eq!(h.desktop.read_with(cx, |d, _| d.composer_editing()), None);
 }
@@ -3181,15 +4858,29 @@ fn a_menu_opened_after_another_one_closed_offers_what_its_own_message_offers(cx:
 // ---- chat info panel (CM 4.1) ----
 
 fn member(guid: &str, name: &str, role: MemberRole, me: bool) -> Member {
-    Member { user: UserId(guid.into()), name: Some(name.into()), avatar: None, role, me }
+    Member {
+        user: UserId(guid.into()),
+        name: Some(name.into()),
+        avatar: None,
+        role,
+        me,
+    }
 }
 
 fn members_of(chat_id: &str, users: Vec<Member>, partial: bool) -> ClientEvent {
-    ClientEvent::Members(ChatMembers { chat: ChatId(chat_id.into()), users, partial })
+    ClientEvent::Members(ChatMembers {
+        chat: ChatId(chat_id.into()),
+        users,
+        partial,
+    })
 }
 
 fn members_failed(chat_id: &str, reason: &str, offline: bool) -> ClientEvent {
-    ClientEvent::MembersFailed { chat: ChatId(chat_id.into()), reason: reason.into(), offline }
+    ClientEvent::MembersFailed {
+        chat: ChatId(chat_id.into()),
+        reason: reason.into(),
+        offline,
+    }
 }
 
 /// Brings the client online the way the core does: a state is announced only when it changes.
@@ -3204,7 +4895,11 @@ fn open_info(h: &Harness, cx: &mut VisualTestContext) {
     go_online(h, cx);
     open_with(h, cx, vec![text("g", 1)]);
     click(cx, "chat-header");
-    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "opening asks for the members, nothing else");
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "opening asks for the members, nothing else"
+    );
 }
 
 fn info_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
@@ -3216,7 +4911,10 @@ fn the_panel_lists_the_users_of_a_group_and_marks_admins_only(cx: &mut TestAppCo
     let (h, cx) = harness(cx);
     open_info(&h, cx);
     assert!(shown(cx, "info-panel"));
-    assert!(shown(cx, "info-loading"), "a loading state, not an empty list");
+    assert!(
+        shown(cx, "info-loading"),
+        "a loading state, not an empty list"
+    );
     assert!(!shown(cx, "info-count"));
     assert!(!shown(cx, "member-a"));
 
@@ -3241,7 +4939,10 @@ fn the_panel_lists_the_users_of_a_group_and_marks_admins_only(cx: &mut TestAppCo
     assert!(shown(cx, "member-a-admin"), "the admin role is marked");
     assert!(!shown(cx, "member-b-admin"), "a plain member is not");
     assert!(!shown(cx, "member-m-admin"));
-    assert!(y(cx, "member-b") < y(cx, "member-a"), "the order of the list is the server's, admins are not moved up");
+    assert!(
+        y(cx, "member-b") < y(cx, "member-a"),
+        "the order of the list is the server's, admins are not moved up"
+    );
     assert!(h.commands().is_empty(), "viewing sends no other request");
 }
 
@@ -3258,11 +4959,24 @@ fn a_failed_load_shows_the_reason_and_retries(cx: &mut TestAppContext) {
 
     click(cx, "info-retry");
     assert_eq!(h.commands(), [Command::LoadMembers(chat_g())]);
-    let state = |h: &Harness, cx: &mut VisualTestContext| h.store.read_with(cx, |s, _| s.members_state(&chat_g()).cloned());
+    let state = |h: &Harness, cx: &mut VisualTestContext| {
+        h.store
+            .read_with(cx, |s, _| s.members_state(&chat_g()).cloned())
+    };
     assert_eq!(state(&h, cx), Some(crate::store::MembersState::Loading));
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
     assert!(shown(cx, "member-a"));
-    assert!(info_open(&h, cx), "the chat itself keeps working: the panel stays and the timeline is there");
+    assert!(
+        info_open(&h, cx),
+        "the chat itself keeps working: the panel stays and the timeline is there"
+    );
     assert!(shown(cx, msg!(1)));
 }
 
@@ -3275,7 +4989,14 @@ fn a_refused_list_says_so_and_is_not_an_empty_list(cx: &mut TestAppContext) {
     h.commands();
     click(cx, "chat-header");
     assert_eq!(h.commands(), [Command::LoadMembers(ChatId("ch".into()))]);
-    h.feed(cx, [members_failed("ch", "список участников недоступен для этой учётной записи", false)]);
+    h.feed(
+        cx,
+        [members_failed(
+            "ch",
+            "список участников недоступен для этой учётной записи",
+            false,
+        )],
+    );
     assert!(shown(cx, "info-error-reason"));
     assert!(!shown(cx, "info-empty"));
     assert!(!shown(cx, "info-count"));
@@ -3293,16 +5014,28 @@ fn offline_the_panel_says_the_list_is_unavailable(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn a_loaded_list_gives_way_to_the_offline_notice_when_the_connection_drops(cx: &mut TestAppContext) {
+fn a_loaded_list_gives_way_to_the_offline_notice_when_the_connection_drops(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     open_info(&h, cx);
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
     assert!(shown(cx, "info-count"));
     assert!(shown(cx, "member-a"));
     assert!(!shown(cx, "info-offline"));
 
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
-    assert!(shown(cx, "info-offline"), "an offline notice instead of the stale list");
+    assert!(
+        shown(cx, "info-offline"),
+        "an offline notice instead of the stale list"
+    );
     assert!(!shown(cx, "info-error"));
     h.store.read_with(cx, |s, _| {
         let body = crate::info_panel::body(s.members_state(&chat_g()), s.connection());
@@ -3316,8 +5049,18 @@ fn a_list_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut TestAp
     let (h, cx) = harness(cx);
     open_info(&h, cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
-    assert!(shown(cx, "info-offline"), "the late answer does not repaint the list");
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
+    assert!(
+        shown(cx, "info-offline"),
+        "the late answer does not repaint the list"
+    );
     assert!(!shown(cx, "info-count"));
     assert!(!shown(cx, "member-a"));
 }
@@ -3326,43 +5069,99 @@ fn a_list_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut TestAp
 fn coming_back_online_asks_for_the_list_again(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_info(&h, cx);
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
     assert!(h.commands().is_empty());
 
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Connecting)]);
-    assert!(h.commands().is_empty(), "nothing is asked while still connecting");
+    assert!(
+        h.commands().is_empty(),
+        "nothing is asked while still connecting"
+    );
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
-    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "the list from before the drop is not shown as current");
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "the list from before the drop is not shown as current"
+    );
     assert!(shown(cx, "info-loading"));
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
     assert!(shown(cx, "info-count"));
 }
 
 #[test]
 fn the_panel_body_follows_the_state_and_the_connection() {
-    use crate::info_panel::{body, Body};
+    use crate::info_panel::{Body, body};
     use crate::store::MembersState;
     let users = vec![member("a", "А", MemberRole::Member, false)];
-    let ready = MembersState::Ready(ChatMembers { chat: chat_g(), users, partial: true });
-    assert_eq!(body(Some(&ready), ConnectionState::Online), Body::Ready { shown: 1, partial: true });
+    let ready = MembersState::Ready(ChatMembers {
+        chat: chat_g(),
+        users,
+        partial: true,
+    });
+    assert_eq!(
+        body(Some(&ready), ConnectionState::Online),
+        Body::Ready {
+            shown: 1,
+            partial: true
+        }
+    );
     assert_eq!(body(Some(&ready), ConnectionState::Offline), Body::Offline);
-    assert_eq!(body(Some(&ready), ConnectionState::Connecting), Body::Offline);
-    assert_eq!(body(Some(&MembersState::Loading), ConnectionState::Offline), Body::Loading);
-    let failed = MembersState::Failed { reason: "r".into(), offline: false };
-    assert_eq!(body(Some(&failed), ConnectionState::Offline), Body::Failed("r".into()));
+    assert_eq!(
+        body(Some(&ready), ConnectionState::Connecting),
+        Body::Offline
+    );
+    assert_eq!(
+        body(Some(&MembersState::Loading), ConnectionState::Offline),
+        Body::Loading
+    );
+    let failed = MembersState::Failed {
+        reason: "r".into(),
+        offline: false,
+    };
+    assert_eq!(
+        body(Some(&failed), ConnectionState::Offline),
+        Body::Failed("r".into())
+    );
 }
 
 #[gpui::test]
 fn a_bounded_list_says_how_many_are_shown_and_that_more_may_exist(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_info(&h, cx);
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], true)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            true,
+        )],
+    );
     assert!(shown(cx, "info-partial"));
-    assert!(!shown(cx, "info-count"), "a bounded list is not presented as the full one");
+    assert!(
+        !shown(cx, "info-count"),
+        "a bounded list is not presented as the full one"
+    );
     assert!(shown(cx, "member-a"));
 
-    assert_eq!(crate::info_panel::count_text(1000, true), "Показано участников: 1000. Список может быть неполным");
+    assert_eq!(
+        crate::info_panel::count_text(1000, true),
+        "Показано участников: 1000. Список может быть неполным"
+    );
     assert_eq!(crate::info_panel::count_text(58, false), "Участников: 58");
 }
 
@@ -3376,10 +5175,24 @@ fn a_private_chat_shows_its_partner_without_group_parts(cx: &mut TestAppContext)
     h.commands();
     click(cx, "chat-header");
     let private = ChatId("p".into());
-    assert_eq!(h.commands(), [Command::LoadMembers(private)], "the core answers from the chat row, the panel sends nothing else");
-    h.feed(cx, [members_of("p", vec![member("anna", "Анна", MemberRole::Member, false)], false)]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(private)],
+        "the core answers from the chat row, the panel sends nothing else"
+    );
+    h.feed(
+        cx,
+        [members_of(
+            "p",
+            vec![member("anna", "Анна", MemberRole::Member, false)],
+            false,
+        )],
+    );
     assert!(shown(cx, "member-anna"));
-    assert!(!shown(cx, "member-anna-admin"), "no role information, no marker");
+    assert!(
+        !shown(cx, "member-anna-admin"),
+        "no role information, no marker"
+    );
     assert!(!shown(cx, "info-partial"));
     assert!(!shown(cx, "info-empty"));
 }
@@ -3395,7 +5208,10 @@ fn a_private_chat_without_a_named_partner_lists_nobody(cx: &mut TestAppContext) 
     click(cx, "chat-header");
     h.feed(cx, [members_of("p", Vec::new(), false)]);
     assert!(shown(cx, "info-empty"));
-    assert!(!shown(cx, "info-members"), "no participant rows, none invented");
+    assert!(
+        !shown(cx, "info-members"),
+        "no participant rows, none invented"
+    );
 }
 
 #[gpui::test]
@@ -3403,14 +5219,25 @@ fn the_panel_closes_by_header_button_escape_and_chat_switch(cx: &mut TestAppCont
     let (h, cx) = harness(cx);
     open_info(&h, cx);
     assert!(info_open(&h, cx));
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Member, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Member, false)],
+            false,
+        )],
+    );
 
     click(cx, "chat-header");
     assert!(!info_open(&h, cx), "the header toggles");
     assert!(h.commands().is_empty(), "closing sends nothing");
 
     click(cx, "chat-header");
-    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())], "a re-open asks again");
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "a re-open asks again"
+    );
     click(cx, "info-close");
     assert!(!info_open(&h, cx), "the close button");
 
@@ -3424,7 +5251,12 @@ fn the_panel_closes_by_header_button_escape_and_chat_switch(cx: &mut TestAppCont
     assert!(info_open(&h, cx));
     click(cx, row!("p"));
     assert!(!info_open(&h, cx), "another chat closes the panel");
-    assert!(h.commands().iter().all(|c| !matches!(c, Command::LoadMembers(_))), "and asks for nothing");
+    assert!(
+        h.commands()
+            .iter()
+            .all(|c| !matches!(c, Command::LoadMembers(_))),
+        "and asks for nothing"
+    );
 }
 
 #[gpui::test]
@@ -3436,12 +5268,22 @@ fn closing_the_panel_keeps_the_timeline_scroll(cx: &mut TestAppContext) {
     assert!(before.item_ix < h.list(cx).item_count(), "scrolled up");
 
     click(cx, "chat-header");
-    h.feed(cx, [members_of("g", vec![member("a", "Алиса", MemberRole::Admin, false)], false)]);
+    h.feed(
+        cx,
+        [members_of(
+            "g",
+            vec![member("a", "Алиса", MemberRole::Admin, false)],
+            false,
+        )],
+    );
     assert!(shown(cx, "info-panel"));
     click(cx, "info-close");
     cx.run_until_parked();
     let after = h.list(cx).logical_scroll_top();
-    assert_eq!((after.item_ix, after.offset_in_item), (before.item_ix, before.offset_in_item));
+    assert_eq!(
+        (after.item_ix, after.offset_in_item),
+        (before.item_ix, before.offset_in_item)
+    );
 }
 
 #[gpui::test]
@@ -3457,7 +5299,12 @@ fn a_covered_chat_does_not_open_the_panel(cx: &mut TestAppContext) {
 // ---- read-only profile (CM 4.2) ----
 
 fn profile_of(name: Option<&str>, status: Option<&str>) -> Profile {
-    Profile { user: UserId("me".into()), name: name.map(Into::into), avatar: None, status_text: status.map(Into::into) }
+    Profile {
+        user: UserId("me".into()),
+        name: name.map(Into::into),
+        avatar: None,
+        status_text: status.map(Into::into),
+    }
 }
 
 fn profile_state(h: &Harness, cx: &mut VisualTestContext) -> Option<crate::store::ProfileState> {
@@ -3473,7 +5320,11 @@ fn open_profile(h: &Harness, cx: &mut VisualTestContext) {
     go_online(h, cx);
     click(cx, "menu-button");
     click(cx, "menu-profile");
-    assert_eq!(h.commands(), [Command::LoadProfile], "opening asks for the profile, nothing else");
+    assert_eq!(
+        h.commands(),
+        [Command::LoadProfile],
+        "opening asks for the profile, nothing else"
+    );
 }
 
 #[gpui::test]
@@ -3486,16 +5337,35 @@ fn the_account_menu_opens_the_profile_with_name_avatar_and_status(cx: &mut TestA
     click(cx, "menu-profile");
     assert_eq!(h.commands(), [Command::LoadProfile]);
     assert!(profile_open(&h, cx));
-    assert_eq!(h.desktop.read_with(cx, |d, _| d.menu), AccountMenu::Closed, "the menu closes");
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.menu),
+        AccountMenu::Closed,
+        "the menu closes"
+    );
     assert!(shown(cx, "profile-view"));
-    assert!(shown(cx, "profile-loading"), "a loading state, not an empty profile");
+    assert!(
+        shown(cx, "profile-loading"),
+        "a loading state, not an empty profile"
+    );
     assert!(!shown(cx, "profile-name"));
 
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван Петров"), Some("в отпуске до пятницы")))]);
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(
+            Some("Иван Петров"),
+            Some("в отпуске до пятницы"),
+        ))],
+    );
     assert!(shown(cx, "profile-name"));
     assert!(shown(cx, "profile-avatar"));
-    assert!(shown(cx, "profile-avatar-initials"), "initials while there is no picture");
-    assert!(shown(cx, "profile-status"), "the status text is shown when the server gave one");
+    assert!(
+        shown(cx, "profile-avatar-initials"),
+        "initials while there is no picture"
+    );
+    assert!(
+        shown(cx, "profile-status"),
+        "the status text is shown when the server gave one"
+    );
     assert!(!shown(cx, "profile-error"));
     assert!(!shown(cx, "profile-offline"));
     assert!(h.commands().is_empty(), "viewing sends no other request");
@@ -3508,9 +5378,18 @@ fn the_profile_avatar_is_the_downloaded_picture(cx: &mut TestAppContext) {
     let mut profile = profile_of(Some("Иван"), None);
     profile.avatar = Some(media("me-av", MediaKind::Avatar));
     h.feed(cx, [ClientEvent::Profile(profile)]);
-    assert_eq!(h.commands(), [Command::FetchMedia(media("me-av", MediaKind::Avatar))]);
+    assert_eq!(
+        h.commands(),
+        [Command::FetchMedia(media("me-av", MediaKind::Avatar))]
+    );
     assert!(shown(cx, "profile-avatar-initials"));
-    h.feed(cx, [ClientEvent::MediaReady { media: media("me-av", MediaKind::Avatar), path: PathBuf::from("/tmp/me-av.png") }]);
+    h.feed(
+        cx,
+        [ClientEvent::MediaReady {
+            media: media("me-av", MediaKind::Avatar),
+            path: PathBuf::from("/tmp/me-av.png"),
+        }],
+    );
     assert!(shown(cx, "profile-avatar-image"));
 }
 
@@ -3518,7 +5397,10 @@ fn the_profile_avatar_is_the_downloaded_picture(cx: &mut TestAppContext) {
 fn no_status_information_shows_no_status_line(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван Петров"), None))]);
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(Some("Иван Петров"), None))],
+    );
     assert!(shown(cx, "profile-name"));
     assert!(!shown(cx, "profile-status"), "an empty status is no line");
 }
@@ -3527,18 +5409,30 @@ fn no_status_information_shows_no_status_line(cx: &mut TestAppContext) {
 fn a_failed_profile_load_says_so_and_retries(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::ProfileFailed { reason: "сервер ответил ошибкой".into(), offline: false }]);
+    h.feed(
+        cx,
+        [ClientEvent::ProfileFailed {
+            reason: "сервер ответил ошибкой".into(),
+            offline: false,
+        }],
+    );
     assert!(shown(cx, "profile-error"));
     assert!(shown(cx, "profile-error-reason"));
     assert!(shown(cx, "profile-retry"));
     assert!(!shown(cx, "profile-offline"));
-    assert!(!shown(cx, "profile-name"), "no name, avatar or status from anywhere else");
+    assert!(
+        !shown(cx, "profile-name"),
+        "no name, avatar or status from anywhere else"
+    );
     assert!(!shown(cx, "profile-avatar"));
     assert!(!shown(cx, "profile-status"));
 
     click(cx, "profile-retry");
     assert_eq!(h.commands(), [Command::LoadProfile]);
-    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading));
+    assert_eq!(
+        profile_state(&h, cx),
+        Some(crate::store::ProfileState::Loading)
+    );
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), None))]);
     assert!(shown(cx, "profile-name"));
     assert!(profile_open(&h, cx));
@@ -3548,34 +5442,60 @@ fn a_failed_profile_load_says_so_and_retries(cx: &mut TestAppContext) {
 fn offline_the_profile_says_it_could_not_be_loaded(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true }]);
+    h.feed(
+        cx,
+        [ClientEvent::ProfileFailed {
+            reason: "Нет соединения".into(),
+            offline: true,
+        }],
+    );
     assert!(shown(cx, "profile-offline"));
-    assert!(!shown(cx, "profile-error"), "an offline notice, not an error");
+    assert!(
+        !shown(cx, "profile-error"),
+        "an offline notice, not an error"
+    );
     assert!(!shown(cx, "profile-name"));
     assert!(!shown(cx, "profile-avatar"));
     assert!(!shown(cx, "profile-status"));
 }
 
 #[gpui::test]
-fn a_loaded_profile_gives_way_to_the_offline_notice_when_the_connection_drops(cx: &mut TestAppContext) {
+fn a_loaded_profile_gives_way_to_the_offline_notice_when_the_connection_drops(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(
+            Some("Иван"),
+            Some("на связи"),
+        ))],
+    );
     assert!(shown(cx, "profile-name"));
     assert!(!shown(cx, "profile-offline"));
 
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
-    assert!(shown(cx, "profile-offline"), "an offline notice instead of the stale profile");
+    assert!(
+        shown(cx, "profile-offline"),
+        "an offline notice instead of the stale profile"
+    );
     assert!(!shown(cx, "profile-error"));
     h.store.read_with(cx, |s, _| {
-        assert_eq!(crate::profile::body(s.profile_state(), s.connection()), crate::profile::Body::Offline);
+        assert_eq!(
+            crate::profile::body(s.profile_state(), s.connection()),
+            crate::profile::Body::Offline
+        );
     });
     assert!(h.commands().is_empty(), "going offline sends nothing");
 
     // Back online: the profile is asked for again, the old one is not shown as current.
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
     assert_eq!(h.commands(), [Command::LoadProfile]);
-    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading));
+    assert_eq!(
+        profile_state(&h, cx),
+        Some(crate::store::ProfileState::Loading)
+    );
     assert!(shown(cx, "profile-loading"));
 }
 
@@ -3584,8 +5504,17 @@ fn a_profile_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut Tes
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
-    assert!(shown(cx, "profile-offline"), "the late answer does not repaint the profile");
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(
+            Some("Иван"),
+            Some("на связи"),
+        ))],
+    );
+    assert!(
+        shown(cx, "profile-offline"),
+        "the late answer does not repaint the profile"
+    );
     assert!(!shown(cx, "profile-name"));
     assert!(!shown(cx, "profile-status"));
 }
@@ -3594,47 +5523,107 @@ fn a_profile_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut Tes
 fn every_open_asks_again_and_shows_nothing_from_before(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(
+            Some("Иван"),
+            Some("на связи"),
+        ))],
+    );
     click(cx, "profile-close");
     assert!(!profile_open(&h, cx));
     assert!(h.commands().is_empty(), "closing sends nothing");
 
     open_profile(&h, cx);
-    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Loading), "the old profile is not current");
+    assert_eq!(
+        profile_state(&h, cx),
+        Some(crate::store::ProfileState::Loading),
+        "the old profile is not current"
+    );
     h.store.read_with(cx, |s, _| {
-        assert_eq!(crate::profile::body(s.profile_state(), s.connection()), crate::profile::Body::Loading);
+        assert_eq!(
+            crate::profile::body(s.profile_state(), s.connection()),
+            crate::profile::Body::Loading
+        );
     });
 }
 
 #[test]
 fn the_profile_body_follows_the_state() {
-    use crate::profile::{body, Body};
+    use crate::profile::{Body, body};
     use crate::store::ProfileState;
     let online = ConnectionState::Online;
     assert_eq!(body(None, online), Body::Loading);
     assert_eq!(body(Some(&ProfileState::Loading), online), Body::Loading);
-    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: true }), online), Body::Offline);
-    assert_eq!(body(Some(&ProfileState::Failed { reason: "r".into(), offline: false }), online), Body::Failed("r".into()));
     assert_eq!(
-        body(Some(&ProfileState::Ready(profile_of(None, None))), online),
-        Body::Ready { name: "Без имени".into(), status: None }
+        body(
+            Some(&ProfileState::Failed {
+                reason: "r".into(),
+                offline: true
+            }),
+            online
+        ),
+        Body::Offline
     );
     assert_eq!(
-        body(Some(&ProfileState::Ready(profile_of(Some("Иван"), Some("занят")))), online),
-        Body::Ready { name: "Иван".into(), status: Some("занят".into()) }
+        body(
+            Some(&ProfileState::Failed {
+                reason: "r".into(),
+                offline: false
+            }),
+            online
+        ),
+        Body::Failed("r".into())
+    );
+    assert_eq!(
+        body(Some(&ProfileState::Ready(profile_of(None, None))), online),
+        Body::Ready {
+            name: "Без имени".into(),
+            status: None
+        }
+    );
+    assert_eq!(
+        body(
+            Some(&ProfileState::Ready(profile_of(
+                Some("Иван"),
+                Some("занят")
+            ))),
+            online
+        ),
+        Body::Ready {
+            name: "Иван".into(),
+            status: Some("занят".into())
+        }
     );
     let ready = ProfileState::Ready(profile_of(Some("Иван"), None));
     assert_eq!(body(Some(&ready), ConnectionState::Offline), Body::Offline);
-    assert_eq!(body(Some(&ready), ConnectionState::Connecting), Body::Offline);
-    assert_eq!(body(Some(&ProfileState::Loading), ConnectionState::Offline), Body::Loading);
+    assert_eq!(
+        body(Some(&ready), ConnectionState::Connecting),
+        Body::Offline
+    );
+    assert_eq!(
+        body(Some(&ProfileState::Loading), ConnectionState::Offline),
+        Body::Loading
+    );
 }
 
 #[gpui::test]
 fn the_profile_has_no_input_and_changes_nothing(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_profile(&h, cx);
-    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), Some("на связи")))]);
-    for selector in ["profile-edit", "profile-name-input", "profile-status-input", "profile-avatar-edit"] {
+    h.feed(
+        cx,
+        [ClientEvent::Profile(profile_of(
+            Some("Иван"),
+            Some("на связи"),
+        ))],
+    );
+    for selector in [
+        "profile-edit",
+        "profile-name-input",
+        "profile-status-input",
+        "profile-avatar-edit",
+    ] {
         assert!(!shown(cx, selector), "{selector}");
     }
     // Clicking the fields and typing reaches no input: nothing changes and nothing is sent.
@@ -3642,8 +5631,18 @@ fn the_profile_has_no_input_and_changes_nothing(cx: &mut TestAppContext) {
     click(cx, "profile-status");
     cx.simulate_input("zzz");
     assert_eq!(composer_text(&h, cx), "");
-    assert_eq!(h.desktop.read_with(cx, |d, cx| d.search.read(cx).content.to_string()), "");
-    assert_eq!(profile_state(&h, cx), Some(crate::store::ProfileState::Ready(profile_of(Some("Иван"), Some("на связи")))));
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, cx| d.search.read(cx).content.to_string()),
+        ""
+    );
+    assert_eq!(
+        profile_state(&h, cx),
+        Some(crate::store::ProfileState::Ready(profile_of(
+            Some("Иван"),
+            Some("на связи")
+        )))
+    );
     cx.run_until_parked();
     assert!(h.commands().is_empty());
 }
@@ -3653,9 +5652,15 @@ fn the_profile_blocks_the_chat_and_escape_closes_it(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
     open_profile(&h, cx);
-    assert!(h.desktop.read_with(cx, |d, cx| d.blocked(cx)), "blocks the chat like other overlays");
+    assert!(
+        h.desktop.read_with(cx, |d, cx| d.blocked(cx)),
+        "blocks the chat like other overlays"
+    );
     h.desktop.update(cx, |d, cx| d.toggle_info(cx));
-    assert!(!info_open(&h, cx), "the info panel does not open under the profile");
+    assert!(
+        !info_open(&h, cx),
+        "the info panel does not open under the profile"
+    );
     assert!(h.commands().is_empty());
 
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Иван"), None))]);
@@ -3688,12 +5693,22 @@ fn person_chat(id: &str, title: &str, partner: &str) -> ChatSummary {
 
 /// The group "g", a private chat with Анна (`anna`) and the self chat (partner `me`).
 fn people_chats() -> Vec<ChatSummary> {
-    vec![chat("g", ChatKind::Group, "Команда", Some(1)), person_chat("p", "Анна", "anna"), person_chat("s", "Избранное", "me")]
+    vec![
+        chat("g", ChatKind::Group, "Команда", Some(1)),
+        person_chat("p", "Анна", "anna"),
+        person_chat("s", "Избранное", "me"),
+    ]
 }
 
 /// Online, the group "g" open with one message; the drained commands are the usual opening ones.
 fn open_people(h: &Harness, cx: &mut VisualTestContext) {
-    h.feed(cx, [ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Online)]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(people_chats()),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+    );
     click(cx, row!("g"));
     h.feed(cx, [history("g", vec![text("g", 1)], true)]);
     h.commands();
@@ -3728,11 +5743,16 @@ fn open_dialog(h: &Harness, cx: &mut VisualTestContext) {
     click(cx, "new-chat-button");
     cx.run_until_parked();
     assert!(dialog_open(h, cx));
-    assert_eq!(h.commands(), [Command::LoadProfile], "opening reads the profile, creates nothing");
+    assert_eq!(
+        h.commands(),
+        [Command::LoadProfile],
+        "opening reads the profile, creates nothing"
+    );
 }
 
 fn chosen_person(h: &Harness, cx: &mut VisualTestContext) -> Option<String> {
-    h.desktop.read_with(cx, |d, _| d.new_chat_choice().map(|c| c.user.0.clone()))
+    h.desktop
+        .read_with(cx, |d, _| d.new_chat_choice().map(|c| c.user.0.clone()))
 }
 
 fn creation(h: &Harness, cx: &mut VisualTestContext) -> Option<crate::store::CreationState> {
@@ -3744,11 +5764,16 @@ fn selected_chat(h: &Harness, cx: &mut VisualTestContext) -> Option<ChatId> {
 }
 
 fn create_alice() -> Command {
-    Command::CreatePrivateChat { user: UserId("alice".into()) }
+    Command::CreatePrivateChat {
+        user: UserId("alice".into()),
+    }
 }
 
 fn creations(commands: &[Command]) -> usize {
-    commands.iter().filter(|c| matches!(c, Command::CreatePrivateChat { .. })).count()
+    commands
+        .iter()
+        .filter(|c| matches!(c, Command::CreatePrivateChat { .. }))
+        .count()
 }
 
 /// The dialog with Алиса (no chat with her yet) chosen from the open panel, ready to confirm.
@@ -3764,13 +5789,28 @@ fn choose_alice(h: &Harness, cx: &mut VisualTestContext) {
 fn new_chat_is_disabled_offline_and_opens_the_dialog_online(cx: &mut TestAppContext) {
     let (h, cx) = harness_with(
         cx,
-        vec![ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Offline)],
+        vec![
+            ClientEvent::ChatsReplaced(people_chats()),
+            ClientEvent::Connection(ConnectionState::Offline),
+        ],
         |_, _| {},
     );
-    assert!(shown(cx, "new-chat-button"), "the action is beside the search field");
-    let (search, button) = (bounds(cx, "search").unwrap(), bounds(cx, "new-chat-button").unwrap());
-    assert!(search.right() <= button.left(), "to the right of the search field");
-    assert!(button.center().y > search.top() && button.center().y < search.bottom(), "on its line");
+    assert!(
+        shown(cx, "new-chat-button"),
+        "the action is beside the search field"
+    );
+    let (search, button) = (
+        bounds(cx, "search").unwrap(),
+        bounds(cx, "new-chat-button").unwrap(),
+    );
+    assert!(
+        search.right() <= button.left(),
+        "to the right of the search field"
+    );
+    assert!(
+        button.center().y > search.top() && button.center().y < search.bottom(),
+        "on its line"
+    );
     click(cx, "new-chat-button");
     cx.run_until_parked();
     assert!(!dialog_open(&h, cx), "offline the action does nothing");
@@ -3791,15 +5831,28 @@ fn the_dialog_offers_known_people_without_the_current_user_or_duplicates(cx: &mu
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);
     let names = |h: &Harness, cx: &mut VisualTestContext, panel: Option<ChatId>| -> Vec<String> {
-        h.store.read_with(cx, |s, _| candidates(s, panel.as_ref()).into_iter().map(|c| c.name).collect())
+        h.store.read_with(cx, |s, _| {
+            candidates(s, panel.as_ref())
+                .into_iter()
+                .map(|c| c.name)
+                .collect()
+        })
     };
     assert_eq!(
         names(&h, cx, Some(chat_g())),
         ["Алиса", "Анна", "Борис"],
         "private partners and the open panel's members, once each; not the self chat, not the `me` member"
     );
-    assert_eq!(names(&h, cx, None), ["Анна"], "without the panel only the partners of private chats are known");
-    assert_eq!(names(&h, cx, Some(ChatId("p".into()))), ["Анна"], "a panel without a loaded list adds nobody");
+    assert_eq!(
+        names(&h, cx, None),
+        ["Анна"],
+        "without the panel only the partners of private chats are known"
+    );
+    assert_eq!(
+        names(&h, cx, Some(ChatId("p".into()))),
+        ["Анна"],
+        "a panel without a loaded list adds nobody"
+    );
 
     open_dialog(&h, cx);
     for row in ["candidate-alice", "candidate-boris", "candidate-anna"] {
@@ -3809,7 +5862,8 @@ fn the_dialog_offers_known_people_without_the_current_user_or_duplicates(cx: &mu
 
     // The loaded profile names the current user even when no member list does.
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
-    h.store.read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
+    h.store
+        .read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
 }
 
 #[gpui::test]
@@ -3820,8 +5874,12 @@ fn a_closed_panel_adds_no_candidates(cx: &mut TestAppContext) {
     click(cx, "info-close");
     open_dialog(&h, cx);
     assert!(shown(cx, "candidate-anna"));
-    assert!(!shown(cx, "candidate-alice"), "members of a chat whose panel is closed are not offered");
-    h.store.read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
+    assert!(
+        !shown(cx, "candidate-alice"),
+        "members of a chat whose panel is closed are not offered"
+    );
+    h.store
+        .read_with(cx, |s, _| assert_eq!(candidates(s, None).len(), 1));
 }
 
 #[gpui::test]
@@ -3831,17 +5889,31 @@ fn typing_narrows_the_people_and_enter_creates_nothing(cx: &mut TestAppContext) 
     open_people_panel(&h, cx);
     open_dialog(&h, cx);
     cx.simulate_input("бор");
-    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("бор"));
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, cx| d.new_chat_query(cx))
+            .as_deref(),
+        Some("бор")
+    );
     h.store.read_with(cx, |s, _| {
         let all = candidates(s, Some(&chat_g()));
-        assert_eq!(matching(&all, " БОР ").iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Борис"]);
+        assert_eq!(
+            matching(&all, " БОР ")
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Борис"]
+        );
         assert_eq!(matching(&all, "").len(), 3);
     });
     assert_eq!(composer_text(&h, cx), "", "the text went to the dialog");
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(h.commands().is_empty(), "Enter in the search field sends nothing");
+    assert!(
+        h.commands().is_empty(),
+        "Enter in the search field sends nothing"
+    );
     assert!(dialog_open(&h, cx));
     assert_eq!(creation(&h, cx), None);
 
@@ -3854,19 +5926,28 @@ fn typing_narrows_the_people_and_enter_creates_nothing(cx: &mut TestAppContext) 
     assert_eq!(creation(&h, cx), None);
 
     cx.simulate_input("яяя");
-    assert!(shown(cx, "new-chat-nomatch"), "a query nobody matches says so");
+    assert!(
+        shown(cx, "new-chat-nomatch"),
+        "a query nobody matches says so"
+    );
 }
 
 #[gpui::test]
 fn an_account_with_nobody_known_says_so(cx: &mut TestAppContext) {
     let (h, cx) = harness_with(
         cx,
-        vec![ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]), ClientEvent::Connection(ConnectionState::Online)],
+        vec![
+            ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
         |_, _| {},
     );
     open_dialog(&h, cx);
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
-    assert!(shown(cx, "new-chat-empty"), "the identity is known now, and nobody else is");
+    assert!(
+        shown(cx, "new-chat-empty"),
+        "the identity is known now, and nobody else is"
+    );
     assert!(!shown(cx, "new-chat-participant"));
 }
 
@@ -3874,48 +5955,77 @@ fn an_account_with_nobody_known_says_so(cx: &mut TestAppContext) {
 fn the_self_chat_is_not_offered_before_the_identity_is_known(cx: &mut TestAppContext) {
     let (h, cx) = harness_with(
         cx,
-        vec![ClientEvent::ChatsReplaced(people_chats()), ClientEvent::Connection(ConnectionState::Online)],
+        vec![
+            ClientEvent::ChatsReplaced(people_chats()),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
         |_, _| {},
     );
     // Cold start: no profile and no member list, so nobody can tell which partner is the current user.
     open_dialog(&h, cx);
-    assert!(shown(cx, "new-chat-identity"), "the dialog says it is still loading");
+    assert!(
+        shown(cx, "new-chat-identity"),
+        "the dialog says it is still loading"
+    );
     for row in ["candidate-me", "candidate-anna"] {
         assert!(!shown(cx, row), "{row} waits for the identity");
     }
-    h.store.read_with(cx, |s, _| assert!(crate::new_chat::candidates(s, None).is_empty()));
+    h.store.read_with(cx, |s, _| {
+        assert!(crate::new_chat::candidates(s, None).is_empty())
+    });
 
     // The profile fails: the self chat stays out and the dialog says why.
-    h.feed(cx, [ClientEvent::ProfileFailed { reason: "Нет соединения".into(), offline: true }]);
+    h.feed(
+        cx,
+        [ClientEvent::ProfileFailed {
+            reason: "Нет соединения".into(),
+            offline: true,
+        }],
+    );
     assert!(shown(cx, "new-chat-identity"));
     assert!(!shown(cx, "candidate-me") && !shown(cx, "candidate-anna"));
     h.store.read_with(cx, |s, _| {
-        assert!(matches!(s.profile_state(), Some(crate::store::ProfileState::Failed { .. })));
+        assert!(matches!(
+            s.profile_state(),
+            Some(crate::store::ProfileState::Failed { .. })
+        ));
         assert!(!crate::new_chat::identity_known(s));
-        assert!(crate::new_chat::candidates(s, None).is_empty(), "a failed profile leaves the self chat out");
+        assert!(
+            crate::new_chat::candidates(s, None).is_empty(),
+            "a failed profile leaves the self chat out"
+        );
     });
     assert_eq!(h.commands(), [], "nothing is created or retried by itself");
 
     // The profile arrives on another try: the others are offered, the current user never.
     h.store.update(cx, |s, cx| s.load_profile(cx));
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
-    h.store.read_with(cx, |s, _| assert!(crate::new_chat::identity_known(s)));
+    h.store
+        .read_with(cx, |s, _| assert!(crate::new_chat::identity_known(s)));
     assert!(shown(cx, "candidate-anna"));
     assert!(!shown(cx, "candidate-me"));
 }
 
 #[gpui::test]
-fn the_confirmation_lists_the_participant_and_one_confirm_sends_one_command(cx: &mut TestAppContext) {
+fn the_confirmation_lists_the_participant_and_one_confirm_sends_one_command(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);
     open_dialog(&h, cx);
     assert!(!shown(cx, "new-chat-participant"), "nobody is chosen yet");
     assert!(shown(cx, "new-chat-create") && shown(cx, "new-chat-cancel"));
     click(cx, "new-chat-create");
-    assert!(h.commands().is_empty(), "nothing to create before a person is chosen");
+    assert!(
+        h.commands().is_empty(),
+        "nothing to create before a person is chosen"
+    );
 
     click(cx, "candidate-alice");
-    assert!(shown(cx, "new-chat-participant"), "the participant is listed");
+    assert!(
+        shown(cx, "new-chat-participant"),
+        "the participant is listed"
+    );
     assert!(shown(cx, "new-chat-participant-avatar"));
     assert_eq!(creation(&h, cx), None);
     assert!(h.commands().is_empty());
@@ -3923,14 +6033,28 @@ fn the_confirmation_lists_the_participant_and_one_confirm_sends_one_command(cx: 
     click(cx, "new-chat-create");
     click(cx, "new-chat-create");
     cx.run_until_parked();
-    assert_eq!(h.commands(), [create_alice()], "one command per confirm, also on a double click");
-    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
+    assert_eq!(
+        h.commands(),
+        [create_alice()],
+        "one command per confirm, also on a double click"
+    );
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::InFlight)
+    );
     assert!(shown(cx, "new-chat-sending"));
     h.store.read_with(cx, |s, _| {
-        assert!(!crate::new_chat::can_create(true, s.creation_state()), "the button is disabled while in flight");
+        assert!(
+            !crate::new_chat::can_create(true, s.creation_state()),
+            "the button is disabled while in flight"
+        );
     });
     click(cx, "candidate-boris");
-    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"), "the choice is locked while in flight");
+    assert_eq!(
+        chosen_person(&h, cx).as_deref(),
+        Some("alice"),
+        "the choice is locked while in flight"
+    );
     assert!(h.commands().is_empty());
 }
 
@@ -3944,24 +6068,50 @@ fn a_created_chat_closes_the_dialog_and_is_opened(cx: &mut TestAppContext) {
     chats.push(person_chat("n", "Алиса", "alice"));
     h.feed(
         cx,
-        [ClientEvent::ChatsReplaced(chats), ClientEvent::ChatCreated { chat: Some(ChatId("n".into())), existing: false }],
+        [
+            ClientEvent::ChatsReplaced(chats),
+            ClientEvent::ChatCreated {
+                chat: Some(ChatId("n".into())),
+                existing: false,
+            },
+        ],
     );
     assert!(!dialog_open(&h, cx));
     assert_eq!(creation(&h, cx), None);
-    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())), "the created chat is opened");
-    assert_eq!(h.commands(), [Command::OpenChat(ChatId("n".into()))], "nothing is created a second time");
+    assert_eq!(
+        selected_chat(&h, cx),
+        Some(ChatId("n".into())),
+        "the created chat is opened"
+    );
+    assert_eq!(
+        h.commands(),
+        [Command::OpenChat(ChatId("n".into()))],
+        "nothing is created a second time"
+    );
     assert!(shown(cx, row!("n")), "it is in the list");
 }
 
 #[gpui::test]
-fn a_created_chat_the_list_does_not_name_closes_the_dialog_and_is_opened_once_listed(cx: &mut TestAppContext) {
+fn a_created_chat_the_list_does_not_name_closes_the_dialog_and_is_opened_once_listed(
+    cx: &mut TestAppContext,
+) {
     let (h, cx) = harness(cx);
     choose_alice(&h, cx);
     click(cx, "new-chat-create");
     h.commands();
-    h.feed(cx, [ClientEvent::ChatCreated { chat: None, existing: false }]);
+    h.feed(
+        cx,
+        [ClientEvent::ChatCreated {
+            chat: None,
+            existing: false,
+        }],
+    );
     assert!(!dialog_open(&h, cx));
-    assert_eq!(selected_chat(&h, cx), Some(chat_g()), "nothing to open yet, the open chat stays");
+    assert_eq!(
+        selected_chat(&h, cx),
+        Some(chat_g()),
+        "nothing to open yet, the open chat stays"
+    );
     assert!(h.commands().is_empty());
 
     // The list later shows the private chat with that person: it is opened (spec "New private chat").
@@ -3996,38 +6146,71 @@ fn a_chat_that_appeared_meanwhile_is_opened_instead_of_created(cx: &mut TestAppC
     click(cx, "new-chat-create");
     assert!(!dialog_open(&h, cx));
     assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
-    assert_eq!(creations(&h.commands()), 0, "the existing chat is opened, no request goes out");
+    assert_eq!(
+        creations(&h.commands()),
+        0,
+        "the existing chat is opened, no request goes out"
+    );
 }
 
 #[gpui::test]
 fn a_rejection_shows_the_reason_keeps_the_data_and_never_retries(cx: &mut TestAppContext) {
-    use crate::new_chat::{notice, Notice};
+    use crate::new_chat::{Notice, notice};
     let (h, cx) = harness(cx);
     choose_alice(&h, cx);
     cx.simulate_input("али");
     click(cx, "new-chat-create");
     assert_eq!(h.commands(), [create_alice()]);
-    h.feed(cx, [ClientEvent::CreationFailed { reason: "сервер отказал: нельзя создать чат".into(), unknown: false }]);
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "сервер отказал: нельзя создать чат".into(),
+            unknown: false,
+        }],
+    );
     assert!(shown(cx, "new-chat-error"));
     assert!(!shown(cx, "new-chat-unknown"));
     assert!(dialog_open(&h, cx), "the dialog stays open");
-    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"), "the choice is kept");
-    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("али"), "so is the typed text");
+    assert_eq!(
+        chosen_person(&h, cx).as_deref(),
+        Some("alice"),
+        "the choice is kept"
+    );
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, cx| d.new_chat_query(cx))
+            .as_deref(),
+        Some("али"),
+        "so is the typed text"
+    );
     h.store.read_with(cx, |s, _| {
-        assert_eq!(notice(s.creation_state()), Notice::Failed("сервер отказал: нельзя создать чат".into()));
-        assert!(crate::new_chat::can_create(true, s.creation_state()), "another explicit attempt is possible");
+        assert_eq!(
+            notice(s.creation_state()),
+            Notice::Failed("сервер отказал: нельзя создать чат".into())
+        );
+        assert!(
+            crate::new_chat::can_create(true, s.creation_state()),
+            "another explicit attempt is possible"
+        );
     });
     cx.run_until_parked();
     assert!(h.commands().is_empty(), "nothing is sent by itself");
 
     click(cx, "new-chat-create");
-    assert_eq!(h.commands(), [create_alice()], "only the user's press tries again");
-    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
+    assert_eq!(
+        h.commands(),
+        [create_alice()],
+        "only the user's press tries again"
+    );
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::InFlight)
+    );
 }
 
 #[gpui::test]
 fn an_unknown_result_is_said_honestly_and_not_retried(cx: &mut TestAppContext) {
-    use crate::new_chat::{notice, Notice};
+    use crate::new_chat::{Notice, notice};
     let (h, cx) = harness(cx);
     choose_alice(&h, cx);
     click(cx, "new-chat-create");
@@ -4036,43 +6219,72 @@ fn an_unknown_result_is_said_honestly_and_not_retried(cx: &mut TestAppContext) {
         cx,
         [
             ClientEvent::ChatsReplaced(people_chats()),
-            ClientEvent::CreationFailed { reason: "Результат неизвестен: чат мог быть создан".into(), unknown: true },
+            ClientEvent::CreationFailed {
+                reason: "Результат неизвестен: чат мог быть создан".into(),
+                unknown: true,
+            },
         ],
     );
     assert!(shown(cx, "new-chat-unknown"));
-    assert!(!shown(cx, "new-chat-error"), "not presented as a plain failure");
+    assert!(
+        !shown(cx, "new-chat-error"),
+        "not presented as a plain failure"
+    );
     assert!(dialog_open(&h, cx));
     assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
     h.store.read_with(cx, |s, _| {
-        assert_eq!(notice(s.creation_state()), Notice::Unknown("Результат неизвестен: чат мог быть создан".into()));
+        assert_eq!(
+            notice(s.creation_state()),
+            Notice::Unknown("Результат неизвестен: чат мог быть создан".into())
+        );
     });
     cx.run_until_parked();
     assert!(h.commands().is_empty(), "no second request");
 }
 
 #[gpui::test]
-fn an_unverified_result_says_the_list_could_not_be_read_and_the_next_attempt_is_the_users(cx: &mut TestAppContext) {
-    use crate::new_chat::{notice, Notice};
+fn an_unverified_result_says_the_list_could_not_be_read_and_the_next_attempt_is_the_users(
+    cx: &mut TestAppContext,
+) {
+    use crate::new_chat::{Notice, notice};
     let (h, cx) = harness(cx);
     choose_alice(&h, cx);
     click(cx, "new-chat-create");
     h.commands();
-    h.feed(cx, [ClientEvent::CreationUnverified { reason: "Результат неизвестен: список не обновлён".into() }]);
+    h.feed(
+        cx,
+        [ClientEvent::CreationUnverified {
+            reason: "Результат неизвестен: список не обновлён".into(),
+        }],
+    );
     assert!(shown(cx, "new-chat-unverified"));
-    assert!(!shown(cx, "new-chat-unknown"), "the list was not refreshed, the dialog must not say it was");
+    assert!(
+        !shown(cx, "new-chat-unknown"),
+        "the list was not refreshed, the dialog must not say it was"
+    );
     assert!(!shown(cx, "new-chat-error"));
     assert!(dialog_open(&h, cx));
     assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
     h.store.read_with(cx, |s, _| {
-        assert_eq!(notice(s.creation_state()), Notice::Unverified("Результат неизвестен: список не обновлён".into()));
+        assert_eq!(
+            notice(s.creation_state()),
+            Notice::Unverified("Результат неизвестен: список не обновлён".into())
+        );
         assert!(crate::new_chat::can_create(true, s.creation_state()));
     });
     cx.run_until_parked();
     assert!(h.commands().is_empty(), "no second request by itself");
 
     click(cx, "new-chat-create");
-    assert_eq!(h.commands(), [create_alice()], "the core owes the list check; the press is the user's");
-    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::InFlight));
+    assert_eq!(
+        h.commands(),
+        [create_alice()],
+        "the core owes the list check; the press is the user's"
+    );
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::InFlight)
+    );
 }
 
 #[gpui::test]
@@ -4083,7 +6295,16 @@ fn a_chat_that_appeared_after_an_unknown_result_is_opened(cx: &mut TestAppContex
     h.commands();
     let mut chats = people_chats();
     chats.push(person_chat("n", "Алиса", "alice"));
-    h.feed(cx, [ClientEvent::ChatsReplaced(chats), ClientEvent::ChatCreated { chat: Some(ChatId("n".into())), existing: true }]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(chats),
+            ClientEvent::ChatCreated {
+                chat: Some(ChatId("n".into())),
+                existing: true,
+            },
+        ],
+    );
     assert!(!dialog_open(&h, cx));
     assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
     assert_eq!(creations(&h.commands()), 0);
@@ -4095,16 +6316,40 @@ fn offline_the_refusal_is_shown_and_the_data_kept(cx: &mut TestAppContext) {
     choose_alice(&h, cx);
     cx.simulate_input("али");
     h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
-    assert!(dialog_open(&h, cx), "losing the connection does not close the dialog");
+    assert!(
+        dialog_open(&h, cx),
+        "losing the connection does not close the dialog"
+    );
     click(cx, "new-chat-create");
     // The core refuses at once, without a request to the server; the dialog says so.
-    h.feed(cx, [ClientEvent::CreationFailed { reason: "Нет соединения".into(), unknown: false }]);
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "Нет соединения".into(),
+            unknown: false,
+        }],
+    );
     assert!(shown(cx, "new-chat-error"));
     assert!(dialog_open(&h, cx));
     assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
-    assert_eq!(h.desktop.read_with(cx, |d, cx| d.new_chat_query(cx)).as_deref(), Some("али"));
-    assert_eq!(creation(&h, cx), Some(crate::store::CreationState::Failed { reason: "Нет соединения".into(), unknown: false }));
-    assert_eq!(creations(&h.commands()), 1, "the one command of the press; the core answered it offline");
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, cx| d.new_chat_query(cx))
+            .as_deref(),
+        Some("али")
+    );
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::Failed {
+            reason: "Нет соединения".into(),
+            unknown: false
+        })
+    );
+    assert_eq!(
+        creations(&h.commands()),
+        1,
+        "the one command of the press; the core answered it offline"
+    );
 }
 
 #[gpui::test]
@@ -4121,14 +6366,23 @@ fn cancel_and_escape_close_the_dialog_without_sending(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     assert!(!dialog_open(&h, cx), "Escape");
     assert!(h.commands().is_empty());
-    assert!(info_open(&h, cx), "Escape closed the dialog, the panel under it stays");
+    assert!(
+        info_open(&h, cx),
+        "Escape closed the dialog, the panel under it stays"
+    );
 
     // A failure is forgotten with the dialog.
     open_dialog_again(&h, cx);
     click(cx, "candidate-alice");
     click(cx, "new-chat-create");
     h.commands();
-    h.feed(cx, [ClientEvent::CreationFailed { reason: "нельзя".into(), unknown: false }]);
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "нельзя".into(),
+            unknown: false,
+        }],
+    );
     click(cx, "new-chat-cancel");
     assert!(!dialog_open(&h, cx));
     assert_eq!(creation(&h, cx), None);
@@ -4150,8 +6404,17 @@ fn a_creation_in_flight_keeps_the_dialog_until_its_outcome_is_shown(cx: &mut Tes
     h.commands();
     click(cx, "new-chat-cancel");
     cx.simulate_keystrokes("escape");
-    assert!(dialog_open(&h, cx), "a request that is out cannot be recalled; its outcome has to reach the user");
-    h.feed(cx, [ClientEvent::CreationFailed { reason: "нельзя".into(), unknown: false }]);
+    assert!(
+        dialog_open(&h, cx),
+        "a request that is out cannot be recalled; its outcome has to reach the user"
+    );
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "нельзя".into(),
+            unknown: false,
+        }],
+    );
     assert!(shown(cx, "new-chat-error"));
     cx.simulate_keystrokes("escape");
     assert!(!dialog_open(&h, cx));
@@ -4162,17 +6425,27 @@ fn the_dialog_blocks_the_chat_and_yields_to_nothing_under_it(cx: &mut TestAppCon
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);
     open_dialog(&h, cx);
-    assert!(h.desktop.read_with(cx, |d, cx| d.blocked(cx)), "blocks the chat like other overlays");
+    assert!(
+        h.desktop.read_with(cx, |d, cx| d.blocked(cx)),
+        "blocks the chat like other overlays"
+    );
     assert_eq!(composer_text(&h, cx), "");
     cx.simulate_input("zzz");
-    assert_eq!(composer_text(&h, cx), "", "typing goes to the dialog, not the composer");
+    assert_eq!(
+        composer_text(&h, cx),
+        "",
+        "typing goes to the dialog, not the composer"
+    );
     click(cx, "new-chat-cancel");
     assert!(!h.desktop.read_with(cx, |d, cx| d.blocked(cx)));
 
     h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
     open_profile(&h, cx);
     h.desktop.update(cx, |d, cx| d.open_new_chat(None, cx));
-    assert!(!dialog_open(&h, cx), "the dialog does not open under another overlay");
+    assert!(
+        !dialog_open(&h, cx),
+        "the dialog does not open under another overlay"
+    );
 }
 
 #[gpui::test]
@@ -4188,7 +6461,11 @@ fn an_ended_session_closes_the_dialog(cx: &mut TestAppContext) {
 fn write_on_a_member_row_opens_the_dialog_for_that_person(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);
-    for row in ["member-alice-write", "member-boris-write", "member-anna-write"] {
+    for row in [
+        "member-alice-write",
+        "member-boris-write",
+        "member-anna-write",
+    ] {
         assert!(shown(cx, row), "{row}");
     }
     assert!(shown(cx, "member-me"), "the own row is listed");
@@ -4200,9 +6477,16 @@ fn write_on_a_member_row_opens_the_dialog_for_that_person(cx: &mut TestAppContex
     cx.run_until_parked();
     assert!(dialog_open(&h, cx));
     assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
-    assert!(shown(cx, "new-chat-participant"), "the confirmation is for that person");
+    assert!(
+        shown(cx, "new-chat-participant"),
+        "the confirmation is for that person"
+    );
     let commands = h.commands();
-    assert_eq!(commands, [Command::LoadProfile], "the dialog opens, nothing is created");
+    assert_eq!(
+        commands,
+        [Command::LoadProfile],
+        "the dialog opens, nothing is created"
+    );
 
     click(cx, "new-chat-create");
     assert_eq!(h.commands(), [create_alice()]);
@@ -4215,7 +6499,11 @@ fn write_on_a_member_with_a_chat_opens_it(cx: &mut TestAppContext) {
     click(cx, "member-anna-write");
     assert!(!dialog_open(&h, cx));
     assert_eq!(selected_chat(&h, cx), Some(ChatId("p".into())));
-    assert_eq!(h.commands(), [Command::OpenChat(ChatId("p".into()))], "no creation, no dialog");
+    assert_eq!(
+        h.commands(),
+        [Command::OpenChat(ChatId("p".into()))],
+        "no creation, no dialog"
+    );
 }
 
 #[gpui::test]
@@ -4235,16 +6523,40 @@ fn escape_closes_the_dialog_before_the_panel_under_it(cx: &mut TestAppContext) {
 
 #[test]
 fn the_dialog_notice_follows_the_creation_state() {
-    use crate::new_chat::{can_create, notice, Notice};
+    use crate::new_chat::{Notice, can_create, notice};
     use crate::store::CreationState;
     assert_eq!(notice(None), Notice::Nothing);
     assert_eq!(notice(Some(&CreationState::InFlight)), Notice::Sending);
-    assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: false })), Notice::Failed("r".into()));
-    assert_eq!(notice(Some(&CreationState::Failed { reason: "r".into(), unknown: true })), Notice::Unknown("r".into()));
-    assert_eq!(notice(Some(&CreationState::Unverified { reason: "r".into() })), Notice::Unverified("r".into()));
+    assert_eq!(
+        notice(Some(&CreationState::Failed {
+            reason: "r".into(),
+            unknown: false
+        })),
+        Notice::Failed("r".into())
+    );
+    assert_eq!(
+        notice(Some(&CreationState::Failed {
+            reason: "r".into(),
+            unknown: true
+        })),
+        Notice::Unknown("r".into())
+    );
+    assert_eq!(
+        notice(Some(&CreationState::Unverified { reason: "r".into() })),
+        Notice::Unverified("r".into())
+    );
     assert!(!can_create(false, None), "nobody chosen");
     assert!(can_create(true, None));
     assert!(!can_create(true, Some(&CreationState::InFlight)));
-    assert!(can_create(true, Some(&CreationState::Failed { reason: "r".into(), unknown: true })));
-    assert!(can_create(true, Some(&CreationState::Unverified { reason: "r".into() })));
+    assert!(can_create(
+        true,
+        Some(&CreationState::Failed {
+            reason: "r".into(),
+            unknown: true
+        })
+    ));
+    assert!(can_create(
+        true,
+        Some(&CreationState::Unverified { reason: "r".into() })
+    ));
 }

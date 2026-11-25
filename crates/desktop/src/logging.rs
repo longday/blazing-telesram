@@ -45,7 +45,9 @@ impl gpui::Global for LogBuffer {}
 impl LogBuffer {
     fn ring(&self) -> MutexGuard<'_, Ring> {
         // A panic while holding the lock leaves a consistent ring: every update is one push/pop.
-        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Changes whenever a record is added.
@@ -107,7 +109,9 @@ impl<S: Subscriber> Layer<S> for LogBuffer {
         self.push(LogLine {
             time_us: Clock::system().now_us(),
             level: *meta.level(),
-            target: visitor.log_target.unwrap_or_else(|| meta.target().to_owned()),
+            target: visitor
+                .log_target
+                .unwrap_or_else(|| meta.target().to_owned()),
             text: visitor.message + &visitor.fields,
         });
     }
@@ -129,8 +133,16 @@ pub fn open_log_file(runtime: &Path, now_us: i64) -> io::Result<(File, PathBuf)>
     for path in &old[..excess] {
         fs::remove_file(path)?;
     }
-    let path = dir.join(format!("{}-{}.{LOG_EXT}", utc_stamp(now_us), std::process::id()));
-    let file = OpenOptions::new().append(true).create_new(true).mode(0o600).open(&path)?;
+    let path = dir.join(format!(
+        "{}-{}.{LOG_EXT}",
+        utc_stamp(now_us),
+        std::process::id()
+    ));
+    let file = OpenOptions::new()
+        .append(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
     Ok((file, path))
 }
 
@@ -154,7 +166,9 @@ pub fn init(runtime: &Path) -> Result<LogBuffer, String> {
     install(filter, file, buffer.clone())?;
     match file_result {
         Ok(path) => tracing::info!(path = %path.display(), "logging to file"),
-        Err(error) => tracing::warn!(%error, "cannot create the log file; logging to stderr and the log window only"),
+        Err(error) => {
+            tracing::warn!(%error, "cannot create the log file; logging to stderr and the log window only")
+        }
     }
     Ok(buffer)
 }
@@ -163,7 +177,11 @@ fn install(filter: EnvFilter, file: Option<File>, buffer: LogBuffer) -> Result<(
     tracing_subscriber::registry()
         .with(filter)
         .with(yandex_proto::log::dependency_cap())
-        .with(fmt::layer().with_writer(io::stderr).with_ansi(io::stderr().is_terminal()))
+        .with(
+            fmt::layer()
+                .with_writer(io::stderr)
+                .with_ansi(io::stderr().is_terminal()),
+        )
         .with(file.map(file_layer))
         .with(buffer)
         .try_init()
@@ -186,26 +204,48 @@ mod tests {
 
         const COOKIE: &str = "Session_id=fake-secret-4711";
         let buffer = LogBuffer::default();
-        install(yandex_proto::log::parse_filter(Some("trace")).unwrap(), None, buffer.clone()).unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        install(
+            yandex_proto::log::parse_filter(Some("trace")).unwrap(),
+            None,
+            buffer.clone(),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         runtime.block_on(async {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-                ws.send(tokio_tungstenite::tungstenite::Message::Close(None)).await.unwrap();
+                ws.send(tokio_tungstenite::tungstenite::Message::Close(None))
+                    .await
+                    .unwrap();
                 while ws.next().await.is_some() {}
             });
-            let target = Target { url: format!("ws://{addr}/v2?session=fake-query-0815"), cookie: COOKIE.into(), origin: "https://yandex.ru".into() };
-            let mut socket = TungsteniteConnector::default().connect(&target).await.unwrap();
+            let target = Target {
+                url: format!("ws://{addr}/v2?session=fake-query-0815"),
+                cookie: COOKIE.into(),
+                origin: "https://yandex.ru".into(),
+            };
+            let mut socket = TungsteniteConnector::default()
+                .connect(&target)
+                .await
+                .unwrap();
             socket.close().await;
             server.await.unwrap();
         });
         let lines = buffer.snapshot();
-        let text: String = lines.iter().map(|l| format!("{} {}\n", l.target, l.text)).collect();
+        let text: String = lines
+            .iter()
+            .map(|l| format!("{} {}\n", l.target, l.text))
+            .collect();
         assert!(
-            lines.iter().any(|l| l.target.starts_with("tungstenite") && l.level == Level::DEBUG),
+            lines
+                .iter()
+                .any(|l| l.target.starts_with("tungstenite") && l.level == Level::DEBUG),
             "the log bridge delivers tungstenite records:\n{text}"
         );
         for secret in ["fake-secret-4711", "fake-query-0815"] {
@@ -217,7 +257,12 @@ mod tests {
     fn ring_keeps_the_newest_records() {
         let buffer = LogBuffer::default();
         for i in 0..RING_CAPACITY + 5 {
-            buffer.push(LogLine { time_us: i as i64, level: Level::INFO, target: "t".into(), text: i.to_string() });
+            buffer.push(LogLine {
+                time_us: i as i64,
+                level: Level::INFO,
+                target: "t".into(),
+                text: i.to_string(),
+            });
         }
         let lines = buffer.snapshot();
         assert_eq!(lines.len(), RING_CAPACITY);
@@ -228,9 +273,12 @@ mod tests {
     #[test]
     fn layer_renders_message_fields_and_log_target() {
         let buffer = LogBuffer::default();
-        tracing::subscriber::with_default(tracing_subscriber::registry().with(buffer.clone()), || {
-            tracing::warn!(target: "yandex_proto::xiva", chats = 3, reason = "closed", "disconnected");
-        });
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(buffer.clone()),
+            || {
+                tracing::warn!(target: "yandex_proto::xiva", chats = 3, reason = "closed", "disconnected");
+            },
+        );
         let lines = buffer.snapshot();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].level, Level::WARN);
@@ -247,7 +295,10 @@ mod tests {
             paths.push(path);
         }
         let dir = runtime.path().join(LOG_DIR);
-        let mut left: Vec<PathBuf> = fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+        let mut left: Vec<PathBuf> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         left.sort();
         assert_eq!(left, paths[2..]);
         assert_eq!(fs::metadata(&dir).unwrap().mode() & 0o777, 0o700);
@@ -263,7 +314,8 @@ mod tests {
             tracing::info!(status = 200, "history loaded");
             // Read before the writer is dropped: the record must already be on disk.
             let text = fs::read_to_string(&path).unwrap();
-            let record: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+            let record: serde_json::Value =
+                serde_json::from_str(text.lines().next().unwrap()).unwrap();
             for key in ["timestamp", "level", "target", "fields"] {
                 assert!(record.get(key).is_some(), "{key} missing in {record}");
             }

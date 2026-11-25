@@ -8,7 +8,10 @@ use reqwest::header::COOKIE;
 use tracing::debug;
 
 use crate::error::ProtoError;
-use crate::net::{HttpSettings, cookie_value, failed, host_of, http_client, http_client_streaming, millis, redact_url};
+use crate::net::{
+    HttpSettings, cookie_value, failed, host_of, http_client, http_client_streaming, millis,
+    redact_url,
+};
 use crate::registry::http_error;
 use crate::session::{SessionCookie, cookie_header};
 
@@ -51,26 +54,34 @@ fn safe_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment != "."
         && segment != ".."
-        && segment.bytes().all(|b| b.is_ascii_alphanumeric() || b"._~@=-".contains(&b))
+        && segment
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._~@=-".contains(&b))
 }
 
 fn safe_path(id: &str) -> Result<&str, ProtoError> {
     if id.split('/').all(safe_segment) {
         Ok(id)
     } else {
-        Err(ProtoError::Protocol("media id has unexpected characters".into()))
+        Err(ProtoError::Protocol(
+            "media id has unexpected characters".into(),
+        ))
     }
 }
 
 impl MediaTarget {
     pub fn url(&self, config: &MediaConfig) -> Result<String, ProtoError> {
         match self {
-            Self::Thumbnail { file_id } => {
-                Ok(format!("{}/file_shortterm/{}?size=MIDDLE2048", config.files_base, safe_path(file_id)?))
-            }
-            Self::Original { file_id } => {
-                Ok(format!("{}/file_shortterm/{}?attach=true", config.files_base, safe_path(file_id)?))
-            }
+            Self::Thumbnail { file_id } => Ok(format!(
+                "{}/file_shortterm/{}?size=MIDDLE2048",
+                config.files_base,
+                safe_path(file_id)?
+            )),
+            Self::Original { file_id } => Ok(format!(
+                "{}/file_shortterm/{}?attach=true",
+                config.files_base,
+                safe_path(file_id)?
+            )),
             Self::Avatar { id, size } => {
                 let (mds, files) = match size {
                     AvatarSize::Small => ("islands-34", "SMALL"),
@@ -99,7 +110,11 @@ pub struct MediaClient {
 }
 
 impl MediaClient {
-    pub fn new(config: MediaConfig, settings: &HttpSettings, cookies: Vec<SessionCookie>) -> Result<Self, ProtoError> {
+    pub fn new(
+        config: MediaConfig,
+        settings: &HttpSettings,
+        cookies: Vec<SessionCookie>,
+    ) -> Result<Self, ProtoError> {
         Ok(Self {
             http: http_client(settings)?,
             streaming: http_client_streaming(settings)?,
@@ -110,7 +125,11 @@ impl MediaClient {
 
     /// Sends the GET shared by `fetch` and `download` and maps the status line: 2xx passes,
     /// 401 is an expired session, 404 is `NotFound`. Returns the response with the start time.
-    async fn get(&self, http: &reqwest::Client, url: &str) -> Result<(reqwest::Response, Instant), ProtoError> {
+    async fn get(
+        &self,
+        http: &reqwest::Client,
+        url: &str,
+    ) -> Result<(reqwest::Response, Instant), ProtoError> {
         let mut request = http.get(url);
         // Cookies go only where they match: public avatar hosts get none. reqwest drops the
         // header again when a redirect leads to another host or port.
@@ -119,7 +138,10 @@ impl MediaClient {
             request = request.header(COOKIE, cookie_value(&self.cookies, &host)?);
         }
         let started = Instant::now();
-        let response = request.send().await.map_err(failed("media", "GET", url, started))?;
+        let response = request
+            .send()
+            .await
+            .map_err(failed("media", "GET", url, started))?;
         let status = response.status().as_u16();
         // `elapsed_ms` is the time to the response headers; the body streams after it.
         // `landed` is where redirects ended up; like the request, host and path only.
@@ -143,7 +165,11 @@ impl MediaClient {
         let url = target.url(&self.config)?;
         let (mut response, started) = self.get(&self.http, &url).await?;
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(failed("media", "GET", &url, started))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(failed("media", "GET", &url, started))?
+        {
             if bytes.len() + chunk.len() > MAX_BYTES {
                 return Err(ProtoError::Protocol("media response is too large".into()));
             }
@@ -166,7 +192,11 @@ impl MediaClient {
         let (mut response, started) = self.get(&self.streaming, &url).await?;
         let total = response.content_length();
         let mut received = 0u64;
-        while let Some(chunk) = response.chunk().await.map_err(failed("media", "GET", &url, started))? {
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(failed("media", "GET", &url, started))?
+        {
             out.write_all(&chunk).map_err(storage_error)?;
             received += chunk.len() as u64;
             progress(received, total);
@@ -201,28 +231,80 @@ mod tests {
 
     #[test]
     fn urls_follow_the_web_clients_templates() {
-        let thumb = MediaTarget::Thumbnail { file_id: "bucket/0a1b-2c".into() };
-        assert_eq!(thumb.url(&prod()).unwrap(), "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c?size=MIDDLE2048");
-        let avatar = |id: &str, size| MediaTarget::Avatar { id: id.into(), size }.url(&prod()).unwrap();
-        assert_eq!(avatar("user_avatar/yapic/123/abc", AvatarSize::Small), "https://avatars.mds.yandex.net/get-yapic/123/abc/islands-34");
-        assert_eq!(avatar("user_avatar/mssngr/9/x", AvatarSize::Large), "https://avatars.mds.yandex.net/get-mssngr/9/x/islands-50");
-        assert_eq!(avatar("team/7/xyz", AvatarSize::Large), "https://files.messenger.yandex.ru/team/7/xyz?size=SMALL48");
+        let thumb = MediaTarget::Thumbnail {
+            file_id: "bucket/0a1b-2c".into(),
+        };
+        assert_eq!(
+            thumb.url(&prod()).unwrap(),
+            "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c?size=MIDDLE2048"
+        );
+        let avatar = |id: &str, size| {
+            MediaTarget::Avatar {
+                id: id.into(),
+                size,
+            }
+            .url(&prod())
+            .unwrap()
+        };
+        assert_eq!(
+            avatar("user_avatar/yapic/123/abc", AvatarSize::Small),
+            "https://avatars.mds.yandex.net/get-yapic/123/abc/islands-34"
+        );
+        assert_eq!(
+            avatar("user_avatar/mssngr/9/x", AvatarSize::Large),
+            "https://avatars.mds.yandex.net/get-mssngr/9/x/islands-50"
+        );
+        assert_eq!(
+            avatar("team/7/xyz", AvatarSize::Large),
+            "https://files.messenger.yandex.ru/team/7/xyz?size=SMALL48"
+        );
     }
 
     #[test]
     fn hostile_ids_are_refused() {
-        for id in ["", "a//b", "../etc", "a/./b", "a?x=1", "a#f", "a b", "a\\b", "a/%2e%2e/b", "/abs"] {
-            assert!(MediaTarget::Thumbnail { file_id: id.into() }.url(&prod()).is_err(), "{id:?}");
+        for id in [
+            "",
+            "a//b",
+            "../etc",
+            "a/./b",
+            "a?x=1",
+            "a#f",
+            "a b",
+            "a\\b",
+            "a/%2e%2e/b",
+            "/abs",
+        ] {
+            assert!(
+                MediaTarget::Thumbnail { file_id: id.into() }
+                    .url(&prod())
+                    .is_err(),
+                "{id:?}"
+            );
         }
     }
 
     fn client(base: &str, timeout: Duration) -> MediaClient {
-        let config = MediaConfig { files_base: base.into(), avatars_base: base.into() };
-        MediaClient::new(config, &HttpSettings { connect_timeout: timeout, request_timeout: timeout }, vec![]).unwrap()
+        let config = MediaConfig {
+            files_base: base.into(),
+            avatars_base: base.into(),
+        };
+        MediaClient::new(
+            config,
+            &HttpSettings {
+                connect_timeout: timeout,
+                request_timeout: timeout,
+            },
+            vec![],
+        )
+        .unwrap()
     }
 
     fn bytes_response(status: &str, body: &[u8]) -> Option<String> {
-        Some(format!("HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}", body.len(), String::from_utf8_lossy(body)))
+        Some(format!(
+            "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            String::from_utf8_lossy(body)
+        ))
     }
 
     #[tokio::test]
@@ -235,19 +317,35 @@ mod tests {
             bytes_response("502 Bad Gateway", b""),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        let thumb = MediaTarget::Thumbnail { file_id: "b/u".into() };
+        let thumb = MediaTarget::Thumbnail {
+            file_id: "b/u".into(),
+        };
         assert_eq!(c.fetch(&thumb).await.unwrap(), b"pixels");
         assert!(seen.lock().unwrap()[0].starts_with("GET /file_shortterm/b/u?size=MIDDLE2048"));
-        assert_eq!(c.fetch(&thumb).await.unwrap_err(), ProtoError::SessionExpired);
-        assert!(matches!(c.fetch(&thumb).await.unwrap_err(), ProtoError::Protocol(_)));
+        assert_eq!(
+            c.fetch(&thumb).await.unwrap_err(),
+            ProtoError::SessionExpired
+        );
+        assert!(matches!(
+            c.fetch(&thumb).await.unwrap_err(),
+            ProtoError::Protocol(_)
+        ));
         assert_eq!(c.fetch(&thumb).await.unwrap_err(), ProtoError::NotFound);
-        assert!(matches!(c.fetch(&thumb).await.unwrap_err(), ProtoError::Network(_)));
+        assert!(matches!(
+            c.fetch(&thumb).await.unwrap_err(),
+            ProtoError::Network(_)
+        ));
     }
 
     #[tokio::test]
     async fn silent_server_times_out() {
         let (base, _) = serve(vec![None]);
-        let err = client(&base, Duration::from_millis(200)).fetch(&MediaTarget::Thumbnail { file_id: "b/u".into() }).await.unwrap_err();
+        let err = client(&base, Duration::from_millis(200))
+            .fetch(&MediaTarget::Thumbnail {
+                file_id: "b/u".into(),
+            })
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProtoError::Network(_)));
     }
 
@@ -258,9 +356,19 @@ mod tests {
         let capture = Capture::default();
         let _guard = capture.install_at(tracing::Level::DEBUG);
         let (base, _) = serve(vec![bytes_response("200 OK", b"pixels-BODY")]);
-        client(&base, Duration::from_secs(5)).fetch(&MediaTarget::Thumbnail { file_id: "b/u".into() }).await.unwrap();
+        client(&base, Duration::from_secs(5))
+            .fetch(&MediaTarget::Thumbnail {
+                file_id: "b/u".into(),
+            })
+            .await
+            .unwrap();
         let text = capture.text();
-        for needle in ["media exchange", "127.0.0.1/file_shortterm/b/u", "status=200", "elapsed_ms"] {
+        for needle in [
+            "media exchange",
+            "127.0.0.1/file_shortterm/b/u",
+            "status=200",
+            "elapsed_ms",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
         capture.assert_absent(&["MIDDLE2048", "size=", "pixels-BODY"]);
@@ -269,19 +377,44 @@ mod tests {
     // ---- original downloads ----
 
     fn original() -> MediaTarget {
-        MediaTarget::Original { file_id: "b/u".into() }
+        MediaTarget::Original {
+            file_id: "b/u".into(),
+        }
     }
 
     #[test]
     fn original_url_is_the_attachment_template() {
-        let url = MediaTarget::Original { file_id: "bucket/0a1b-2c".into() }.url(&prod()).unwrap();
-        assert_eq!(url, "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c?attach=true");
+        let url = MediaTarget::Original {
+            file_id: "bucket/0a1b-2c".into(),
+        }
+        .url(&prod())
+        .unwrap();
+        assert_eq!(
+            url,
+            "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c?attach=true"
+        );
     }
 
     #[test]
     fn hostile_original_ids_are_refused() {
-        for id in ["", "a//b", "../etc", "a/./b", "a?x=1", "a#f", "a b", "a\\b", "a/%2e%2e/b", "/abs"] {
-            assert!(MediaTarget::Original { file_id: id.into() }.url(&prod()).is_err(), "{id:?}");
+        for id in [
+            "",
+            "a//b",
+            "../etc",
+            "a/./b",
+            "a?x=1",
+            "a#f",
+            "a b",
+            "a\\b",
+            "a/%2e%2e/b",
+            "/abs",
+        ] {
+            assert!(
+                MediaTarget::Original { file_id: id.into() }
+                    .url(&prod())
+                    .is_err(),
+                "{id:?}"
+            );
         }
     }
 
@@ -298,13 +431,28 @@ mod tests {
     }
 
     fn client_with(base: &str, timeout: Duration, cookies: Vec<SessionCookie>) -> MediaClient {
-        let config = MediaConfig { files_base: base.into(), avatars_base: base.into() };
-        MediaClient::new(config, &HttpSettings { connect_timeout: timeout, request_timeout: timeout }, cookies).unwrap()
+        let config = MediaConfig {
+            files_base: base.into(),
+            avatars_base: base.into(),
+        };
+        MediaClient::new(
+            config,
+            &HttpSettings {
+                connect_timeout: timeout,
+                request_timeout: timeout,
+            },
+            cookies,
+        )
+        .unwrap()
     }
 
     /// Serves one connection: `head`, then each piece after its delay, then holds the
     /// connection open for `hold` before closing. Records the raw request.
-    fn serve_script(head: &str, pieces: Vec<(Duration, Vec<u8>)>, hold: Duration) -> (String, Arc<Mutex<Vec<String>>>) {
+    fn serve_script(
+        head: &str,
+        pieces: Vec<(Duration, Vec<u8>)>,
+        hold: Duration,
+    ) -> (String, Arc<Mutex<Vec<String>>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -315,11 +463,17 @@ mod tests {
             stream.set_nodelay(true).unwrap();
             let mut buf = vec![0u8; 16384];
             let n = stream.read(&mut buf).unwrap_or(0);
-            log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+            log.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&buf[..n]).into_owned());
             let _ = stream.write_all(head.as_bytes());
             for (delay, piece) in pieces {
                 thread::sleep(delay);
-                if stream.write_all(&piece).and_then(|()| stream.flush()).is_err() {
+                if stream
+                    .write_all(&piece)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -350,7 +504,10 @@ mod tests {
 
     impl Write for Broken {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(self.0, "/Users/someone/Downloads/secret-name.pdf.part"))
+            Err(io::Error::new(
+                self.0,
+                "/Users/someone/Downloads/secret-name.pdf.part",
+            ))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -360,12 +517,16 @@ mod tests {
 
     #[tokio::test]
     async fn downloads_bytes_and_reports_progress_with_the_total() {
-        let pieces = ["ab", "cd", "ef"].map(|p| (Duration::from_millis(60), p.as_bytes().to_vec())).to_vec();
+        let pieces = ["ab", "cd", "ef"]
+            .map(|p| (Duration::from_millis(60), p.as_bytes().to_vec()))
+            .to_vec();
         let (base, seen) = serve_script(&ok_head(6), pieces, Duration::ZERO);
         let steps = Mutex::new(Vec::new());
         let mut out = Vec::new();
         let n = client_with(&base, Duration::from_secs(5), vec![])
-            .download(&original(), &mut out, &|received, total| steps.lock().unwrap().push((received, total)))
+            .download(&original(), &mut out, &|received, total| {
+                steps.lock().unwrap().push((received, total))
+            })
             .await
             .unwrap();
         assert_eq!((n, out.as_slice()), (6, b"abcdef".as_slice()));
@@ -373,7 +534,10 @@ mod tests {
         let steps = steps.into_inner().unwrap();
         assert!(steps.len() >= 2, "{steps:?}");
         assert!(steps.windows(2).all(|w| w[0].0 < w[1].0), "{steps:?}");
-        assert!(steps.iter().all(|&(_, total)| total == Some(6)), "{steps:?}");
+        assert!(
+            steps.iter().all(|&(_, total)| total == Some(6)),
+            "{steps:?}"
+        );
         assert_eq!(steps.last(), Some(&(6, Some(6))));
     }
 
@@ -388,7 +552,9 @@ mod tests {
         let steps = Mutex::new(Vec::new());
         let mut out = Vec::new();
         let n = client_with(&base, Duration::from_secs(5), vec![])
-            .download(&original(), &mut out, &|received, total| steps.lock().unwrap().push((received, total)))
+            .download(&original(), &mut out, &|received, total| {
+                steps.lock().unwrap().push((received, total))
+            })
             .await
             .unwrap();
         assert_eq!((n, out.as_slice()), (5, b"hello".as_slice()));
@@ -398,15 +564,24 @@ mod tests {
     #[tokio::test]
     async fn a_body_above_the_preview_cap_is_accepted() {
         let len = MAX_BYTES + 1024 * 1024;
-        let (base, _) = serve_script(&ok_head(len), vec![(Duration::ZERO, vec![7u8; len])], Duration::ZERO);
+        let (base, _) = serve_script(
+            &ok_head(len),
+            vec![(Duration::ZERO, vec![7u8; len])],
+            Duration::ZERO,
+        );
         let mut out = Count(0);
         let last = Mutex::new(None);
         let n = client_with(&base, Duration::from_secs(20), vec![])
-            .download(&original(), &mut out, &|received, total| *last.lock().unwrap() = Some((received, total)))
+            .download(&original(), &mut out, &|received, total| {
+                *last.lock().unwrap() = Some((received, total))
+            })
             .await
             .unwrap();
         assert_eq!((n, out.0), (len as u64, len as u64));
-        assert_eq!(last.into_inner().unwrap(), Some((len as u64, Some(len as u64))));
+        assert_eq!(
+            last.into_inner().unwrap(),
+            Some((len as u64, Some(len as u64)))
+        );
     }
 
     #[tokio::test]
@@ -419,7 +594,11 @@ mod tests {
         ]);
         let c = client_with(&base, Duration::from_secs(5), vec![]);
         let mut out = Vec::new();
-        let mut attempt = async || c.download(&original(), &mut out, &|_, _| {}).await.unwrap_err();
+        let mut attempt = async || {
+            c.download(&original(), &mut out, &|_, _| {})
+                .await
+                .unwrap_err()
+        };
         assert_eq!(attempt().await, ProtoError::SessionExpired);
         assert!(matches!(attempt().await, ProtoError::Protocol(_)));
         assert_eq!(attempt().await, ProtoError::NotFound);
@@ -429,18 +608,32 @@ mod tests {
 
     #[tokio::test]
     async fn a_truncated_body_fails() {
-        let (base, _) = serve_script(&ok_head(10), vec![(Duration::ZERO, b"12345".to_vec())], Duration::ZERO);
+        let (base, _) = serve_script(
+            &ok_head(10),
+            vec![(Duration::ZERO, b"12345".to_vec())],
+            Duration::ZERO,
+        );
         let mut out = Vec::new();
-        let err = client_with(&base, Duration::from_secs(5), vec![]).download(&original(), &mut out, &|_, _| {}).await.unwrap_err();
+        let err = client_with(&base, Duration::from_secs(5), vec![])
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProtoError::Network(_)), "{err:?}");
     }
 
     #[tokio::test]
     async fn a_stalled_body_fails_after_the_idle_timeout() {
-        let (base, _) = serve_script(&ok_head(10), vec![(Duration::ZERO, b"12345".to_vec())], Duration::from_secs(5));
+        let (base, _) = serve_script(
+            &ok_head(10),
+            vec![(Duration::ZERO, b"12345".to_vec())],
+            Duration::from_secs(5),
+        );
         let started = Instant::now();
         let mut out = Vec::new();
-        let err = client_with(&base, Duration::from_millis(300), vec![]).download(&original(), &mut out, &|_, _| {}).await.unwrap_err();
+        let err = client_with(&base, Duration::from_millis(300), vec![])
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProtoError::Network(_)), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -448,11 +641,16 @@ mod tests {
     #[tokio::test]
     async fn a_slow_but_steady_body_outlives_the_idle_timeout() {
         // Eight pieces 100 ms apart take longer than the 350 ms idle timeout in total.
-        let pieces = (0..8).map(|_| (Duration::from_millis(100), b"xy".to_vec())).collect();
+        let pieces = (0..8)
+            .map(|_| (Duration::from_millis(100), b"xy".to_vec()))
+            .collect();
         let (base, _) = serve_script(&ok_head(16), pieces, Duration::ZERO);
         let started = Instant::now();
         let mut out = Vec::new();
-        let n = client_with(&base, Duration::from_millis(350), vec![]).download(&original(), &mut out, &|_, _| {}).await.unwrap();
+        let n = client_with(&base, Duration::from_millis(350), vec![])
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap();
         assert_eq!(n, 16);
         assert!(started.elapsed() > Duration::from_millis(350));
     }
@@ -462,7 +660,9 @@ mod tests {
         use crate::test_log::Capture;
 
         let (storage, storage_seen) = serve(vec![bytes_response("200 OK", b"payload")]);
-        let redirect = format!("HTTP/1.1 302 Found\r\nlocation: {storage}/store/blob?sig=abc\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nlocation: {storage}/store/blob?sig=abc\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
         let (files, files_seen) = serve(vec![Some(redirect)]);
         assert_ne!(files, storage, "two servers on different ports");
         let capture = Capture::default();
@@ -474,11 +674,18 @@ mod tests {
             .unwrap();
         assert_eq!((n, out.as_slice()), (7, b"payload".as_slice()));
         let first = files_seen.lock().unwrap()[0].to_lowercase();
-        assert!(first.contains("cookie: session_id=s3cret-cookie"), "{first}");
+        assert!(
+            first.contains("cookie: session_id=s3cret-cookie"),
+            "{first}"
+        );
         let second = storage_seen.lock().unwrap()[0].to_lowercase();
         assert!(second.starts_with("get /store/blob?sig=abc"), "{second}");
         assert!(!second.contains("cookie"), "{second}");
-        assert!(capture.text().contains("landed=127.0.0.1/store/blob"), "{}", capture.text());
+        assert!(
+            capture.text().contains("landed=127.0.0.1/store/blob"),
+            "{}",
+            capture.text()
+        );
         capture.assert_absent(&["sig=abc", "s3cret-cookie"]);
     }
 
@@ -491,15 +698,34 @@ mod tests {
         let cookies = vec![cookie("127.0.0.1")];
         let (base, _) = serve(vec![bytes_response("200 OK", b"pixels-BODY")]);
         let mut out = Vec::new();
-        client_with(&base, Duration::from_secs(5), cookies.clone()).download(&original(), &mut out, &|_, _| {}).await.unwrap();
+        client_with(&base, Duration::from_secs(5), cookies.clone())
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap();
         let text = capture.text();
-        for needle in ["media exchange", "127.0.0.1/file_shortterm/b/u", "status=200", "elapsed_ms"] {
+        for needle in [
+            "media exchange",
+            "127.0.0.1/file_shortterm/b/u",
+            "status=200",
+            "elapsed_ms",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
         // A failed transfer logs its own record, equally free of query, cookie and body.
-        let (base, _) = serve_script(&ok_head(20), vec![(Duration::ZERO, b"pixels-BODY".to_vec())], Duration::ZERO);
-        client_with(&base, Duration::from_secs(5), cookies).download(&original(), &mut out, &|_, _| {}).await.unwrap_err();
-        assert!(capture.text().contains("http exchange failed"), "{}", capture.text());
+        let (base, _) = serve_script(
+            &ok_head(20),
+            vec![(Duration::ZERO, b"pixels-BODY".to_vec())],
+            Duration::ZERO,
+        );
+        client_with(&base, Duration::from_secs(5), cookies)
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap_err();
+        assert!(
+            capture.text().contains("http exchange failed"),
+            "{}",
+            capture.text()
+        );
         capture.assert_absent(&["attach", "s3cret-cookie", "pixels-BODY"]);
     }
 
@@ -507,8 +733,14 @@ mod tests {
     async fn a_failing_writer_is_a_storage_error_without_the_destination() {
         let (base, _) = serve(vec![bytes_response("200 OK", b"pixels")]);
         let mut out = Broken(io::ErrorKind::StorageFull);
-        let err = client_with(&base, Duration::from_secs(5), vec![]).download(&original(), &mut out, &|_, _| {}).await.unwrap_err();
-        assert_eq!(err, ProtoError::Storage(io::ErrorKind::StorageFull.to_string()));
+        let err = client_with(&base, Duration::from_secs(5), vec![])
+            .download(&original(), &mut out, &|_, _| {})
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ProtoError::Storage(io::ErrorKind::StorageFull.to_string())
+        );
         assert!(!err.to_string().contains("secret-name"), "{err}");
     }
 }

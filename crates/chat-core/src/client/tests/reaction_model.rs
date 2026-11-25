@@ -113,7 +113,14 @@ struct Case {
 
 impl Case {
     fn uniform(shape: Shape, snaps: [Snap; 2], pushes: [Push; 2], edit: bool, own: Own) -> Case {
-        Case { shapes: [shape; 2], snaps, pushes, edit, own, bare: false }
+        Case {
+            shapes: [shape; 2],
+            snaps,
+            pushes,
+            edit,
+            own,
+            bare: false,
+        }
     }
 }
 
@@ -134,7 +141,10 @@ fn junk() -> Vec<ReactionCount> {
 
 /// The user's choice of FIRE over `counts` when the account's reaction is `mine`: the overlay
 /// and what `mine` becomes (choosing FIRE again removes it).
-fn toggled_to_fire(mut counts: Vec<ReactionCount>, mine: Option<ReactionCode>) -> (Vec<ReactionCount>, Option<ReactionCode>) {
+fn toggled_to_fire(
+    mut counts: Vec<ReactionCount>,
+    mine: Option<ReactionCode>,
+) -> (Vec<ReactionCount>, Option<ReactionCode>) {
     let lower = |counts: &mut Vec<ReactionCount>, code| {
         if let Some(at) = counts.iter().position(|c| c.code == code) {
             counts[at].count -= 1;
@@ -151,7 +161,10 @@ fn toggled_to_fire(mut counts: Vec<ReactionCount>, mine: Option<ReactionCode>) -
     }
     match counts.iter_mut().find(|c| c.code == FIRE) {
         Some(fire) => fire.count += 1,
-        None => counts.push(ReactionCount { code: FIRE, count: 1 }),
+        None => counts.push(ReactionCount {
+            code: FIRE,
+            count: 1,
+        }),
     }
     (counts, Some(FIRE))
 }
@@ -168,11 +181,17 @@ struct Held {
 impl Held {
     /// No state at all: a message the cache gets without any (a live copy of a message it dropped).
     fn fresh() -> Held {
-        Held { version: None, mine: None, overlay: None }
+        Held {
+            version: None,
+            mine: None,
+            overlay: None,
+        }
     }
 
     fn counts(&self) -> Vec<ReactionCount> {
-        self.overlay.clone().unwrap_or_else(|| self.version.map_or_else(Vec::new, server_counts))
+        self.overlay
+            .clone()
+            .unwrap_or_else(|| self.version.map_or_else(Vec::new, server_counts))
     }
 
     /// An input of version `v` (`None`: without one) that says `says` about `mine` (`None`: does
@@ -263,7 +282,15 @@ impl Model {
     fn new(bare: bool) -> Model {
         Model {
             present: BTreeSet::from([TS]),
-            held: if bare { Held::fresh() } else { Held { version: Some(START), mine: Some(LIKE), overlay: None } },
+            held: if bare {
+                Held::fresh()
+            } else {
+                Held {
+                    version: Some(START),
+                    mine: Some(LIKE),
+                    overlay: None,
+                }
+            },
             out: 0,
             grown: false,
             started: [None, None],
@@ -289,7 +316,12 @@ impl Model {
     fn step(&mut self, case: &Case, step: Step) {
         match step {
             Step::FetchStart(k) => {
-                self.started[k] = Some(Started { newest: self.present.last().copied(), grown: self.grown, later: false, edited: false });
+                self.started[k] = Some(Started {
+                    newest: self.present.last().copied(),
+                    grown: self.grown,
+                    later: false,
+                    edited: false,
+                });
                 self.out += 1;
             }
             Step::FetchEnd(k) => self.fetch_end(case.shapes[k], case.snaps[k], k),
@@ -299,7 +331,10 @@ impl Model {
                 // Cached or not, the state is accepted: by the cache, or by the ledger while a
                 // request is out or the own choice is unanswered. With none, nothing is held and
                 // the push is gone.
-                if let (true, Some((v, says))) = (self.cached(TS) || self.out > 0 || self.reacting, push_offer(case.pushes[i])) {
+                if let (true, Some((v, says))) = (
+                    self.cached(TS) || self.out > 0 || self.reacting,
+                    push_offer(case.pushes[i]),
+                ) {
                     let changed = self.held.offer(v, says);
                     self.superseded |= changed && self.reacting;
                 }
@@ -321,8 +356,14 @@ impl Model {
             Step::ReactEnd => {
                 let reacting = std::mem::take(&mut self.reacting);
                 let kept = self.cached(TS) || self.out > 0;
-                if reacting && case.own == Own::Confirmed && !self.superseded && kept && own_wins(self.held.version, self.base) {
-                    let (overlay, mine) = toggled_to_fire(self.start_counts.clone(), self.started_with);
+                if reacting
+                    && case.own == Own::Confirmed
+                    && !self.superseded
+                    && kept
+                    && own_wins(self.held.version, self.base)
+                {
+                    let (overlay, mine) =
+                        toggled_to_fire(self.start_counts.clone(), self.started_with);
                     self.held.overlay = Some(overlay);
                     self.held.mine = mine;
                     self.held.version = self.base;
@@ -358,7 +399,12 @@ impl Model {
             _ => None,
         };
         let inside = |ts: MessageTs| lo.is_none_or(|lo| ts >= lo) && hi.is_none_or(|hi| ts <= hi);
-        let mut after: BTreeSet<MessageTs> = self.present.iter().copied().filter(|ts| !inside(*ts)).collect();
+        let mut after: BTreeSet<MessageTs> = self
+            .present
+            .iter()
+            .copied()
+            .filter(|ts| !inside(*ts))
+            .collect();
         after.extend(rows.iter().copied());
         // The replay puts an edited message back, inside the replaced range.
         if started.edited && inside(TS) {
@@ -391,20 +437,37 @@ struct Pending {
 fn engine_for(
     refused: bool,
     bare: bool,
-) -> (Engine<Fake>, async_channel::Receiver<Input>, async_channel::Receiver<ClientEvent>) {
+) -> (
+    Engine<Fake>,
+    async_channel::Receiver<Input>,
+    async_channel::Receiver<ClientEvent>,
+) {
     let (events, event_rx) = async_channel::unbounded();
     let (inputs, input_rx) = async_channel::unbounded();
     let fake = Fake::default();
     if refused {
-        let refused = BackendError::Rejected { reason: "no".into(), permanent: false };
+        let refused = BackendError::Rejected {
+            reason: "no".into(),
+            permanent: false,
+        };
         fake.state().write_results.push_back(Err(refused));
     }
     let mut cache = Cache::open_in_memory().unwrap();
     cache.replace_chats(&[chat("a", Some(TS), None)]).unwrap();
     let mut first = reacted();
-    first.reactions = if bare { Reactions::default() } else { reactions(&[(LIKE, 2)], Some(LIKE), START) };
-    cache.replace_range(&id("a"), None, None, &[first], Some(true)).unwrap();
-    let config = ClientConfig::new(Path::new("/nonexistent"), Path::new("/nonexistent").join("session.json"), account());
+    first.reactions = if bare {
+        Reactions::default()
+    } else {
+        reactions(&[(LIKE, 2)], Some(LIKE), START)
+    };
+    cache
+        .replace_range(&id("a"), None, None, &[first], Some(true))
+        .unwrap();
+    let config = ClientConfig::new(
+        Path::new("/nonexistent"),
+        Path::new("/nonexistent").join("session.json"),
+        account(),
+    );
     let mut engine = Engine::new(Arc::new(fake), config, events, inputs, cache);
     engine.phase = Phase::Online;
     (engine, input_rx, event_rx)
@@ -427,9 +490,21 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                         snapshot.edited = edited;
                         snapshot.reactions = match case.snaps[k] {
                             Snap::Absent | Snap::Bare => Reactions::default(),
-                            Snap::Versionless => Reactions { counts: junk(), mine: None, version: None },
-                            Snap::At(v) => Reactions { counts: server_counts(v), mine: None, version: Some(v) },
-                            Snap::AtMine(v) => Reactions { counts: server_counts(v), mine: Some(FIRE), version: Some(v) },
+                            Snap::Versionless => Reactions {
+                                counts: junk(),
+                                mine: None,
+                                version: None,
+                            },
+                            Snap::At(v) => Reactions {
+                                counts: server_counts(v),
+                                mine: None,
+                                version: Some(v),
+                            },
+                            Snap::AtMine(v) => Reactions {
+                                counts: server_counts(v),
+                                mine: Some(FIRE),
+                                version: Some(v),
+                            },
                         };
                         let mut rows = vec![snapshot];
                         if grown && case.shapes[k] == Shape::Tail {
@@ -439,10 +514,18 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                     }
                 };
                 let known_newest = engine.db(engine.cache.newest_ts(&id("a"))).flatten();
-                pending[k] = Some(Pending { mark: engine.begin_snapshots(1), known_newest, rows });
+                pending[k] = Some(Pending {
+                    mark: engine.begin_snapshots(1),
+                    known_newest,
+                    rows,
+                });
             }
             Step::FetchEnd(k) => {
-                let Pending { mark, known_newest, rows } = pending[k].take().unwrap();
+                let Pending {
+                    mark,
+                    known_newest,
+                    rows,
+                } = pending[k].take().unwrap();
                 let chunk = HistoryChunk {
                     chat: id("a"),
                     messages: rows,
@@ -450,18 +533,44 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
                     replaces: None,
                     payloads: Vec::new(),
                 };
-                engine.handle(Input::History(HistoryFetch { chat: id("a"), before: None, known_newest, mark, result: Ok(chunk) }));
+                engine.handle(Input::History(HistoryFetch {
+                    chat: id("a"),
+                    before: None,
+                    known_newest,
+                    mark,
+                    result: Ok(chunk),
+                }));
                 delivered = Some(());
             }
             Step::Grow => grown = true,
             Step::Push(i) => {
                 let update = match case.pushes[i] {
-                    Push::Absent | Push::Versionless => ReactionsUpdate { counts: junk(), version: None, mine: None },
-                    Push::At(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: None },
-                    Push::AtMine(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: Some(Some(FIRE)) },
-                    Push::AtClear(v) => ReactionsUpdate { counts: server_counts(v), version: Some(v), mine: Some(None) },
+                    Push::Absent | Push::Versionless => ReactionsUpdate {
+                        counts: junk(),
+                        version: None,
+                        mine: None,
+                    },
+                    Push::At(v) => ReactionsUpdate {
+                        counts: server_counts(v),
+                        version: Some(v),
+                        mine: None,
+                    },
+                    Push::AtMine(v) => ReactionsUpdate {
+                        counts: server_counts(v),
+                        version: Some(v),
+                        mine: Some(Some(FIRE)),
+                    },
+                    Push::AtClear(v) => ReactionsUpdate {
+                        counts: server_counts(v),
+                        version: Some(v),
+                        mine: Some(None),
+                    },
                 };
-                engine.handle_live(LiveEvent::ReactionsChanged { chat: id("a"), timestamp: TS, update });
+                engine.handle_live(LiveEvent::ReactionsChanged {
+                    chat: id("a"),
+                    timestamp: TS,
+                    update,
+                });
             }
             Step::Edit => {
                 edited = true;
@@ -471,7 +580,10 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
             }
             Step::ReactStart => {
                 // A message the cache does not hold is refused: no request goes out.
-                reacting = engine.db(engine.cache.message(&id("a"), TS)).flatten().is_some();
+                reacting = engine
+                    .db(engine.cache.message(&id("a"), TS))
+                    .flatten()
+                    .is_some();
                 engine.toggle_reaction(id("a"), TS, FIRE);
             }
             Step::ReactEnd => {
@@ -490,16 +602,26 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
             }
         }
         let held = engine.db(engine.cache.message(&id("a"), TS)).flatten();
-        let cached = |ts| engine.db(engine.cache.message(&id("a"), ts)).flatten().is_some();
+        let cached = |ts| {
+            engine
+                .db(engine.cache.message(&id("a"), ts))
+                .flatten()
+                .is_some()
+        };
         let present = [3, 4, 10].map(|ts| (cached(ts), model.cached(ts)));
-        let (want_counts, want_version, want_mine) = (model.held.counts(), model.held.version, model.held.mine);
+        let (want_counts, want_version, want_mine) =
+            (model.held.counts(), model.held.version, model.held.mine);
         let ok = present.iter().all(|(got, want)| got == want)
             && held.as_ref().is_none_or(|held| {
                 held.reactions.counts == want_counts
                     && held.reactions.version == want_version
                     && held.reactions.mine == want_mine
                     && held.edited == edited
-                    && delivered.is_none_or(|()| chunk_row.as_ref().is_none_or(|row| row.reactions == held.reactions && row.body == held.body))
+                    && delivered.is_none_or(|()| {
+                        chunk_row.as_ref().is_none_or(|row| {
+                            row.reactions == held.reactions && row.body == held.body
+                        })
+                    })
             });
         if !ok {
             return Err(format!(
@@ -514,7 +636,12 @@ fn run(case: &Case, order: &[Step], rt: &tokio::runtime::Runtime) -> Result<(), 
 
 /// Every order of the chains that keeps each chain's own order.
 fn interleavings(chains: &[Vec<Step>]) -> Vec<Vec<Step>> {
-    fn go(chains: &[Vec<Step>], at: &mut Vec<usize>, now: &mut Vec<Step>, out: &mut Vec<Vec<Step>>) {
+    fn go(
+        chains: &[Vec<Step>],
+        at: &mut Vec<usize>,
+        now: &mut Vec<Step>,
+        out: &mut Vec<Vec<Step>>,
+    ) {
         let mut moved = false;
         for c in 0..chains.len() {
             if at[c] < chains[c].len() {
@@ -531,7 +658,12 @@ fn interleavings(chains: &[Vec<Step>]) -> Vec<Vec<Step>> {
         }
     }
     let mut out = Vec::new();
-    go(chains, &mut vec![0; chains.len()], &mut Vec::new(), &mut out);
+    go(
+        chains,
+        &mut vec![0; chains.len()],
+        &mut Vec::new(),
+        &mut out,
+    );
     out
 }
 
@@ -558,7 +690,10 @@ fn chains(case: &Case) -> Vec<Vec<Step>> {
 }
 
 fn runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
 }
 
 fn check_every_interleaving(case: Case) {
@@ -595,7 +730,13 @@ fn every_interleaving_of_two_snapshots_an_edit_and_a_confirmed_choice() {
         true,
         Own::Confirmed,
     ));
-    check_every_interleaving(Case::uniform(Shape::Single, [Snap::Versionless, Snap::At(6)], [Push::Absent; 2], true, Own::Off));
+    check_every_interleaving(Case::uniform(
+        Shape::Single,
+        [Snap::Versionless, Snap::At(6)],
+        [Push::Absent; 2],
+        true,
+        Own::Off,
+    ));
 }
 
 #[test]
@@ -616,7 +757,13 @@ fn every_interleaving_around_a_confirmed_choice() {
         (Snap::At(6), [Push::At(5), Push::At(7)]),
         (Snap::Bare, [Push::At(5), Push::At(6)]),
     ] {
-        check_every_interleaving(Case::uniform(Shape::Single, [snap, Snap::Absent], pushes, true, Own::Confirmed));
+        check_every_interleaving(Case::uniform(
+            Shape::Single,
+            [snap, Snap::Absent],
+            pushes,
+            true,
+            Own::Confirmed,
+        ));
     }
 }
 
@@ -662,9 +809,27 @@ fn every_interleaving_of_input_that_says_or_does_not_say_mine() {
 /// pushes and an edit around: message 4 stays (a request only vouches for what it saw).
 #[test]
 fn every_interleaving_keeps_a_tail_another_request_stored() {
-    check_every_interleaving(Case::uniform(Shape::Tail, [Snap::At(5), Snap::At(6)], [Push::At(6), Push::At(7)], false, Own::Off));
-    check_every_interleaving(Case::uniform(Shape::Tail, [Snap::At(5), Snap::At(6)], [Push::At(7), Push::Absent], true, Own::Off));
-    check_every_interleaving(Case::uniform(Shape::Tail, [Snap::At(5), Snap::At(5)], [Push::At(6), Push::Absent], false, Own::Confirmed));
+    check_every_interleaving(Case::uniform(
+        Shape::Tail,
+        [Snap::At(5), Snap::At(6)],
+        [Push::At(6), Push::At(7)],
+        false,
+        Own::Off,
+    ));
+    check_every_interleaving(Case::uniform(
+        Shape::Tail,
+        [Snap::At(5), Snap::At(6)],
+        [Push::At(7), Push::Absent],
+        true,
+        Own::Off,
+    ));
+    check_every_interleaving(Case::uniform(
+        Shape::Tail,
+        [Snap::At(5), Snap::At(5)],
+        [Push::At(6), Push::Absent],
+        false,
+        Own::Confirmed,
+    ));
 }
 
 /// A page above everything cached drops the cache below it, except a message a live change
@@ -672,8 +837,20 @@ fn every_interleaving_keeps_a_tail_another_request_stored() {
 /// the state it had when the request started.
 #[test]
 fn every_interleaving_of_a_page_above_the_cache_keeps_the_reactions_of_a_touched_message() {
-    check_every_interleaving(Case::uniform(Shape::Jump, [Snap::At(5), Snap::At(5)], [Push::At(6), Push::AtMine(7)], true, Own::Off));
-    check_every_interleaving(Case::uniform(Shape::Jump, [Snap::At(5), Snap::Absent], [Push::At(6), Push::AtClear(7)], true, Own::Off));
+    check_every_interleaving(Case::uniform(
+        Shape::Jump,
+        [Snap::At(5), Snap::At(5)],
+        [Push::At(6), Push::AtMine(7)],
+        true,
+        Own::Off,
+    ));
+    check_every_interleaving(Case::uniform(
+        Shape::Jump,
+        [Snap::At(5), Snap::Absent],
+        [Push::At(6), Push::AtClear(7)],
+        true,
+        Own::Off,
+    ));
 }
 
 /// Mixed ranges (ReviewRecon5): a page above the cache drops message 3 while a snapshot that saw
@@ -684,11 +861,33 @@ fn every_interleaving_of_a_page_above_the_cache_keeps_the_reactions_of_a_touched
 fn every_interleaving_of_a_snapshot_and_a_page_above_the_cache() {
     for shapes in [[Shape::Single, Shape::Jump], [Shape::Jump, Shape::Single]] {
         for (snaps, pushes, edit, own) in [
-            ([Snap::At(5), Snap::Bare], [Push::At(7), Push::Absent], false, Own::Off),
-            ([Snap::At(5), Snap::Bare], [Push::At(6), Push::AtMine(7)], true, Own::Off),
-            ([Snap::At(6), Snap::Bare], [Push::AtClear(7), Push::Absent], false, Own::Confirmed),
+            (
+                [Snap::At(5), Snap::Bare],
+                [Push::At(7), Push::Absent],
+                false,
+                Own::Off,
+            ),
+            (
+                [Snap::At(5), Snap::Bare],
+                [Push::At(6), Push::AtMine(7)],
+                true,
+                Own::Off,
+            ),
+            (
+                [Snap::At(6), Snap::Bare],
+                [Push::AtClear(7), Push::Absent],
+                false,
+                Own::Confirmed,
+            ),
         ] {
-            check_every_interleaving(Case { shapes, snaps, pushes, edit, own, bare: false });
+            check_every_interleaving(Case {
+                shapes,
+                snaps,
+                pushes,
+                edit,
+                own,
+                bare: false,
+            });
         }
     }
 }
@@ -710,7 +909,11 @@ fn a_snapshot_must_not_bring_back_an_older_state_of_a_message_a_page_dropped() {
     };
 
     let mut seen = msg("a", TS, "hi");
-    seen.reactions = Reactions { counts: server_counts(5), mine: None, version: Some(5) };
+    seen.reactions = Reactions {
+        counts: server_counts(5),
+        mine: None,
+        version: Some(5),
+    };
     let a = HistoryFetch {
         chat: id("a"),
         before: None,
@@ -728,14 +931,27 @@ fn a_snapshot_must_not_bring_back_an_older_state_of_a_message_a_page_dropped() {
     engine.handle_live(LiveEvent::ReactionsChanged {
         chat: id("a"),
         timestamp: TS,
-        update: ReactionsUpdate { counts: server_counts(7), version: Some(7), mine: None },
+        update: ReactionsUpdate {
+            counts: server_counts(7),
+            version: Some(7),
+            mine: None,
+        },
     });
     engine.handle(Input::History(b));
-    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3");
+    assert!(
+        engine
+            .db(engine.cache.message(&id("a"), TS))
+            .flatten()
+            .is_none(),
+        "the page drops message 3"
+    );
     while event_rx.try_recv().is_ok() {}
     engine.handle(Input::History(a));
 
-    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
+    let held = engine
+        .db(engine.cache.message(&id("a"), TS))
+        .flatten()
+        .expect("message 3 is back");
     assert_eq!(held.reactions.version, Some(7));
     assert_eq!(held.reactions.counts, server_counts(7));
     let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
@@ -744,8 +960,14 @@ fn a_snapshot_must_not_bring_back_an_older_state_of_a_message_a_page_dropped() {
             _ => None,
         })
         .expect("the snapshot's chunk is shown");
-    assert_eq!(shown.reactions, held.reactions, "the chunk shows what the cache holds");
-    assert!(engine.reaction_ledger.is_empty(), "nothing is kept once no request is out");
+    assert_eq!(
+        shown.reactions, held.reactions,
+        "the chunk shows what the cache holds"
+    );
+    assert!(
+        engine.reaction_ledger.is_empty(),
+        "nothing is kept once no request is out"
+    );
 }
 
 /// ReviewRecon6: message 3 has no reaction state; request A holds its bare row, request B is a
@@ -781,11 +1003,21 @@ fn a_push_for_an_evicted_message_supersedes_the_pending_choice() {
     };
     engine.toggle_reaction(id("a"), TS, FIRE);
     engine.handle(Input::History(b));
-    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3");
+    assert!(
+        engine
+            .db(engine.cache.message(&id("a"), TS))
+            .flatten()
+            .is_none(),
+        "the page drops message 3"
+    );
     engine.handle_live(LiveEvent::ReactionsChanged {
         chat: id("a"),
         timestamp: TS,
-        update: ReactionsUpdate { counts: junk(), version: None, mine: None },
+        update: ReactionsUpdate {
+            counts: junk(),
+            version: None,
+            mine: None,
+        },
     });
     let input = rt.block_on(input_rx.recv()).unwrap();
     assert!(matches!(input, Input::Action { .. }));
@@ -793,7 +1025,10 @@ fn a_push_for_an_evicted_message_supersedes_the_pending_choice() {
     while event_rx.try_recv().is_ok() {}
     engine.handle(Input::History(a));
 
-    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
+    let held = engine
+        .db(engine.cache.message(&id("a"), TS))
+        .flatten()
+        .expect("message 3 is back");
     assert_eq!(held.reactions.counts, junk(), "the push, not the overlay");
     let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
         .find_map(|event| match event {
@@ -809,7 +1044,10 @@ fn a_push_for_an_evicted_message_supersedes_the_pending_choice() {
 #[test]
 fn every_interleaving_of_pushes_for_an_evicted_message_and_a_pending_choice() {
     for shapes in [[Shape::Single, Shape::Jump], [Shape::Jump, Shape::Single]] {
-        for pushes in [[Push::Versionless, Push::Absent], [Push::Versionless, Push::At(6)]] {
+        for pushes in [
+            [Push::Versionless, Push::Absent],
+            [Push::Versionless, Push::At(6)],
+        ] {
             check_every_interleaving(Case {
                 shapes,
                 snaps: [Snap::Bare, Snap::Bare],
@@ -846,9 +1084,19 @@ fn a_push_repeating_the_base_after_the_ledger_was_dropped_does_not_supersede_the
     };
     engine.toggle_reaction(id("a"), TS, FIRE);
     engine.handle(Input::History(b));
-    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3");
+    assert!(
+        engine
+            .db(engine.cache.message(&id("a"), TS))
+            .flatten()
+            .is_none(),
+        "the page drops message 3"
+    );
     assert_eq!(
-        engine.reaction_ledger.values().map(|held| held.len()).sum::<usize>(),
+        engine
+            .reaction_ledger
+            .values()
+            .map(|held| held.len())
+            .sum::<usize>(),
         1,
         "no request is out: only the state the unanswered choice relies on stays"
     );
@@ -870,7 +1118,11 @@ fn a_push_repeating_the_base_after_the_ledger_was_dropped_does_not_supersede_the
     engine.handle_live(LiveEvent::ReactionsChanged {
         chat: id("a"),
         timestamp: TS,
-        update: ReactionsUpdate { counts: server_counts(START), version: Some(START), mine: None },
+        update: ReactionsUpdate {
+            counts: server_counts(START),
+            version: Some(START),
+            mine: None,
+        },
     });
     let input = rt.block_on(input_rx.recv()).unwrap();
     assert!(matches!(input, Input::Action { .. }));
@@ -879,9 +1131,19 @@ fn a_push_repeating_the_base_after_the_ledger_was_dropped_does_not_supersede_the
     engine.handle(Input::History(a));
 
     let (counts, mine) = toggled_to_fire(server_counts(START), Some(LIKE));
-    let want = Reactions { counts, mine, version: Some(START) };
-    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
-    assert_eq!(held.reactions, want, "the confirmed choice survives the repeated state");
+    let want = Reactions {
+        counts,
+        mine,
+        version: Some(START),
+    };
+    let held = engine
+        .db(engine.cache.message(&id("a"), TS))
+        .flatten()
+        .expect("message 3 is back");
+    assert_eq!(
+        held.reactions, want,
+        "the confirmed choice survives the repeated state"
+    );
     let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
         .find_map(|event| match event {
             ClientEvent::History(chunk) => chunk.messages.into_iter().find(|m| m.timestamp == TS),
@@ -891,13 +1153,24 @@ fn a_push_repeating_the_base_after_the_ledger_was_dropped_does_not_supersede_the
     assert_eq!(shown.reactions, want);
 }
 
-fn page_fetch(engine: &mut Engine<Fake>, known_newest: Option<MessageTs>, rows: Vec<Message>, reached_start: bool) -> HistoryFetch {
+fn page_fetch(
+    engine: &mut Engine<Fake>,
+    known_newest: Option<MessageTs>,
+    rows: Vec<Message>,
+    reached_start: bool,
+) -> HistoryFetch {
     HistoryFetch {
         chat: id("a"),
         before: None,
         known_newest,
         mark: engine.begin_snapshots(1),
-        result: Ok(HistoryChunk { chat: id("a"), messages: rows, reached_start, replaces: None, payloads: Vec::new() }),
+        result: Ok(HistoryChunk {
+            chat: id("a"),
+            messages: rows,
+            reached_start,
+            replaces: None,
+            payloads: Vec::new(),
+        }),
     }
 }
 
@@ -919,17 +1192,34 @@ fn the_state_kept_for_a_pending_choice_survives_the_row_coming_and_going() {
     engine.handle(Input::History(jump));
     let bare = page_fetch(&mut engine, Some(10), vec![msg("a", TS, "hi")], true);
     engine.handle(Input::History(bare));
-    let back = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("the snapshot puts message 3 back");
-    assert_eq!(back.reactions.version, Some(START), "a bare row takes the state the cache accepted");
+    let back = engine
+        .db(engine.cache.message(&id("a"), TS))
+        .flatten()
+        .expect("the snapshot puts message 3 back");
+    assert_eq!(
+        back.reactions.version,
+        Some(START),
+        "a bare row takes the state the cache accepted"
+    );
 
     let held_snapshot = page_fetch(&mut engine, Some(TS), vec![msg("a", TS, "hi")], true);
     let jump_again = page_fetch(&mut engine, Some(TS), vec![msg("a", 10, "ten")], false);
     engine.handle(Input::History(jump_again));
-    assert!(engine.db(engine.cache.message(&id("a"), TS)).flatten().is_none(), "the page drops message 3 again");
+    assert!(
+        engine
+            .db(engine.cache.message(&id("a"), TS))
+            .flatten()
+            .is_none(),
+        "the page drops message 3 again"
+    );
     engine.handle_live(LiveEvent::ReactionsChanged {
         chat: id("a"),
         timestamp: TS,
-        update: ReactionsUpdate { counts: junk(), version: None, mine: None },
+        update: ReactionsUpdate {
+            counts: junk(),
+            version: None,
+            mine: None,
+        },
     });
     let input = rt.block_on(input_rx.recv()).unwrap();
     assert!(matches!(input, Input::Action { .. }));
@@ -938,9 +1228,19 @@ fn the_state_kept_for_a_pending_choice_survives_the_row_coming_and_going() {
     engine.handle(Input::History(held_snapshot));
 
     let (counts, mine) = toggled_to_fire(server_counts(START), Some(LIKE));
-    let want = Reactions { counts, mine, version: Some(START) };
-    let held = engine.db(engine.cache.message(&id("a"), TS)).flatten().expect("message 3 is back");
-    assert_eq!(held.reactions, want, "the choice over the accepted version 5, without the rejected push");
+    let want = Reactions {
+        counts,
+        mine,
+        version: Some(START),
+    };
+    let held = engine
+        .db(engine.cache.message(&id("a"), TS))
+        .flatten()
+        .expect("message 3 is back");
+    assert_eq!(
+        held.reactions, want,
+        "the choice over the accepted version 5, without the rejected push"
+    );
     let shown = std::iter::from_fn(|| event_rx.try_recv().ok())
         .find_map(|event| match event {
             ClientEvent::History(chunk) => chunk.messages.into_iter().find(|m| m.timestamp == TS),
@@ -955,9 +1255,24 @@ fn the_state_kept_for_a_pending_choice_survives_the_row_coming_and_going() {
 #[test]
 fn every_interleaving_of_pushes_after_the_ledger_was_dropped_under_a_pending_choice() {
     for shapes in [[Shape::Jump, Shape::Single], [Shape::Single, Shape::Jump]] {
-        for pushes in [[Push::At(5), Push::Absent], [Push::Versionless, Push::At(5)], [Push::At(5), Push::At(6)]] {
-            for snaps in [[Snap::At(5), Snap::At(5)], [Snap::Bare, Snap::At(5)], [Snap::At(5), Snap::Bare]] {
-                check_every_interleaving(Case { shapes, snaps, pushes, edit: false, own: Own::Confirmed, bare: false });
+        for pushes in [
+            [Push::At(5), Push::Absent],
+            [Push::Versionless, Push::At(5)],
+            [Push::At(5), Push::At(6)],
+        ] {
+            for snaps in [
+                [Snap::At(5), Snap::At(5)],
+                [Snap::Bare, Snap::At(5)],
+                [Snap::At(5), Snap::Bare],
+            ] {
+                check_every_interleaving(Case {
+                    shapes,
+                    snaps,
+                    pushes,
+                    edit: false,
+                    own: Own::Confirmed,
+                    bare: false,
+                });
             }
         }
     }
@@ -967,8 +1282,19 @@ fn every_interleaving_of_pushes_after_the_ledger_was_dropped_under_a_pending_cho
 /// message 3 while it is out; the edit puts message 3 back, and it must keep version 6.
 #[test]
 fn a_message_put_back_outside_the_page_keeps_the_state_the_cache_reached() {
-    let case = Case::uniform(Shape::Jump, [Snap::At(5), Snap::Absent], [Push::At(6), Push::Absent], true, Own::Off);
-    let order = [Step::FetchStart(0), Step::Edit, Step::Push(0), Step::FetchEnd(0)];
+    let case = Case::uniform(
+        Shape::Jump,
+        [Snap::At(5), Snap::Absent],
+        [Push::At(6), Push::Absent],
+        true,
+        Own::Off,
+    );
+    let order = [
+        Step::FetchStart(0),
+        Step::Edit,
+        Step::Push(0),
+        Step::FetchEnd(0),
+    ];
     let rt = runtime();
     let _enter = rt.enter();
     run(&case, &order, &rt).unwrap_or_else(|failure| panic!("{failure}"));
@@ -978,8 +1304,21 @@ fn a_message_put_back_outside_the_page_keeps_the_state_the_cache_reached() {
 /// message 4 and a push touched message 3; message 4 must stay.
 #[test]
 fn a_tail_another_request_stored_survives_a_request_that_started_before_it() {
-    let case = Case::uniform(Shape::Tail, [Snap::At(5), Snap::At(5)], [Push::At(6), Push::Absent], false, Own::Off);
-    let order = [Step::FetchStart(0), Step::Grow, Step::FetchStart(1), Step::FetchEnd(1), Step::Push(0), Step::FetchEnd(0)];
+    let case = Case::uniform(
+        Shape::Tail,
+        [Snap::At(5), Snap::At(5)],
+        [Push::At(6), Push::Absent],
+        false,
+        Own::Off,
+    );
+    let order = [
+        Step::FetchStart(0),
+        Step::Grow,
+        Step::FetchStart(1),
+        Step::FetchEnd(1),
+        Step::Push(0),
+        Step::FetchEnd(0),
+    ];
     let rt = runtime();
     let _enter = rt.enter();
     run(&case, &order, &rt).unwrap_or_else(|failure| panic!("{failure}"));
@@ -995,15 +1334,37 @@ fn random_inputs_in_random_orders() {
         (state % n as u64) as usize
     };
     let snap = |n: usize| {
-        [Snap::Bare, Snap::Versionless, Snap::At(4), Snap::At(5), Snap::At(6), Snap::At(7), Snap::AtMine(6), Snap::AtMine(7)][n]
+        [
+            Snap::Bare,
+            Snap::Versionless,
+            Snap::At(4),
+            Snap::At(5),
+            Snap::At(6),
+            Snap::At(7),
+            Snap::AtMine(6),
+            Snap::AtMine(7),
+        ][n]
     };
     let push = |n: usize| {
-        [Push::Versionless, Push::At(4), Push::At(5), Push::At(6), Push::At(7), Push::AtMine(6), Push::AtMine(7), Push::AtClear(6), Push::AtClear(7)][n]
+        [
+            Push::Versionless,
+            Push::At(4),
+            Push::At(5),
+            Push::At(6),
+            Push::At(7),
+            Push::AtMine(6),
+            Push::AtMine(7),
+            Push::AtClear(6),
+            Push::AtClear(7),
+        ][n]
     };
     let rt = runtime();
     let _enter = rt.enter();
     for _ in 0..6000 {
-        let shapes = [[Shape::Single, Shape::Tail, Shape::Jump][next(3)], [Shape::Single, Shape::Tail, Shape::Jump][next(3)]];
+        let shapes = [
+            [Shape::Single, Shape::Tail, Shape::Jump][next(3)],
+            [Shape::Single, Shape::Tail, Shape::Jump][next(3)],
+        ];
         let case = Case {
             shapes,
             snaps: [snap(next(8)), snap(next(8))],
@@ -1015,7 +1376,9 @@ fn random_inputs_in_random_orders() {
         let chains = chains(&case);
         let (mut at, mut order) = (vec![0; chains.len()], Vec::new());
         while order.len() < chains.iter().map(Vec::len).sum() {
-            let open: Vec<usize> = (0..chains.len()).filter(|&c| at[c] < chains[c].len()).collect();
+            let open: Vec<usize> = (0..chains.len())
+                .filter(|&c| at[c] < chains[c].len())
+                .collect();
             let c = open[next(open.len())];
             order.push(chains[c][at[c]]);
             at[c] += 1;
@@ -1037,8 +1400,14 @@ fn a_flood_of_page_fetches_does_not_push_an_edit_and_a_deletion_out_of_the_repla
     let mut cache = Cache::open_in_memory().unwrap();
     cache.replace_chats(&[chat("a", Some(TS), None)]).unwrap();
     let two = msg("a", 2, "two");
-    cache.replace_range(&id("a"), None, None, &[two.clone(), reacted()], Some(true)).unwrap();
-    let config = ClientConfig::new(Path::new("/nonexistent"), Path::new("/nonexistent").join("session.json"), account());
+    cache
+        .replace_range(&id("a"), None, None, &[two.clone(), reacted()], Some(true))
+        .unwrap();
+    let config = ClientConfig::new(
+        Path::new("/nonexistent"),
+        Path::new("/nonexistent").join("session.json"),
+        account(),
+    );
     let mut engine = Engine::new(Arc::new(Fake::default()), config, events, inputs, cache);
     engine.phase = Phase::Online;
     let rt = runtime();
@@ -1056,7 +1425,10 @@ fn a_flood_of_page_fetches_does_not_push_an_edit_and_a_deletion_out_of_the_repla
     let mut edited = msg("a", TS, "hi!");
     edited.edited = true;
     engine.handle_live(LiveEvent::MessageUpserted(edited));
-    engine.handle_live(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 2 });
+    engine.handle_live(LiveEvent::MessageDeleted {
+        chat: id("a"),
+        timestamp: 2,
+    });
     for _ in 0..LIVE_LOG_CAP + 4 {
         let page = HistoryChunk {
             chat: id("a"),
@@ -1065,13 +1437,38 @@ fn a_flood_of_page_fetches_does_not_push_an_edit_and_a_deletion_out_of_the_repla
             replaces: None,
             payloads: Vec::new(),
         };
-        let fetch = HistoryFetch { chat: id("a"), before: Some(2), known_newest: Some(TS), mark: engine.live_seq, result: Ok(page) };
+        let fetch = HistoryFetch {
+            chat: id("a"),
+            before: Some(2),
+            known_newest: Some(TS),
+            mark: engine.live_seq,
+            result: Ok(page),
+        };
         engine.handle(Input::History(fetch));
     }
-    let fetch = HistoryFetch { chat: id("a"), before: None, known_newest: Some(TS), mark, result: Ok(snapshot) };
+    let fetch = HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: Some(TS),
+        mark,
+        result: Ok(snapshot),
+    };
     engine.handle(Input::History(fetch));
 
-    let body = |ts| engine.db(engine.cache.message(&id("a"), ts)).flatten().map(|m| m.body);
-    assert_eq!(body(3), Some(MessageBody::Text("hi!".into())), "the edit must be replayed");
-    assert_eq!(body(2), Some(MessageBody::Deleted), "the deletion must be replayed");
+    let body = |ts| {
+        engine
+            .db(engine.cache.message(&id("a"), ts))
+            .flatten()
+            .map(|m| m.body)
+    };
+    assert_eq!(
+        body(3),
+        Some(MessageBody::Text("hi!".into())),
+        "the edit must be replayed"
+    );
+    assert_eq!(
+        body(2),
+        Some(MessageBody::Deleted),
+        "the deletion must be replayed"
+    );
 }

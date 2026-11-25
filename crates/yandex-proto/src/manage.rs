@@ -108,10 +108,21 @@ pub fn parse_created_chat(data: &Json) -> CreatedChat {
         .get("errors")
         .and_then(Json::as_array)
         .map(|errors| {
-            errors.iter().map(|e| e.get("code").and_then(Json::as_str).unwrap_or("unknown").to_owned()).collect()
+            errors
+                .iter()
+                .map(|e| {
+                    e.get("code")
+                        .and_then(Json::as_str)
+                        .unwrap_or("unknown")
+                        .to_owned()
+                })
+                .collect()
         })
         .unwrap_or_default();
-    CreatedChat { chat: created_chat_id(data), refused }
+    CreatedChat {
+        chat: created_chat_id(data),
+        refused,
+    }
 }
 
 #[cfg(test)]
@@ -124,7 +135,10 @@ mod tests {
     fn every_request() -> Vec<ManageRequest> {
         let all = vec![
             ManageRequest::CreatePrivateChat { guid: "g-1".into() },
-            ManageRequest::CreateChat { title: "T".into(), users: vec!["g-1".into()] },
+            ManageRequest::CreateChat {
+                title: "T".into(),
+                users: vec!["g-1".into()],
+            },
         ];
         for request in &all {
             match request {
@@ -153,19 +167,34 @@ mod tests {
     #[test]
     fn manage_methods_are_disjoint_from_the_read_allowlist() {
         for method in MANAGE_METHODS {
-            assert!(!ALLOWED_METHODS.contains(&method), "{method} is also a read");
+            assert!(
+                !ALLOWED_METHODS.contains(&method),
+                "{method} is also a read"
+            );
         }
     }
 
     #[test]
     fn deferred_management_methods_are_not_representable() {
         for deferred in [
-            "change_chat_members", "change_chat_role", "change_chat_admins", "leave", "invite", "invite_renew",
-            "set_chat_info", "create_token",
+            "change_chat_members",
+            "change_chat_role",
+            "change_chat_admins",
+            "leave",
+            "invite",
+            "invite_renew",
+            "set_chat_info",
+            "create_token",
         ] {
-            assert!(!MANAGE_METHODS.contains(&deferred), "{deferred} is in MANAGE_METHODS");
+            assert!(
+                !MANAGE_METHODS.contains(&deferred),
+                "{deferred} is in MANAGE_METHODS"
+            );
             for request in every_request() {
-                assert!(!request.registry_body().contains(&format!("\"{deferred}\"")), "{deferred} is encodable");
+                assert!(
+                    !request.registry_body().contains(&format!("\"{deferred}\"")),
+                    "{deferred} is encodable"
+                );
             }
         }
     }
@@ -174,17 +203,36 @@ mod tests {
     fn create_private_chat_has_the_documented_body() {
         let request = ManageRequest::CreatePrivateChat { guid: "g-1".into() };
         let body: Json = serde_json::from_str(&request.registry_body()).unwrap();
-        assert_eq!(body, json!({ "method": "create_private_chat", "params": { "guid": "g-1", "wait_for_update": true } }));
+        assert_eq!(
+            body,
+            json!({ "method": "create_private_chat", "params": { "guid": "g-1", "wait_for_update": true } })
+        );
         assert!(!request.registry_body().contains("onetime_user_token"));
     }
 
     #[test]
     fn the_chat_id_is_found_in_the_usual_places_and_never_invented() {
-        assert_eq!(created_chat_id(&json!({ "chat_id": "0/0/c" })).as_deref(), Some("0/0/c"));
-        assert_eq!(created_chat_id(&json!({ "chat": { "chat_id": "a_b" } })).as_deref(), Some("a_b"));
-        assert_eq!(created_chat_id(&json!({ "chat": { "id": "a_b" } })).as_deref(), Some("a_b"));
+        assert_eq!(
+            created_chat_id(&json!({ "chat_id": "0/0/c" })).as_deref(),
+            Some("0/0/c")
+        );
+        assert_eq!(
+            created_chat_id(&json!({ "chat": { "chat_id": "a_b" } })).as_deref(),
+            Some("a_b")
+        );
+        assert_eq!(
+            created_chat_id(&json!({ "chat": { "id": "a_b" } })).as_deref(),
+            Some("a_b")
+        );
         assert_eq!(created_chat_id(&json!({ "id": "x" })).as_deref(), Some("x"));
-        for none in [json!(null), json!({}), json!({ "chat_id": "" }), json!({ "chat_id": 7 }), json!({ "chat": "x" }), json!([])] {
+        for none in [
+            json!(null),
+            json!({}),
+            json!({ "chat_id": "" }),
+            json!({ "chat_id": 7 }),
+            json!({ "chat": "x" }),
+            json!([]),
+        ] {
             assert_eq!(created_chat_id(&none), None, "{none}");
         }
     }
@@ -193,7 +241,10 @@ mod tests {
     /// and a second participant: the exact bytes the web client's wizard would send.
     #[test]
     fn create_chat_has_the_recorded_body() {
-        let request = ManageRequest::CreateChat { title: "Test group".into(), users: vec!["g-1".into(), "g-2".into()] };
+        let request = ManageRequest::CreateChat {
+            title: "Test group".into(),
+            users: vec!["g-1".into(), "g-2".into()],
+        };
         let body: Json = serde_json::from_str(&request.registry_body()).unwrap();
         let recorded: Json = serde_json::from_str(
             r#"{"method":"create_chat","params":{"name":"Test group","description":"","permissions":{"users":["g-1","g-2"]},"group_refs":[],"department_refs":[],"channel":false,"is_public":true}}"#,
@@ -202,7 +253,15 @@ mod tests {
         assert_eq!(body, recorded);
         // Nothing the web client does not send: no token, no wait flag, no alias, no avatar.
         let text = request.registry_body();
-        for absent in ["onetime_user_token", "wait_for_update", "alias", "avatar_id", "\"key\"", "\"groups\"", "\"departments\""] {
+        for absent in [
+            "onetime_user_token",
+            "wait_for_update",
+            "alias",
+            "avatar_id",
+            "\"key\"",
+            "\"groups\"",
+            "\"departments\"",
+        ] {
             assert!(!text.contains(absent), "{absent} in {text}");
         }
     }
@@ -210,7 +269,10 @@ mod tests {
     #[test]
     fn create_chat_escapes_the_title_and_keeps_the_participant_order() {
         let title = "Q \"1\" \\ \u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}\n";
-        let request = ManageRequest::CreateChat { title: title.into(), users: vec!["b".into(), "a".into()] };
+        let request = ManageRequest::CreateChat {
+            title: title.into(),
+            users: vec!["b".into(), "a".into()],
+        };
         let body: Json = serde_json::from_str(&request.registry_body()).unwrap();
         assert_eq!(body["params"]["name"], title);
         assert_eq!(body["params"]["permissions"]["users"], json!(["b", "a"]));
@@ -232,16 +294,35 @@ mod tests {
         });
         let created = parse_created_chat(&reply);
         assert_eq!(created.chat.as_deref(), Some("0/0/g"));
-        assert_eq!(created.refused, ["blocked_by_privacy_settings", "unknown", "unknown"]);
+        assert_eq!(
+            created.refused,
+            ["blocked_by_privacy_settings", "unknown", "unknown"]
+        );
     }
 
     #[test]
     fn a_created_group_reply_without_an_id_or_errors_is_still_readable() {
-        assert_eq!(parse_created_chat(&json!({ "chat": { "chat_id": "0/0/g" } })), CreatedChat { chat: Some("0/0/g".into()), refused: vec![] });
-        for odd in [json!(null), json!({}), json!({ "chat": {} }), json!({ "errors": "boom" }), json!({ "errors": {} }), json!([])] {
+        assert_eq!(
+            parse_created_chat(&json!({ "chat": { "chat_id": "0/0/g" } })),
+            CreatedChat {
+                chat: Some("0/0/g".into()),
+                refused: vec![]
+            }
+        );
+        for odd in [
+            json!(null),
+            json!({}),
+            json!({ "chat": {} }),
+            json!({ "errors": "boom" }),
+            json!({ "errors": {} }),
+            json!([]),
+        ] {
             let created = parse_created_chat(&odd);
             assert_eq!(created, CreatedChat::default(), "{odd}");
         }
-        assert_eq!(parse_created_chat(&json!({ "errors": [] })).refused, Vec::<String>::new());
+        assert_eq!(
+            parse_created_chat(&json!({ "errors": [] })).refused,
+            Vec::<String>::new()
+        );
     }
 }

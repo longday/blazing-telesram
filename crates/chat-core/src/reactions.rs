@@ -45,21 +45,48 @@ pub struct KnownReaction {
 /// private-chat picker without the unconfirmed `100108`). Empty would hide the picker only
 /// (chips still render with [`NEUTRAL_GLYPH`]).
 pub const KNOWN: &[KnownReaction] = &[
-    KnownReaction { code: ReactionCode(100109), emoji: "\u{2764}\u{FE0F}" }, // HEART ❤️
-    KnownReaction { code: ReactionCode(100104), emoji: "\u{1F525}" },        // FIRE 🔥
-    KnownReaction { code: ReactionCode(100102), emoji: "\u{1F44D}" },        // LIKE 👍
-    KnownReaction { code: ReactionCode(100103), emoji: "\u{1F44E}" },        // DISLIKE 👎
-    KnownReaction { code: ReactionCode(100106), emoji: "\u{1F632}" },        // SURPRISED 😲
-    KnownReaction { code: ReactionCode(100105), emoji: "\u{1F62D}" },        // CRYING 😭
-    KnownReaction { code: ReactionCode(100110), emoji: "\u{1F440}" },        // EYES 👀
-    KnownReaction { code: ReactionCode(100101), emoji: "\u{2705}" },         // CHECK ✅
+    KnownReaction {
+        code: ReactionCode(100109),
+        emoji: "\u{2764}\u{FE0F}",
+    }, // HEART ❤️
+    KnownReaction {
+        code: ReactionCode(100104),
+        emoji: "\u{1F525}",
+    }, // FIRE 🔥
+    KnownReaction {
+        code: ReactionCode(100102),
+        emoji: "\u{1F44D}",
+    }, // LIKE 👍
+    KnownReaction {
+        code: ReactionCode(100103),
+        emoji: "\u{1F44E}",
+    }, // DISLIKE 👎
+    KnownReaction {
+        code: ReactionCode(100106),
+        emoji: "\u{1F632}",
+    }, // SURPRISED 😲
+    KnownReaction {
+        code: ReactionCode(100105),
+        emoji: "\u{1F62D}",
+    }, // CRYING 😭
+    KnownReaction {
+        code: ReactionCode(100110),
+        emoji: "\u{1F440}",
+    }, // EYES 👀
+    KnownReaction {
+        code: ReactionCode(100101),
+        emoji: "\u{2705}",
+    }, // CHECK ✅
 ];
 
 /// Drawn for a code that is not in [`KNOWN`].
 pub const NEUTRAL_GLYPH: &str = "❔";
 
 pub fn emoji(code: ReactionCode) -> Option<&'static str> {
-    KNOWN.iter().find(|known| known.code == code).map(|known| known.emoji)
+    KNOWN
+        .iter()
+        .find(|known| known.code == code)
+        .map(|known| known.emoji)
 }
 
 // The reaction state of a message is kept by one rule (design D5, "Invariant"). States are
@@ -81,7 +108,13 @@ impl Reactions {
     /// [`Reactions::apply`] does for a push that does not say `mine`. A state that carries no
     /// reactions and no version ([`Reactions::is_unknown`]) says nothing and changes nothing.
     pub fn merge(&mut self, incoming: &Reactions) -> bool {
-        !incoming.is_unknown() && self.accept(&incoming.counts, incoming.version, incoming.mine.map(Some), false)
+        !incoming.is_unknown()
+            && self.accept(
+                &incoming.counts,
+                incoming.version,
+                incoming.mine.map(Some),
+                false,
+            )
     }
 
     /// Puts the user's own confirmed choice `own` (built on the server state of its version) over
@@ -113,7 +146,9 @@ impl Reactions {
         if !wins {
             return false;
         }
-        let mine = mine.unwrap_or(self.mine).filter(|code| counts.iter().any(|count| count.code == *code));
+        let mine = mine
+            .unwrap_or(self.mine)
+            .filter(|code| counts.iter().any(|count| count.code == *code));
         let changed = self.counts != counts || self.mine != mine || self.version != version;
         if changed {
             self.counts.clear();
@@ -128,7 +163,11 @@ impl Reactions {
     /// (`None` removes). Choosing the own type again removes it; any other type replaces the
     /// own one. The version is kept, so a newer push overwrites the overlay.
     pub fn toggled(&self, code: ReactionCode) -> (Reactions, Option<ReactionCode>) {
-        let target = if self.mine == Some(code) { None } else { Some(code) };
+        let target = if self.mine == Some(code) {
+            None
+        } else {
+            Some(code)
+        };
         let mut overlay = self.clone();
         if let Some(old) = self.mine
             && let Some(at) = overlay.counts.iter().position(|count| count.code == old)
@@ -141,7 +180,10 @@ impl Reactions {
         if let Some(new) = target {
             match overlay.counts.iter_mut().find(|count| count.code == new) {
                 Some(count) => count.count += 1,
-                None => overlay.counts.push(ReactionCount { code: new, count: 1 }),
+                None => overlay.counts.push(ReactionCount {
+                    code: new,
+                    count: 1,
+                }),
             }
         }
         overlay.mine = target;
@@ -158,15 +200,33 @@ mod tests {
     }
 
     fn counts(pairs: &[(i64, u32)]) -> Vec<ReactionCount> {
-        pairs.iter().map(|&(c, count)| ReactionCount { code: code(c), count }).collect()
+        pairs
+            .iter()
+            .map(|&(c, count)| ReactionCount {
+                code: code(c),
+                count,
+            })
+            .collect()
     }
 
     fn state(pairs: &[(i64, u32)], mine: Option<i64>, version: Option<i64>) -> Reactions {
-        Reactions { counts: counts(pairs), mine: mine.map(code), version }
+        Reactions {
+            counts: counts(pairs),
+            mine: mine.map(code),
+            version,
+        }
     }
 
-    fn update(pairs: &[(i64, u32)], version: Option<i64>, mine: Option<Option<i64>>) -> ReactionsUpdate {
-        ReactionsUpdate { counts: counts(pairs), version, mine: mine.map(|m| m.map(code)) }
+    fn update(
+        pairs: &[(i64, u32)],
+        version: Option<i64>,
+        mine: Option<Option<i64>>,
+    ) -> ReactionsUpdate {
+        ReactionsUpdate {
+            counts: counts(pairs),
+            version,
+            mine: mine.map(|m| m.map(code)),
+        }
     }
 
     #[test]
@@ -234,8 +294,15 @@ mod tests {
         assert_eq!(r, held);
         let mut versionless = state(&[(1, 2)], None, None);
         assert!(versionless.apply(&update(&[(1, 3)], None, None)));
-        assert_eq!(versionless, state(&[(1, 3)], None, None), "later wins among versionless states");
-        assert!(versionless.apply(&update(&[(1, 4)], Some(1), None)), "any version beats none");
+        assert_eq!(
+            versionless,
+            state(&[(1, 3)], None, None),
+            "later wins among versionless states"
+        );
+        assert!(
+            versionless.apply(&update(&[(1, 4)], Some(1), None)),
+            "any version beats none"
+        );
         assert_eq!(versionless.version, Some(1));
     }
 
@@ -247,8 +314,14 @@ mod tests {
             (state(&[(1, 9)], None, Some(5)), held.clone()),
             (state(&[(1, 9)], None, None), held.clone()),
             (state(&[], None, None), held.clone()),
-            (state(&[(1, 3)], None, Some(6)), state(&[(1, 3)], Some(1), Some(6))),
-            (state(&[(2, 1)], Some(2), Some(6)), state(&[(2, 1)], Some(2), Some(6))),
+            (
+                state(&[(1, 3)], None, Some(6)),
+                state(&[(1, 3)], Some(1), Some(6)),
+            ),
+            (
+                state(&[(2, 1)], Some(2), Some(6)),
+                state(&[(2, 1)], Some(2), Some(6)),
+            ),
         ] {
             let mut r = held.clone();
             r.merge(&incoming);
@@ -262,13 +335,20 @@ mod tests {
     #[test]
     fn overlay_own_replaces_the_server_state_of_its_version_or_a_lower_one() {
         let own = state(&[(1, 2), (2, 1)], Some(2), Some(5));
-        for held in [state(&[(1, 2)], None, Some(5)), state(&[(1, 1)], None, Some(4)), state(&[], None, None)] {
+        for held in [
+            state(&[(1, 2)], None, Some(5)),
+            state(&[(1, 1)], None, Some(4)),
+            state(&[], None, None),
+        ] {
             let mut r = held;
             assert!(r.overlay_own(&own));
             assert_eq!(r, own);
         }
         let mut same = own.clone();
-        assert!(!same.overlay_own(&own), "nothing changes for the same state");
+        assert!(
+            !same.overlay_own(&own),
+            "nothing changes for the same state"
+        );
     }
 
     #[test]
@@ -298,7 +378,10 @@ mod tests {
     #[test]
     fn toggled_first_reaction_raises_an_existing_count() {
         let (overlay, target) = state(&[(1, 2)], None, None).toggled(code(1));
-        assert_eq!((overlay, target), (state(&[(1, 3)], Some(1), None), Some(code(1))));
+        assert_eq!(
+            (overlay, target),
+            (state(&[(1, 3)], Some(1), None), Some(code(1)))
+        );
     }
 
     #[test]
@@ -336,7 +419,12 @@ mod tests {
     #[test]
     fn known_matches_the_research_table() {
         let codes: Vec<i64> = KNOWN.iter().map(|known| known.code.0).collect();
-        assert_eq!(codes, [100109, 100104, 100102, 100103, 100106, 100105, 100110, 100101]);
+        assert_eq!(
+            codes,
+            [
+                100109, 100104, 100102, 100103, 100106, 100105, 100110, 100101
+            ]
+        );
     }
 
     #[test]

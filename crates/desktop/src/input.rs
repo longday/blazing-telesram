@@ -94,7 +94,14 @@ struct Shaped {
 }
 
 impl Shaped {
-    fn new(text: SharedString, font_size: Pixels, runs: &[TextRun], wrap: Option<Pixels>, line_height: Pixels, window: &Window) -> Self {
+    fn new(
+        text: SharedString,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap: Option<Pixels>,
+        line_height: Pixels,
+        window: &Window,
+    ) -> Self {
         let lines: Vec<WrappedLine> = window
             .text_system()
             .shape_text(text, font_size, runs, wrap, None)
@@ -105,7 +112,11 @@ impl Shaped {
         for (line_ix, line) in lines.iter().enumerate() {
             let unwrapped = &line.unwrapped_layout;
             let mut starts = vec![0];
-            starts.extend(line.wrap_boundaries.iter().map(|b| unwrapped.runs[b.run_ix].glyphs[b.glyph_ix].index));
+            starts.extend(
+                line.wrap_boundaries
+                    .iter()
+                    .map(|b| unwrapped.runs[b.run_ix].glyphs[b.glyph_ix].index),
+            );
             for (k, &start) in starts.iter().enumerate() {
                 rows.push(Row {
                     line: line_ix,
@@ -119,9 +130,16 @@ impl Shaped {
             line_start += line.len() + 1;
         }
         if rows.is_empty() {
-            rows.push(Row { last_in_line: true, ..Row::default() });
+            rows.push(Row {
+                last_in_line: true,
+                ..Row::default()
+            });
         }
-        Self { lines, rows, line_height }
+        Self {
+            lines,
+            rows,
+            line_height,
+        }
     }
 
     fn height(&self) -> Pixels {
@@ -130,19 +148,26 @@ impl Shaped {
 
     /// The row that shows the caret at `index`: a wrap point belongs to the row that starts there.
     fn row_of(&self, index: usize) -> usize {
-        self.rows.partition_point(|row| row.start <= index).saturating_sub(1)
+        self.rows
+            .partition_point(|row| row.start <= index)
+            .saturating_sub(1)
     }
 
     fn x_in_row(&self, row: &Row, index: usize) -> Pixels {
-        self.lines
-            .get(row.line)
-            .map_or(px(0.), |line| line.unwrapped_layout.x_for_index(index.saturating_sub(row.line_start)) - row.x0)
+        self.lines.get(row.line).map_or(px(0.), |line| {
+            line.unwrapped_layout
+                .x_for_index(index.saturating_sub(row.line_start))
+                - row.x0
+        })
     }
 
     /// Top-left of the caret at `index`, relative to the text origin.
     fn position(&self, index: usize) -> Point<Pixels> {
         let ix = self.row_of(index);
-        point(self.x_in_row(&self.rows[ix], index), self.line_height * ix as f32)
+        point(
+            self.x_in_row(&self.rows[ix], index),
+            self.line_height * ix as f32,
+        )
     }
 
     /// Where the caret goes at the end of a row: before a wrap point, since after it the caret would show on the next row.
@@ -151,15 +176,25 @@ impl Shaped {
         if row.last_in_line {
             return row.end;
         }
-        let last = text[row.start..row.end].graphemes(true).next_back().map_or(0, str::len);
+        let last = text[row.start..row.end]
+            .graphemes(true)
+            .next_back()
+            .map_or(0, str::len);
         row.end - last
     }
 
     fn index_in_row(&self, ix: usize, x: Pixels, text: &str) -> usize {
         let row = &self.rows[ix];
-        let Some(line) = self.lines.get(row.line) else { return 0 };
-        let index = (row.line_start + line.unwrapped_layout.closest_index_for_x(x + row.x0)).clamp(row.start, row.end);
-        if index >= row.end { self.end_of_row(ix, text) } else { index }
+        let Some(line) = self.lines.get(row.line) else {
+            return 0;
+        };
+        let index = (row.line_start + line.unwrapped_layout.closest_index_for_x(x + row.x0))
+            .clamp(row.start, row.end);
+        if index >= row.end {
+            self.end_of_row(ix, text)
+        } else {
+            index
+        }
     }
 
     /// The closest caret position to `point`, relative to the text origin; outside the text it clamps to the nearest row.
@@ -274,11 +309,15 @@ impl TextInput {
 
     /// Moves the caret one visual row up or down, keeping its column; past the first or last row it goes to the text's edge.
     fn vertical(&mut self, delta: isize, extend: bool, cx: &mut Context<Self>) {
-        let Some(layout) = self.fresh_layout() else { return };
+        let Some(layout) = self.fresh_layout() else {
+            return;
+        };
         let shaped = &layout.shaped;
         let cursor = self.cursor_offset();
         let current = shaped.row_of(cursor);
-        let x = self.preferred_x.unwrap_or_else(|| shaped.x_in_row(&shaped.rows[current], cursor));
+        let x = self
+            .preferred_x
+            .unwrap_or_else(|| shaped.x_in_row(&shaped.rows[current], cursor));
         let target = current as isize + delta;
         let index = if target < 0 {
             0
@@ -324,14 +363,17 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        let start = self.fresh_layout().map_or(0, |l| l.shaped.rows[l.shaped.row_of(self.cursor_offset())].start);
+        let start = self.fresh_layout().map_or(0, |l| {
+            l.shaped.rows[l.shaped.row_of(self.cursor_offset())].start
+        });
         self.move_to(start, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
-        let end = self
-            .fresh_layout()
-            .map_or(self.content.len(), |l| l.shaped.end_of_row(l.shaped.row_of(self.cursor_offset()), &self.content));
+        let end = self.fresh_layout().map_or(self.content.len(), |l| {
+            l.shaped
+                .end_of_row(l.shaped.row_of(self.cursor_offset()), &self.content)
+        });
         self.move_to(end, cx);
     }
 
@@ -443,7 +485,9 @@ impl TextInput {
     }
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
-        let Some(layout) = self.fresh_layout() else { return 0 };
+        let Some(layout) = self.fresh_layout() else {
+            return 0;
+        };
         let mut local = position - layout.bounds.origin;
         local.y += layout.scroll_y;
         layout.shaped.index_at(local, &self.content)
@@ -625,7 +669,10 @@ impl EntityInputHandler for TextInput {
     ) -> Option<Bounds<Pixels>> {
         let layout = self.current_layout()?;
         let range = self.range_from_utf16(&range_utf16);
-        let (start, end) = (layout.shaped.position(range.start), layout.shaped.position(range.end));
+        let (start, end) = (
+            layout.shaped.position(range.start),
+            layout.shaped.position(range.end),
+        );
         let origin = bounds.origin - point(px(0.), layout.scroll_y);
         Some(Bounds::from_corners(
             origin + start,
@@ -692,7 +739,11 @@ impl Element for TextElement {
             return (window.request_layout(style, [], cx), ());
         }
         // The height follows the wrapped text, up to `MAX_ROWS` rows.
-        let text = if input.content.is_empty() { input.placeholder.clone() } else { input.content.clone() };
+        let text = if input.content.is_empty() {
+            input.placeholder.clone()
+        } else {
+            input.content.clone()
+        };
         let text_style = window.text_style();
         let font = text_style.font();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -710,8 +761,13 @@ impl Element for TextElement {
                 underline: None,
                 strikethrough: None,
             };
-            let rows = Shaped::new(text.clone(), font_size, &[run], width, line_height, window).rows.len();
-            size(width.unwrap_or_default(), line_height * rows.clamp(1, MAX_ROWS) as f32)
+            let rows = Shaped::new(text.clone(), font_size, &[run], width, line_height, window)
+                .rows
+                .len();
+            size(
+                width.unwrap_or_default(),
+                line_height * rows.clamp(1, MAX_ROWS) as f32,
+            )
         });
         (layout, ())
     }
@@ -729,7 +785,8 @@ impl Element for TextElement {
         let content = input.content.clone();
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
-        let (multiline, mut scroll_y, reveal) = (input.multiline, input.scroll_y, input.reveal_caret);
+        let (multiline, mut scroll_y, reveal) =
+            (input.multiline, input.scroll_y, input.reveal_caret);
         let style = window.text_style();
 
         let (display_text, text_color) = if content.is_empty() {
@@ -775,7 +832,14 @@ impl Element for TextElement {
 
         let font_size = style.font_size.to_pixels(window.rem_size());
         let wrap = multiline.then_some(bounds.size.width);
-        let shaped = Shaped::new(display_text, font_size, &runs, wrap, window.line_height(), window);
+        let shaped = Shaped::new(
+            display_text,
+            font_size,
+            &runs,
+            wrap,
+            window.line_height(),
+            window,
+        );
 
         let line_height = shaped.line_height;
         let caret = shaped.position(cursor);
@@ -808,21 +872,31 @@ impl Element for TextElement {
                 .rows
                 .iter()
                 .enumerate()
-                .filter(|(_, row)| row.start <= selected_range.end && selected_range.start <= row.end)
+                .filter(|(_, row)| {
+                    row.start <= selected_range.end && selected_range.start <= row.end
+                })
                 .map(|(ix, row)| {
                     let from = selected_range.start.max(row.start);
                     let to = selected_range.end.min(row.end);
                     let (left, right) = (shaped.x_in_row(row, from), shaped.x_in_row(row, to));
                     let top = origin.y + line_height * ix as f32;
                     fill(
-                        Bounds::from_corners(point(origin.x + left, top), point(origin.x + right, top + line_height)),
+                        Bounds::from_corners(
+                            point(origin.x + left, top),
+                            point(origin.x + right, top + line_height),
+                        ),
                         rgba(0x6ab2f255),
                     )
                 })
                 .collect();
             (quads, None)
         };
-        PrepaintState { shaped, cursor, selection, scroll_y }
+        PrepaintState {
+            shaped,
+            cursor,
+            selection,
+            scroll_y,
+        }
     }
 
     fn paint(
@@ -848,7 +922,8 @@ impl Element for TextElement {
             }
             let mut origin = bounds.origin - point(px(0.), prepaint.scroll_y);
             for line in &prepaint.shaped.lines {
-                line.paint(origin, line_height, TextAlign::Left, None, window, cx).unwrap();
+                line.paint(origin, line_height, TextAlign::Left, None, window, cx)
+                    .unwrap();
                 origin.y += line.size(line_height).height;
             }
             if focus_handle.is_focused(window)
@@ -858,10 +933,22 @@ impl Element for TextElement {
             }
         });
 
-        let shaped = std::mem::replace(&mut prepaint.shaped, Shaped { lines: Vec::new(), rows: Vec::new(), line_height });
+        let shaped = std::mem::replace(
+            &mut prepaint.shaped,
+            Shaped {
+                lines: Vec::new(),
+                rows: Vec::new(),
+                line_height,
+            },
+        );
         let scroll_y = prepaint.scroll_y;
         self.input.update(cx, |input, _cx| {
-            input.layout = Some(LastLayout { content: input.content.clone(), shaped, bounds, scroll_y });
+            input.layout = Some(LastLayout {
+                content: input.content.clone(),
+                shaped,
+                bounds,
+                scroll_y,
+            });
         });
     }
 }

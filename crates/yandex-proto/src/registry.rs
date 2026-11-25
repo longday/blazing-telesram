@@ -20,7 +20,12 @@ use crate::wire::{WireUser, parse_users};
 const REFERER_URL: &str = "https://yandex.ru/chat";
 
 /// Registry error codes that mean the cookies are stale or missing.
-const COOKIE_ERROR_CODES: [&str; 4] = ["invalid_cookies", "not_authorized", "no_credentials", "cookie_auth_failed"];
+const COOKIE_ERROR_CODES: [&str; 4] = [
+    "invalid_cookies",
+    "not_authorized",
+    "no_credentials",
+    "cookie_auth_failed",
+];
 
 #[derive(Clone)]
 pub struct RegistryClient {
@@ -34,7 +39,11 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
-    pub fn new(endpoints: &RegistryEndpoints, settings: &HttpSettings, cookies: &[SessionCookie]) -> Result<Self, ProtoError> {
+    pub fn new(
+        endpoints: &RegistryEndpoints,
+        settings: &HttpSettings,
+        cookies: &[SessionCookie],
+    ) -> Result<Self, ProtoError> {
         Ok(Self {
             http: http_client(settings)?,
             mutation_http: reqwest::Client::builder()
@@ -49,13 +58,20 @@ impl RegistryClient {
     }
 
     fn common(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request.header(COOKIE, self.cookie.clone()).header(ACCEPT, "application/json").header(REFERER, REFERER_URL)
+        request
+            .header(COOKIE, self.cookie.clone())
+            .header(ACCEPT, "application/json")
+            .header(REFERER, REFERER_URL)
     }
 
     async fn csrf_token(&self) -> Result<String, ProtoError> {
         let started = Instant::now();
         let fail = |started| failed("csrf-token", "POST", &self.csrf_url, started);
-        let response = self.common(self.http.post(&self.csrf_url)).send().await.map_err(fail(started))?;
+        let response = self
+            .common(self.http.post(&self.csrf_url))
+            .send()
+            .await
+            .map_err(fail(started))?;
         let status = response.status().as_u16();
         let body = response.bytes().await.map_err(fail(started))?;
         // The reply body carries the token: it is never logged.
@@ -74,10 +90,13 @@ impl RegistryClient {
 
     /// Runs a registry-routed request and returns its `data` object.
     pub(crate) async fn execute(&self, request: &ReadRequest) -> Result<Json, ProtoError> {
-        let (Route::Registry { csrf }, Some(body)) = (request.route(), request.registry_body()) else {
+        let (Route::Registry { csrf }, Some(body)) = (request.route(), request.registry_body())
+        else {
             return Err(ProtoError::Protocol("not a registry request".into()));
         };
-        let mut call = self.common(self.http.post(&self.api_url)).multipart(Form::new().text("request", body));
+        let mut call = self
+            .common(self.http.post(&self.api_url))
+            .multipart(Form::new().text("request", body));
         if csrf {
             call = call.header("X-CSRF-TOKEN", self.csrf_token().await?);
         }
@@ -98,10 +117,17 @@ impl RegistryClient {
         if status == 401 {
             return Err(ProtoError::SessionExpired);
         }
-        let payload: Json = serde_json::from_slice(&body)
-            .map_err(|_| ProtoError::Protocol(format!("{} returned HTTP {status} with a non-JSON body", request.method())))?;
+        let payload: Json = serde_json::from_slice(&body).map_err(|_| {
+            ProtoError::Protocol(format!(
+                "{} returned HTTP {status} with a non-JSON body",
+                request.method()
+            ))
+        })?;
         if payload.get("status").and_then(Json::as_str) != Some("ok") {
-            let code = payload.pointer("/data/code").and_then(Json::as_str).unwrap_or("unknown");
+            let code = payload
+                .pointer("/data/code")
+                .and_then(Json::as_str)
+                .unwrap_or("unknown");
             return Err(if COOKIE_ERROR_CODES.contains(&code) {
                 ProtoError::SessionExpired
             } else if status >= 500 {
@@ -110,7 +136,10 @@ impl RegistryClient {
                 ProtoError::Protocol(format!("{} failed: {code}", request.method()))
             });
         }
-        payload.get("data").cloned().ok_or_else(|| ProtoError::Protocol(format!("{} reply has no data", request.method())))
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| ProtoError::Protocol(format!("{} reply has no data", request.method())))
     }
 
     /// Sends one mutation, once, always with a CSRF token, and classifies a failure by what the
@@ -130,13 +159,24 @@ impl RegistryClient {
                 // A connection that never opened sent nothing; any later failure may have.
                 let nothing_sent = e.is_connect();
                 let error = ProtoError::from(failed(call, "POST", &self.api_url, started)(e));
-                return Err(if nothing_sent { ManageError::NotSent(error) } else { ManageError::Unknown(error) });
+                return Err(if nothing_sent {
+                    ManageError::NotSent(error)
+                } else {
+                    ManageError::Unknown(error)
+                });
             }
         };
         let status = response.status().as_u16();
         let body = match response.bytes().await {
             Ok(body) => body,
-            Err(e) => return Err(ManageError::Unknown(ProtoError::from(failed(call, "POST", &self.api_url, started)(e)))),
+            Err(e) => {
+                return Err(ManageError::Unknown(ProtoError::from(failed(
+                    call,
+                    "POST",
+                    &self.api_url,
+                    started,
+                )(e))));
+            }
         };
         debug!(method = "POST", url = %redact_url(&self.api_url), call, status, elapsed_ms = millis(started.elapsed()), "registry exchange");
         trace!(call, body = %String::from_utf8_lossy(&body), "registry reply body");
@@ -146,15 +186,23 @@ impl RegistryClient {
         if status == 429 || status >= 500 {
             return Err(ManageError::Unknown(http_error(call, status)));
         }
-        let payload: Json = serde_json::from_slice(&body)
-            .map_err(|_| ManageError::Unknown(ProtoError::Protocol(format!("{call} returned HTTP {status} with a non-JSON body"))))?;
+        let payload: Json = serde_json::from_slice(&body).map_err(|_| {
+            ManageError::Unknown(ProtoError::Protocol(format!(
+                "{call} returned HTTP {status} with a non-JSON body"
+            )))
+        })?;
         if payload.get("status").and_then(Json::as_str) != Some("ok") {
-            let code = payload.pointer("/data/code").and_then(Json::as_str).unwrap_or("unknown");
-            return Err(ManageError::Rejected(if COOKIE_ERROR_CODES.contains(&code) {
-                ProtoError::SessionExpired
-            } else {
-                ProtoError::Protocol(format!("{call} failed: {code}"))
-            }));
+            let code = payload
+                .pointer("/data/code")
+                .and_then(Json::as_str)
+                .unwrap_or("unknown");
+            return Err(ManageError::Rejected(
+                if COOKIE_ERROR_CODES.contains(&code) {
+                    ProtoError::SessionExpired
+                } else {
+                    ProtoError::Protocol(format!("{call} failed: {code}"))
+                },
+            ));
         }
         Ok(payload.get("data").cloned().unwrap_or(Json::Null))
     }
@@ -164,13 +212,28 @@ impl RegistryClient {
         if guids.is_empty() {
             return Ok(Vec::new());
         }
-        parse_users(&self.execute(&ReadRequest::GetUsersData { guids: guids.to_vec() }).await?)
+        parse_users(
+            &self
+                .execute(&ReadRequest::GetUsersData {
+                    guids: guids.to_vec(),
+                })
+                .await?,
+        )
     }
 
     /// One `search` for `query`: a result set per requested entity (first page only). The query
     /// text goes on the wire and into the `trace` log only.
-    pub async fn search(&self, query: &str, limit: u32, entities: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
-        let request = ReadRequest::Search { query: query.to_owned(), limit, entities: entities.to_vec() };
+    pub async fn search(
+        &self,
+        query: &str,
+        limit: u32,
+        entities: &[SearchEntity],
+    ) -> Result<SearchReply, ProtoError> {
+        let request = ReadRequest::Search {
+            query: query.to_owned(),
+            limit,
+            entities: entities.to_vec(),
+        };
         parse_search(&self.execute(&request).await?, entities)
     }
 }
@@ -204,7 +267,9 @@ pub(crate) mod stub {
                 let (mut stream, _) = listener.accept().unwrap();
                 let mut buf = vec![0u8; 16384];
                 let n = stream.read(&mut buf).unwrap_or(0);
-                log.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                log.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
                 match response {
                     Some(r) => {
                         let _ = stream.write_all(r.as_bytes());
@@ -217,7 +282,10 @@ pub(crate) mod stub {
     }
 
     pub fn json_response(status: &str, body: &str) -> Option<String> {
-        Some(format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()))
+        Some(format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        ))
     }
 }
 
@@ -244,7 +312,10 @@ mod tests {
         let mut endpoints = RegistryEndpoints::production();
         endpoints.api_url = format!("{base}/api/");
         endpoints.csrf_url = format!("{base}/csrf/");
-        let settings = HttpSettings { connect_timeout: timeout, request_timeout: timeout };
+        let settings = HttpSettings {
+            connect_timeout: timeout,
+            request_timeout: timeout,
+        };
         RegistryClient::new(&endpoints, &settings, &[cookie()]).unwrap()
     }
 
@@ -254,13 +325,22 @@ mod tests {
             "200 OK",
             r#"{"status":"ok","data":{"users":[{"guid":"g1","display_name":"Ivan","avatar_id":"a1"}]}}"#,
         )]);
-        let users = client(&base, Duration::from_secs(5)).users(&["g1".into()]).await.unwrap();
+        let users = client(&base, Duration::from_secs(5))
+            .users(&["g1".into()])
+            .await
+            .unwrap();
         assert_eq!(users[0].display_name.as_deref(), Some("Ivan"));
         let request = seen.lock().unwrap()[0].to_lowercase();
         assert!(request.starts_with("post /api/"));
         assert!(request.contains("get_users_data") && request.contains("accept: application/json"));
         assert!(!request.contains("x-csrf-token"));
-        assert!(client(&base, Duration::from_secs(5)).users(&[]).await.unwrap().is_empty());
+        assert!(
+            client(&base, Duration::from_secs(5))
+                .users(&[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -269,7 +349,10 @@ mod tests {
             json_response("200 OK", r#"{"token":"t0k"}"#),
             json_response("200 OK", r#"{"status":"ok","data":{"user":{"guid":"g"}}}"#),
         ]);
-        let data = client(&base, Duration::from_secs(5)).execute(&ReadRequest::RequestUser).await.unwrap();
+        let data = client(&base, Duration::from_secs(5))
+            .execute(&ReadRequest::RequestUser)
+            .await
+            .unwrap();
         assert_eq!(data["user"]["guid"], "g");
         let seen = seen.lock().unwrap();
         assert!(seen[0].starts_with("POST /csrf/"));
@@ -279,7 +362,10 @@ mod tests {
     #[tokio::test]
     async fn cookie_errors_and_401_expire_the_session() {
         let (base, _) = serve(vec![
-            json_response("200 OK", r#"{"status":"error","data":{"code":"invalid_cookies"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"invalid_cookies"}}"#,
+            ),
             json_response("401 Unauthorized", "{}"),
             json_response("200 OK", r#"{"status":"error","data":{"code":"weird"}}"#),
             json_response("503 Service Unavailable", "{}"),
@@ -296,39 +382,65 @@ mod tests {
     #[tokio::test]
     async fn silent_server_times_out_as_a_network_error() {
         let (base, _) = serve(vec![None]);
-        let err = client(&base, Duration::from_millis(200)).users(&["g".into()]).await.unwrap_err();
+        let err = client(&base, Duration::from_millis(200))
+            .users(&["g".into()])
+            .await
+            .unwrap_err();
         assert!(matches!(err, ProtoError::Network(_)));
     }
 
     #[tokio::test]
     async fn socket_requests_are_not_executed_over_http() {
         let c = client("http://127.0.0.1:1", Duration::from_secs(1));
-        assert!(matches!(c.execute(&ReadRequest::ChatList).await, Err(ProtoError::Protocol(_))));
+        assert!(matches!(
+            c.execute(&ReadRequest::ChatList).await,
+            Err(ProtoError::Protocol(_))
+        ));
     }
 
     const SET: &str = r#"{"items":[{"x":1}],"total":1,"limit":10,"page":1,"pages":1}"#;
     const EMPTY_SET: &str = r#"{"items":[],"total":0,"limit":10,"page":1,"pages":1}"#;
-    const ALL: [SearchEntity; 3] = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+    const ALL: [SearchEntity; 3] = [
+        SearchEntity::Messages,
+        SearchEntity::Users,
+        SearchEntity::Chats,
+    ];
 
     #[tokio::test]
     async fn search_posts_the_query_without_csrf_and_parses_the_sets() {
-        let reply = format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
+        let reply = format!(
+            r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#
+        );
         let (base, seen) = serve(vec![json_response("200 OK", &reply)]);
-        let found = client(&base, Duration::from_secs(5)).search("needle", 10, &ALL).await.unwrap();
+        let found = client(&base, Duration::from_secs(5))
+            .search("needle", 10, &ALL)
+            .await
+            .unwrap();
         assert_eq!(found.messages.total, 1);
         assert_eq!(found.messages.items.len(), 1);
         assert!(found.users.items.is_empty() && found.chats.items.is_empty());
         let request = seen.lock().unwrap()[0].to_lowercase();
         assert!(request.starts_with("post /api/") && !request.contains("x-csrf-token"));
-        assert!(request.contains(r#""method":"search""#) && request.contains("needle"), "{request}");
-        assert!(request.contains(r#""entities":["messages","users","chats"]"#), "{request}");
+        assert!(
+            request.contains(r#""method":"search""#) && request.contains("needle"),
+            "{request}"
+        );
+        assert!(
+            request.contains(r#""entities":["messages","users","chats"]"#),
+            "{request}"
+        );
     }
 
     #[tokio::test]
     async fn search_with_no_matches_returns_empty_sets() {
-        let reply = format!(r#"{{"status":"ok","data":{{"messages":{EMPTY_SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
+        let reply = format!(
+            r#"{{"status":"ok","data":{{"messages":{EMPTY_SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#
+        );
         let (base, _) = serve(vec![json_response("200 OK", &reply)]);
-        let found = client(&base, Duration::from_secs(5)).search("nothing", 10, &ALL).await.unwrap();
+        let found = client(&base, Duration::from_secs(5))
+            .search("nothing", 10, &ALL)
+            .await
+            .unwrap();
         for set in [&found.messages, &found.users, &found.chats] {
             assert!(set.items.is_empty());
             assert_eq!((set.total, set.limit, set.page, set.pages), (0, 10, 1, 1));
@@ -338,45 +450,74 @@ mod tests {
     #[tokio::test]
     async fn search_reply_with_a_missing_set_or_no_data_is_a_protocol_error() {
         let (base, _) = serve(vec![
-            json_response("200 OK", &format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{SET}}}}}"#)),
+            json_response(
+                "200 OK",
+                &format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{SET}}}}}"#),
+            ),
             json_response("200 OK", r#"{"status":"ok"}"#),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        assert!(matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("chats")));
-        assert!(matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("no data")));
+        assert!(
+            matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("chats"))
+        );
+        assert!(
+            matches!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::Protocol(m) if m.contains("no data"))
+        );
     }
 
     #[tokio::test]
     async fn search_cookie_error_maps_to_session_expired() {
         let (base, _) = serve(vec![
-            json_response("200 OK", r#"{"status":"error","data":{"code":"invalid_cookies"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"invalid_cookies"}}"#,
+            ),
             json_response("401 Unauthorized", "{}"),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        assert_eq!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::SessionExpired);
-        assert_eq!(c.search("q", 10, &ALL).await.unwrap_err(), ProtoError::SessionExpired);
+        assert_eq!(
+            c.search("q", 10, &ALL).await.unwrap_err(),
+            ProtoError::SessionExpired
+        );
+        assert_eq!(
+            c.search("q", 10, &ALL).await.unwrap_err(),
+            ProtoError::SessionExpired
+        );
     }
 
     #[tokio::test]
     async fn search_query_is_logged_at_trace_only() {
         use crate::test_log::Capture;
 
-        let reply = format!(r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#);
-        let (base, _) = serve(vec![json_response("200 OK", &reply), json_response("200 OK", &reply)]);
+        let reply = format!(
+            r#"{{"status":"ok","data":{{"messages":{SET},"users":{EMPTY_SET},"chats":{EMPTY_SET}}}}}"#
+        );
+        let (base, _) = serve(vec![
+            json_response("200 OK", &reply),
+            json_response("200 OK", &reply),
+        ]);
         let c = client(&base, Duration::from_secs(5));
         let debug = Capture::default();
         {
             let _guard = debug.install_at(tracing::Level::DEBUG);
             c.search("QUERY-WORD", 10, &ALL).await.unwrap();
         }
-        assert!(debug.text().contains("registry exchange"), "{}", debug.text());
+        assert!(
+            debug.text().contains("registry exchange"),
+            "{}",
+            debug.text()
+        );
         debug.assert_absent(&["QUERY-WORD"]);
         let trace = Capture::default();
         {
             let _guard = trace.install();
             c.search("QUERY-WORD", 10, &ALL).await.unwrap();
         }
-        assert!(trace.text().contains("registry reply body"), "{}", trace.text());
+        assert!(
+            trace.text().contains("registry reply body"),
+            "{}",
+            trace.text()
+        );
     }
 
     #[tokio::test]
@@ -387,24 +528,41 @@ mod tests {
         let _guard = capture.install();
         let (base, _) = serve(vec![
             json_response("200 OK", r#"{"token":"t0k-CSRF-VALUE"}"#),
-            json_response("200 OK", r#"{"status":"ok","data":{"user":{"guid":"g-reply"}}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"ok","data":{"user":{"guid":"g-reply"}}}"#,
+            ),
         ]);
         let mut endpoints = RegistryEndpoints::production();
         endpoints.api_url = format!("{base}/api/?uid=Q-VALUE-1");
         endpoints.csrf_url = format!("{base}/csrf/?uid=Q-VALUE-2");
-        let cookie = SessionCookie { value: "c00kie-VALUE".into(), domain: "127.0.0.1".into(), ..cookie() };
+        let cookie = SessionCookie {
+            value: "c00kie-VALUE".into(),
+            domain: "127.0.0.1".into(),
+            ..cookie()
+        };
         let c = RegistryClient::new(&endpoints, &HttpSettings::default(), &[cookie]).unwrap();
         c.execute(&ReadRequest::RequestUser).await.unwrap();
 
         let text = capture.text();
-        for needle in ["csrf-token exchange", "registry exchange", "127.0.0.1/csrf/", "127.0.0.1/api/", "status=200", "request_user", "g-reply"] {
+        for needle in [
+            "csrf-token exchange",
+            "registry exchange",
+            "127.0.0.1/csrf/",
+            "127.0.0.1/api/",
+            "status=200",
+            "request_user",
+            "g-reply",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
         capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2"]);
     }
 
     fn creation() -> ManageRequest {
-        ManageRequest::CreatePrivateChat { guid: "g-target".into() }
+        ManageRequest::CreatePrivateChat {
+            guid: "g-target".into(),
+        }
     }
 
     fn csrf_ok() -> Option<String> {
@@ -413,14 +571,31 @@ mod tests {
 
     #[tokio::test]
     async fn manage_sends_the_csrf_header_and_returns_the_chat_id() {
-        let (base, seen) = serve(vec![csrf_ok(), json_response("200 OK", r#"{"status":"ok","data":{"chat_id":"a_b"}}"#)]);
-        let data = client(&base, Duration::from_secs(5)).manage(&creation()).await.unwrap();
-        assert_eq!(crate::manage::created_chat_id(&data).as_deref(), Some("a_b"));
+        let (base, seen) = serve(vec![
+            csrf_ok(),
+            json_response("200 OK", r#"{"status":"ok","data":{"chat_id":"a_b"}}"#),
+        ]);
+        let data = client(&base, Duration::from_secs(5))
+            .manage(&creation())
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::manage::created_chat_id(&data).as_deref(),
+            Some("a_b")
+        );
         let seen = seen.lock().unwrap();
         assert!(seen[0].starts_with("POST /csrf/"));
         let request = seen[1].to_lowercase();
-        assert!(request.starts_with("post /api/") && request.contains("x-csrf-token: t0k"), "{request}");
-        assert!(request.contains("create_private_chat") && request.contains("g-target") && request.contains("wait_for_update"), "{request}");
+        assert!(
+            request.starts_with("post /api/") && request.contains("x-csrf-token: t0k"),
+            "{request}"
+        );
+        assert!(
+            request.contains("create_private_chat")
+                && request.contains("g-target")
+                && request.contains("wait_for_update"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
@@ -442,19 +617,35 @@ mod tests {
     async fn manage_rejections_are_the_servers_answer() {
         let (base, _) = serve(vec![
             csrf_ok(),
-            json_response("200 OK", r#"{"status":"error","data":{"code":"no_permission"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"no_permission"}}"#,
+            ),
             csrf_ok(),
             json_response("200 OK", r#"{"status":"error"}"#),
             csrf_ok(),
-            json_response("200 OK", r#"{"status":"error","data":{"code":"invalid_cookies"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"invalid_cookies"}}"#,
+            ),
             csrf_ok(),
             json_response("401 Unauthorized", "{}"),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        assert!(matches!(c.manage(&creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("no_permission")));
-        assert!(matches!(c.manage(&creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("unknown")));
-        assert_eq!(c.manage(&creation()).await.unwrap_err(), ManageError::Rejected(ProtoError::SessionExpired));
-        assert_eq!(c.manage(&creation()).await.unwrap_err(), ManageError::Rejected(ProtoError::SessionExpired));
+        assert!(
+            matches!(c.manage(&creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("no_permission"))
+        );
+        assert!(
+            matches!(c.manage(&creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("unknown"))
+        );
+        assert_eq!(
+            c.manage(&creation()).await.unwrap_err(),
+            ManageError::Rejected(ProtoError::SessionExpired)
+        );
+        assert_eq!(
+            c.manage(&creation()).await.unwrap_err(),
+            ManageError::Rejected(ProtoError::SessionExpired)
+        );
     }
 
     #[tokio::test]
@@ -468,20 +659,36 @@ mod tests {
             json_response("200 OK", "<html>oops</html>"),
             // A 5xx wins over a JSON error body: the server may have acted before failing.
             csrf_ok(),
-            json_response("500 Internal Server Error", r#"{"status":"error","data":{"code":"boom"}}"#),
+            json_response(
+                "500 Internal Server Error",
+                r#"{"status":"error","data":{"code":"boom"}}"#,
+            ),
         ]);
         let c = client(&base, Duration::from_secs(5));
         for _ in 0..4 {
-            assert!(matches!(c.manage(&creation()).await, Err(ManageError::Unknown(_))));
+            assert!(matches!(
+                c.manage(&creation()).await,
+                Err(ManageError::Unknown(_))
+            ));
         }
     }
 
     #[tokio::test]
     async fn manage_hang_after_the_request_is_unknown() {
         let (base, seen) = serve(vec![csrf_ok(), None]);
-        let err = client(&base, Duration::from_millis(200)).manage(&creation()).await.unwrap_err();
-        assert!(matches!(err, ManageError::Unknown(ProtoError::Network(_))), "{err:?}");
-        assert_eq!(seen.lock().unwrap().len(), 2, "the creation request did leave the client");
+        let err = client(&base, Duration::from_millis(200))
+            .manage(&creation())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, ManageError::Unknown(ProtoError::Network(_))),
+            "{err:?}"
+        );
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "the creation request did leave the client"
+        );
     }
 
     #[tokio::test]
@@ -492,17 +699,32 @@ mod tests {
             json_response("401 Unauthorized", "{}"),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        assert!(matches!(c.manage(&creation()).await, Err(ManageError::NotSent(ProtoError::Network(_)))));
-        assert!(matches!(c.manage(&creation()).await, Err(ManageError::NotSent(ProtoError::Protocol(_)))));
-        assert_eq!(c.manage(&creation()).await.unwrap_err(), ManageError::NotSent(ProtoError::SessionExpired));
+        assert!(matches!(
+            c.manage(&creation()).await,
+            Err(ManageError::NotSent(ProtoError::Network(_)))
+        ));
+        assert!(matches!(
+            c.manage(&creation()).await,
+            Err(ManageError::NotSent(ProtoError::Protocol(_)))
+        ));
+        assert_eq!(
+            c.manage(&creation()).await.unwrap_err(),
+            ManageError::NotSent(ProtoError::SessionExpired)
+        );
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 3);
-        assert!(seen.iter().all(|r| r.starts_with("POST /csrf/")), "only CSRF exchanges were made");
+        assert!(
+            seen.iter().all(|r| r.starts_with("POST /csrf/")),
+            "only CSRF exchanges were made"
+        );
     }
 
     #[tokio::test]
     async fn manage_to_an_unreachable_server_sends_nothing() {
-        let err = client("http://127.0.0.1:1", Duration::from_secs(2)).manage(&creation()).await.unwrap_err();
+        let err = client("http://127.0.0.1:1", Duration::from_secs(2))
+            .manage(&creation())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ManageError::NotSent(_)), "{err:?}");
     }
 
@@ -512,7 +734,10 @@ mod tests {
         // to connect and look like "not sent" although the server already got the request.
         let redirect = Some("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1:1/elsewhere\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_owned());
         let (base, seen) = serve(vec![csrf_ok(), redirect]);
-        let err = client(&base, Duration::from_secs(2)).manage(&creation()).await.unwrap_err();
+        let err = client(&base, Duration::from_secs(2))
+            .manage(&creation())
+            .await
+            .unwrap_err();
         assert!(matches!(err, ManageError::Unknown(_)), "{err:?}");
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2);
@@ -532,52 +757,93 @@ mod tests {
         let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let (base, _) = serve(vec![
             json_response("200 OK", r#"{"token":"t0k-CSRF-VALUE"}"#),
-            json_response("200 OK", r#"{"status":"ok","data":{"chat_id":"chat-reply"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"ok","data":{"chat_id":"chat-reply"}}"#,
+            ),
         ]);
         let mut endpoints = RegistryEndpoints::production();
         endpoints.api_url = format!("{base}/api/?uid=Q-VALUE-1");
         endpoints.csrf_url = format!("{base}/csrf/?uid=Q-VALUE-2");
-        let cookie = SessionCookie { value: "c00kie-VALUE".into(), domain: "127.0.0.1".into(), ..cookie() };
+        let cookie = SessionCookie {
+            value: "c00kie-VALUE".into(),
+            domain: "127.0.0.1".into(),
+            ..cookie()
+        };
         let c = RegistryClient::new(&endpoints, &HttpSettings::default(), &[cookie]).unwrap();
         c.manage(&creation()).await.unwrap();
 
         let text = capture.text();
-        for needle in ["csrf-token exchange", "registry exchange", "127.0.0.1/api/", "status=200", "create_private_chat"] {
+        for needle in [
+            "csrf-token exchange",
+            "registry exchange",
+            "127.0.0.1/api/",
+            "status=200",
+            "create_private_chat",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
-        capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2", "g-target"]);
+        capture.assert_absent(&[
+            "c00kie-VALUE",
+            "t0k-CSRF-VALUE",
+            "Q-VALUE-1",
+            "Q-VALUE-2",
+            "g-target",
+        ]);
     }
 
     fn group_creation() -> ManageRequest {
-        ManageRequest::CreateChat { title: "T1tle-VALUE".into(), users: vec!["g-p1".into(), "g-p2".into()] }
+        ManageRequest::CreateChat {
+            title: "T1tle-VALUE".into(),
+            users: vec!["g-p1".into(), "g-p2".into()],
+        }
     }
 
     #[tokio::test]
     async fn manage_create_chat_sends_the_csrf_header_and_returns_the_group_reply() {
         let reply = r#"{"status":"ok","data":{"chat":{"chat_id":"0/0/g"},"errors":[{"code":"join_denied"}]}}"#;
         let (base, seen) = serve(vec![csrf_ok(), json_response("200 OK", reply)]);
-        let data = client(&base, Duration::from_secs(5)).manage(&group_creation()).await.unwrap();
+        let data = client(&base, Duration::from_secs(5))
+            .manage(&group_creation())
+            .await
+            .unwrap();
         let created = crate::manage::parse_created_chat(&data);
         assert_eq!(created.chat.as_deref(), Some("0/0/g"));
         assert_eq!(created.refused, ["join_denied"]);
         let seen = seen.lock().unwrap();
         assert!(seen[0].starts_with("POST /csrf/"));
         let request = seen[1].to_lowercase();
-        assert!(request.starts_with("post /api/") && request.contains("x-csrf-token: t0k"), "{request}");
-        assert!(request.contains("create_chat") && request.contains("t1tle-value") && request.contains("g-p2"), "{request}");
+        assert!(
+            request.starts_with("post /api/") && request.contains("x-csrf-token: t0k"),
+            "{request}"
+        );
+        assert!(
+            request.contains("create_chat")
+                && request.contains("t1tle-value")
+                && request.contains("g-p2"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
     async fn manage_create_chat_failures_keep_their_class() {
         let (base, _) = serve(vec![
             csrf_ok(),
-            json_response("200 OK", r#"{"status":"error","data":{"code":"validation_error"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"validation_error"}}"#,
+            ),
             csrf_ok(),
             json_response("502 Bad Gateway", "{}"),
         ]);
         let c = client(&base, Duration::from_secs(5));
-        assert!(matches!(c.manage(&group_creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("create_chat failed: validation_error")));
-        assert!(matches!(c.manage(&group_creation()).await, Err(ManageError::Unknown(_))));
+        assert!(
+            matches!(c.manage(&group_creation()).await, Err(ManageError::Rejected(ProtoError::Protocol(m))) if m.contains("create_chat failed: validation_error"))
+        );
+        assert!(matches!(
+            c.manage(&group_creation()).await,
+            Err(ManageError::Unknown(_))
+        ));
     }
 
     #[tokio::test]
@@ -590,19 +856,40 @@ mod tests {
         let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let (base, _) = serve(vec![
             json_response("200 OK", r#"{"token":"t0k-CSRF-VALUE"}"#),
-            json_response("200 OK", r#"{"status":"ok","data":{"chat":{"chat_id":"chat-reply"}}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"ok","data":{"chat":{"chat_id":"chat-reply"}}}"#,
+            ),
         ]);
         let mut endpoints = RegistryEndpoints::production();
         endpoints.api_url = format!("{base}/api/?uid=Q-VALUE-1");
         endpoints.csrf_url = format!("{base}/csrf/?uid=Q-VALUE-2");
-        let cookie = SessionCookie { value: "c00kie-VALUE".into(), domain: "127.0.0.1".into(), ..cookie() };
+        let cookie = SessionCookie {
+            value: "c00kie-VALUE".into(),
+            domain: "127.0.0.1".into(),
+            ..cookie()
+        };
         let c = RegistryClient::new(&endpoints, &HttpSettings::default(), &[cookie]).unwrap();
         c.manage(&group_creation()).await.unwrap();
 
         let text = capture.text();
-        for needle in ["csrf-token exchange", "registry exchange", "127.0.0.1/api/", "status=200", "create_chat"] {
+        for needle in [
+            "csrf-token exchange",
+            "registry exchange",
+            "127.0.0.1/api/",
+            "status=200",
+            "create_chat",
+        ] {
             assert!(text.contains(needle), "{needle}: {text}");
         }
-        capture.assert_absent(&["c00kie-VALUE", "t0k-CSRF-VALUE", "Q-VALUE-1", "Q-VALUE-2", "T1tle-VALUE", "g-p1", "g-p2"]);
+        capture.assert_absent(&[
+            "c00kie-VALUE",
+            "t0k-CSRF-VALUE",
+            "Q-VALUE-1",
+            "Q-VALUE-2",
+            "T1tle-VALUE",
+            "g-p1",
+            "g-p2",
+        ]);
     }
 }

@@ -21,7 +21,10 @@ pub enum Body {
     /// The request failed; the text is the reason.
     Failed(String),
     /// The account as the server reports it; the status is set only when the server sent a non-blank text.
-    Ready { name: String, status: Option<String> },
+    Ready {
+        name: String,
+        status: Option<String>,
+    },
 }
 
 /// What the view shows for `state` while the client is in `connection`. A loaded profile is shown only
@@ -41,7 +44,10 @@ pub fn body(state: Option<&ProfileState>, connection: ConnectionState) -> Body {
 }
 
 fn notice(selector: &'static str, text: impl Into<SharedString>) -> Div {
-    div().debug_selector(move || selector.into()).text_color(rgb(MUTED)).child(text.into())
+    div()
+        .debug_selector(move || selector.into())
+        .text_color(rgb(MUTED))
+        .child(text.into())
 }
 
 fn retry(cx: &mut Context<Desktop>) -> Stateful<Div> {
@@ -85,13 +91,21 @@ pub fn render(store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
                     Some(ProfileState::Ready(profile)) => Some(profile),
                     _ => None,
                 };
-                let (key, media) = profile.map_or(("", None), |p| (p.user.0.as_str(), p.avatar.as_ref()));
+                let (key, media) =
+                    profile.map_or(("", None), |p| (p.user.0.as_str(), p.avatar.as_ref()));
                 div()
                     .flex()
                     .flex_col()
                     .items_center()
                     .gap(px(10.))
-                    .child(avatar(state, media, key, &name, 96., "profile-avatar".into()))
+                    .child(avatar(
+                        state,
+                        media,
+                        key,
+                        &name,
+                        96.,
+                        "profile-avatar".into(),
+                    ))
                     .child(
                         div()
                             .debug_selector(|| "profile-name".into())
@@ -100,7 +114,12 @@ pub fn render(store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
                             .child(name),
                     )
                     .when_some(status, |d, status| {
-                        d.child(div().debug_selector(|| "profile-status".into()).text_color(rgb(MUTED)).child(status))
+                        d.child(
+                            div()
+                                .debug_selector(|| "profile-status".into())
+                                .text_color(rgb(MUTED))
+                                .child(status),
+                        )
                     })
                     .into_any_element()
             }
@@ -124,7 +143,12 @@ pub fn render(store: &Entity<ChatStore>, cx: &mut Context<Desktop>) -> Div {
                 .flex()
                 .flex_col()
                 .gap(px(16.))
-                .child(div().text_size(px(17.)).font_weight(FontWeight::MEDIUM).child("Профиль"))
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Профиль"),
+                )
                 .child(div().flex().justify_center().text_center().child(content))
                 .child(
                     div().flex().justify_end().child(

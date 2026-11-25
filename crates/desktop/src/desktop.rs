@@ -2,28 +2,33 @@
 
 mod composer;
 
-use crate::format::{chat_time, log_time, one_line, Clock};
-use crate::logging::{LogBuffer, LogLine};
-use crate::input::{InputEvent, TextInput};
+use crate::format::{Clock, chat_time, log_time, one_line};
 use crate::info_panel;
+use crate::input::{InputEvent, TextInput};
+use crate::logging::{LogBuffer, LogLine};
 use crate::new_chat::{self, Candidate, NewChat};
 use crate::profile;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
-    ChatFilter, ChatStore, CreationState, MembersState, ProfileState, SearchStatus, SessionState, StoreEvent,
-    TimelineChange, SEARCH_DEBOUNCE, SEARCH_MIN_CHARS,
+    ChatFilter, ChatStore, CreationState, MembersState, ProfileState, SEARCH_DEBOUNCE,
+    SEARCH_MIN_CHARS, SearchStatus, SessionState, StoreEvent, TimelineChange,
 };
 use crate::theme::*;
 use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
-use bt_chat_core::model::{ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs, UserId};
+use bt_chat_core::model::{
+    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs, UserId,
+};
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
 use std::ops::Range;
 use std::time::Duration;
 
-actions!(bt, [Search, Quit, ToggleLog, Dismiss, ViewerPrev, ViewerNext]);
+actions!(
+    bt,
+    [Search, Quit, ToggleLog, Dismiss, ViewerPrev, ViewerNext]
+);
 
 /// How often an open log view looks for new records.
 const LOG_POLL: Duration = Duration::from_millis(250);
@@ -104,7 +109,12 @@ pub struct Desktop {
 }
 
 impl Desktop {
-    pub fn new(store: Entity<ChatStore>, clock: Clock, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        store: Entity<ChatStore>,
+        clock: Clock,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let search = cx.new(|cx| TextInput::single_line("Поиск", cx));
         let compose = Compose::new(cx);
         let subscriptions = vec![
@@ -113,7 +123,11 @@ impl Desktop {
                 cx.notify();
             }),
             cx.observe(&compose.input, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&compose.input, window, |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx)),
+            cx.subscribe_in(
+                &compose.input,
+                window,
+                |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx),
+            ),
             cx.observe_in(&store, window, |this, _, window, cx| {
                 this.sync_open(window, cx);
                 this.sync_viewer(cx);
@@ -122,18 +136,28 @@ impl Desktop {
                 this.sync_new_chat(cx);
                 cx.notify();
             }),
-            cx.subscribe_in(&store, window, |this, _, event: &StoreEvent, _, cx| match event {
-                StoreEvent::Timeline { chat, change } => this.apply_timeline_change(chat, change, cx),
-                StoreEvent::Drafts => this.restore_late_draft(cx),
-                StoreEvent::Connection => {
-                    this.resume_search(cx);
-                    this.resume_reads(cx);
-                }
-                StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
-                StoreEvent::SendRefused { draft, reason } => this.send_refused(draft.clone(), reason.clone(), cx),
-                StoreEvent::ChatCreated { chat, .. } => this.new_chat_created(chat.is_none(), cx),
-                _ => {}
-            }),
+            cx.subscribe_in(
+                &store,
+                window,
+                |this, _, event: &StoreEvent, _, cx| match event {
+                    StoreEvent::Timeline { chat, change } => {
+                        this.apply_timeline_change(chat, change, cx)
+                    }
+                    StoreEvent::Drafts => this.restore_late_draft(cx),
+                    StoreEvent::Connection => {
+                        this.resume_search(cx);
+                        this.resume_reads(cx);
+                    }
+                    StoreEvent::ActionFailed { reason, .. } => this.show_toast(reason.clone(), cx),
+                    StoreEvent::SendRefused { draft, reason } => {
+                        this.send_refused(draft.clone(), reason.clone(), cx)
+                    }
+                    StoreEvent::ChatCreated { chat, .. } => {
+                        this.new_chat_created(chat.is_none(), cx)
+                    }
+                    _ => {}
+                },
+            ),
             // Whether the window is active decides if the visible messages count as read.
             cx.observe_window_activation(window, |_, _, cx| cx.notify()),
         ];
@@ -144,7 +168,12 @@ impl Desktop {
             store,
             clock,
             search,
-            search_input: SearchInput { seen: SharedString::default(), generation: 0, settled: 0, timer: None },
+            search_input: SearchInput {
+                seen: SharedString::default(),
+                generation: 0,
+                settled: 0,
+                timer: None,
+            },
             filter: ChatFilter::All,
             open: None,
             info: None,
@@ -199,12 +228,15 @@ impl Desktop {
             self.close_info(cx);
             return;
         }
-        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else { return };
+        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else {
+            return;
+        };
         if self.blocked(cx) {
             return;
         }
         self.info = Some(chat.clone());
-        self.store.update(cx, |store, cx| store.load_members(chat, cx));
+        self.store
+            .update(cx, |store, cx| store.load_members(chat, cx));
         cx.notify();
     }
 
@@ -217,12 +249,15 @@ impl Desktop {
     /// The retry of a failed member load; the store ignores it while a load is running.
     pub(crate) fn reload_info(&mut self, cx: &mut Context<Self>) {
         let Some(chat) = self.info_chat() else { return };
-        self.store.update(cx, |store, cx| store.load_members(chat, cx));
+        self.store
+            .update(cx, |store, cx| store.load_members(chat, cx));
     }
 
     /// The chat whose panel is open, if it is still the open chat.
     pub(crate) fn info_chat(&self) -> Option<ChatId> {
-        self.info.clone().filter(|chat| self.open.as_ref().is_some_and(|o| &o.chat == chat))
+        self.info
+            .clone()
+            .filter(|chat| self.open.as_ref().is_some_and(|o| &o.chat == chat))
     }
 
     /// The panel belongs to one chat: it closes when another chat (or none) is open.
@@ -287,7 +322,10 @@ impl Desktop {
             cx.notify();
             return;
         }
-        if let Some(chat) = user.as_ref().and_then(|u| new_chat::existing_chat(self.store.read(cx), u)) {
+        if let Some(chat) = user
+            .as_ref()
+            .and_then(|u| new_chat::existing_chat(self.store.read(cx), u))
+        {
             self.select(chat, cx);
             return;
         }
@@ -301,7 +339,9 @@ impl Desktop {
         });
         let mut dialog = NewChat::new(cx);
         dialog.chosen = user.and_then(|user| {
-            new_chat::candidates(self.store.read(cx), self.info_chat().as_ref()).into_iter().find(|c| c.user == user)
+            new_chat::candidates(self.store.read(cx), self.info_chat().as_ref())
+                .into_iter()
+                .find(|c| c.user == user)
         });
         self.new_chat = Some(dialog);
         cx.notify();
@@ -318,14 +358,16 @@ impl Desktop {
             return;
         }
         self.new_chat = None;
-        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        self.store
+            .update(cx, |store, cx| store.dismiss_creation(cx));
         cx.notify();
     }
 
     /// Closes the dialog and opens the chat that already exists.
     fn open_existing_chat(&mut self, chat: ChatId, cx: &mut Context<Self>) {
         self.new_chat = None;
-        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        self.store
+            .update(cx, |store, cx| store.dismiss_creation(cx));
         self.select(chat, cx);
         cx.notify();
     }
@@ -341,18 +383,28 @@ impl Desktop {
             return;
         }
         let people = new_chat::candidates(self.store.read(cx), self.info_chat().as_ref());
-        let Some(person) = people.into_iter().find(|c| c.user == user) else { return };
+        let Some(person) = people.into_iter().find(|c| c.user == user) else {
+            return;
+        };
         if let Some(dialog) = self.new_chat.as_mut() {
             dialog.chosen = Some(person);
         }
-        self.store.update(cx, |store, cx| store.dismiss_creation(cx));
+        self.store
+            .update(cx, |store, cx| store.dismiss_creation(cx));
         cx.notify();
     }
 
     /// "Создать": the only call that creates a chat. A chat with the person that appeared meanwhile is
     /// opened instead; while a creation is in flight nothing is sent again.
     pub(crate) fn confirm_new_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(user) = self.new_chat.as_ref().and_then(|d| d.chosen.as_ref()).map(|c| c.user.clone()) else { return };
+        let Some(user) = self
+            .new_chat
+            .as_ref()
+            .and_then(|d| d.chosen.as_ref())
+            .map(|c| c.user.clone())
+        else {
+            return;
+        };
         if self.creation_in_flight(cx) {
             return;
         }
@@ -360,7 +412,8 @@ impl Desktop {
             self.open_existing_chat(chat, cx);
             return;
         }
-        self.store.update(cx, |store, cx| store.create_private_chat(user, cx));
+        self.store
+            .update(cx, |store, cx| store.create_private_chat(user, cx));
     }
 
     /// A creation ended in a chat (the store selects it): the dialog is done. A chat the answer and the
@@ -423,7 +476,8 @@ impl Desktop {
             return;
         };
         // A reply still on its way answers the old text: it must not show up before the new request is sent.
-        self.store.update(cx, |store, _| store.supersede_search(query));
+        self.store
+            .update(cx, |store, _| store.supersede_search(query));
         self.search_input.timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(SEARCH_DEBOUNCE).await;
             this.update(cx, |this, cx| {
@@ -440,17 +494,20 @@ impl Desktop {
     /// query is already answered or in flight. While offline nothing is sent; any search state is dropped.
     fn run_search(&mut self, cx: &mut Context<Self>) {
         let content = self.search_input.seen.clone();
-        let Some(query) = search_query(&content) else { return };
+        let Some(query) = search_query(&content) else {
+            return;
+        };
         let store = self.store.read(cx);
         if store.connection() == ConnectionState::Offline {
             self.store.update(cx, |store, cx| store.cancel_search(cx));
             return;
         }
-        let current = store
-            .search_state()
-            .is_some_and(|state| state.query == query && !matches!(state.status, SearchStatus::Failed(_)));
+        let current = store.search_state().is_some_and(|state| {
+            state.query == query && !matches!(state.status, SearchStatus::Failed(_))
+        });
         if !current {
-            self.store.update(cx, |store, cx| store.search(query.to_string(), cx));
+            self.store
+                .update(cx, |store, cx| store.search(query.to_string(), cx));
         }
     }
 
@@ -462,12 +519,19 @@ impl Desktop {
             return;
         }
         let members = self.info_chat().filter(|chat| {
-            matches!(store.members_state(chat), Some(MembersState::Ready(_) | MembersState::Failed { offline: true, .. }))
+            matches!(
+                store.members_state(chat),
+                Some(MembersState::Ready(_) | MembersState::Failed { offline: true, .. })
+            )
         });
         let profile = self.profile
-            && matches!(store.profile_state(), Some(ProfileState::Ready(_) | ProfileState::Failed { offline: true, .. }));
+            && matches!(
+                store.profile_state(),
+                Some(ProfileState::Ready(_) | ProfileState::Failed { offline: true, .. })
+            );
         if let Some(chat) = members {
-            self.store.update(cx, |store, cx| store.load_members(chat, cx));
+            self.store
+                .update(cx, |store, cx| store.load_members(chat, cx));
         }
         if profile {
             self.store.update(cx, |store, cx| store.load_profile(cx));
@@ -481,7 +545,10 @@ impl Desktop {
             return;
         }
         let store = self.store.read(cx);
-        if store.search_state().is_none_or(|state| matches!(state.status, SearchStatus::Failed(_))) {
+        if store
+            .search_state()
+            .is_none_or(|state| matches!(state.status, SearchStatus::Failed(_)))
+        {
             self.run_search(cx);
         }
     }
@@ -492,7 +559,10 @@ impl Desktop {
         search_query(&self.search.read(cx).content)?;
         let store = self.store.read(cx);
         let view = if store.connection() == ConnectionState::Offline {
-            SearchView { status: Some(StatusLine::Offline), sections: Vec::new() }
+            SearchView {
+                status: Some(StatusLine::Offline),
+                sections: Vec::new(),
+            }
         } else {
             search_results::view(store.search_state()?, local, self.clock)
         };
@@ -503,14 +573,25 @@ impl Desktop {
     #[cfg(test)]
     pub(crate) fn search_listing(&self, cx: &App) -> Option<SearchView> {
         let query = self.search.read(cx).content.to_string();
-        let local: Vec<ChatId> =
-            self.store.read(cx).visible_chats(&query, self.filter).into_iter().map(|c| c.id.clone()).collect();
+        let local: Vec<ChatId> = self
+            .store
+            .read(cx)
+            .visible_chats(&query, self.filter)
+            .into_iter()
+            .map(|c| c.id.clone())
+            .collect();
         self.search_view(&local, cx)
     }
 
     /// Opens the viewer on picture `index` of the message `ts` in the open chat `chat`. Ignored while
     /// something else covers the chat, when the message is not loaded or has no such picture.
-    pub(crate) fn open_viewer(&mut self, chat: ChatId, ts: MessageTs, index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn open_viewer(
+        &mut self,
+        chat: ChatId,
+        ts: MessageTs,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) {
         let in_open_chat = self.open.as_ref().is_some_and(|o| o.chat == chat);
         if !in_open_chat || self.blocked(cx) || index >= self.gallery_of(&chat, ts, cx).len() {
             return;
@@ -528,7 +609,13 @@ impl Desktop {
 
     /// Moves to the previous (negative) or next picture; the ends do not wrap.
     pub(crate) fn step_viewer(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let Some((chat, ts, index)) = self.viewer.as_ref().map(|v| (v.chat.clone(), v.ts, v.index)) else { return };
+        let Some((chat, ts, index)) = self
+            .viewer
+            .as_ref()
+            .map(|v| (v.chat.clone(), v.ts, v.index))
+        else {
+            return;
+        };
         let next = viewer::step(index, self.gallery_of(&chat, ts, cx).len(), delta);
         if next != index {
             if let Some(viewer) = self.viewer.as_mut() {
@@ -540,7 +627,9 @@ impl Desktop {
 
     /// The pictures of the loaded message `ts`; empty when the message is gone or holds none.
     fn gallery_of(&self, chat: &ChatId, ts: MessageTs, cx: &App) -> Vec<GalleryItem> {
-        let Some(timeline) = self.store.read(cx).timeline(chat) else { return Vec::new() };
+        let Some(timeline) = self.store.read(cx).timeline(chat) else {
+            return Vec::new();
+        };
         match timeline.messages.binary_search_by_key(&ts, |m| m.timestamp) {
             Ok(ix) => timeline.messages[ix].body.gallery_items(),
             Err(_) => Vec::new(),
@@ -550,7 +639,9 @@ impl Desktop {
     /// Keeps the viewer on something that still exists: it closes when its message was deleted or lost
     /// its pictures, or the chat changed, and steps back when the message has fewer pictures than before.
     fn sync_viewer(&mut self, cx: &mut Context<Self>) {
-        let Some(viewer) = self.viewer.as_ref() else { return };
+        let Some(viewer) = self.viewer.as_ref() else {
+            return;
+        };
         let (chat, ts, index) = (viewer.chat.clone(), viewer.ts, viewer.index);
         let len = self.gallery_of(&chat, ts, cx).len();
         let in_open_chat = self.open.as_ref().is_some_and(|o| o.chat == chat);
@@ -565,7 +656,12 @@ impl Desktop {
         let viewer = self.viewer.as_ref()?;
         let items = self.gallery_of(&viewer.chat, viewer.ts, cx);
         let size = window.viewport_size();
-        let frame = viewer::frame(viewer, &items, self.store.read(cx), (f32::from(size.width), f32::from(size.height)))?;
+        let frame = viewer::frame(
+            viewer,
+            &items,
+            self.store.read(cx),
+            (f32::from(size.width), f32::from(size.height)),
+        )?;
         Some(viewer::render(frame, cx))
     }
 
@@ -586,13 +682,20 @@ impl Desktop {
             None => {
                 // The message menu is drawn above the log; it must not outlive the cover's start.
                 self.message_menu = None;
-                let poll = cx.spawn(async move |this, cx| loop {
-                    cx.background_executor().timer(LOG_POLL).await;
-                    if this.update(cx, |this, cx| this.refresh_log(cx)).is_err() {
-                        break;
+                let poll = cx.spawn(async move |this, cx| {
+                    loop {
+                        cx.background_executor().timer(LOG_POLL).await;
+                        if this.update(cx, |this, cx| this.refresh_log(cx)).is_err() {
+                            break;
+                        }
                     }
                 });
-                let mut view = LogView { lines: Vec::new(), generation: u64::MAX, scroll: UniformListScrollHandle::new(), _poll: poll };
+                let mut view = LogView {
+                    lines: Vec::new(),
+                    generation: u64::MAX,
+                    scroll: UniformListScrollHandle::new(),
+                    _poll: poll,
+                };
                 Self::load_log(&mut view, cx);
                 Some(view)
             }
@@ -601,7 +704,9 @@ impl Desktop {
     }
 
     fn refresh_log(&mut self, cx: &mut Context<Self>) {
-        let Some(view) = self.log.as_mut() else { return };
+        let Some(view) = self.log.as_mut() else {
+            return;
+        };
         if Self::load_log(view, cx) {
             cx.notify();
         }
@@ -624,7 +729,12 @@ impl Desktop {
 
     pub(crate) fn log_text(&self) -> Option<String> {
         let view = self.log.as_ref()?;
-        Some(view.lines.iter().map(|line| log_line(line, self.clock) + "\n").collect())
+        Some(
+            view.lines
+                .iter()
+                .map(|line| log_line(line, self.clock) + "\n")
+                .collect(),
+        )
     }
 
     #[cfg(test)]
@@ -633,12 +743,28 @@ impl Desktop {
     }
 
     /// Keeps the list element's item count in step with the store's timeline.
-    fn apply_timeline_change(&mut self, chat: &ChatId, change: &TimelineChange, cx: &mut Context<Self>) {
-        let Some(open) = self.open.as_mut().filter(|o| &o.chat == chat) else { return };
-        let len = self.store.read(cx).timeline(chat).map_or(0, |t| t.messages.len());
+    fn apply_timeline_change(
+        &mut self,
+        chat: &ChatId,
+        change: &TimelineChange,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(open) = self.open.as_mut().filter(|o| &o.chat == chat) else {
+            return;
+        };
+        let len = self
+            .store
+            .read(cx)
+            .timeline(chat)
+            .map_or(0, |t| t.messages.len());
         // A message the user just sent stays in view even when they had scrolled up.
         let follow = matches!(change, TimelineChange::Delta { appended, .. } if *appended > 0)
-            && self.store.read(cx).timeline(chat).and_then(|t| t.messages.last()).is_some_and(|m| matches!(m.delivery, Delivery::Pending(_)));
+            && self
+                .store
+                .read(cx)
+                .timeline(chat)
+                .and_then(|t| t.messages.last())
+                .is_some_and(|m| matches!(m.delivery, Delivery::Pending(_)));
         let list = &open.list;
         match change {
             TimelineChange::Reset => list.reset(len),
@@ -653,7 +779,11 @@ impl Desktop {
                     list.splice(*at..*at + 1, 1);
                 }
             }
-            TimelineChange::Delta { prepended, appended, touched } => {
+            TimelineChange::Delta {
+                prepended,
+                appended,
+                touched,
+            } => {
                 let before = list.item_count();
                 let anchor = list.logical_scroll_top();
                 if *prepended > 0 {
@@ -676,7 +806,10 @@ impl Desktop {
                     }
                 }
                 if *prepended > 0 {
-                    list.scroll_to(ListOffset { item_ix: anchor.item_ix + prepended, offset_in_item: anchor.offset_in_item });
+                    list.scroll_to(ListOffset {
+                        item_ix: anchor.item_ix + prepended,
+                        offset_in_item: anchor.offset_in_item,
+                    });
                 }
             }
         }
@@ -684,7 +817,10 @@ impl Desktop {
             list.reset(len);
         }
         if follow {
-            list.scroll_to(ListOffset { item_ix: list.item_count(), offset_in_item: px(0.) });
+            list.scroll_to(ListOffset {
+                item_ix: list.item_count(),
+                offset_in_item: px(0.),
+            });
         }
         cx.notify();
     }
@@ -692,7 +828,11 @@ impl Desktop {
     fn sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let query = self.search.read(cx).content.to_string();
         let store = self.store.read(cx);
-        let rows: Vec<ChatId> = store.visible_chats(&query, self.filter).into_iter().map(|c| c.id.clone()).collect();
+        let rows: Vec<ChatId> = store
+            .visible_chats(&query, self.filter)
+            .into_iter()
+            .map(|c| c.id.clone())
+            .collect();
         let empty = if !store.chats_loaded() {
             Some("Загрузка чатов…")
         } else if store.chat_count() == 0 {
@@ -704,7 +844,9 @@ impl Desktop {
         };
         let connection = store.connection();
         let count = rows.len();
-        let results = self.search_view(&rows, cx).map(|view| search_results::render(&view, &self.store, cx));
+        let results = self
+            .search_view(&rows, cx)
+            .map(|view| search_results::render(&view, &self.store, cx));
 
         div()
             .relative()
@@ -751,7 +893,11 @@ impl Desktop {
                             .hover(|s| s.bg(rgb(ROW_HOVER)))
                             .child("≡")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.menu = if this.menu == AccountMenu::Closed { AccountMenu::Open } else { AccountMenu::Closed };
+                                this.menu = if this.menu == AccountMenu::Closed {
+                                    AccountMenu::Open
+                                } else {
+                                    AccountMenu::Closed
+                                };
                                 cx.notify();
                             })),
                     )
@@ -778,13 +924,14 @@ impl Desktop {
                             .rounded(px(20.))
                             .text_size(px(13.))
                             .when(online, |d| {
-                                d.cursor_pointer().text_color(rgb(ACCENT)).hover(|s| s.bg(rgb(ROW_HOVER))).on_click(
-                                    cx.listener(|this, _, _, cx| {
+                                d.cursor_pointer()
+                                    .text_color(rgb(ACCENT))
+                                    .hover(|s| s.bg(rgb(ROW_HOVER)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
                                         if this.new_chat_available(cx) {
                                             this.open_new_chat(None, cx);
                                         }
-                                    }),
-                                )
+                                    }))
                             })
                             .when(!online, |d| d.text_color(rgb(MUTED)))
                             .child("Новый чат")
@@ -825,7 +972,9 @@ impl Desktop {
                             .text_size(px(13.))
                             .cursor_pointer()
                             .when(active, |d| d.bg(rgb(ROW_SELECTED)).text_color(rgb(INK)))
-                            .when(!active, |d| d.text_color(rgb(MUTED)).hover(|s| s.bg(rgb(ROW_HOVER))))
+                            .when(!active, |d| {
+                                d.text_color(rgb(MUTED)).hover(|s| s.bg(rgb(ROW_HOVER)))
+                            })
                             .child(label)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.filter = filter;
@@ -878,7 +1027,10 @@ impl Desktop {
                             "chat-list",
                             count,
                             cx.processor(move |this, range: Range<usize>, _, cx| {
-                                range.filter_map(|ix| rows.get(ix)).map(|id| this.chat_row(id, cx)).collect::<Vec<_>>()
+                                range
+                                    .filter_map(|ix| rows.get(ix))
+                                    .map(|id| this.chat_row(id, cx))
+                                    .collect::<Vec<_>>()
                             }),
                         )
                         .size_full(),
@@ -915,11 +1067,16 @@ impl Desktop {
 
     fn chat_row(&self, id: &ChatId, cx: &mut Context<Self>) -> AnyElement {
         let store = self.store.read(cx);
-        let Some(chat) = store.chat(id) else { return div().into_any_element() };
+        let Some(chat) = store.chat(id) else {
+            return div().into_any_element();
+        };
         let selected = store.selected() == Some(id);
         let tag = format!("chat-{}", id.0);
         let preview = chat_preview(store, chat);
-        let time = chat.last_message.as_ref().map(|m| chat_time(m.timestamp, self.clock));
+        let time = chat
+            .last_message
+            .as_ref()
+            .map(|m| chat_time(m.timestamp, self.clock));
         let (unread, muted, pinned) = (chat.unread, chat.muted, chat.pinned_rank.is_some());
         let click_id = id.clone();
         let row_tag = tag.clone();
@@ -937,7 +1094,14 @@ impl Desktop {
             .bg(rgb(if selected { ROW_SELECTED } else { PANEL }))
             .hover(|s| s.bg(rgb(if selected { ROW_SELECTED } else { ROW_HOVER })))
             .on_click(cx.listener(move |this, _, _, cx| this.select(click_id.clone(), cx)))
-            .child(avatar(store, chat.avatar.as_ref(), &id.0, &chat.title, 48., format!("{tag}-avatar")))
+            .child(avatar(
+                store,
+                chat.avatar.as_ref(),
+                &id.0,
+                &chat.title,
+                48.,
+                format!("{tag}-avatar"),
+            ))
             .child(
                 div()
                     .flex_1()
@@ -961,7 +1125,13 @@ impl Desktop {
                             )
                             .when(muted, |d| marker(d, format!("{tag}-muted"), "🔇"))
                             .when_some(time, |d, time| {
-                                d.child(div().flex_none().text_size(px(12.)).text_color(rgb(MUTED)).child(time))
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .child(time),
+                                )
                             }),
                     )
                     .child(
@@ -975,7 +1145,10 @@ impl Desktop {
                                 d.child(
                                     div()
                                         .debug_selector(move || {
-                                            format!("{tag}-badge{}", if muted { "-muted" } else { "" })
+                                            format!(
+                                                "{tag}-badge{}",
+                                                if muted { "-muted" } else { "" }
+                                            )
                                         })
                                         .flex_none()
                                         .min_w(px(20.))
@@ -1009,7 +1182,12 @@ impl Desktop {
                 .child("Выберите чат, чтобы начать чтение")
                 .into_any_element();
         };
-        let Some((list, rows)) = self.open.as_ref().filter(|o| o.chat == selected).map(|o| (o.list.clone(), o.rows.clone())) else {
+        let Some((list, rows)) = self
+            .open
+            .as_ref()
+            .filter(|o| o.chat == selected)
+            .map(|o| (o.list.clone(), o.rows.clone()))
+        else {
             return div().flex_1().into_any_element();
         };
         let summary: Option<&ChatSummary> = store.chat(&selected);
@@ -1020,7 +1198,14 @@ impl Desktop {
             ChatKind::Channel => "Канал",
         });
         let typing = store.typing_text(&selected);
-        let header_avatar = avatar(store, summary.and_then(|c| c.avatar.as_ref()), &selected.0, &title, 40., "header-avatar".into());
+        let header_avatar = avatar(
+            store,
+            summary.and_then(|c| c.avatar.as_ref()),
+            &selected.0,
+            &title,
+            40.,
+            "header-avatar".into(),
+        );
         let timeline = store.timeline(&selected);
         let loaded = timeline.is_some_and(|t| t.loaded);
         let empty = timeline.is_some_and(|t| t.loaded && t.messages.is_empty());
@@ -1031,9 +1216,16 @@ impl Desktop {
         } else if empty {
             centered("timeline-empty", "Сообщений пока нет")
         } else {
-            let ctx = RowContext { store: self.store.clone(), desktop: cx.weak_entity(), chat: selected.clone(), clock: self.clock, rows };
+            let ctx = RowContext {
+                store: self.store.clone(),
+                desktop: cx.weak_entity(),
+                chat: selected.clone(),
+                clock: self.clock,
+                rows,
+            };
             let probe_list = list.clone();
-            let (probe_store, probe_chat, probe_desktop) = (self.store.clone(), selected.clone(), cx.weak_entity());
+            let (probe_store, probe_chat, probe_desktop) =
+                (self.store.clone(), selected.clone(), cx.weak_entity());
             div()
                 .debug_selector(|| "timeline".into())
                 .relative()
@@ -1048,11 +1240,15 @@ impl Desktop {
                         move |_, window, cx| {
                             if at_top(&probe_list) {
                                 let (store, chat) = (probe_store.clone(), probe_chat.clone());
-                                window.defer(cx, move |_, cx| store.update(cx, |s, cx| s.load_older(&chat, cx)));
+                                window.defer(cx, move |_, cx| {
+                                    store.update(cx, |s, cx| s.load_older(&chat, cx))
+                                });
                             }
                             let desktop = probe_desktop.clone();
                             window.defer(cx, move |window, cx| {
-                                desktop.update(cx, |this, cx| this.check_read(window, cx)).ok();
+                                desktop
+                                    .update(cx, |this, cx| this.check_read(window, cx))
+                                    .ok();
                             });
                         },
                         |_, _, _, _| {},
@@ -1062,17 +1258,23 @@ impl Desktop {
                 )
                 .when(loading_older, |d| {
                     d.child(
-                        div().absolute().top(px(8.)).w_full().flex().justify_center().child(
-                            div()
-                                .debug_selector(|| "timeline-loading".into())
-                                .px(px(12.))
-                                .py(px(3.))
-                                .rounded_full()
-                                .bg(rgb(PANEL))
-                                .text_size(px(13.))
-                                .text_color(rgb(MUTED))
-                                .child("Загрузка…"),
-                        ),
+                        div()
+                            .absolute()
+                            .top(px(8.))
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .debug_selector(|| "timeline-loading".into())
+                                    .px(px(12.))
+                                    .py(px(3.))
+                                    .rounded_full()
+                                    .bg(rgb(PANEL))
+                                    .text_size(px(13.))
+                                    .text_color(rgb(MUTED))
+                                    .child("Загрузка…"),
+                            ),
                     )
                 })
                 .into_any_element()
@@ -1111,7 +1313,10 @@ impl Desktop {
                                     .text_size(px(13.))
                                     .text_color(rgb(ACCENT))
                                     .child(text),
-                                None => div().text_size(px(13.)).text_color(rgb(MUTED)).child(subtitle),
+                                None => div()
+                                    .text_size(px(13.))
+                                    .text_color(rgb(MUTED))
+                                    .child(subtitle),
                             }),
                     ),
             )
@@ -1125,7 +1330,8 @@ impl Desktop {
 fn at_top(list: &ListState) -> bool {
     list.item_count() > 0
         && list.viewport_bounds().size.height > px(0.)
-        && (list.logical_scroll_top().item_ix == 0 || list.max_offset_for_scrollbar().height <= px(0.))
+        && (list.logical_scroll_top().item_ix == 0
+            || list.max_offset_for_scrollbar().height <= px(0.))
 }
 
 fn centered(selector: &'static str, text: &'static str) -> AnyElement {
@@ -1141,7 +1347,13 @@ fn centered(selector: &'static str, text: &'static str) -> AnyElement {
 }
 
 fn marker(parent: Div, selector: String, glyph: &'static str) -> Div {
-    parent.child(div().debug_selector(move || selector).flex_none().text_size(px(12.)).child(glyph))
+    parent.child(
+        div()
+            .debug_selector(move || selector)
+            .flex_none()
+            .text_size(px(12.))
+            .child(glyph),
+    )
 }
 
 fn connection_text(state: ConnectionState) -> Option<&'static str> {
@@ -1166,21 +1378,36 @@ pub(crate) fn chat_preview(store: &ChatStore, chat: &ChatSummary) -> Preview {
         return Preview::Typing(text);
     }
     if let Some(draft) = store.draft(&chat.id) {
-        let text = if draft.text.trim().is_empty() { draft.reply_to.as_ref().map_or("", |r| r.text.as_str()) } else { &draft.text };
+        let text = if draft.text.trim().is_empty() {
+            draft.reply_to.as_ref().map_or("", |r| r.text.as_str())
+        } else {
+            &draft.text
+        };
         return Preview::Draft(one_line(text));
     }
-    Preview::Message(chat.last_message.as_ref().map_or_else(String::new, |m| match &m.author {
-        Some(author) => format!("{author}: {}", one_line(&m.text)),
-        None => one_line(&m.text),
-    }))
+    Preview::Message(
+        chat.last_message
+            .as_ref()
+            .map_or_else(String::new, |m| match &m.author {
+                Some(author) => format!("{author}: {}", one_line(&m.text)),
+                None => one_line(&m.text),
+            }),
+    )
 }
 
 fn preview_view(preview: Preview, tag: &str) -> Div {
-    let line = div().flex_1().min_w_0().text_size(px(14.)).text_color(rgb(MUTED));
+    let line = div()
+        .flex_1()
+        .min_w_0()
+        .text_size(px(14.))
+        .text_color(rgb(MUTED));
     match preview {
         Preview::Typing(text) => {
             let selector = format!("{tag}-typing");
-            line.debug_selector(move || selector).truncate().text_color(rgb(ACCENT)).child(text)
+            line.debug_selector(move || selector)
+                .truncate()
+                .text_color(rgb(ACCENT))
+                .child(text)
         }
         Preview::Draft(text) => {
             let selector = format!("{tag}-draft");
@@ -1202,9 +1429,14 @@ impl Render for Desktop {
         }
         let sidebar = self.sidebar(cx);
         let pane = self.chat_pane(cx);
-        let info = self.info_chat().map(|chat| info_panel::render(&chat, &self.store, cx));
+        let info = self
+            .info_chat()
+            .map(|chat| info_panel::render(&chat, &self.store, cx));
         let profile = self.profile.then(|| profile::render(&self.store, cx));
-        let new_chat = self.new_chat.as_ref().map(|dialog| new_chat::render(dialog, self.info_chat(), &self.store, cx));
+        let new_chat = self
+            .new_chat
+            .as_ref()
+            .map(|dialog| new_chat::render(dialog, self.info_chat(), &self.store, cx));
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
@@ -1239,37 +1471,47 @@ impl Render for Desktop {
             .children(toast)
             .children(menu)
             .children(delete)
-            .when(self.menu == AccountMenu::ConfirmSignOut && session == SessionState::Active, |d| {
-                d.child(overlay(
-                    "sign-out-dialog",
-                    "Выйти из аккаунта?",
-                    "Сессия, локальный кэш и загруженные файлы будут удалены.",
-                    vec![
-                        button("cancel-sign-out", "Отмена").debug_selector(|| "cancel-sign-out".into()).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.menu = AccountMenu::Closed;
-                                cx.notify();
-                            }),
-                        ),
-                        button("confirm-sign-out", "Выйти")
-                            .debug_selector(|| "confirm-sign-out".into())
-                            .text_color(rgb(ACCENT))
-                            .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx))),
-                    ],
-                ))
-            })
+            .when(
+                self.menu == AccountMenu::ConfirmSignOut && session == SessionState::Active,
+                |d| {
+                    d.child(overlay(
+                        "sign-out-dialog",
+                        "Выйти из аккаунта?",
+                        "Сессия, локальный кэш и загруженные файлы будут удалены.",
+                        vec![
+                            button("cancel-sign-out", "Отмена")
+                                .debug_selector(|| "cancel-sign-out".into())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.menu = AccountMenu::Closed;
+                                    cx.notify();
+                                })),
+                            button("confirm-sign-out", "Выйти")
+                                .debug_selector(|| "confirm-sign-out".into())
+                                .text_color(rgb(ACCENT))
+                                .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx))),
+                        ],
+                    ))
+                },
+            )
             .when(session == SessionState::Expired, |d| {
                 d.child(overlay(
                     "session-expired",
                     "Сессия истекла",
                     "Выйдите и войдите снова, чтобы продолжить чтение.",
-                    vec![button("expired-sign-out", "Выйти")
-                        .debug_selector(|| "expired-sign-out".into())
-                        .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx)))],
+                    vec![
+                        button("expired-sign-out", "Выйти")
+                            .debug_selector(|| "expired-sign-out".into())
+                            .on_click(cx.listener(|this, _, _, cx| this.confirm_sign_out(cx))),
+                    ],
                 ))
             })
             .when(session == SessionState::SignedOut, |d| {
-                d.child(overlay("signed-out", "Вы вышли из аккаунта", "Данные сессии удалены.", vec![]))
+                d.child(overlay(
+                    "signed-out",
+                    "Вы вышли из аккаунта",
+                    "Данные сессии удалены.",
+                    vec![],
+                ))
             })
     }
 }
@@ -1301,15 +1543,28 @@ impl Desktop {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(div().flex_1().text_size(px(17.)).font_weight(FontWeight::MEDIUM).child("Журнал"))
-                            .child(div().text_color(rgb(MUTED)).text_size(px(12.)).child(format!("{count} записей")))
-                            .child(button("log-copy", "Копировать").debug_selector(|| "log-copy".into()).on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    if let Some(text) = this.log_text() {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                    }
-                                }),
-                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(17.))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Журнал"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(rgb(MUTED))
+                                    .text_size(px(12.))
+                                    .child(format!("{count} записей")),
+                            )
+                            .child(
+                                button("log-copy", "Копировать")
+                                    .debug_selector(|| "log-copy".into())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if let Some(text) = this.log_text() {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        }
+                                    })),
+                            )
                             .child(
                                 button("log-close", "Закрыть")
                                     .debug_selector(|| "log-close".into())
@@ -1330,7 +1585,9 @@ impl Desktop {
                                     "log-lines",
                                     count,
                                     cx.processor(|this, range: Range<usize>, _, _| {
-                                        let Some(view) = this.log.as_ref() else { return Vec::new() };
+                                        let Some(view) = this.log.as_ref() else {
+                                            return Vec::new();
+                                        };
                                         range
                                             .filter_map(|ix| view.lines.get(ix))
                                             .map(|line| {
@@ -1340,7 +1597,10 @@ impl Desktop {
                                                     tracing::Level::INFO => INK,
                                                     _ => MUTED,
                                                 };
-                                                div().truncate().text_color(rgb(color)).child(log_line(line, this.clock))
+                                                div()
+                                                    .truncate()
+                                                    .text_color(rgb(color))
+                                                    .child(log_line(line, this.clock))
                                             })
                                             .collect()
                                     }),
@@ -1355,11 +1615,22 @@ impl Desktop {
 
 /// One record as shown and copied: `HH:MM:SS.mmm LEVEL target message fields`.
 fn log_line(line: &LogLine, clock: Clock) -> String {
-    format!("{} {:<5} {} {}", log_time(line.time_us, clock), line.level, line.target, line.text)
+    format!(
+        "{} {:<5} {} {}",
+        log_time(line.time_us, clock),
+        line.level,
+        line.target,
+        line.text
+    )
 }
 
 /// Full-window modal that blocks everything beneath it.
-fn overlay(selector: &'static str, title: &'static str, text: &'static str, actions: Vec<Stateful<Div>>) -> Div {
+fn overlay(
+    selector: &'static str,
+    title: &'static str,
+    text: &'static str,
+    actions: Vec<Stateful<Div>>,
+) -> Div {
     div()
         .debug_selector(move || selector.into())
         .absolute()
@@ -1378,7 +1649,12 @@ fn overlay(selector: &'static str, title: &'static str, text: &'static str, acti
                 .flex()
                 .flex_col()
                 .gap(px(10.))
-                .child(div().text_size(px(17.)).font_weight(FontWeight::MEDIUM).child(title))
+                .child(
+                    div()
+                        .text_size(px(17.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(title),
+                )
                 .child(div().text_color(rgb(MUTED)).child(text))
                 .child(div().flex().justify_end().gap(px(8.)).children(actions)),
         )

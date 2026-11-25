@@ -3,7 +3,7 @@
 //! The sections come from the server reply only; the local name matches are listed by the sidebar itself and
 //! the chats among them are not repeated here.
 
-use crate::format::{chat_time, one_line, Clock};
+use crate::format::{Clock, chat_time, one_line};
 use crate::store::{ChatStore, SearchState, SearchStatus};
 use crate::theme::*;
 use crate::widgets::avatar;
@@ -38,10 +38,27 @@ impl StatusLine {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Row {
-    Chat { open: ChatId, kind: ChatKind, title: String, avatar: Option<MediaRef> },
+    Chat {
+        open: ChatId,
+        kind: ChatKind,
+        title: String,
+        avatar: Option<MediaRef>,
+    },
     /// `open` is the existing private chat with this person; without it the row is shown but not clickable.
-    Person { user: UserId, name: String, avatar: Option<MediaRef>, open: Option<ChatId> },
-    Message { open: ChatId, timestamp: MessageTs, chat_title: String, author: Option<String>, time: String, text: String },
+    Person {
+        user: UserId,
+        name: String,
+        avatar: Option<MediaRef>,
+        open: Option<ChatId>,
+    },
+    Message {
+        open: ChatId,
+        timestamp: MessageTs,
+        chat_title: String,
+        author: Option<String>,
+        time: String,
+        text: String,
+    },
 }
 
 impl Row {
@@ -77,13 +94,23 @@ pub fn view(state: &SearchState, local: &[ChatId], clock: Clock) -> SearchView {
         .chats
         .iter()
         .filter(|hit| !local.contains(&hit.id))
-        .map(|hit| Row::Chat { open: hit.id.clone(), kind: hit.kind, title: hit.title.clone(), avatar: hit.avatar.clone() })
+        .map(|hit| Row::Chat {
+            open: hit.id.clone(),
+            kind: hit.kind,
+            title: hit.title.clone(),
+            avatar: hit.avatar.clone(),
+        })
         .collect();
     let dropped = chats.len() != hits.chats.len();
     let people: Vec<Row> = hits
         .people
         .iter()
-        .map(|hit| Row::Person { user: hit.user.clone(), name: hit.name.clone(), avatar: hit.avatar.clone(), open: hit.chat.clone() })
+        .map(|hit| Row::Person {
+            user: hit.user.clone(),
+            name: hit.name.clone(),
+            avatar: hit.avatar.clone(),
+            open: hit.chat.clone(),
+        })
         .collect();
     let messages: Vec<Row> = hits
         .messages
@@ -158,11 +185,28 @@ pub fn render(view: &SearchView, store: &Entity<ChatStore>, cx: &App) -> Div {
         }))
 }
 
-fn row_view(row: &Row, store: &Entity<ChatStore>, state: &ChatStore, selected: bool) -> Stateful<Div> {
+fn row_view(
+    row: &Row,
+    store: &Entity<ChatStore>,
+    state: &ChatStore,
+    selected: bool,
+) -> Stateful<Div> {
     let (tag, lead, title, subtitle, time) = match row {
-        Row::Chat { open, kind, title, avatar: media } => {
+        Row::Chat {
+            open,
+            kind,
+            title,
+            avatar: media,
+        } => {
             let tag = format!("search-chat-{}", open.0);
-            let lead = avatar(state, media.as_ref(), &open.0, title, 48., format!("{tag}-avatar"));
+            let lead = avatar(
+                state,
+                media.as_ref(),
+                &open.0,
+                title,
+                48.,
+                format!("{tag}-avatar"),
+            );
             let kind = match kind {
                 ChatKind::Private => "Личный чат",
                 ChatKind::Group => "Группа",
@@ -170,16 +214,42 @@ fn row_view(row: &Row, store: &Entity<ChatStore>, state: &ChatStore, selected: b
             };
             (tag, lead, title.clone(), vec![Line::muted(kind)], None)
         }
-        Row::Person { user, name, avatar: media, .. } => {
+        Row::Person {
+            user,
+            name,
+            avatar: media,
+            ..
+        } => {
             let tag = format!("search-person-{}", user.0);
-            let lead = avatar(state, media.as_ref(), &user.0, name, 48., format!("{tag}-avatar"));
+            let lead = avatar(
+                state,
+                media.as_ref(),
+                &user.0,
+                name,
+                48.,
+                format!("{tag}-avatar"),
+            );
             (tag, lead, name.clone(), Vec::new(), None)
         }
-        Row::Message { open, timestamp, chat_title, author, time, text } => {
+        Row::Message {
+            open,
+            timestamp,
+            chat_title,
+            author,
+            time,
+            text,
+        } => {
             let tag = format!("search-message-{}-{timestamp}", open.0);
             // The chat's own avatar, when the chat is in the loaded list.
             let media = state.chat(open).and_then(|chat| chat.avatar.as_ref());
-            let lead = avatar(state, media, &open.0, chat_title, 48., format!("{tag}-avatar"));
+            let lead = avatar(
+                state,
+                media,
+                &open.0,
+                chat_title,
+                48.,
+                format!("{tag}-avatar"),
+            );
             let mut lines = Vec::new();
             if let Some(author) = author {
                 lines.push(Line::accent(author.clone()));
@@ -204,7 +274,8 @@ fn row_view(row: &Row, store: &Entity<ChatStore>, state: &ChatStore, selected: b
         .gap(px(12.))
         .bg(rgb(if selected { ROW_SELECTED } else { PANEL }))
         .when(clickable, |d| {
-            d.cursor_pointer().hover(|s| s.bg(rgb(if selected { ROW_SELECTED } else { ROW_HOVER })))
+            d.cursor_pointer()
+                .hover(|s| s.bg(rgb(if selected { ROW_SELECTED } else { ROW_HOVER })))
         })
         .when_some(open, |d, chat| {
             d.on_click(move |_, _, cx| store.update(cx, |store, cx| store.select(chat.clone(), cx)))
@@ -232,7 +303,13 @@ fn row_view(row: &Row, store: &Entity<ChatStore>, state: &ChatStore, selected: b
                                 .child(title),
                         )
                         .when_some(time, |d, time| {
-                            d.child(div().flex_none().text_size(px(12.)).text_color(rgb(MUTED)).child(time))
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child(time),
+                            )
                         }),
                 )
                 .children(subtitle.into_iter().map(Line::into_element)),
@@ -248,28 +325,48 @@ struct Line {
 
 impl Line {
     fn muted(text: &'static str) -> Self {
-        Self { text: text.into(), color: MUTED, clamp: 1 }
+        Self {
+            text: text.into(),
+            color: MUTED,
+            clamp: 1,
+        }
     }
 
     fn accent(text: String) -> Self {
-        Self { text, color: ACCENT, clamp: 1 }
+        Self {
+            text,
+            color: ACCENT,
+            clamp: 1,
+        }
     }
 
     fn text(text: String) -> Self {
-        Self { text, color: MUTED, clamp: 2 }
+        Self {
+            text,
+            color: MUTED,
+            clamp: 2,
+        }
     }
 
     fn into_element(self) -> Div {
-        div().min_w_0().text_size(px(14.)).text_color(rgb(self.color)).line_clamp(self.clamp).child(self.text)
+        div()
+            .min_w_0()
+            .text_size(px(14.))
+            .text_color(rgb(self.color))
+            .line_clamp(self.clamp)
+            .child(self.text)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{view, Row, SearchView, StatusLine};
+    use super::{Row, SearchView, StatusLine, view};
     use crate::format::Clock;
     use crate::store::{SearchState, SearchStatus};
-    use bt_chat_core::model::{ChatHit, ChatId, ChatKind, MessageHit, PersonHit, SearchFailure, SearchHits, SearchId, UserId};
+    use bt_chat_core::model::{
+        ChatHit, ChatId, ChatKind, MessageHit, PersonHit, SearchFailure, SearchHits, SearchId,
+        UserId,
+    };
 
     const HOUR: i64 = 3_600_000_000;
 
@@ -283,19 +380,40 @@ mod tests {
     }
 
     fn chat_hit(s: &str) -> ChatHit {
-        ChatHit { id: id(s), kind: ChatKind::Group, title: format!("title {s}"), avatar: None }
+        ChatHit {
+            id: id(s),
+            kind: ChatKind::Group,
+            title: format!("title {s}"),
+            avatar: None,
+        }
     }
 
     fn person(guid: &str, chat: Option<&str>) -> PersonHit {
-        PersonHit { user: UserId(guid.into()), name: format!("name {guid}"), avatar: None, chat: chat.map(id) }
+        PersonHit {
+            user: UserId(guid.into()),
+            name: format!("name {guid}"),
+            avatar: None,
+            chat: chat.map(id),
+        }
     }
 
     fn message(chat: &str, ts: i64, text: &str) -> MessageHit {
-        MessageHit { chat: id(chat), chat_title: format!("title {chat}"), timestamp: ts, author_name: Some("Анна".into()), text: text.into() }
+        MessageHit {
+            chat: id(chat),
+            chat_title: format!("title {chat}"),
+            timestamp: ts,
+            author_name: Some("Анна".into()),
+            text: text.into(),
+        }
     }
 
     fn state(status: SearchStatus, hits: SearchHits) -> SearchState {
-        SearchState { id: SearchId(1), query: "q".into(), status, hits }
+        SearchState {
+            id: SearchId(1),
+            query: "q".into(),
+            status,
+            hits,
+        }
     }
 
     fn full() -> SearchHits {
@@ -324,17 +442,29 @@ mod tests {
     fn empty_sections_are_omitted() {
         let mut hits = full();
         hits.people.clear();
-        assert_eq!(titles(&view(&state(SearchStatus::Ready, hits.clone()), &[], clock())), ["Чаты", "Сообщения"]);
+        assert_eq!(
+            titles(&view(
+                &state(SearchStatus::Ready, hits.clone()),
+                &[],
+                clock()
+            )),
+            ["Чаты", "Сообщения"]
+        );
         hits.chats.clear();
         hits.messages.clear();
         hits.people.push(person("u1", None));
-        assert_eq!(titles(&view(&state(SearchStatus::Ready, hits), &[], clock())), ["Люди"]);
+        assert_eq!(
+            titles(&view(&state(SearchStatus::Ready, hits), &[], clock())),
+            ["Люди"]
+        );
     }
 
     #[test]
     fn chats_among_local_matches_are_dropped() {
         let view = view(&state(SearchStatus::Ready, full()), &[id("a")], clock());
-        let Row::Chat { open, .. } = &view.sections[0].rows[0] else { panic!("chat row") };
+        let Row::Chat { open, .. } = &view.sections[0].rows[0] else {
+            panic!("chat row")
+        };
         assert_eq!(*open, id("b"));
         assert_eq!(view.sections[0].rows.len(), 1);
         // Messages and people of a locally matched chat stay.
@@ -343,7 +473,10 @@ mod tests {
 
     #[test]
     fn a_section_of_only_local_chats_disappears_without_claiming_nothing_found() {
-        let hits = SearchHits { chats: vec![chat_hit("a")], ..SearchHits::default() };
+        let hits = SearchHits {
+            chats: vec![chat_hit("a")],
+            ..SearchHits::default()
+        };
         let view = view(&state(SearchStatus::Ready, hits), &[id("a")], clock());
         assert!(view.sections.is_empty());
         assert_eq!(view.status, None);
@@ -389,16 +522,43 @@ mod tests {
 
     #[test]
     fn loading_without_hits_shows_only_the_status() {
-        let view = view(&state(SearchStatus::Loading, SearchHits::default()), &[], clock());
-        assert_eq!(view, SearchView { status: Some(StatusLine::Loading), sections: Vec::new() });
+        let view = view(
+            &state(SearchStatus::Loading, SearchHits::default()),
+            &[],
+            clock(),
+        );
+        assert_eq!(
+            view,
+            SearchView {
+                status: Some(StatusLine::Loading),
+                sections: Vec::new()
+            }
+        );
     }
 
     #[test]
     fn offline_and_failure_have_their_own_text() {
-        let offline = view(&state(SearchStatus::Failed(SearchFailure::Offline), SearchHits::default()), &[], clock());
+        let offline = view(
+            &state(
+                SearchStatus::Failed(SearchFailure::Offline),
+                SearchHits::default(),
+            ),
+            &[],
+            clock(),
+        );
         assert_eq!(offline.status, Some(StatusLine::Offline));
-        assert_eq!(StatusLine::Offline.text(), "Для поиска по серверу нужно подключение");
-        let failed = view(&state(SearchStatus::Failed(SearchFailure::Failed), SearchHits::default()), &[], clock());
+        assert_eq!(
+            StatusLine::Offline.text(),
+            "Для поиска по серверу нужно подключение"
+        );
+        let failed = view(
+            &state(
+                SearchStatus::Failed(SearchFailure::Failed),
+                SearchHits::default(),
+            ),
+            &[],
+            clock(),
+        );
         assert_eq!(failed.status, Some(StatusLine::Failed));
         assert_eq!(StatusLine::Failed.text(), "Не удалось выполнить поиск");
         assert_ne!(StatusLine::Offline.text(), StatusLine::Failed.text());
@@ -406,26 +566,47 @@ mod tests {
 
     #[test]
     fn a_failure_keeps_the_hits_already_shown() {
-        let view = view(&state(SearchStatus::Failed(SearchFailure::Failed), full()), &[], clock());
+        let view = view(
+            &state(SearchStatus::Failed(SearchFailure::Failed), full()),
+            &[],
+            clock(),
+        );
         assert_eq!(view.status, Some(StatusLine::Failed));
         assert_eq!(titles(&view), ["Чаты", "Люди", "Сообщения"]);
     }
 
     #[test]
     fn an_empty_reply_says_nothing_found() {
-        let view = view(&state(SearchStatus::Ready, SearchHits::default()), &[id("a")], clock());
-        assert_eq!(view, SearchView { status: Some(StatusLine::NothingFound), sections: Vec::new() });
-        assert_eq!(StatusLine::NothingFound.text(), "На сервере ничего не найдено");
+        let view = view(
+            &state(SearchStatus::Ready, SearchHits::default()),
+            &[id("a")],
+            clock(),
+        );
+        assert_eq!(
+            view,
+            SearchView {
+                status: Some(StatusLine::NothingFound),
+                sections: Vec::new()
+            }
+        );
+        assert_eq!(
+            StatusLine::NothingFound.text(),
+            "На сервере ничего не найдено"
+        );
     }
 
     mod rendering {
-        use super::super::{render, view, SearchView};
+        use super::super::{SearchView, render, view};
         use crate::format::Clock;
         use crate::store::{ChatStore, SearchStatus};
         use bt_chat_core::model::{
-            ChatHit, ChatId, ChatKind, ChatSummary, ClientEvent, Command, MessageHit, PersonHit, SearchHits, SearchId, UserId,
+            ChatHit, ChatId, ChatKind, ChatSummary, ClientEvent, Command, MessageHit, PersonHit,
+            SearchHits, SearchId, UserId,
         };
-        use gpui::{px, size, AppContext, Context, Entity, IntoElement, Modifiers, Render, TestAppContext, VisualTestContext, Window};
+        use gpui::{
+            AppContext, Context, Entity, IntoElement, Modifiers, Render, TestAppContext,
+            VisualTestContext, Window, px, size,
+        };
 
         struct Host {
             store: Entity<ChatStore>,
@@ -454,10 +635,25 @@ mod tests {
 
         fn hits() -> SearchHits {
             SearchHits {
-                chats: vec![ChatHit { id: ChatId("g".into()), kind: ChatKind::Group, title: "Команда".into(), avatar: None }],
+                chats: vec![ChatHit {
+                    id: ChatId("g".into()),
+                    kind: ChatKind::Group,
+                    title: "Команда".into(),
+                    avatar: None,
+                }],
                 people: vec![
-                    PersonHit { user: UserId("u1".into()), name: "Анна".into(), avatar: None, chat: Some(ChatId("p1".into())) },
-                    PersonHit { user: UserId("u2".into()), name: "Борис".into(), avatar: None, chat: None },
+                    PersonHit {
+                        user: UserId("u1".into()),
+                        name: "Анна".into(),
+                        avatar: None,
+                        chat: Some(ChatId("p1".into())),
+                    },
+                    PersonHit {
+                        user: UserId("u2".into()),
+                        name: "Борис".into(),
+                        avatar: None,
+                        chat: None,
+                    },
                 ],
                 messages: vec![MessageHit {
                     chat: ChatId("m".into()),
@@ -470,14 +666,26 @@ mod tests {
         }
 
         /// A store with an answered search, and a window showing its results.
-        fn show(cx: &mut TestAppContext) -> (Entity<ChatStore>, async_channel::Receiver<Command>, &mut VisualTestContext) {
+        fn show(
+            cx: &mut TestAppContext,
+        ) -> (
+            Entity<ChatStore>,
+            async_channel::Receiver<Command>,
+            &mut VisualTestContext,
+        ) {
             let (events, event_rx) = async_channel::unbounded::<ClientEvent>();
             let (command_tx, commands) = async_channel::unbounded();
             let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
             store.update(cx, |s, cx| {
                 s.apply(ClientEvent::ChatsReplaced(vec![private("p1", "Анна")]), cx);
                 s.search("ab".into(), cx);
-                s.apply(ClientEvent::SearchResults { id: SearchId(1), hits: hits() }, cx);
+                s.apply(
+                    ClientEvent::SearchResults {
+                        id: SearchId(1),
+                        hits: hits(),
+                    },
+                    cx,
+                );
             });
             let state = store.read_with(cx, |s, _| s.search_state().cloned().unwrap());
             assert_eq!(state.status, SearchStatus::Ready);
@@ -494,7 +702,9 @@ mod tests {
         }
 
         fn click(cx: &mut VisualTestContext, selector: &'static str) {
-            let bounds = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+            let bounds = cx
+                .debug_bounds(selector)
+                .unwrap_or_else(|| panic!("{selector} is not on screen"));
             cx.simulate_click(bounds.center(), Modifiers::none());
         }
 
@@ -511,22 +721,43 @@ mod tests {
                 "search-person-u2-row",
                 "search-message-m-7-row",
             ] {
-                assert!(vcx.debug_bounds(selector).is_some(), "{selector} is not on screen");
+                assert!(
+                    vcx.debug_bounds(selector).is_some(),
+                    "{selector} is not on screen"
+                );
             }
-            assert!(vcx.debug_bounds("search-status").is_none(), "a ready reply with rows has no status line");
+            assert!(
+                vcx.debug_bounds("search-status").is_none(),
+                "a ready reply with rows has no status line"
+            );
         }
 
         #[gpui::test]
         fn clicking_a_chat_a_message_or_a_person_with_a_chat_selects_it(cx: &mut TestAppContext) {
             let (store, commands, vcx) = show(cx);
             click(vcx, "search-chat-g-row");
-            assert_eq!(commands.try_recv().ok(), Some(Command::OpenChat(ChatId("g".into()))));
+            assert_eq!(
+                commands.try_recv().ok(),
+                Some(Command::OpenChat(ChatId("g".into())))
+            );
             click(vcx, "search-message-m-7-row");
-            assert_eq!(commands.try_recv().ok(), Some(Command::OpenChat(ChatId("m".into()))));
+            assert_eq!(
+                commands.try_recv().ok(),
+                Some(Command::OpenChat(ChatId("m".into())))
+            );
             click(vcx, "search-person-u1-row");
-            assert_eq!(commands.try_recv().ok(), Some(Command::OpenChat(ChatId("p1".into()))));
-            assert!(commands.try_recv().is_err(), "choosing a result sends nothing else, in particular no read marker");
-            assert_eq!(store.read_with(vcx, |s, _| s.selected().cloned()), Some(ChatId("p1".into())));
+            assert_eq!(
+                commands.try_recv().ok(),
+                Some(Command::OpenChat(ChatId("p1".into())))
+            );
+            assert!(
+                commands.try_recv().is_err(),
+                "choosing a result sends nothing else, in particular no read marker"
+            );
+            assert_eq!(
+                store.read_with(vcx, |s, _| s.selected().cloned()),
+                Some(ChatId("p1".into()))
+            );
         }
 
         #[gpui::test]

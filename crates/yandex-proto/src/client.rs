@@ -13,8 +13,8 @@ use crate::request::{HISTORY_CHUNK, ReadRequest, SEARCH_LIMIT, SearchEntity};
 use crate::search::SearchReply;
 use crate::session::Session;
 use crate::wire::{
-    DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireMembers, WireProfile, WireUser, parse_members,
-    parse_profile,
+    DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireMembers, WireProfile, WireUser,
+    parse_members, parse_profile,
 };
 use crate::write::{Committed, WriteRequest};
 use crate::ws::TungsteniteConnector;
@@ -56,7 +56,10 @@ pub struct Client {
 impl Client {
     /// Connects to production Xiva. Must run inside a Tokio runtime; the returned stream
     /// carries connection state and pushes.
-    pub fn start(session: &Session, config: ClientConfig) -> Result<(Self, XivaEvents), ProtoError> {
+    pub fn start(
+        session: &Session,
+        config: ClientConfig,
+    ) -> Result<(Self, XivaEvents), ProtoError> {
         Self::start_with(TungsteniteConnector::default(), session, config)
     }
 
@@ -68,7 +71,8 @@ impl Client {
         let registry = RegistryClient::new(&config.registry, &config.http, &session.cookies)?;
         let media = MediaClient::new(config.media, &config.http, session.cookies.clone())?;
         let user = session.identity.xiva_user().to_owned();
-        let (xiva, events) = XivaHandle::spawn(connector, config.xiva, user, session.cookies.clone());
+        let (xiva, events) =
+            XivaHandle::spawn(connector, config.xiva, user, session.cookies.clone());
         let client = Self {
             xiva,
             registry,
@@ -86,7 +90,11 @@ impl Client {
     }
 
     /// One page of up to `history_limit` messages older than `before` (newest page when `None`).
-    pub async fn history(&self, chat: &str, before: Option<i64>) -> Result<WireHistory, ProtoError> {
+    pub async fn history(
+        &self,
+        chat: &str,
+        before: Option<i64>,
+    ) -> Result<WireHistory, ProtoError> {
         self.xiva.history(chat, before, self.history_limit).await
     }
 
@@ -102,17 +110,38 @@ impl Client {
 
     /// The app's search: first page of messages, users and chats matching `query`.
     pub async fn search(&self, query: &str) -> Result<SearchReply, ProtoError> {
-        self.search_with(query, SEARCH_LIMIT, &[SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats]).await
+        self.search_with(
+            query,
+            SEARCH_LIMIT,
+            &[
+                SearchEntity::Messages,
+                SearchEntity::Users,
+                SearchEntity::Chats,
+            ],
+        )
+        .await
     }
 
     /// `search` with an explicit page size and entity set (what `bt-probe search` exposes).
-    pub async fn search_with(&self, query: &str, limit: u32, entities: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
+    pub async fn search_with(
+        &self,
+        query: &str,
+        limit: u32,
+        entities: &[SearchEntity],
+    ) -> Result<SearchReply, ProtoError> {
         self.registry.search(query, limit, entities).await
     }
 
     /// The signed-in account's profile (socket `whoami`).
     pub async fn whoami(&self) -> Result<WireProfile, ProtoError> {
-        parse_profile(&self.xiva.request(ReadRequest::Whoami { guid: self.guid.clone() }).await?)
+        parse_profile(
+            &self
+                .xiva
+                .request(ReadRequest::Whoami {
+                    guid: self.guid.clone(),
+                })
+                .await?,
+        )
     }
 
     /// One page of up to `limit` members of a **group** chat (`get_chat_members`): the first page
@@ -120,7 +149,12 @@ impl Client {
     /// marker, so a page shorter than `limit` is the last. Private chats, the self chat and
     /// channels are refused with `no_permissions_for_this_chat_operation`, which surfaces as
     /// `ProtoError::Protocol` carrying that code.
-    pub async fn members(&self, chat: &str, limit: u32, guid_offset: Option<&str>) -> Result<WireMembers, ProtoError> {
+    pub async fn members(
+        &self,
+        chat: &str,
+        limit: u32,
+        guid_offset: Option<&str>,
+    ) -> Result<WireMembers, ProtoError> {
         let request = ReadRequest::ChatMembers {
             chat: chat.to_owned(),
             limit,
@@ -136,7 +170,12 @@ impl Client {
     /// without an id is still a success; the caller refreshes the chat list). A failure says
     /// whether a repeat could duplicate the chat, see [`ManageError`].
     pub async fn create_private_chat(&self, guid: &str) -> Result<Option<String>, ManageError> {
-        let data = self.registry.manage(&ManageRequest::CreatePrivateChat { guid: guid.to_owned() }).await?;
+        let data = self
+            .registry
+            .manage(&ManageRequest::CreatePrivateChat {
+                guid: guid.to_owned(),
+            })
+            .await?;
         Ok(created_chat_id(&data))
     }
 
@@ -146,8 +185,15 @@ impl Client {
     /// reply names one and `refused` lists the codes for the participants the server could not
     /// add (the group exists anyway). A failure says whether a repeat could duplicate the group,
     /// see [`ManageError`]. The payload is the web client's, not yet confirmed live.
-    pub async fn create_chat(&self, title: &str, users: &[String]) -> Result<CreatedChat, ManageError> {
-        let request = ManageRequest::CreateChat { title: title.to_owned(), users: users.to_vec() };
+    pub async fn create_chat(
+        &self,
+        title: &str,
+        users: &[String],
+    ) -> Result<CreatedChat, ManageError> {
+        let request = ManageRequest::CreateChat {
+            title: title.to_owned(),
+            users: users.to_vec(),
+        };
         Ok(parse_created_chat(&self.registry.manage(&request).await?))
     }
 
@@ -179,7 +225,14 @@ mod tests {
 
     #[tokio::test]
     async fn start_builds_a_client_offline() {
-        let session = Session { cookies: vec![], identity: Identity { uid: None, guid: "g".into(), display_name: None } };
+        let session = Session {
+            cookies: vec![],
+            identity: Identity {
+                uid: None,
+                guid: "g".into(),
+                display_name: None,
+            },
+        };
         let mut config = ClientConfig::production();
         // Nothing listens here: connection attempts fail and requests fail fast.
         config.xiva.base_url = "ws://127.0.0.1:1/v2".into();
@@ -192,7 +245,14 @@ mod tests {
     }
 
     async fn client_with_registry(base: &str) -> Client {
-        let session = Session { cookies: vec![], identity: Identity { uid: None, guid: "g".into(), display_name: None } };
+        let session = Session {
+            cookies: vec![],
+            identity: Identity {
+                uid: None,
+                guid: "g".into(),
+                display_name: None,
+            },
+        };
         let mut config = ClientConfig::production();
         config.xiva.base_url = "ws://127.0.0.1:1/v2".into();
         config.registry.api_url = format!("{base}/api/");
@@ -206,14 +266,20 @@ mod tests {
         use crate::wire::WireMemberRole;
         let page = include_str!("../tests/fixtures/live-members-group.json");
         let reply = format!(r#"{{"status":"ok","data":{page}}}"#);
-        let (base, seen) = serve(vec![json_response("200 OK", &reply), json_response("200 OK", &reply)]);
+        let (base, seen) = serve(vec![
+            json_response("200 OK", &reply),
+            json_response("200 OK", &reply),
+        ]);
         let client = client_with_registry(&base).await;
 
         let members = client.members("0/0/c", 50, Some("g-last")).await.unwrap();
         assert_eq!(members.users.len(), 4);
         assert_eq!(members.users[0].role, WireMemberRole::Admin);
         let request = seen.lock().unwrap()[0].clone();
-        assert!(request.contains("get_chat_members") && !request.to_lowercase().contains("x-csrf-token"));
+        assert!(
+            request.contains("get_chat_members")
+                && !request.to_lowercase().contains("x-csrf-token")
+        );
         assert!(request.contains(r#""chat_id":"0/0/c""#) && request.contains(r#""limit":50"#));
         assert!(request.contains(r#""guid_offset":"g-last""#) && !request.contains("roles"));
 
@@ -226,7 +292,11 @@ mod tests {
         use crate::registry::stub::{json_response, serve};
         let refusal = include_str!("../tests/fixtures/live-members-private.json");
         let (base, _) = serve(vec![json_response("403 Forbidden", refusal)]);
-        let err = client_with_registry(&base).await.members("a_b", 50, None).await.unwrap_err();
+        let err = client_with_registry(&base)
+            .await
+            .members("a_b", 50, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, ProtoError::Protocol(m) if m.contains("no_permissions_for_this_chat_operation")),
             "{err:?}"
@@ -240,13 +310,20 @@ mod tests {
             json_response("200 OK", r#"{"token":"t0k"}"#),
             json_response("200 OK", r#"{"status":"ok","data":{"chat_id":"a_b"}}"#),
         ]);
-        let created = client_with_registry(&base).await.create_private_chat("g-target").await.unwrap();
+        let created = client_with_registry(&base)
+            .await
+            .create_private_chat("g-target")
+            .await
+            .unwrap();
         assert_eq!(created.as_deref(), Some("a_b"));
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "one CSRF exchange and one creation");
         let request = seen[1].to_lowercase();
         assert!(request.contains("x-csrf-token: t0k"), "{request}");
-        assert!(request.contains("create_private_chat") && request.contains("g-target"), "{request}");
+        assert!(
+            request.contains("create_private_chat") && request.contains("g-target"),
+            "{request}"
+        );
     }
 
     #[tokio::test]
@@ -257,14 +334,23 @@ mod tests {
             csrf(),
             json_response("200 OK", r#"{"status":"ok"}"#),
             csrf(),
-            json_response("200 OK", r#"{"status":"error","data":{"code":"no_permission"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"no_permission"}}"#,
+            ),
             csrf(),
             json_response("503 Service Unavailable", "{}"),
         ]);
         let client = client_with_registry(&base).await;
         assert_eq!(client.create_private_chat("g").await, Ok(None));
-        assert!(matches!(client.create_private_chat("g").await, Err(ManageError::Rejected(_))));
-        assert!(matches!(client.create_private_chat("g").await, Err(ManageError::Unknown(_))));
+        assert!(matches!(
+            client.create_private_chat("g").await,
+            Err(ManageError::Rejected(_))
+        ));
+        assert!(matches!(
+            client.create_private_chat("g").await,
+            Err(ManageError::Unknown(_))
+        ));
     }
 
     #[tokio::test]
@@ -278,15 +364,25 @@ mod tests {
             ),
         ]);
         let users = ["g-1".to_owned(), "g-2".to_owned()];
-        let created = client_with_registry(&base).await.create_chat("Test group", &users).await.unwrap();
+        let created = client_with_registry(&base)
+            .await
+            .create_chat("Test group", &users)
+            .await
+            .unwrap();
         assert_eq!(created.chat.as_deref(), Some("0/0/g"));
         assert_eq!(created.refused, ["join_denied"]);
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 2, "one CSRF exchange and one creation");
         let request = seen[1].to_lowercase();
         assert!(request.contains("x-csrf-token: t0k"), "{request}");
-        assert!(request.contains("create_chat") && request.contains("test group"), "{request}");
-        assert!(request.contains(r#""users":["g-1","g-2"]"#) && request.contains(r#""is_public":true"#), "{request}");
+        assert!(
+            request.contains("create_chat") && request.contains("test group"),
+            "{request}"
+        );
+        assert!(
+            request.contains(r#""users":["g-1","g-2"]"#) && request.contains(r#""is_public":true"#),
+            "{request}"
+        );
     }
 
     #[tokio::test]
@@ -297,14 +393,26 @@ mod tests {
             csrf(),
             json_response("200 OK", r#"{"status":"ok"}"#),
             csrf(),
-            json_response("200 OK", r#"{"status":"error","data":{"code":"validation_error"}}"#),
+            json_response(
+                "200 OK",
+                r#"{"status":"error","data":{"code":"validation_error"}}"#,
+            ),
             csrf(),
             json_response("503 Service Unavailable", "{}"),
         ]);
         let client = client_with_registry(&base).await;
         let users = ["g".to_owned()];
-        assert_eq!(client.create_chat("T", &users).await, Ok(CreatedChat::default()));
-        assert!(matches!(client.create_chat("T", &users).await, Err(ManageError::Rejected(_))));
-        assert!(matches!(client.create_chat("T", &users).await, Err(ManageError::Unknown(_))));
+        assert_eq!(
+            client.create_chat("T", &users).await,
+            Ok(CreatedChat::default())
+        );
+        assert!(matches!(
+            client.create_chat("T", &users).await,
+            Err(ManageError::Rejected(_))
+        ));
+        assert!(matches!(
+            client.create_chat("T", &users).await,
+            Err(ManageError::Unknown(_))
+        ));
     }
 }

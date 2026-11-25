@@ -25,7 +25,11 @@ const ARROW_WIDTH: f32 = 48.;
 /// scaled down, never up, to the space left after the bars, the padding and (with several pictures) the
 /// two arrows, and to `IMAGE_MAX`. Unknown dimensions give a square.
 pub fn picture_box(width: u32, height: u32, viewport: (f32, f32), multiple: bool) -> (f32, f32) {
-    let arrows = if multiple { 2. * (ARROW_WIDTH + PAD) } else { 0. };
+    let arrows = if multiple {
+        2. * (ARROW_WIDTH + PAD)
+    } else {
+        0.
+    };
     let max_w = (viewport.0 - 2. * PAD - arrows).clamp(1., IMAGE_MAX);
     let max_h = (viewport.1 - TOP_BAR - BOTTOM_BAR - 2. * PAD).clamp(1., IMAGE_MAX);
     if width == 0 || height == 0 {
@@ -47,7 +51,9 @@ pub struct Viewer {
 
 /// `index` moved by `delta` and clamped to `0..len`; the ends do not wrap.
 pub fn step(index: usize, len: usize, delta: isize) -> usize {
-    index.saturating_add_signed(delta).min(len.saturating_sub(1))
+    index
+        .saturating_add_signed(delta)
+        .min(len.saturating_sub(1))
 }
 
 /// One-based position among the message's pictures, e.g. `3 / 4`.
@@ -116,12 +122,21 @@ pub fn action_line(state: Option<&DownloadState>, online: bool) -> ActionLine {
             (Some(progress), Action::Cancel)
         }
         Some(DownloadState::Saved(path)) => {
-            let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             (Some(format!("Сохранено: {name}")), Action::DownloadAgain)
         }
-        Some(DownloadState::Failed(reason)) => (Some(failure_text(*reason).to_string()), Action::Retry),
+        Some(DownloadState::Failed(reason)) => {
+            (Some(failure_text(*reason).to_string()), Action::Retry)
+        }
     };
-    ActionLine { enabled: online || action == Action::Cancel, status, action }
+    ActionLine {
+        enabled: online || action == Action::Cancel,
+        status,
+        action,
+    }
 }
 
 /// Everything one frame of the overlay needs, read from the store up front so building the element
@@ -136,7 +151,12 @@ pub struct Frame {
 }
 
 /// `viewport` is the window's (width, height).
-pub fn frame(viewer: &Viewer, items: &[GalleryItem], store: &ChatStore, viewport: (f32, f32)) -> Option<Frame> {
+pub fn frame(
+    viewer: &Viewer,
+    items: &[GalleryItem],
+    store: &ChatStore,
+    viewport: (f32, f32),
+) -> Option<Frame> {
     let item = items.get(viewer.index)?.clone();
     let online = store.connection() == ConnectionState::Online;
     Some(Frame {
@@ -150,7 +170,14 @@ pub fn frame(viewer: &Viewer, items: &[GalleryItem], store: &ChatStore, viewport
 }
 
 pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
-    let Frame { item, index, len, picture: (w, h), preview, line } = frame;
+    let Frame {
+        item,
+        index,
+        len,
+        picture: (w, h),
+        preview,
+        line,
+    } = frame;
     let position = position_label(index, len);
     let position_selector = format!("viewer-pos-{}-{len}", index + 1);
     let multiple = len > 1;
@@ -176,12 +203,15 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
     let original = item.media.original();
     let name = item.name.clone();
     let action = line.action;
-    let mut act = button(action.selector(), action.label()).debug_selector(move || action.selector().into());
+    let mut act =
+        button(action.selector(), action.label()).debug_selector(move || action.selector().into());
     act = if line.enabled {
         act.on_click(cx.listener(move |this, _, _, cx| match action {
             Action::Cancel => this.store.read(cx).cancel_download(&original),
             Action::Download | Action::Retry | Action::DownloadAgain => {
-                this.store.update(cx, |store, cx| store.download(original.clone(), name.clone(), cx));
+                this.store.update(cx, |store, cx| {
+                    store.download(original.clone(), name.clone(), cx)
+                });
             }
         }))
     } else {
@@ -205,7 +235,12 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
                 .flex()
                 .items_center()
                 .gap(px(12.))
-                .child(div().debug_selector(move || position_selector).flex_1().child(position))
+                .child(
+                    div()
+                        .debug_selector(move || position_selector)
+                        .flex_1()
+                        .child(position),
+                )
                 .child(
                     button("viewer-close", "Закрыть")
                         .debug_selector(|| "viewer-close".into())
@@ -221,9 +256,13 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
                 .items_center()
                 .justify_center()
                 .gap(px(PAD))
-                .when(multiple, |d| d.child(arrow("viewer-prev", "‹", index > 0, -1, cx)))
+                .when(multiple, |d| {
+                    d.child(arrow("viewer-prev", "‹", index > 0, -1, cx))
+                })
                 .child(picture)
-                .when(multiple, |d| d.child(arrow("viewer-next", "›", index + 1 < len, 1, cx))),
+                .when(multiple, |d| {
+                    d.child(arrow("viewer-next", "›", index + 1 < len, 1, cx))
+                }),
         )
         .child(
             div()
@@ -236,7 +275,13 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
                 .children(line.status.map(|text| {
                     let saved = matches!(line.action, Action::DownloadAgain);
                     div()
-                        .debug_selector(move || String::from(if saved { "viewer-saved" } else { "viewer-status" }))
+                        .debug_selector(move || {
+                            String::from(if saved {
+                                "viewer-saved"
+                            } else {
+                                "viewer-status"
+                            })
+                        })
                         .text_color(rgb(MUTED))
                         .child(text)
                 }))
@@ -245,7 +290,13 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
 }
 
 /// Previous/next control; dimmed and inert at the end it cannot move past.
-fn arrow(id: &'static str, glyph: &'static str, enabled: bool, delta: isize, cx: &mut Context<Desktop>) -> Stateful<Div> {
+fn arrow(
+    id: &'static str,
+    glyph: &'static str,
+    enabled: bool,
+    delta: isize,
+    cx: &mut Context<Desktop>,
+) -> Stateful<Div> {
     let arrow = button(id, glyph)
         .debug_selector(move || id.into())
         .text_size(px(28.))
@@ -263,7 +314,7 @@ fn arrow(id: &'static str, glyph: &'static str, enabled: bool, delta: isize, cx:
 
 #[cfg(test)]
 mod tests {
-    use super::{action_line, picture_box, position_label, step, Action, ActionLine};
+    use super::{Action, ActionLine, action_line, picture_box, position_label, step};
     use crate::store::DownloadState;
     use bt_chat_core::model::DownloadFailure;
     use std::path::Path;
@@ -289,34 +340,74 @@ mod tests {
     #[test]
     fn the_action_line_follows_the_download_state() {
         let line = |state: Option<DownloadState>, online| action_line(state.as_ref(), online);
-        assert_eq!(line(None, true), ActionLine { status: None, action: Action::Download, enabled: true });
+        assert_eq!(
+            line(None, true),
+            ActionLine {
+                status: None,
+                action: Action::Download,
+                enabled: true
+            }
+        );
         assert_eq!(
             line(None, false),
-            ActionLine { status: Some("Нет соединения".into()), action: Action::Download, enabled: false }
+            ActionLine {
+                status: Some("Нет соединения".into()),
+                action: Action::Download,
+                enabled: false
+            }
         );
-        let running = Some(DownloadState::Running { received: 1536, total: Some(10 * 1024 * 1024) });
+        let running = Some(DownloadState::Running {
+            received: 1536,
+            total: Some(10 * 1024 * 1024),
+        });
         assert_eq!(
             line(running, true),
-            ActionLine { status: Some("1,5 КБ из 10 МБ".into()), action: Action::Cancel, enabled: true }
+            ActionLine {
+                status: Some("1,5 КБ из 10 МБ".into()),
+                action: Action::Cancel,
+                enabled: true
+            }
         );
-        let unknown = Some(DownloadState::Running { received: 100, total: None });
-        assert_eq!(line(unknown.clone(), false).status.as_deref(), Some("100 Б"));
-        assert!(line(unknown, false).enabled, "a running download can be cancelled offline");
-        let saved = Some(DownloadState::Saved(Path::new("/Users/x/Downloads/a (1).jpg").to_path_buf()));
+        let unknown = Some(DownloadState::Running {
+            received: 100,
+            total: None,
+        });
+        assert_eq!(
+            line(unknown.clone(), false).status.as_deref(),
+            Some("100 Б")
+        );
+        assert!(
+            line(unknown, false).enabled,
+            "a running download can be cancelled offline"
+        );
+        let saved = Some(DownloadState::Saved(
+            Path::new("/Users/x/Downloads/a (1).jpg").to_path_buf(),
+        ));
         assert_eq!(
             line(saved, true),
-            ActionLine { status: Some("Сохранено: a (1).jpg".into()), action: Action::DownloadAgain, enabled: true }
+            ActionLine {
+                status: Some("Сохранено: a (1).jpg".into()),
+                action: Action::DownloadAgain,
+                enabled: true
+            }
         );
         let failed = Some(DownloadState::Failed(DownloadFailure::Disk));
         assert_eq!(
             line(failed.clone(), true),
-            ActionLine { status: Some("Не удалось записать на диск".into()), action: Action::Retry, enabled: true }
+            ActionLine {
+                status: Some("Не удалось записать на диск".into()),
+                action: Action::Retry,
+                enabled: true
+            }
         );
         assert!(!line(failed, false).enabled);
     }
 
     fn near(actual: (f32, f32), expected: (f32, f32)) {
-        assert!((actual.0 - expected.0).abs() < 0.01 && (actual.1 - expected.1).abs() < 0.01, "{actual:?} != {expected:?}");
+        assert!(
+            (actual.0 - expected.0).abs() < 0.01 && (actual.1 - expected.1).abs() < 0.01,
+            "{actual:?} != {expected:?}"
+        );
     }
 
     #[test]

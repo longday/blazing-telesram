@@ -4,8 +4,8 @@
 //! a private chat.
 
 use crate::model::{
-    ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId, Profile, ReplyTarget, SearchHits,
-    UserId,
+    ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId,
+    Profile, ReplyTarget, SearchHits, UserId,
 };
 use crate::reactions::{ReactionCode, ReactionsUpdate};
 use std::io::Write;
@@ -54,13 +54,28 @@ pub enum LiveEvent {
     /// New or edited message.
     MessageUpserted(Message),
     /// An own message that carries the send's `PayloadId`, from this or another client.
-    Echo { payload: PayloadId, message: Message },
-    MessageDeleted { chat: ChatId, timestamp: MessageTs },
+    Echo {
+        payload: PayloadId,
+        message: Message,
+    },
+    MessageDeleted {
+        chat: ChatId,
+        timestamp: MessageTs,
+    },
     /// The server's reaction state of one message changed (a reaction push). Applied by the
     /// engine only when it is newer than what the cache holds.
-    ReactionsChanged { chat: ChatId, timestamp: MessageTs, update: ReactionsUpdate },
+    ReactionsChanged {
+        chat: ChatId,
+        timestamp: MessageTs,
+        update: ReactionsUpdate,
+    },
     /// `user` is typing in `chat`; the indicator lives `timeout` unless renewed.
-    Typing { chat: ChatId, user: UserId, name: Option<String>, timeout: Duration },
+    Typing {
+        chat: ChatId,
+        user: UserId,
+        name: Option<String>,
+        timeout: Duration,
+    },
     /// Authoritative summary (unread counter, preview, pin, mute) of one chat.
     ChatChanged(ChatSummary),
     Disconnected,
@@ -87,7 +102,10 @@ pub trait Backend: Send + Sync + 'static {
         limit: usize,
     ) -> impl Future<Output = Result<HistoryChunk, BackendError>> + Send;
 
-    fn fetch_media(&self, media: &MediaRef) -> impl Future<Output = Result<Vec<u8>, BackendError>> + Send;
+    fn fetch_media(
+        &self,
+        media: &MediaRef,
+    ) -> impl Future<Output = Result<Vec<u8>, BackendError>> + Send;
 
     /// Streams the original file `media` (kind `File`) into `out` without buffering it and
     /// returns the byte count. `progress(received, total)` is called as bytes arrive; `total`
@@ -100,7 +118,9 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<u64, BackendError>> + Send;
 
     /// Opens the live stream. The channel closing means the connection is gone for good.
-    fn subscribe(&self) -> impl Future<Output = Result<async_channel::Receiver<LiveEvent>, BackendError>> + Send;
+    fn subscribe(
+        &self,
+    ) -> impl Future<Output = Result<async_channel::Receiver<LiveEvent>, BackendError>> + Send;
 
     /// The chat the user has open, or none. The general live stream already carries new
     /// messages of every chat; per-chat updates are requested for this one only, because the
@@ -127,7 +147,11 @@ pub trait Backend: Send + Sync + 'static {
         reply_to: Option<&ReplyTarget>,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
-    fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> impl Future<Output = Result<(), BackendError>> + Send;
+    fn delete(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Sets the account's reaction on a message to `target`, or removes it when `None`. One
     /// reaction per message: a `Some` replaces the previous one. Offline fails fast with
@@ -140,19 +164,30 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Moves the read position of `chat` up to `timestamp` inclusive.
-    fn mark_seen(&self, chat: &ChatId, timestamp: MessageTs) -> impl Future<Output = Result<(), BackendError>> + Send;
+    fn mark_seen(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+    ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     fn typing(&self, chat: &ChatId) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     /// Server search by name and text: at most `limit` hits per kind (chats, people,
     /// messages), first page only. Read-only; the query is typed text and must not be logged
     /// above `trace`.
-    fn search(&self, query: &str, limit: usize) -> impl Future<Output = Result<SearchHits, BackendError>> + Send;
+    fn search(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> impl Future<Output = Result<SearchHits, BackendError>> + Send;
 
     /// The people of `chat`. A group or channel is read from the server (paged, bounded; the
     /// server refusing the list is `Rejected`, `permanent`); a private chat is answered from
     /// the row itself without a request. Read-only; nothing is persisted.
-    fn members(&self, chat: &ChatSummary) -> impl Future<Output = Result<ChatMembers, BackendError>> + Send;
+    fn members(
+        &self,
+        chat: &ChatSummary,
+    ) -> impl Future<Output = Result<ChatMembers, BackendError>> + Send;
 
     /// The signed-in account's own profile. Read-only.
     fn profile(&self) -> impl Future<Output = Result<Profile, BackendError>> + Send;
@@ -160,5 +195,8 @@ pub trait Backend: Send + Sync + 'static {
     /// Opens the private chat with `user`, creating it when missing: one request, never
     /// retried. Returns the chat id when the reply names one. A guard refusal (developer
     /// limit on writes) is `Failed(Rejected { permanent: true })` and sends nothing.
-    fn create_private_chat(&self, user: &UserId) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
+    fn create_private_chat(
+        &self,
+        user: &UserId,
+    ) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
 }

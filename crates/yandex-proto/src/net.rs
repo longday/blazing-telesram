@@ -17,7 +17,10 @@ pub struct HttpSettings {
 
 impl Default for HttpSettings {
     fn default() -> Self {
-        Self { connect_timeout: Duration::from_secs(10), request_timeout: Duration::from_secs(30) }
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+        }
     }
 }
 
@@ -31,7 +34,9 @@ pub(crate) fn http_client(settings: &HttpSettings) -> Result<reqwest::Client, Pr
 
 /// Client for large bodies: a connect deadline and an idle (between-chunks) deadline, but
 /// no total deadline, so a slow but steady transfer is not cut off while a stalled one fails.
-pub(crate) fn http_client_streaming(settings: &HttpSettings) -> Result<reqwest::Client, ProtoError> {
+pub(crate) fn http_client_streaming(
+    settings: &HttpSettings,
+) -> Result<reqwest::Client, ProtoError> {
     reqwest::Client::builder()
         .connect_timeout(settings.connect_timeout)
         .read_timeout(settings.request_timeout)
@@ -40,7 +45,10 @@ pub(crate) fn http_client_streaming(settings: &HttpSettings) -> Result<reqwest::
 }
 
 /// Sensitive `Cookie` header for `host`.
-pub(crate) fn cookie_value(cookies: &[SessionCookie], host: &str) -> Result<HeaderValue, ProtoError> {
+pub(crate) fn cookie_value(
+    cookies: &[SessionCookie],
+    host: &str,
+) -> Result<HeaderValue, ProtoError> {
     let mut value = HeaderValue::from_str(&cookie_header(cookies, host))
         .map_err(|_| ProtoError::Protocol("cookie value is not a valid header".into()))?;
     value.set_sensitive(true);
@@ -111,8 +119,14 @@ mod tests {
 
     #[test]
     fn redacted_url_keeps_only_host_and_path() {
-        assert_eq!(redact_url("https://u:p@yandex.ru:8443/messenger/api/?token=abc#frag"), "yandex.ru/messenger/api/");
-        assert_eq!(redact_url("wss://push.yandex.ru/v2/subscribe/websocket?session=a-b&user=4001"), "push.yandex.ru/v2/subscribe/websocket");
+        assert_eq!(
+            redact_url("https://u:p@yandex.ru:8443/messenger/api/?token=abc#frag"),
+            "yandex.ru/messenger/api/"
+        );
+        assert_eq!(
+            redact_url("wss://push.yandex.ru/v2/subscribe/websocket?session=a-b&user=4001"),
+            "push.yandex.ru/v2/subscribe/websocket"
+        );
         assert_eq!(redact_url("not a url?secret=1"), "<invalid url>");
     }
 }

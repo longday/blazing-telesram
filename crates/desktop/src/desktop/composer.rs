@@ -1,12 +1,12 @@
 //! Writing in the open chat: composer, reply and edit modes, drafts, the message menu, read markers and error toasts.
 
-use super::{overlay, AccountMenu, Desktop, OpenTimeline, SIDEBAR_WIDTH};
+use super::{AccountMenu, Desktop, OpenTimeline, SIDEBAR_WIDTH, overlay};
 use crate::format::one_line;
 use crate::input::{InputEvent, TextInput};
 use crate::theme::*;
-use crate::widgets::{button, icon, Icon};
+use crate::widgets::{Icon, button, icon};
 use bt_chat_core::model::{ChatId, Delivery, Draft, Message, MessageBody, MessageTs, ReplyTarget};
-use bt_chat_core::reactions::{ReactionCode, KNOWN};
+use bt_chat_core::reactions::{KNOWN, ReactionCode};
 use gpui::{prelude::*, *};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -132,7 +132,9 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
 fn copy_text(m: &Message) -> Option<&str> {
     match &m.body {
         MessageBody::Text(text) => Some(text),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => caption.as_deref(),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+            caption.as_deref()
+        }
         MessageBody::File { name, .. } => Some(name),
         MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
@@ -147,7 +149,9 @@ fn reactable(m: &Message) -> bool {
 fn quote_text(m: &Message) -> String {
     let text = match &m.body {
         MessageBody::Text(text) => text.as_str(),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => caption.as_deref().unwrap_or("Фото"),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+            caption.as_deref().unwrap_or("Фото")
+        }
         MessageBody::File { name, .. } => name,
         MessageBody::Deleted | MessageBody::Unsupported(_) => "",
     };
@@ -161,12 +165,22 @@ fn editable(m: &Message) -> bool {
         && m.delivery == Delivery::Sent
         && matches!(m.body, MessageBody::Text(_))
         && m.forwarded_from.is_none()
-        && m.reply_to.as_ref().is_none_or(|quote| quote.timestamp.is_some())
+        && m.reply_to
+            .as_ref()
+            .is_none_or(|quote| quote.timestamp.is_some())
 }
 
 /// The refused text in front of `current`; the reply target the user has chosen since wins.
-fn with_refused(refused: &Draft, current: &str, reply: Option<ReplyTarget>) -> (String, Option<ReplyTarget>) {
-    let text = if current.is_empty() { refused.text.clone() } else { format!("{}\n{current}", refused.text) };
+fn with_refused(
+    refused: &Draft,
+    current: &str,
+    reply: Option<ReplyTarget>,
+) -> (String, Option<ReplyTarget>) {
+    let text = if current.is_empty() {
+        refused.text.clone()
+    } else {
+        format!("{}\n{current}", refused.text)
+    };
     (text, reply.or_else(|| refused.reply_to.clone()))
 }
 
@@ -185,7 +199,11 @@ impl Desktop {
         self.leave_chat(cx);
         self.message_menu = None;
         self.delete_pending = None;
-        self.open = selected.zip(list).map(|(chat, list)| OpenTimeline { chat, list, rows: Default::default() });
+        self.open = selected.zip(list).map(|(chat, list)| OpenTimeline {
+            chat,
+            list,
+            rows: Default::default(),
+        });
         self.enter_chat(window, cx);
         cx.notify();
     }
@@ -200,24 +218,40 @@ impl Desktop {
     }
 
     fn enter_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else { return };
+        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else {
+            return;
+        };
         let draft = self.store.read(cx).draft(&chat).cloned();
         self.compose.chat = Some(chat);
         self.compose.reply = draft.as_ref().and_then(|d| d.reply_to.clone());
         let text = draft.map(|d| d.text).unwrap_or_default();
-        self.compose.input.update(cx, |input, cx| input.set_text(&text, cx));
+        self.compose
+            .input
+            .update(cx, |input, cx| input.set_text(&text, cx));
         window.focus(&self.compose.input.focus_handle(cx));
     }
 
     /// Fills an untouched composer with a draft that arrived after the chat was opened.
     pub(super) fn restore_late_draft(&mut self, cx: &mut Context<Self>) {
-        let Some(chat) = self.compose.chat.clone() else { return };
+        let Some(chat) = self.compose.chat.clone() else {
+            return;
+        };
         let untouched = self.compose.editing.is_none()
             && self.compose.reply.is_none()
             && self.compose.input.read(cx).content.is_empty();
-        let Some(draft) = self.store.read(cx).draft(&chat).cloned().filter(|_| untouched) else { return };
+        let Some(draft) = self
+            .store
+            .read(cx)
+            .draft(&chat)
+            .cloned()
+            .filter(|_| untouched)
+        else {
+            return;
+        };
         self.compose.reply = draft.reply_to;
-        self.compose.input.update(cx, |input, cx| input.set_text(&draft.text, cx));
+        self.compose
+            .input
+            .update(cx, |input, cx| input.set_text(&draft.text, cx));
         cx.notify();
     }
 
@@ -256,17 +290,31 @@ impl Desktop {
 
     /// Hands the composer state of the current chat to the store; edit mode has no draft of its own.
     fn save_draft(&mut self, cx: &mut Context<Self>) {
-        let Some(chat) = self.compose.chat.clone().filter(|_| self.compose.editing.is_none()) else { return };
+        let Some(chat) = self
+            .compose
+            .chat
+            .clone()
+            .filter(|_| self.compose.editing.is_none())
+        else {
+            return;
+        };
         let text = self.compose.input.read(cx).content.to_string();
-        let draft = Draft { chat, text, reply_to: self.compose.reply.clone() };
-        self.store.update(cx, |store, cx| store.save_draft(draft, cx));
+        let draft = Draft {
+            chat,
+            text,
+            reply_to: self.compose.reply.clone(),
+        };
+        self.store
+            .update(cx, |store, cx| store.save_draft(draft, cx));
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         if self.blocked(cx) {
             return;
         }
-        let Some(chat) = self.compose.chat.clone() else { return };
+        let Some(chat) = self.compose.chat.clone() else {
+            return;
+        };
         let text = self.compose.input.read(cx).content.trim().to_string();
         if text.is_empty() {
             return;
@@ -281,8 +329,11 @@ impl Desktop {
             None => {
                 self.compose.draft_timer = None;
                 let reply = self.compose.reply.take();
-                self.compose.input.update(cx, |input, cx| input.set_text("", cx));
-                self.store.update(cx, |store, cx| store.send_text(chat, text, reply, cx));
+                self.compose
+                    .input
+                    .update(cx, |input, cx| input.set_text("", cx));
+                self.store
+                    .update(cx, |store, cx| store.send_text(chat, text, reply, cx));
             }
         }
         cx.notify();
@@ -296,16 +347,27 @@ impl Desktop {
             if let Some(edit) = self.compose.editing.as_mut() {
                 // The composer shows the edited text; what it held before the edit is the draft, and it
                 // is saved now because edit mode never autosaves and the app may quit mid-edit.
-                let (text, reply_to) = with_refused(&draft, &edit.before.text, edit.before.reply.take());
-                edit.before = Restore { text: text.clone(), reply: reply_to.clone() };
-                let merged = Draft { chat: draft.chat, text, reply_to };
-                self.store.update(cx, |store, cx| store.save_draft(merged, cx));
+                let (text, reply_to) =
+                    with_refused(&draft, &edit.before.text, edit.before.reply.take());
+                edit.before = Restore {
+                    text: text.clone(),
+                    reply: reply_to.clone(),
+                };
+                let merged = Draft {
+                    chat: draft.chat,
+                    text,
+                    reply_to,
+                };
+                self.store
+                    .update(cx, |store, cx| store.save_draft(merged, cx));
                 return;
             }
             let current = self.compose.input.read(cx).content.to_string();
             let (text, reply) = with_refused(&draft, &current, self.compose.reply.take());
             self.compose.reply = reply;
-            self.compose.input.update(cx, |input, cx| input.set_text(&text, cx));
+            self.compose
+                .input
+                .update(cx, |input, cx| input.set_text(&text, cx));
             self.schedule_draft_save(cx);
             cx.notify();
             return;
@@ -314,7 +376,11 @@ impl Desktop {
             let merged = match store.draft(&draft.chat).cloned() {
                 Some(stored) => {
                     let (text, reply_to) = with_refused(&draft, &stored.text, stored.reply_to);
-                    Draft { chat: stored.chat, text, reply_to }
+                    Draft {
+                        chat: stored.chat,
+                        text,
+                        reply_to,
+                    }
                 }
                 None => draft,
             };
@@ -324,18 +390,25 @@ impl Desktop {
 
     fn restore(&mut self, before: Restore, cx: &mut Context<Self>) {
         self.compose.reply = before.reply;
-        self.compose.input.update(cx, |input, cx| input.set_text(&before.text, cx));
+        self.compose
+            .input
+            .update(cx, |input, cx| input.set_text(&before.text, cx));
     }
 
     fn find_message(&self, timestamp: MessageTs, cx: &App) -> Option<Message> {
         let chat = &self.open.as_ref()?.chat;
         let messages = &self.store.read(cx).timeline(chat)?.messages;
-        let ix = messages.binary_search_by_key(&timestamp, |m| m.timestamp).ok()?;
+        let ix = messages
+            .binary_search_by_key(&timestamp, |m| m.timestamp)
+            .ok()?;
         Some(messages[ix].clone())
     }
 
     fn start_reply(&mut self, timestamp: MessageTs, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(message) = self.find_message(timestamp, cx).filter(|m| m.delivery == Delivery::Sent && !self.blocked(cx)) else {
+        let Some(message) = self
+            .find_message(timestamp, cx)
+            .filter(|m| m.delivery == Delivery::Sent && !self.blocked(cx))
+        else {
             return;
         };
         self.cancel_edit(cx);
@@ -350,8 +423,15 @@ impl Desktop {
     }
 
     fn start_edit(&mut self, timestamp: MessageTs, cx: &mut Context<Self>) {
-        let Some(message) = self.find_message(timestamp, cx).filter(|m| editable(m) && !self.blocked(cx)) else { return };
-        let MessageBody::Text(original) = message.body else { return };
+        let Some(message) = self
+            .find_message(timestamp, cx)
+            .filter(|m| editable(m) && !self.blocked(cx))
+        else {
+            return;
+        };
+        let MessageBody::Text(original) = message.body else {
+            return;
+        };
         let before = match self.compose.editing.take() {
             Some(edit) => edit.before,
             None => {
@@ -363,8 +443,14 @@ impl Desktop {
                 }
             }
         };
-        self.compose.input.update(cx, |input, cx| input.set_text(&original, cx));
-        self.compose.editing = Some(Editing { timestamp, original, before });
+        self.compose
+            .input
+            .update(cx, |input, cx| input.set_text(&original, cx));
+        self.compose.editing = Some(Editing {
+            timestamp,
+            original,
+            before,
+        });
         cx.notify();
     }
 
@@ -384,12 +470,16 @@ impl Desktop {
     }
 
     fn edit_newest(&mut self, cx: &mut Context<Self>) {
-        let Some(chat) = self.compose.chat.as_ref() else { return };
-        let newest = self
-            .store
-            .read(cx)
-            .timeline(chat)
-            .and_then(|t| t.messages.iter().rev().find(|m| editable(m)).map(|m| m.timestamp));
+        let Some(chat) = self.compose.chat.as_ref() else {
+            return;
+        };
+        let newest = self.store.read(cx).timeline(chat).and_then(|t| {
+            t.messages
+                .iter()
+                .rev()
+                .find(|m| editable(m))
+                .map(|m| m.timestamp)
+        });
         if let Some(timestamp) = newest {
             self.start_edit(timestamp, cx);
         }
@@ -439,21 +529,39 @@ impl Desktop {
         }
     }
 
-    pub(crate) fn open_menu(&mut self, chat: ChatId, timestamp: MessageTs, position: Point<Pixels>, cx: &mut Context<Self>) {
+    pub(crate) fn open_menu(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
             return;
         }
-        let Some(message) = self.find_message(timestamp, cx) else { return };
+        let Some(message) = self.find_message(timestamp, cx) else {
+            return;
+        };
         if menu_actions(&message).is_empty() && !reactable(&message) {
             return;
         }
-        self.message_menu = Some(MessageMenu { chat, timestamp, position });
+        self.message_menu = Some(MessageMenu {
+            chat,
+            timestamp,
+            position,
+        });
         cx.notify();
     }
 
     /// The user chose reaction `code` on a message: ignored while the session is blocked or the
     /// chat is not the open one. The core decides between add, replace and remove.
-    pub(crate) fn toggle_reaction(&mut self, chat: ChatId, timestamp: MessageTs, code: ReactionCode, cx: &mut Context<Self>) {
+    pub(crate) fn toggle_reaction(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        code: ReactionCode,
+        cx: &mut Context<Self>,
+    ) {
         if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
             return;
         }
@@ -461,13 +569,17 @@ impl Desktop {
     }
 
     fn run_menu_reaction(&mut self, code: ReactionCode, cx: &mut Context<Self>) {
-        let Some(menu) = self.message_menu.take() else { return };
+        let Some(menu) = self.message_menu.take() else {
+            return;
+        };
         self.toggle_reaction(menu.chat, menu.timestamp, code, cx);
         cx.notify();
     }
 
     fn run_menu_action(&mut self, action: MenuAction, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(menu) = self.message_menu.take() else { return };
+        let Some(menu) = self.message_menu.take() else {
+            return;
+        };
         if self.blocked(cx) {
             cx.notify();
             return;
@@ -533,27 +645,44 @@ impl Desktop {
     /// is the active one and nothing covers the chat. A row is seen when its bottom edge is inside the
     /// viewport: a row taller than the viewport can never be entirely inside it.
     pub(super) fn check_read(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some(open) = self.open.as_ref() else { return };
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
         // Drained even when unused, so a frame's report never outlives it.
         let rows = std::mem::take(&mut *open.rows.borrow_mut());
         if !window.is_window_active() || self.blocked(cx) {
             return;
         }
         let store = self.store.read(cx);
-        let Some(messages) = store.timeline(&open.chat).filter(|t| t.loaded).map(|t| &t.messages) else { return };
+        let Some(messages) = store
+            .timeline(&open.chat)
+            .filter(|t| t.loaded)
+            .map(|t| &t.messages)
+        else {
+            return;
+        };
         let viewport = open.list.viewport_bounds();
         let slack = px(1.);
         let newest = rows
             .iter()
-            .filter(|(_, row)| row.bottom() > viewport.top() && row.bottom() <= viewport.bottom() + slack)
+            .filter(|(_, row)| {
+                row.bottom() > viewport.top() && row.bottom() <= viewport.bottom() + slack
+            })
             .filter_map(|(timestamp, _)| {
-                let ix = messages.binary_search_by_key(timestamp, |m| m.timestamp).ok()?;
+                let ix = messages
+                    .binary_search_by_key(timestamp, |m| m.timestamp)
+                    .ok()?;
                 (messages[ix].delivery == Delivery::Sent).then_some(*timestamp)
             })
             .max();
         let Some(timestamp) = newest else { return };
         let chat = open.chat.clone();
-        if self.compose.marked.get(&chat).is_some_and(|&last| last >= timestamp) {
+        if self
+            .compose
+            .marked
+            .get(&chat)
+            .is_some_and(|&last| last >= timestamp)
+        {
             return;
         }
         self.compose.marked.insert(chat.clone(), timestamp);
@@ -563,10 +692,24 @@ impl Desktop {
     pub(super) fn composer_view(&mut self, cx: &mut Context<Self>) -> Div {
         let blank = self.compose.input.read(cx).content.trim().is_empty();
         let bar = match (&self.compose.editing, &self.compose.reply) {
-            (Some(edit), _) => Some(self.quote_bar("edit-bar", "edit-bar-close", Icon::Edit, "Редактирование".into(), &edit.original, cx)),
+            (Some(edit), _) => Some(self.quote_bar(
+                "edit-bar",
+                "edit-bar-close",
+                Icon::Edit,
+                "Редактирование".into(),
+                &edit.original,
+                cx,
+            )),
             (None, Some(reply)) => {
                 let title = reply.author.clone().unwrap_or_else(|| "Сообщение".into());
-                Some(self.quote_bar("reply-bar", "reply-bar-close", Icon::Reply, title, &reply.text, cx))
+                Some(self.quote_bar(
+                    "reply-bar",
+                    "reply-bar-close",
+                    Icon::Reply,
+                    title,
+                    &reply.text,
+                    cx,
+                ))
             }
             (None, None) => None,
         };
@@ -587,9 +730,18 @@ impl Desktop {
                     .items_end()
                     .gap(px(12.))
                     .child(
-                        div().flex_1().min_w_0().min_h(px(SEND_SIZE)).flex().items_center().child(
-                            div().debug_selector(|| "composer-input".into()).w_full().child(self.compose.input.clone()),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h(px(SEND_SIZE))
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .debug_selector(|| "composer-input".into())
+                                    .w_full()
+                                    .child(self.compose.input.clone()),
+                            ),
                     )
                     .child(
                         div()
@@ -639,8 +791,21 @@ impl Desktop {
                     .pl(px(8.))
                     .border_l(px(3.))
                     .border_color(rgb(ACCENT))
-                    .child(div().truncate().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(ACCENT)).child(title))
-                    .child(div().truncate().text_size(px(12.)).text_color(rgb(MUTED)).child(one_line(text))),
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(rgb(ACCENT))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child(one_line(text)),
+                    ),
             )
             .child(
                 div()
@@ -675,12 +840,24 @@ impl Desktop {
         if reactions {
             items.push(Self::reaction_row(&message, cx).into_any_element());
             if !actions.is_empty() {
-                items.push(div().h(px(1.)).my(px(4.)).bg(rgb(MENU_SEPARATOR)).into_any_element());
+                items.push(
+                    div()
+                        .h(px(1.))
+                        .my(px(4.))
+                        .bg(rgb(MENU_SEPARATOR))
+                        .into_any_element(),
+                );
             }
         }
         for (i, &action) in actions.iter().enumerate() {
             if i > 0 && action.is_own_only() != actions[i - 1].is_own_only() {
-                items.push(div().h(px(1.)).my(px(4.)).bg(rgb(MENU_SEPARATOR)).into_any_element());
+                items.push(
+                    div()
+                        .h(px(1.))
+                        .my(px(4.))
+                        .bg(rgb(MENU_SEPARATOR))
+                        .into_any_element(),
+                );
             }
             let selector = action.selector();
             items.push(
@@ -694,11 +871,17 @@ impl Desktop {
                     .gap(px(14.))
                     .cursor_pointer()
                     .text_size(px(13.))
-                    .text_color(rgb(if action == MenuAction::Delete { DANGER } else { INK }))
+                    .text_color(rgb(if action == MenuAction::Delete {
+                        DANGER
+                    } else {
+                        INK
+                    }))
                     .hover(|s| s.bg(rgb(MENU_HOVER)))
                     .child(icon(action.icon(), 16., MENU_ICON))
                     .child(action.label())
-                    .on_click(cx.listener(move |this, _, window, cx| this.run_menu_action(action, window, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.run_menu_action(action, window, cx)
+                    }))
                     .into_any_element(),
             );
         }
@@ -713,25 +896,28 @@ impl Desktop {
                 .occlude()
                 .on_any_mouse_down(close)
                 .child(
-                    anchored().position(menu.position).snap_to_window_with_margin(px(8.)).child(
-                        div()
-                            .debug_selector(|| "message-menu".into())
-                            .w(px(220.))
-                            .py(px(4.))
-                            .rounded(px(8.))
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(MENU_SEPARATOR))
-                            // The mockup's shadow: the surface offset down and right, 35% black.
-                            .shadow(vec![BoxShadow {
-                                color: hsla(0., 0., 0., 0.35),
-                                offset: point(px(2.), px(4.)),
-                                blur_radius: px(10.),
-                                spread_radius: px(0.),
-                            }])
-                            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-                            .children(items),
-                    ),
+                    anchored()
+                        .position(menu.position)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .debug_selector(|| "message-menu".into())
+                                .w(px(220.))
+                                .py(px(4.))
+                                .rounded(px(8.))
+                                .bg(rgb(PANEL))
+                                .border_1()
+                                .border_color(rgb(MENU_SEPARATOR))
+                                // The mockup's shadow: the surface offset down and right, 35% black.
+                                .shadow(vec![BoxShadow {
+                                    color: hsla(0., 0., 0., 0.35),
+                                    offset: point(px(2.), px(4.)),
+                                    blur_radius: px(10.),
+                                    spread_radius: px(0.),
+                                }])
+                                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                                .children(items),
+                        ),
                 ),
         )
     }
@@ -750,12 +936,21 @@ impl Desktop {
                 .rounded_full()
                 .cursor_pointer()
                 .text_size(px(16.))
-                .when(message.reactions.mine == Some(code), |d| d.bg(rgb(REACTION_OWN)))
+                .when(message.reactions.mine == Some(code), |d| {
+                    d.bg(rgb(REACTION_OWN))
+                })
                 .hover(|s| s.bg(rgb(MENU_HOVER)))
                 .child(known.emoji)
                 .on_click(cx.listener(move |this, _, _, cx| this.run_menu_reaction(code, cx)))
         });
-        div().debug_selector(|| "menu-reactions".into()).px(px(6.)).py(px(2.)).flex().flex_wrap().justify_between().children(buttons)
+        div()
+            .debug_selector(|| "menu-reactions".into())
+            .px(px(6.))
+            .py(px(2.))
+            .flex()
+            .flex_wrap()
+            .justify_between()
+            .children(buttons)
     }
 
     pub(super) fn delete_dialog(&self, cx: &mut Context<Self>) -> Option<Div> {
@@ -765,12 +960,12 @@ impl Desktop {
             "Удалить сообщение?",
             "Сообщение будет удалено для всех участников чата.",
             vec![
-                button("cancel-delete", "Отмена").debug_selector(|| "cancel-delete".into()).on_click(cx.listener(
-                    |this, _, _, cx| {
+                button("cancel-delete", "Отмена")
+                    .debug_selector(|| "cancel-delete".into())
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.delete_pending = None;
                         cx.notify();
-                    },
-                )),
+                    })),
                 button("confirm-delete", "Удалить")
                     .debug_selector(|| "confirm-delete".into())
                     .text_color(rgb(DANGER))
@@ -782,17 +977,24 @@ impl Desktop {
     pub(super) fn toast_view(&self) -> Option<Div> {
         let toast = self.toast.as_ref()?;
         Some(
-            div().absolute().bottom(px(88.)).left(px(SIDEBAR_WIDTH)).right_0().flex().justify_center().child(
-                div()
-                    .debug_selector(|| "toast".into())
-                    .max_w(px(480.))
-                    .px(px(14.))
-                    .py(px(8.))
-                    .rounded(px(10.))
-                    .bg(rgb(FIELD))
-                    .text_color(rgb(INK))
-                    .child(toast.text.clone()),
-            ),
+            div()
+                .absolute()
+                .bottom(px(88.))
+                .left(px(SIDEBAR_WIDTH))
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .debug_selector(|| "toast".into())
+                        .max_w(px(480.))
+                        .px(px(14.))
+                        .py(px(8.))
+                        .rounded(px(10.))
+                        .bg(rgb(FIELD))
+                        .text_color(rgb(INK))
+                        .child(toast.text.clone()),
+                ),
         )
     }
 }

@@ -17,7 +17,11 @@ impl Capture {
     }
 
     pub fn install_at(&self, level: tracing::Level) -> DefaultGuard {
-        let subscriber = tracing_subscriber::fmt().with_writer(self.clone()).with_max_level(level).with_ansi(false).finish();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(self.clone())
+            .with_max_level(level)
+            .with_ansi(false)
+            .finish();
         tracing::subscriber::set_default(subscriber)
     }
 
@@ -29,7 +33,10 @@ impl Capture {
     pub fn assert_absent(&self, secrets: &[&str]) {
         let text = self.text();
         for secret in secrets {
-            assert!(!text.contains(secret), "{secret:?} leaked into the log:\n{text}");
+            assert!(
+                !text.contains(secret),
+                "{secret:?} leaked into the log:\n{text}"
+            );
         }
     }
 }

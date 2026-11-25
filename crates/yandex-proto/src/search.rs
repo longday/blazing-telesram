@@ -79,12 +79,21 @@ pub struct SearchReply {
 }
 
 fn text(value: &Json, key: &str) -> Option<String> {
-    value.get(key)?.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+    value
+        .get(key)?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
 }
 
 fn message_hit(item: &Json) -> Option<WireSearchMessage> {
     let message = parse_server_message(item.get("data")?, None).ok()?;
-    Some(WireSearchMessage { chat: message.chat, timestamp: message.timestamp, from: message.from, body: message.body })
+    Some(WireSearchMessage {
+        chat: message.chat,
+        timestamp: message.timestamp,
+        from: message.from,
+        body: message.body,
+    })
 }
 
 fn user_hit(item: &Json) -> Option<WireSearchUser> {
@@ -99,12 +108,19 @@ fn user_hit(item: &Json) -> Option<WireSearchUser> {
 fn chat_hit(item: &Json) -> Option<WireSearchChat> {
     let data = item.get("data")?;
     let id = text(data, "chat_id")?;
-    let kind = if namespace_of(&id) == Some(1) { WireChatKind::Channel } else { WireChatKind::Group };
+    let kind = if namespace_of(&id) == Some(1) {
+        WireChatKind::Channel
+    } else {
+        WireChatKind::Group
+    };
     Some(WireSearchChat {
         kind,
         title: text(data, "name"),
         avatar_id: text(data, "avatar_id"),
-        members_count: data.get("members_count").or_else(|| item.get("member_count")).and_then(Json::as_u64),
+        members_count: data
+            .get("members_count")
+            .or_else(|| item.get("member_count"))
+            .and_then(Json::as_u64),
         id,
     })
 }
@@ -121,7 +137,9 @@ fn decode<T>(items: &[Json], hit: fn(&Json) -> Option<T>, skipped: &mut usize) -
 /// value (items carry message text). Items inside a well-formed set never fail the parse.
 pub fn parse_search(data: &Json, requested: &[SearchEntity]) -> Result<SearchReply, ProtoError> {
     if !data.is_object() {
-        return Err(ProtoError::Protocol("search reply data is not an object".into()));
+        return Err(ProtoError::Protocol(
+            "search reply data is not an object".into(),
+        ));
     }
     let set = |entity: SearchEntity| -> Result<SearchSet, ProtoError> {
         if !requested.contains(&entity) {
@@ -129,16 +147,21 @@ pub fn parse_search(data: &Json, requested: &[SearchEntity]) -> Result<SearchRep
         }
         let name = entity.wire_name();
         let malformed = || ProtoError::Protocol(format!("search reply has a malformed {name} set"));
-        let set = data.get(name).and_then(Json::as_object).ok_or_else(|| {
-            ProtoError::Protocol(format!("search reply has no {name} set"))
-        })?;
+        let set = data
+            .get(name)
+            .and_then(Json::as_object)
+            .ok_or_else(|| ProtoError::Protocol(format!("search reply has no {name} set")))?;
         let number = |key: &str| set.get(key).and_then(Json::as_u64).ok_or_else(malformed);
         Ok(SearchSet {
             total: number("total")?,
             limit: number("limit")?,
             page: number("page")?,
             pages: number("pages")?,
-            items: set.get("items").and_then(Json::as_array).ok_or_else(malformed)?.clone(),
+            items: set
+                .get("items")
+                .and_then(Json::as_array)
+                .ok_or_else(malformed)?
+                .clone(),
         })
     };
     let messages = set(SearchEntity::Messages)?;
@@ -151,7 +174,12 @@ pub fn parse_search(data: &Json, requested: &[SearchEntity]) -> Result<SearchRep
         chats: decode(&chats.items, chat_hit, &mut skipped),
         skipped,
     };
-    Ok(SearchReply { messages, users, chats, decoded })
+    Ok(SearchReply {
+        messages,
+        users,
+        chats,
+        decoded,
+    })
 }
 
 #[cfg(test)]
@@ -160,7 +188,11 @@ mod tests {
 
     use super::*;
 
-    const ALL: [SearchEntity; 3] = [SearchEntity::Messages, SearchEntity::Users, SearchEntity::Chats];
+    const ALL: [SearchEntity; 3] = [
+        SearchEntity::Messages,
+        SearchEntity::Users,
+        SearchEntity::Chats,
+    ];
 
     fn set(items: Json, total: u64) -> Json {
         json!({ "items": items, "total": total, "limit": 10, "page": 1, "pages": 1 })
@@ -175,7 +207,16 @@ mod tests {
             "warnings": { "users": [] },
         });
         let reply = parse_search(&data, &ALL).unwrap();
-        assert_eq!(reply.messages, SearchSet { total: 2, limit: 10, page: 1, pages: 1, items: vec![json!({"a": 1}), json!({"b": 2})] });
+        assert_eq!(
+            reply.messages,
+            SearchSet {
+                total: 2,
+                limit: 10,
+                page: 1,
+                pages: 1,
+                items: vec![json!({"a": 1}), json!({"b": 2})]
+            }
+        );
         assert_eq!(reply.users.items, vec![json!({"u": 1})]);
         assert!(reply.chats.items.is_empty());
     }
@@ -185,7 +226,11 @@ mod tests {
         let empty = json!({ "items": [], "total": 0, "limit": 0, "page": 1, "pages": 1 });
         let data = json!({ "messages": empty, "users": empty, "chats": empty });
         let reply = parse_search(&data, &ALL).unwrap();
-        assert!(reply.messages.items.is_empty() && reply.users.items.is_empty() && reply.chats.items.is_empty());
+        assert!(
+            reply.messages.items.is_empty()
+                && reply.users.items.is_empty()
+                && reply.chats.items.is_empty()
+        );
         assert_eq!((reply.messages.total, reply.messages.pages), (0, 1));
     }
 
@@ -193,7 +238,10 @@ mod tests {
     fn a_missing_requested_set_is_a_protocol_error() {
         let data = json!({ "messages": set(json!([]), 0), "users": set(json!([]), 0) });
         let err = parse_search(&data, &ALL).unwrap_err();
-        assert!(matches!(&err, ProtoError::Protocol(m) if m.contains("chats")), "{err:?}");
+        assert!(
+            matches!(&err, ProtoError::Protocol(m) if m.contains("chats")),
+            "{err:?}"
+        );
     }
 
     #[test]
@@ -216,9 +264,15 @@ mod tests {
         ] {
             let data = json!({ "messages": bad, "users": good(), "chats": good() });
             let err = parse_search(&data, &ALL).unwrap_err();
-            assert!(matches!(&err, ProtoError::Protocol(m) if m.contains("messages") && !m.contains("secret")), "{err:?}");
+            assert!(
+                matches!(&err, ProtoError::Protocol(m) if m.contains("messages") && !m.contains("secret")),
+                "{err:?}"
+            );
         }
-        assert!(matches!(parse_search(&json!([]), &ALL), Err(ProtoError::Protocol(_))));
+        assert!(matches!(
+            parse_search(&json!([]), &ALL),
+            Err(ProtoError::Protocol(_))
+        ));
     }
 
     fn message_item(chat: Option<&str>, timestamp: Option<i64>) -> Json {
@@ -255,16 +309,43 @@ mod tests {
         let reply = parse_search(&data, &ALL).unwrap();
         assert_eq!(reply.decoded.skipped, 3 + 2 + 1);
 
-        let [message] = reply.decoded.messages.as_slice() else { panic!("{:?}", reply.decoded.messages) };
+        let [message] = reply.decoded.messages.as_slice() else {
+            panic!("{:?}", reply.decoded.messages)
+        };
         assert_eq!((message.chat.as_str(), message.timestamp), ("0/22/c", 5));
         assert!(matches!(&message.body, WireBody::Text(t) if t == "hello"));
-        assert_eq!(message.from.as_ref().and_then(|f| f.display_name.as_deref()), Some("Ann"));
+        assert_eq!(
+            message
+                .from
+                .as_ref()
+                .and_then(|f| f.display_name.as_deref()),
+            Some("Ann")
+        );
 
-        let [user] = reply.decoded.users.as_slice() else { panic!("{:?}", reply.decoded.users) };
-        assert_eq!((user.guid.as_str(), user.display_name.as_deref(), user.avatar_id.as_deref()), ("u1", Some("Bob"), None));
+        let [user] = reply.decoded.users.as_slice() else {
+            panic!("{:?}", reply.decoded.users)
+        };
+        assert_eq!(
+            (
+                user.guid.as_str(),
+                user.display_name.as_deref(),
+                user.avatar_id.as_deref()
+            ),
+            ("u1", Some("Bob"), None)
+        );
 
-        let [chat] = reply.decoded.chats.as_slice() else { panic!("{:?}", reply.decoded.chats) };
-        assert_eq!((chat.id.as_str(), chat.kind.clone(), chat.title.as_deref(), chat.members_count), ("1/0/ch", WireChatKind::Channel, Some("News"), Some(9)));
+        let [chat] = reply.decoded.chats.as_slice() else {
+            panic!("{:?}", reply.decoded.chats)
+        };
+        assert_eq!(
+            (
+                chat.id.as_str(),
+                chat.kind.clone(),
+                chat.title.as_deref(),
+                chat.members_count
+            ),
+            ("1/0/ch", WireChatKind::Channel, Some("News"), Some(9))
+        );
 
         // The raw items stay untouched, skipped ones included.
         assert_eq!(reply.messages.items.len(), 4);

@@ -7,7 +7,9 @@
 use crate::backend::{Backend, BackendError, CreateError, LiveEvent};
 use crate::cache::{self, Cache, CacheError, OutboxEntry};
 use crate::model::*;
-use crate::paths::{commit_partial, create_partial, escape_component, media_dir, sanitize_file_name};
+use crate::paths::{
+    commit_partial, create_partial, escape_component, media_dir, sanitize_file_name,
+};
 use crate::reactions::{ReactionCode, Reactions, ReactionsUpdate};
 use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -58,7 +60,10 @@ const LIST_CHECK_FAILED_REASON: &str =
 enum LiveChange {
     /// `message` as cached (reactions merged into the cached state); `supplied` is what the
     /// pushed copy itself said about reactions.
-    Upsert { message: Message, supplied: Reactions },
+    Upsert {
+        message: Message,
+        supplied: Reactions,
+    },
     Delete(MessageTs),
 }
 
@@ -84,7 +89,11 @@ pub struct ClientConfig {
 }
 
 impl ClientConfig {
-    pub fn new(runtime_dir: impl Into<PathBuf>, session_file: impl Into<PathBuf>, account: UserId) -> Self {
+    pub fn new(
+        runtime_dir: impl Into<PathBuf>,
+        session_file: impl Into<PathBuf>,
+        account: UserId,
+    ) -> Self {
         Self {
             runtime_dir: runtime_dir.into(),
             session_file: session_file.into(),
@@ -110,12 +119,16 @@ impl ChatClient {
     /// Starts the client thread. The cache is opened on that thread, so this returns at once
     /// and the cached chats arrive as the first event.
     pub fn spawn<B: Backend>(backend: B, config: ClientConfig) -> io::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let (commands, command_rx) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
-        std::thread::Builder::new().name("chat-client".into()).spawn(move || {
-            runtime.block_on(Engine::run(Arc::new(backend), config, command_rx, event_tx));
-        })?;
+        std::thread::Builder::new()
+            .name("chat-client".into())
+            .spawn(move || {
+                runtime.block_on(Engine::run(Arc::new(backend), config, command_rx, event_tx));
+            })?;
         Ok(Self { commands, events })
     }
 
@@ -145,26 +158,57 @@ struct HistoryFetch {
 enum Input {
     Command(Command),
     CommandsClosed,
-    Connected { epoch: u64, result: Result<Connected, BackendError> },
+    Connected {
+        epoch: u64,
+        result: Result<Connected, BackendError>,
+    },
     Retry(u64),
-    Live { epoch: u64, event: LiveEvent },
+    Live {
+        epoch: u64,
+        event: LiveEvent,
+    },
     LiveClosed(u64),
     Chats(Result<Vec<ChatSummary>, BackendError>),
     History(HistoryFetch),
     /// History requests that ended without answering: `.0` of them never posted a result.
     HistoryAbandoned(usize),
-    Media { media: MediaRef, result: Result<Vec<u8>, BackendError> },
+    Media {
+        media: MediaRef,
+        result: Result<Vec<u8>, BackendError>,
+    },
     /// `bytes` of the saved file, or why the transfer of generation `seq` produced no file.
-    Download { media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError> },
-    DownloadProgress { media: MediaRef, seq: u64, received: u64, total: Option<u64> },
-    Sent { payload: PayloadId, result: Result<Option<MessageTs>, BackendError> },
+    Download {
+        media: MediaRef,
+        seq: u64,
+        result: Result<(PathBuf, u64), DownloadError>,
+    },
+    DownloadProgress {
+        media: MediaRef,
+        seq: u64,
+        received: u64,
+        total: Option<u64>,
+    },
+    Sent {
+        payload: PayloadId,
+        result: Result<Option<MessageTs>, BackendError>,
+    },
     /// The send queue's backoff of generation `.0` ended.
     OutboxResume(u64),
-    Action { chat: ChatId, action: Action, result: Result<(), BackendError> },
+    Action {
+        chat: ChatId,
+        action: Action,
+        result: Result<(), BackendError>,
+    },
     /// The answer to the search `id`, which may have been superseded since.
-    Search { id: SearchId, result: Result<SearchHits, BackendError> },
+    Search {
+        id: SearchId,
+        result: Result<SearchHits, BackendError>,
+    },
     /// The answer to a `LoadMembers` for `chat`.
-    Members { chat: ChatId, result: Result<ChatMembers, BackendError> },
+    Members {
+        chat: ChatId,
+        result: Result<ChatMembers, BackendError>,
+    },
     /// The answer to a `LoadProfile`.
     Profile(Result<Profile, BackendError>),
     /// The answer to a `CreatePrivateChat` for `user`; `chats` is the list read right after it
@@ -175,15 +219,25 @@ enum Input {
         chats: Option<Result<Vec<ChatSummary>, BackendError>>,
     },
     /// The list read that precedes a `CreatePrivateChat` for `user` after an unverified result.
-    ListChecked { user: UserId, chats: Result<Vec<ChatSummary>, BackendError> },
+    ListChecked {
+        user: UserId,
+        chats: Result<Vec<ChatSummary>, BackendError>,
+    },
 }
 
 /// A server write that is attempted once and not queued.
 enum Action {
-    Edit { timestamp: MessageTs, text: String, reply: Option<ReplyTarget> },
+    Edit {
+        timestamp: MessageTs,
+        text: String,
+        reply: Option<ReplyTarget>,
+    },
     Delete(MessageTs),
     /// `overlay` is the state the user was shown; its `mine` is the reaction asked for.
-    React { timestamp: MessageTs, overlay: Reactions },
+    React {
+        timestamp: MessageTs,
+        overlay: Reactions,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -300,10 +354,16 @@ fn open_cache(runtime_dir: &Path, account: &UserId) -> Cache {
     match Cache::open(runtime_dir, account) {
         Ok(cache) => cache,
         Err(first) => {
-            let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
             match cache::move_aside(runtime_dir, account, secs) {
-                Ok(moved) => tracing::error!(error = %first, moved = %moved.display(), "cache unusable, moved aside; starting a new one"),
-                Err(e) => tracing::error!(error = %first, move_error = %e, "cache unusable and could not be moved aside"),
+                Ok(moved) => {
+                    tracing::error!(error = %first, moved = %moved.display(), "cache unusable, moved aside; starting a new one")
+                }
+                Err(e) => {
+                    tracing::error!(error = %first, move_error = %e, "cache unusable and could not be moved aside")
+                }
             }
             Cache::open(runtime_dir, account).unwrap_or_else(|second| {
                 tracing::error!(error = %second, "cache unavailable, running in memory");
@@ -314,14 +374,28 @@ fn open_cache(runtime_dir: &Path, account: &UserId) -> Cache {
 }
 
 /// Live changes of `chat` that arrived after `mark`, oldest first.
-fn raced<'a>(log: &'a HashMap<ChatId, VecDeque<(u64, LiveChange)>>, chat: &ChatId, mark: u64) -> Vec<&'a LiveChange> {
+fn raced<'a>(
+    log: &'a HashMap<ChatId, VecDeque<(u64, LiveChange)>>,
+    chat: &ChatId,
+    mark: u64,
+) -> Vec<&'a LiveChange> {
     log.get(chat)
-        .map(|log| log.iter().filter(|(seq, _)| *seq > mark).map(|(_, change)| change).collect())
+        .map(|log| {
+            log.iter()
+                .filter(|(seq, _)| *seq > mark)
+                .map(|(_, change)| change)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 /// Applies `changes` (oldest first) to sorted `messages`, limited to the range `lo..=hi`.
-fn replay_live(messages: &mut Vec<Message>, changes: &[&LiveChange], lo: Option<MessageTs>, hi: Option<MessageTs>) {
+fn replay_live(
+    messages: &mut Vec<Message>,
+    changes: &[&LiveChange],
+    lo: Option<MessageTs>,
+    hi: Option<MessageTs>,
+) {
     let in_range = |ts: MessageTs| lo.is_none_or(|lo| ts >= lo) && hi.is_none_or(|hi| ts <= hi);
     for change in changes {
         match change {
@@ -361,13 +435,19 @@ fn preview_text(body: &MessageBody) -> Option<String> {
 }
 
 fn fnv1a(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 fn media_file_name(media: &MediaRef) -> String {
     let prefix = cache::kind_name(media.kind);
     let name = format!("{prefix}-{}", escape_component(&media.id));
-    if name.len() <= 200 { name } else { format!("{prefix}-{:016x}", fnv1a(&media.id)) }
+    if name.len() <= 200 {
+        name
+    } else {
+        format!("{prefix}-{:016x}", fnv1a(&media.id))
+    }
 }
 
 fn remove_ignoring_missing(result: io::Result<()>) {
@@ -400,7 +480,9 @@ fn download_failure(error: &BackendError) -> DownloadFailure {
         BackendError::Storage(_) => DownloadFailure::Disk,
         BackendError::Network(_) => DownloadFailure::Network,
         // `SessionExpired` ends the session before this mapping is asked for.
-        BackendError::SessionExpired | BackendError::Protocol(_) | BackendError::Rejected { .. } => DownloadFailure::Other,
+        BackendError::SessionExpired
+        | BackendError::Protocol(_)
+        | BackendError::Rejected { .. } => DownloadFailure::Other,
     }
 }
 
@@ -445,7 +527,10 @@ impl Throttle {
         if total.is_some() {
             state.total = total;
         }
-        if state.passed_at.is_some_and(|at| now.duration_since(at) < DOWNLOAD_PROGRESS_INTERVAL) {
+        if state
+            .passed_at
+            .is_some_and(|at| now.duration_since(at) < DOWNLOAD_PROGRESS_INTERVAL)
+        {
             return false;
         }
         state.passed_at = Some(now);
@@ -473,28 +558,55 @@ async fn run_download<B: Backend>(
     seq: u64,
 ) -> Result<(PathBuf, u64), DownloadError> {
     let Ok(_slot) = slots.acquire().await else {
-        return Err(DownloadError::Backend(BackendError::Protocol("download slots closed".into())));
+        return Err(DownloadError::Backend(BackendError::Protocol(
+            "download slots closed".into(),
+        )));
     };
     let name = sanitize_file_name(name);
     let (mut file, partial) = create_partial(dir, &name).map_err(DownloadError::Destination)?;
     let throttle = Throttle::default();
     let report = |received: u64, total: Option<u64>| {
         if throttle.admit(Instant::now(), received, total) {
-            post(inputs, Input::DownloadProgress { media: media.clone(), seq, received, total });
+            post(
+                inputs,
+                Input::DownloadProgress {
+                    media: media.clone(),
+                    seq,
+                    received,
+                    total,
+                },
+            );
         }
     };
-    let bytes = backend.download(media, &mut file, &report).await.map_err(DownloadError::Backend)?;
+    let bytes = backend
+        .download(media, &mut file, &report)
+        .await
+        .map_err(DownloadError::Backend)?;
     file.flush().map_err(DownloadError::Disk)?;
     drop(file);
     if let Some((received, total)) = throttle.last(bytes) {
-        post(inputs, Input::DownloadProgress { media: media.clone(), seq, received, total });
+        post(
+            inputs,
+            Input::DownloadProgress {
+                media: media.clone(),
+                seq,
+                received,
+                total,
+            },
+        );
     }
     let path = commit_partial(partial, dir, &name).map_err(DownloadError::Disk)?;
     Ok((path, bytes))
 }
 
 impl<B: Backend> Engine<B> {
-    fn new(backend: Arc<B>, config: ClientConfig, events: Sender<ClientEvent>, inputs: Sender<Input>, cache: Cache) -> Self {
+    fn new(
+        backend: Arc<B>,
+        config: ClientConfig,
+        events: Sender<ClientEvent>,
+        inputs: Sender<Input>,
+        cache: Cache,
+    ) -> Self {
         Engine {
             cache,
             backend,
@@ -537,7 +649,12 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    async fn run(backend: Arc<B>, config: ClientConfig, commands: Receiver<Command>, events: Sender<ClientEvent>) {
+    async fn run(
+        backend: Arc<B>,
+        config: ClientConfig,
+        commands: Receiver<Command>,
+        events: Sender<ClientEvent>,
+    ) {
         let (inputs, input_rx) = async_channel::unbounded();
         let cache = open_cache(&config.runtime_dir, &config.account);
         let mut engine = Engine::new(backend, config, events, inputs.clone(), cache);
@@ -573,7 +690,9 @@ impl<B: Backend> Engine<B> {
 
     /// Cache failures degrade to "not cached"; they must not take the client down.
     fn db<T>(&self, result: Result<T, CacheError>) -> Option<T> {
-        result.map_err(|e| tracing::error!(error = %e, "cache error")).ok()
+        result
+            .map_err(|e| tracing::error!(error = %e, "cache error"))
+            .ok()
     }
 
     fn is_online(&self) -> bool {
@@ -585,8 +704,12 @@ impl<B: Backend> Engine<B> {
         match input {
             Input::Command(command) => return self.handle_command(command),
             Input::CommandsClosed => return false,
-            Input::Connected { epoch, result } if epoch == self.epoch => self.handle_connected(result),
-            Input::Retry(epoch) if epoch == self.epoch && self.phase == Phase::Offline => self.start_connect(),
+            Input::Connected { epoch, result } if epoch == self.epoch => {
+                self.handle_connected(result)
+            }
+            Input::Retry(epoch) if epoch == self.epoch && self.phase == Phase::Offline => {
+                self.start_connect()
+            }
             Input::Live { epoch, event } if epoch == self.epoch => self.handle_live(event),
             Input::LiveClosed(epoch) if epoch == self.epoch => self.connection_lost(),
             Input::Chats(result) => self.handle_chats(result),
@@ -596,20 +719,39 @@ impl<B: Backend> Engine<B> {
                 self.forget_idle_reactions();
             }
             Input::Media { media, result } => self.handle_media_result(media, result),
-            Input::Download { media, seq, result } => self.handle_download_result(media, seq, result),
-            Input::DownloadProgress { media, seq, received, total } => self.handle_download_progress(&media, seq, received, total),
+            Input::Download { media, seq, result } => {
+                self.handle_download_result(media, seq, result)
+            }
+            Input::DownloadProgress {
+                media,
+                seq,
+                received,
+                total,
+            } => self.handle_download_progress(&media, seq, received, total),
             Input::Sent { payload, result } => self.handle_sent(payload, result),
             Input::OutboxResume(hold) if hold == self.outbox_hold => {
                 self.outbox_held = false;
                 self.pump_outbox();
             }
-            Input::Action { chat, action, result } => self.handle_action(chat, action, result),
+            Input::Action {
+                chat,
+                action,
+                result,
+            } => self.handle_action(chat, action, result),
             Input::Search { id, result } => self.handle_search(id, result),
             Input::Members { chat, result } => self.handle_members(chat, result),
             Input::Profile(result) => self.handle_profile(result),
-            Input::Created { user, result, chats } => self.handle_created(user, result, chats),
+            Input::Created {
+                user,
+                result,
+                chats,
+            } => self.handle_created(user, result, chats),
             Input::ListChecked { user, chats } => self.handle_list_checked(user, chats),
-            Input::Connected { .. } | Input::Retry(_) | Input::Live { .. } | Input::LiveClosed(_) | Input::OutboxResume(_) => {}
+            Input::Connected { .. }
+            | Input::Retry(_)
+            | Input::Live { .. }
+            | Input::LiveClosed(_)
+            | Input::OutboxResume(_) => {}
         }
         true
     }
@@ -618,13 +760,17 @@ impl<B: Backend> Engine<B> {
         match command {
             Command::OpenChat(chat) => {
                 let limit = self.config.history_limit;
-                let cached = self.db(self.cache.history(&chat, None, limit)).map(|chunk| self.with_outbox(chunk));
+                let cached = self
+                    .db(self.cache.history(&chat, None, limit))
+                    .map(|chunk| self.with_outbox(chunk));
                 self.open_chat = Some(chat.clone());
                 self.backend.watch(Some(&chat));
                 let fetch = self.is_online();
                 // With a fetch coming, an empty cache is not worth an (empty) event.
                 match cached {
-                    Some(chunk) if !fetch || !chunk.messages.is_empty() => self.emit(ClientEvent::History(chunk)),
+                    Some(chunk) if !fetch || !chunk.messages.is_empty() => {
+                        self.emit(ClientEvent::History(chunk))
+                    }
                     None if !fetch => self.emit(ClientEvent::History(HistoryChunk {
                         chat: chat.clone(),
                         messages: Vec::new(),
@@ -652,11 +798,23 @@ impl<B: Backend> Engine<B> {
                 self.sign_out();
                 return false;
             }
-            Command::Send { chat, text, reply_to } => self.send(chat, text, reply_to),
+            Command::Send {
+                chat,
+                text,
+                reply_to,
+            } => self.send(chat, text, reply_to),
             Command::Retry(payload) => self.retry(&payload),
-            Command::Edit { chat, timestamp, text } => self.edit(chat, timestamp, text),
+            Command::Edit {
+                chat,
+                timestamp,
+                text,
+            } => self.edit(chat, timestamp, text),
             Command::Delete { chat, timestamp } => self.run_action(chat, Action::Delete(timestamp)),
-            Command::ToggleReaction { chat, timestamp, code } => self.toggle_reaction(chat, timestamp, code),
+            Command::ToggleReaction {
+                chat,
+                timestamp,
+                code,
+            } => self.toggle_reaction(chat, timestamp, code),
             Command::MarkRead { chat, timestamp } => self.mark_read(chat, timestamp),
             Command::Typing(chat) => self.typing(chat),
             Command::SaveDraft(draft) => self.save_draft(draft),
@@ -673,7 +831,13 @@ impl<B: Backend> Engine<B> {
         let limit = self.config.history_limit;
         let chunk = self
             .db(self.cache.history(&chat, Some(before), limit))
-            .unwrap_or(HistoryChunk { chat, messages: Vec::new(), reached_start: false, replaces: None, payloads: Vec::new() });
+            .unwrap_or(HistoryChunk {
+                chat,
+                messages: Vec::new(),
+                reached_start: false,
+                replaces: None,
+                payloads: Vec::new(),
+            });
         self.emit(ClientEvent::History(chunk));
     }
 
@@ -710,7 +874,11 @@ impl<B: Backend> Engine<B> {
         } else {
             self.emit(ClientEvent::ChatsReplaced(chats));
         }
-        self.live_pump = Some(tokio::spawn(pump_live(self.epoch, live, self.inputs.clone())));
+        self.live_pump = Some(tokio::spawn(pump_live(
+            self.epoch,
+            live,
+            self.inputs.clone(),
+        )));
         self.become_online(false);
     }
 
@@ -748,7 +916,11 @@ impl<B: Backend> Engine<B> {
         self.epoch += 1;
         self.set_connection(ConnectionState::Offline);
         let factor = 1u32 << self.attempt.min(16);
-        let delay = self.config.reconnect_base.saturating_mul(factor).min(self.config.reconnect_max);
+        let delay = self
+            .config
+            .reconnect_base
+            .saturating_mul(factor)
+            .min(self.config.reconnect_max);
         self.attempt = self.attempt.saturating_add(1);
         tracing::info!(retry_in_ms = delay.as_millis() as u64, "offline");
         let (inputs, epoch) = (self.inputs.clone(), self.epoch);
@@ -807,7 +979,10 @@ impl<B: Backend> Engine<B> {
         // Release the database file before deleting it.
         self.cache = Cache::open_in_memory().expect("in-memory sqlite always opens");
         remove_ignoring_missing(cache::remove_files(&self.config.runtime_dir, &self.account));
-        remove_ignoring_missing(fs::remove_dir_all(media_dir(&self.config.runtime_dir, &self.account)));
+        remove_ignoring_missing(fs::remove_dir_all(media_dir(
+            &self.config.runtime_dir,
+            &self.account,
+        )));
         self.emit(ClientEvent::SignedOut);
     }
 
@@ -822,23 +997,37 @@ impl<B: Backend> Engine<B> {
                 // what the ledger kept of it. The log keeps what the copy said, apart from the
                 // merged copy it replays, which is only the fallback for an absent row.
                 let supplied = message.reactions.clone();
-                match self.db(self.cache.message(&message.chat, message.timestamp)).flatten() {
+                match self
+                    .db(self.cache.message(&message.chat, message.timestamp))
+                    .flatten()
+                {
                     Some(cached) => message.inherit_reactions(&cached),
                     None => self.inherit_held_reactions(&mut message),
                 }
-                self.record_live(&message.chat, LiveChange::Upsert { message: message.clone(), supplied });
+                self.record_live(
+                    &message.chat,
+                    LiveChange::Upsert {
+                        message: message.clone(),
+                        supplied,
+                    },
+                );
                 self.db(self.cache.upsert_message(&message));
                 self.emit(ClientEvent::MessageUpserted(message.clone()));
                 self.update_preview(&message);
             }
-            LiveEvent::ReactionsChanged { chat, timestamp, update } => {
+            LiveEvent::ReactionsChanged {
+                chat,
+                timestamp,
+                update,
+            } => {
                 // The cache is where states are merged (`Reactions::apply`); a history request
                 // that started earlier merges its snapshot into it (`store_chunk`), so a cached
                 // message's update is only noted as a change (`touch`: it bounds what such a
                 // request may replace, it replays nothing). An uncached message has no state to
                 // merge into: the update goes to the ledger, for a request that may insert the row.
                 self.touch(&chat);
-                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten()
+                else {
                     // The server's state replaces the user's overlay here too: a choice still
                     // unconfirmed must not overwrite what the ledger accepted (`hold_own`).
                     if self.hold_update(&chat, timestamp, &update)
@@ -852,16 +1041,25 @@ impl<B: Backend> Engine<B> {
                     self.db(self.cache.upsert_message(&message));
                     // The server's state replaces the user's overlay, so the result of their own
                     // request no longer decides what is shown.
-                    if let Some(superseded) = self.reaction_inflight.get_mut(&(chat.clone(), timestamp)) {
+                    if let Some(superseded) =
+                        self.reaction_inflight.get_mut(&(chat.clone(), timestamp))
+                    {
                         *superseded = true;
                     }
-                    self.emit(ClientEvent::ReactionsChanged { chat, timestamp, reactions: message.reactions });
+                    self.emit(ClientEvent::ReactionsChanged {
+                        chat,
+                        timestamp,
+                        reactions: message.reactions,
+                    });
                 }
             }
             LiveEvent::MessageDeleted { chat, timestamp } => {
                 self.record_live(&chat, LiveChange::Delete(timestamp));
                 self.db(self.cache.mark_deleted(&chat, timestamp));
-                self.emit(ClientEvent::MessageDeleted { chat: chat.clone(), timestamp });
+                self.emit(ClientEvent::MessageDeleted {
+                    chat: chat.clone(),
+                    timestamp,
+                });
                 self.mark_preview_deleted(&chat, timestamp);
             }
             LiveEvent::ChatChanged(summary) => {
@@ -888,14 +1086,27 @@ impl<B: Backend> Engine<B> {
                 // The entry is gone when a confirmation settled it first; then this is the
                 // server copy of an ordinary message (also a send from another client).
                 if let Some(entry) = self.take_outbox(&payload) {
-                    self.emit(ClientEvent::PendingSettled { chat: entry.chat, payload });
+                    self.emit(ClientEvent::PendingSettled {
+                        chat: entry.chat,
+                        payload,
+                    });
                 }
                 self.handle_live(LiveEvent::MessageUpserted(message));
             }
             // The same account typing in another client is not "someone is typing".
             LiveEvent::Typing { user, .. } if user == self.account => {}
-            LiveEvent::Typing { chat, user, name, timeout } => {
-                self.emit(ClientEvent::Typing { chat, user, name, until: Instant::now() + timeout });
+            LiveEvent::Typing {
+                chat,
+                user,
+                name,
+                timeout,
+            } => {
+                self.emit(ClientEvent::Typing {
+                    chat,
+                    user,
+                    name,
+                    until: Instant::now() + timeout,
+                });
             }
         }
     }
@@ -941,7 +1152,10 @@ impl<B: Backend> Engine<B> {
     /// Whether the state accepted for an uncached message is kept: while a history request is
     /// out, and while the user's own choice for the message is unanswered.
     fn keeps_reactions(&self, chat: &ChatId, timestamp: MessageTs) -> bool {
-        self.history_out > 0 || self.reaction_inflight.contains_key(&(chat.clone(), timestamp))
+        self.history_out > 0
+            || self
+                .reaction_inflight
+                .contains_key(&(chat.clone(), timestamp))
     }
 
     /// Keeps `state`, the state the cache accepted for a row about to leave it, for the requests
@@ -949,7 +1163,9 @@ impl<B: Backend> Engine<B> {
     /// what tells that the cache accepted it, instead of the state a later push may meet).
     /// The cache's state is never lower than what the ledger kept before.
     fn hold_reactions(&mut self, chat: &ChatId, timestamp: MessageTs, state: &Reactions) {
-        let own = self.reaction_inflight.contains_key(&(chat.clone(), timestamp));
+        let own = self
+            .reaction_inflight
+            .contains_key(&(chat.clone(), timestamp));
         if !own && (self.history_out == 0 || state.is_unknown()) {
             return;
         }
@@ -969,15 +1185,31 @@ impl<B: Backend> Engine<B> {
     /// A reaction update for a message the cache does not hold, kept for the requests still out
     /// and the unanswered own choice. Returns whether it changed what the cache accepted of the
     /// message.
-    fn hold_update(&mut self, chat: &ChatId, timestamp: MessageTs, update: &ReactionsUpdate) -> bool {
+    fn hold_update(
+        &mut self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        update: &ReactionsUpdate,
+    ) -> bool {
         self.keeps_reactions(chat, timestamp)
-            && self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().apply(update)
+            && self
+                .reaction_ledger
+                .entry(chat.clone())
+                .or_default()
+                .entry(timestamp)
+                .or_default()
+                .apply(update)
     }
 
     /// A confirmed own choice for a message the cache does not hold, kept for the requests still out.
     fn hold_own(&mut self, chat: &ChatId, timestamp: MessageTs, own: &Reactions) {
         if self.history_out > 0 {
-            self.reaction_ledger.entry(chat.clone()).or_default().entry(timestamp).or_default().overlay_own(own);
+            self.reaction_ledger
+                .entry(chat.clone())
+                .or_default()
+                .entry(timestamp)
+                .or_default()
+                .overlay_own(own);
         }
     }
 
@@ -985,7 +1217,10 @@ impl<B: Backend> Engine<B> {
     /// the copy's own (the ledger is the held state, as the cache is for a cached message) and
     /// takes the entry out, since the cache holds that state from here on.
     fn inherit_held_reactions(&mut self, message: &mut Message) {
-        let kept = self.reaction_ledger.get_mut(&message.chat).and_then(|held| held.remove(&message.timestamp));
+        let kept = self
+            .reaction_ledger
+            .get_mut(&message.chat)
+            .and_then(|held| held.remove(&message.timestamp));
         if let Some(mut merged) = kept {
             merged.merge(&message.reactions);
             message.reactions = merged;
@@ -995,8 +1230,12 @@ impl<B: Backend> Engine<B> {
     /// Keeps the row preview and unread counter current even when the backend only forwards
     /// the message. A later `ChatChanged` carries the authoritative values and replaces this.
     fn update_preview(&mut self, message: &Message) {
-        let Some(mut chat) = self.db(self.cache.chat(&message.chat)).flatten() else { return };
-        let Some(text) = preview_text(&message.body) else { return };
+        let Some(mut chat) = self.db(self.cache.chat(&message.chat)).flatten() else {
+            return;
+        };
+        let Some(text) = preview_text(&message.body) else {
+            return;
+        };
         let last = chat.last_message.as_ref().map(|p| p.timestamp);
         if last.is_some_and(|last| last > message.timestamp) {
             return;
@@ -1005,8 +1244,16 @@ impl<B: Backend> Engine<B> {
             chat.unread = chat.unread.saturating_add(1);
         }
         // Same attribution as the backend's chat summaries.
-        let author = if message.outgoing { Some("Вы".to_owned()) } else { message.author_name.clone() };
-        chat.last_message = Some(MessagePreview { author, text, timestamp: message.timestamp });
+        let author = if message.outgoing {
+            Some("Вы".to_owned())
+        } else {
+            message.author_name.clone()
+        };
+        chat.last_message = Some(MessagePreview {
+            author,
+            text,
+            timestamp: message.timestamp,
+        });
         self.db(self.cache.upsert_chat(&chat));
         self.emit(ClientEvent::ChatUpdated(chat));
     }
@@ -1014,8 +1261,16 @@ impl<B: Backend> Engine<B> {
     /// The backend's chat summaries show this text for a deleted last message; the row keeps
     /// showing the old text until then unless it is rewritten here.
     fn mark_preview_deleted(&mut self, chat: &ChatId, timestamp: MessageTs) {
-        let Some(mut row) = self.db(self.cache.chat(chat)).flatten() else { return };
-        let Some(preview) = row.last_message.as_mut().filter(|p| p.timestamp == timestamp) else { return };
+        let Some(mut row) = self.db(self.cache.chat(chat)).flatten() else {
+            return;
+        };
+        let Some(preview) = row
+            .last_message
+            .as_mut()
+            .filter(|p| p.timestamp == timestamp)
+        else {
+            return;
+        };
         preview.text = DELETED_PREVIEW.into();
         self.db(self.cache.upsert_chat(&row));
         self.emit(ClientEvent::ChatUpdated(row));
@@ -1049,8 +1304,15 @@ impl<B: Backend> Engine<B> {
         // resends it under the same id. Without a durable entry nothing is sent, and the UI
         // gets the text back.
         if !self.cache.is_durable() || self.db(self.cache.enqueue(&entry)).is_none() {
-            let draft = Draft { chat: entry.chat, text: entry.text, reply_to: entry.reply_to };
-            return self.emit(ClientEvent::SendRefused { draft, reason: STORE_FAILED_REASON.into() });
+            let draft = Draft {
+                chat: entry.chat,
+                text: entry.text,
+                reply_to: entry.reply_to,
+            };
+            return self.emit(ClientEvent::SendRefused {
+                draft,
+                reason: STORE_FAILED_REASON.into(),
+            });
         }
         let message = self.pending_message(&entry);
         self.outbox.push(entry);
@@ -1061,14 +1323,34 @@ impl<B: Backend> Engine<B> {
     /// Sorts after everything known in the chat, so the pending message stays at the bottom
     /// even when the local clock is behind the server's.
     fn next_local_ts(&self, chat: &ChatId) -> MessageTs {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_micros() as MessageTs);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as MessageTs);
         let cached = self.db(self.cache.newest_ts(chat)).flatten();
-        let listed = self.db(self.cache.chat(chat)).flatten().and_then(|c| c.last_message).map(|p| p.timestamp);
-        let queued = self.outbox.iter().filter(|e| e.chat == *chat).map(|e| e.created_us).max();
-        [cached, listed, queued].into_iter().flatten().max().map_or(now, |newest| now.max(newest + 1))
+        let listed = self
+            .db(self.cache.chat(chat))
+            .flatten()
+            .and_then(|c| c.last_message)
+            .map(|p| p.timestamp);
+        let queued = self
+            .outbox
+            .iter()
+            .filter(|e| e.chat == *chat)
+            .map(|e| e.created_us)
+            .max();
+        [cached, listed, queued]
+            .into_iter()
+            .flatten()
+            .max()
+            .map_or(now, |newest| now.max(newest + 1))
     }
 
-    fn outgoing_message(&self, entry: &OutboxEntry, timestamp: MessageTs, delivery: Delivery) -> Message {
+    fn outgoing_message(
+        &self,
+        entry: &OutboxEntry,
+        timestamp: MessageTs,
+        delivery: Delivery,
+    ) -> Message {
         Message {
             chat: entry.chat.clone(),
             timestamp,
@@ -1092,7 +1374,10 @@ impl<B: Backend> Engine<B> {
     fn pending_message(&self, entry: &OutboxEntry) -> Message {
         let payload = entry.payload.clone();
         let delivery = match &entry.failed {
-            Some(reason) => Delivery::Failed { payload, reason: reason.clone() },
+            Some(reason) => Delivery::Failed {
+                payload,
+                reason: reason.clone(),
+            },
             None => Delivery::Pending(payload),
         };
         self.outgoing_message(entry, entry.created_us, delivery)
@@ -1110,15 +1395,22 @@ impl<B: Backend> Engine<B> {
             .collect();
         for payload in delivered {
             if let Some(entry) = self.take_outbox(&payload) {
-                self.emit(ClientEvent::PendingSettled { chat: entry.chat, payload });
+                self.emit(ClientEvent::PendingSettled {
+                    chat: entry.chat,
+                    payload,
+                });
             }
         }
     }
 
     /// Adds the chat's unconfirmed messages to a chunk that ends at the newest message.
     fn with_outbox(&self, mut chunk: HistoryChunk) -> HistoryChunk {
-        let pending: Vec<Message> =
-            self.outbox.iter().filter(|e| e.chat == chunk.chat).map(|e| self.pending_message(e)).collect();
+        let pending: Vec<Message> = self
+            .outbox
+            .iter()
+            .filter(|e| e.chat == chunk.chat)
+            .map(|e| self.pending_message(e))
+            .collect();
         if !pending.is_empty() {
             chunk.messages.extend(pending);
             chunk.messages.sort_by_key(|m| m.timestamp);
@@ -1138,12 +1430,27 @@ impl<B: Backend> Engine<B> {
         if !self.is_online() || self.outbox_held || self.outbox_inflight.is_some() {
             return;
         }
-        let Some(entry) = self.outbox.iter().find(|e| e.failed.is_none()).cloned() else { return };
+        let Some(entry) = self.outbox.iter().find(|e| e.failed.is_none()).cloned() else {
+            return;
+        };
         self.outbox_inflight = Some(entry.payload.clone());
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
-            let result = backend.send_text(&entry.chat, &entry.payload, &entry.text, entry.reply_to.as_ref()).await;
-            post(&inputs, Input::Sent { payload: entry.payload, result });
+            let result = backend
+                .send_text(
+                    &entry.chat,
+                    &entry.payload,
+                    &entry.text,
+                    entry.reply_to.as_ref(),
+                )
+                .await;
+            post(
+                &inputs,
+                Input::Sent {
+                    payload: entry.payload,
+                    result,
+                },
+            );
         });
     }
 
@@ -1157,7 +1464,10 @@ impl<B: Backend> Engine<B> {
                 self.confirm(payload, timestamp);
             }
             Err(BackendError::SessionExpired) => return self.expire(),
-            Err(BackendError::Rejected { reason, permanent: true }) => {
+            Err(BackendError::Rejected {
+                reason,
+                permanent: true,
+            }) => {
                 self.outbox_failures = 0;
                 self.reject(&payload, reason);
             }
@@ -1176,8 +1486,13 @@ impl<B: Backend> Engine<B> {
     /// without details; then the copy is loaded from the server's history instead.
     fn confirm(&mut self, payload: PayloadId, timestamp: Option<MessageTs>) {
         // Already settled by the echo: nothing left to do.
-        let Some(entry) = self.take_outbox(&payload) else { return };
-        self.emit(ClientEvent::PendingSettled { chat: entry.chat.clone(), payload });
+        let Some(entry) = self.take_outbox(&payload) else {
+            return;
+        };
+        self.emit(ClientEvent::PendingSettled {
+            chat: entry.chat.clone(),
+            payload,
+        });
         match timestamp {
             Some(timestamp) => {
                 let message = self.outgoing_message(&entry, timestamp, Delivery::Sent);
@@ -1188,7 +1503,9 @@ impl<B: Backend> Engine<B> {
     }
 
     fn reject(&mut self, payload: &PayloadId, reason: String) {
-        let Some(entry) = self.outbox.iter_mut().find(|e| e.payload == *payload) else { return };
+        let Some(entry) = self.outbox.iter_mut().find(|e| e.payload == *payload) else {
+            return;
+        };
         entry.failed = Some(reason);
         let entry = entry.clone();
         self.db(self.cache.put_outbox(&entry));
@@ -1196,7 +1513,13 @@ impl<B: Backend> Engine<B> {
     }
 
     fn retry(&mut self, payload: &PayloadId) {
-        let Some(entry) = self.outbox.iter_mut().find(|e| e.payload == *payload && e.failed.is_some()) else { return };
+        let Some(entry) = self
+            .outbox
+            .iter_mut()
+            .find(|e| e.payload == *payload && e.failed.is_some())
+        else {
+            return;
+        };
         entry.failed = None;
         let entry = entry.clone();
         self.db(self.cache.put_outbox(&entry));
@@ -1206,7 +1529,11 @@ impl<B: Backend> Engine<B> {
 
     fn hold_outbox(&mut self) {
         self.outbox_failures = self.outbox_failures.saturating_add(1);
-        let delay = self.config.send_backoff_step.saturating_mul(self.outbox_failures).min(self.config.send_backoff_max);
+        let delay = self
+            .config
+            .send_backoff_step
+            .saturating_mul(self.outbox_failures)
+            .min(self.config.send_backoff_max);
         self.outbox_held = true;
         self.outbox_hold += 1;
         let (inputs, hold) = (self.inputs.clone(), self.outbox_hold);
@@ -1224,16 +1551,38 @@ impl<B: Backend> Engine<B> {
     /// refused, as is a message that is not cached.
     fn edit(&mut self, chat: ChatId, timestamp: MessageTs, text: String) {
         let reply = match self.db(self.cache.message(&chat, timestamp)).flatten() {
-            Some(Message { forwarded_from: None, reply_to: None, .. }) => Ok(None),
-            Some(Message { forwarded_from: None, reply_to: Some(quote), .. }) => match quote.timestamp {
-                Some(original) => Ok(Some(ReplyTarget { timestamp: original, author: quote.author, text: quote.text })),
+            Some(Message {
+                forwarded_from: None,
+                reply_to: None,
+                ..
+            }) => Ok(None),
+            Some(Message {
+                forwarded_from: None,
+                reply_to: Some(quote),
+                ..
+            }) => match quote.timestamp {
+                Some(original) => Ok(Some(ReplyTarget {
+                    timestamp: original,
+                    author: quote.author,
+                    text: quote.text,
+                })),
                 None => Err(()),
             },
             _ => Err(()),
         };
         match reply {
-            Ok(reply) => self.run_action(chat, Action::Edit { timestamp, text, reply }),
-            Err(()) => self.emit(ClientEvent::ActionFailed { chat, reason: EDIT_REFUSED_REASON.into() }),
+            Ok(reply) => self.run_action(
+                chat,
+                Action::Edit {
+                    timestamp,
+                    text,
+                    reply,
+                },
+            ),
+            Err(()) => self.emit(ClientEvent::ActionFailed {
+                chat,
+                reason: EDIT_REFUSED_REASON.into(),
+            }),
         }
     }
 
@@ -1247,19 +1596,33 @@ impl<B: Backend> Engine<B> {
             .flatten()
             .filter(|m| m.delivery == Delivery::Sent && m.body != MessageBody::Deleted);
         let Some(cached) = cached else {
-            return self.emit(ClientEvent::ActionFailed { chat, reason: REACTION_REFUSED_REASON.into() });
+            return self.emit(ClientEvent::ActionFailed {
+                chat,
+                reason: REACTION_REFUSED_REASON.into(),
+            });
         };
         if !self.is_online() {
-            return self.emit(ClientEvent::ActionFailed { chat, reason: OFFLINE_REASON.into() });
+            return self.emit(ClientEvent::ActionFailed {
+                chat,
+                reason: OFFLINE_REASON.into(),
+            });
         }
         // A request is unconfirmed: the cached state is not what the user sees, so a second
         // choice has nothing sound to toggle.
-        if self.reaction_inflight.contains_key(&(chat.clone(), timestamp)) {
+        if self
+            .reaction_inflight
+            .contains_key(&(chat.clone(), timestamp))
+        {
             return;
         }
         let (overlay, _) = cached.reactions.toggled(code);
-        self.reaction_inflight.insert((chat.clone(), timestamp), false);
-        self.emit(ClientEvent::ReactionsChanged { chat: chat.clone(), timestamp, reactions: overlay.clone() });
+        self.reaction_inflight
+            .insert((chat.clone(), timestamp), false);
+        self.emit(ClientEvent::ReactionsChanged {
+            chat: chat.clone(),
+            timestamp,
+            reactions: overlay.clone(),
+        });
         self.run_action(chat, Action::React { timestamp, overlay });
     }
 
@@ -1267,16 +1630,32 @@ impl<B: Backend> Engine<B> {
     /// a replay could undo a later change.
     fn run_action(&mut self, chat: ChatId, action: Action) {
         if !self.is_online() {
-            return self.emit(ClientEvent::ActionFailed { chat, reason: OFFLINE_REASON.into() });
+            return self.emit(ClientEvent::ActionFailed {
+                chat,
+                reason: OFFLINE_REASON.into(),
+            });
         }
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
             let result = match &action {
-                Action::Edit { timestamp, text, reply } => backend.edit(&chat, *timestamp, text, reply.as_ref()).await,
+                Action::Edit {
+                    timestamp,
+                    text,
+                    reply,
+                } => backend.edit(&chat, *timestamp, text, reply.as_ref()).await,
                 Action::Delete(timestamp) => backend.delete(&chat, *timestamp).await,
-                Action::React { timestamp, overlay } => backend.react(&chat, *timestamp, overlay.mine).await,
+                Action::React { timestamp, overlay } => {
+                    backend.react(&chat, *timestamp, overlay.mine).await
+                }
             };
-            post(&inputs, Input::Action { chat, action, result });
+            post(
+                &inputs,
+                Input::Action {
+                    chat,
+                    action,
+                    result,
+                },
+            );
         });
     }
 
@@ -1289,25 +1668,35 @@ impl<B: Backend> Engine<B> {
     fn finish_action(&mut self, chat: ChatId, action: Action, result: Result<(), BackendError>) {
         // Whether a server update replaced the overlay while the request was out.
         let superseded = match &action {
-            Action::React { timestamp, .. } => self.reaction_inflight.remove(&(chat.clone(), *timestamp)),
+            Action::React { timestamp, .. } => {
+                self.reaction_inflight.remove(&(chat.clone(), *timestamp))
+            }
             _ => None,
         };
         match result {
             Ok(()) => match action {
-                Action::Edit { timestamp, text, .. } => {
-                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else { return };
+                Action::Edit {
+                    timestamp, text, ..
+                } => {
+                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten()
+                    else {
+                        return;
+                    };
                     message.body = MessageBody::Text(text);
                     message.edited = true;
                     self.handle_live(LiveEvent::MessageUpserted(message));
                 }
-                Action::Delete(timestamp) => self.handle_live(LiveEvent::MessageDeleted { chat, timestamp }),
+                Action::Delete(timestamp) => {
+                    self.handle_live(LiveEvent::MessageDeleted { chat, timestamp })
+                }
                 // Only now does the cache learn the choice, and only if the server has not told
                 // a newer state meanwhile (`overlay_own`; the overlay keeps the version it was
                 // built on, so any later push overwrites it). A restart mid-request must not
                 // show an unseen reaction. History requests that started earlier meet the choice
                 // in the cache (`store_chunk`).
                 Action::React { timestamp, overlay } if superseded != Some(true) => {
-                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten() else {
+                    let Some(mut message) = self.db(self.cache.message(&chat, timestamp)).flatten()
+                    else {
                         return self.hold_own(&chat, timestamp, &overlay);
                     };
                     if message.reactions.overlay_own(&overlay) {
@@ -1347,7 +1736,10 @@ impl<B: Backend> Engine<B> {
     fn search(&mut self, id: SearchId, query: String) {
         self.search_latest = Some(id);
         if !self.is_online() {
-            return self.emit(ClientEvent::SearchFailed { id, reason: SearchFailure::Offline });
+            return self.emit(ClientEvent::SearchFailed {
+                id,
+                reason: SearchFailure::Offline,
+            });
         }
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
@@ -1365,7 +1757,10 @@ impl<B: Backend> Engine<B> {
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
                 tracing::warn!(kind = error_kind(&error), "search failed");
-                self.emit(ClientEvent::SearchFailed { id, reason: SearchFailure::Failed });
+                self.emit(ClientEvent::SearchFailed {
+                    id,
+                    reason: SearchFailure::Failed,
+                });
             }
         }
     }
@@ -1380,10 +1775,18 @@ impl<B: Backend> Engine<B> {
             return;
         }
         if !self.is_online() {
-            return self.emit(ClientEvent::MembersFailed { chat, reason: OFFLINE_REASON.into(), offline: true });
+            return self.emit(ClientEvent::MembersFailed {
+                chat,
+                reason: OFFLINE_REASON.into(),
+                offline: true,
+            });
         }
         let Some(row) = self.db(self.cache.chat(&chat)).flatten() else {
-            return self.emit(ClientEvent::MembersFailed { chat, reason: UNKNOWN_CHAT_REASON.into(), offline: false });
+            return self.emit(ClientEvent::MembersFailed {
+                chat,
+                reason: UNKNOWN_CHAT_REASON.into(),
+                offline: false,
+            });
         };
         self.members_inflight.insert(chat.clone());
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
@@ -1399,13 +1802,21 @@ impl<B: Backend> Engine<B> {
         }
         match result {
             Ok(members) => {
-                tracing::debug!(users = members.users.len(), partial = members.partial, "members loaded");
+                tracing::debug!(
+                    users = members.users.len(),
+                    partial = members.partial,
+                    "members loaded"
+                );
                 self.emit(ClientEvent::Members(members));
             }
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
                 tracing::warn!(kind = error_kind(&error), "members load failed");
-                self.emit(ClientEvent::MembersFailed { chat, reason: read_failure_reason(error), offline: false });
+                self.emit(ClientEvent::MembersFailed {
+                    chat,
+                    reason: read_failure_reason(error),
+                    offline: false,
+                });
             }
         }
     }
@@ -1416,7 +1827,10 @@ impl<B: Backend> Engine<B> {
             return;
         }
         if !self.is_online() {
-            return self.emit(ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: true });
+            return self.emit(ClientEvent::ProfileFailed {
+                reason: OFFLINE_REASON.into(),
+                offline: true,
+            });
         }
         self.profile_inflight = true;
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
@@ -1432,7 +1846,10 @@ impl<B: Backend> Engine<B> {
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
                 tracing::warn!(kind = error_kind(&error), "profile load failed");
-                self.emit(ClientEvent::ProfileFailed { reason: read_failure_reason(error), offline: false });
+                self.emit(ClientEvent::ProfileFailed {
+                    reason: read_failure_reason(error),
+                    offline: false,
+                });
             }
         }
     }
@@ -1449,17 +1866,31 @@ impl<B: Backend> Engine<B> {
             return;
         }
         if !self.is_online() {
-            return self.emit(ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+            return self.emit(ClientEvent::CreationFailed {
+                reason: OFFLINE_REASON.into(),
+                unknown: false,
+            });
         }
         if let Some(chat) = self.private_chat_with(&user) {
-            return self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+            return self.emit(ClientEvent::ChatCreated {
+                chat: Some(chat),
+                existing: true,
+            });
         }
         self.creation_inflight = true;
         if !self.creation_unverified {
             return self.send_creation(user);
         }
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
-        tokio::spawn(async move { post(&inputs, Input::ListChecked { user, chats: backend.chat_list().await }) });
+        tokio::spawn(async move {
+            post(
+                &inputs,
+                Input::ListChecked {
+                    user,
+                    chats: backend.chat_list().await,
+                },
+            )
+        });
     }
 
     /// Sends the creation request. Needs `creation_inflight` set.
@@ -1473,7 +1904,14 @@ impl<B: Backend> Engine<B> {
                 Ok(_) | Err(CreateError::Unknown(_)) => Some(backend.chat_list().await),
                 Err(CreateError::Failed(_)) => None,
             };
-            post(&inputs, Input::Created { user, result, chats });
+            post(
+                &inputs,
+                Input::Created {
+                    user,
+                    result,
+                    chats,
+                },
+            );
         });
     }
 
@@ -1492,13 +1930,18 @@ impl<B: Backend> Engine<B> {
         if !listed {
             self.creation_inflight = false;
             tracing::warn!("chat list check before a creation failed");
-            return self.emit(ClientEvent::CreationUnverified { reason: LIST_CHECK_FAILED_REASON.into() });
+            return self.emit(ClientEvent::CreationUnverified {
+                reason: LIST_CHECK_FAILED_REASON.into(),
+            });
         }
         self.creation_unverified = false;
         if let Some(chat) = self.private_chat_with(&user) {
             self.creation_inflight = false;
             tracing::info!("private chat found by the list check before a creation");
-            return self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+            return self.emit(ClientEvent::ChatCreated {
+                chat: Some(chat),
+                existing: true,
+            });
         }
         self.send_creation(user);
     }
@@ -1525,28 +1968,44 @@ impl<B: Backend> Engine<B> {
                 // The reply's id, else the list entry of that person (the id may be missing).
                 let chat = created.or_else(|| self.private_chat_with(&user));
                 tracing::info!(listed = chat.is_some(), "private chat created");
-                self.emit(ClientEvent::ChatCreated { chat, existing: false });
+                self.emit(ClientEvent::ChatCreated {
+                    chat,
+                    existing: false,
+                });
             }
             Err(CreateError::Failed(BackendError::SessionExpired)) => self.expire(),
             Err(CreateError::Failed(error)) => {
                 tracing::warn!(kind = error_kind(&error), "private chat creation failed");
-                self.emit(ClientEvent::CreationFailed { reason: read_failure_reason(error), unknown: false });
+                self.emit(ClientEvent::CreationFailed {
+                    reason: read_failure_reason(error),
+                    unknown: false,
+                });
             }
             // Never retried here. The refreshed list may already hold the chat: then it is simply opened.
             // Without a successful read the chat may exist unseen: the next attempt reads the list first.
             Err(CreateError::Unknown(_)) => match self.private_chat_with(&user) {
                 Some(chat) => {
                     tracing::info!("private chat found after an unknown result");
-                    self.emit(ClientEvent::ChatCreated { chat: Some(chat), existing: true });
+                    self.emit(ClientEvent::ChatCreated {
+                        chat: Some(chat),
+                        existing: true,
+                    });
                 }
                 None if listed => {
                     tracing::warn!("private chat creation outcome unknown");
-                    self.emit(ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true });
+                    self.emit(ClientEvent::CreationFailed {
+                        reason: CREATION_UNKNOWN_REASON.into(),
+                        unknown: true,
+                    });
                 }
                 None => {
-                    tracing::warn!("private chat creation outcome unknown and the chat list could not be read");
+                    tracing::warn!(
+                        "private chat creation outcome unknown and the chat list could not be read"
+                    );
                     self.creation_unverified = true;
-                    self.emit(ClientEvent::CreationUnverified { reason: CREATION_UNVERIFIED_REASON.into() });
+                    self.emit(ClientEvent::CreationUnverified {
+                        reason: CREATION_UNVERIFIED_REASON.into(),
+                    });
                 }
             },
         }
@@ -1554,18 +2013,28 @@ impl<B: Backend> Engine<B> {
 
     /// The cached private chat whose other participant is `user`.
     fn private_chat_with(&self, user: &UserId) -> Option<ChatId> {
-        self.db(self.cache.chats())?.into_iter().find(|c| c.partner.as_ref() == Some(user)).map(|c| c.id)
+        self.db(self.cache.chats())?
+            .into_iter()
+            .find(|c| c.partner.as_ref() == Some(user))
+            .map(|c| c.id)
     }
 
     /// Never marks twice for the same or an older message. The counter drops at once; the
     /// request goes out now, or once online when it cannot (only the newest per chat is kept).
     fn mark_read(&mut self, chat: ChatId, timestamp: MessageTs) {
-        if self.read_marks.get(&chat).is_some_and(|&marked| marked >= timestamp) {
+        if self
+            .read_marks
+            .get(&chat)
+            .is_some_and(|&marked| marked >= timestamp)
+        {
             return;
         }
         self.read_marks.insert(chat.clone(), timestamp);
         if let Some(mut summary) = self.db(self.cache.chat(&chat)).flatten() {
-            let newest = summary.last_message.as_ref().is_none_or(|last| timestamp >= last.timestamp);
+            let newest = summary
+                .last_message
+                .as_ref()
+                .is_none_or(|last| timestamp >= last.timestamp);
             if summary.unread > 0 && newest {
                 summary.unread = 0;
                 self.db(self.cache.upsert_chat(&summary));
@@ -1590,7 +2059,12 @@ impl<B: Backend> Engine<B> {
 
     fn typing(&mut self, chat: ChatId) {
         let now = tokio::time::Instant::now();
-        if !self.is_online() || self.typing_sent.get(&chat).is_some_and(|&at| now.duration_since(at) < TYPING_INTERVAL) {
+        if !self.is_online()
+            || self
+                .typing_sent
+                .get(&chat)
+                .is_some_and(|&at| now.duration_since(at) < TYPING_INTERVAL)
+        {
             return;
         }
         self.typing_sent.insert(chat.clone(), now);
@@ -1612,7 +2086,9 @@ impl<B: Backend> Engine<B> {
     }
 
     fn emit_drafts(&self) {
-        self.emit(ClientEvent::Drafts(self.db(self.cache.drafts()).unwrap_or_default()));
+        self.emit(ClientEvent::Drafts(
+            self.db(self.cache.drafts()).unwrap_or_default(),
+        ));
     }
 
     // -- history --------------------------------------------------------------------------
@@ -1620,10 +2096,23 @@ impl<B: Backend> Engine<B> {
     fn spawn_history(&mut self, chat: ChatId, before: Option<MessageTs>) {
         let known_newest = self.db(self.cache.newest_ts(&chat)).flatten();
         let mark = self.begin_snapshots(1);
-        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
+        let (backend, inputs, limit) = (
+            self.backend.clone(),
+            self.inputs.clone(),
+            self.config.history_limit,
+        );
         tokio::spawn(async move {
             let result = backend.history(&chat, before, limit).await;
-            post(&inputs, Input::History(HistoryFetch { chat, before, known_newest, mark, result }));
+            post(
+                &inputs,
+                Input::History(HistoryFetch {
+                    chat,
+                    before,
+                    known_newest,
+                    mark,
+                    result,
+                }),
+            );
         });
     }
 
@@ -1631,7 +2120,11 @@ impl<B: Backend> Engine<B> {
     /// at a time, so messages missed while disconnected show up and deleted ones vanish.
     fn spawn_catch_up(&mut self) {
         let mut chats: Vec<ChatId> = self.open_chat.iter().cloned().collect();
-        let cached: HashSet<ChatId> = self.db(self.cache.chats_with_messages()).unwrap_or_default().into_iter().collect();
+        let cached: HashSet<ChatId> = self
+            .db(self.cache.chats_with_messages())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         for summary in self.db(self.cache.chats()).unwrap_or_default() {
             if cached.contains(&summary.id) && !chats.contains(&summary.id) {
                 chats.push(summary.id);
@@ -1646,13 +2139,29 @@ impl<B: Backend> Engine<B> {
             .collect();
         let total = targets.len();
         let mark = self.begin_snapshots(total);
-        let (backend, inputs, limit) = (self.backend.clone(), self.inputs.clone(), self.config.history_limit);
+        let (backend, inputs, limit) = (
+            self.backend.clone(),
+            self.inputs.clone(),
+            self.config.history_limit,
+        );
         tokio::spawn(async move {
             let mut posted = 0;
             for (chat, known_newest) in targets {
                 let result = backend.history(&chat, None, limit).await;
-                let stop = matches!(result, Err(BackendError::SessionExpired | BackendError::Network(_)));
-                post(&inputs, Input::History(HistoryFetch { chat, before: None, known_newest, mark, result }));
+                let stop = matches!(
+                    result,
+                    Err(BackendError::SessionExpired | BackendError::Network(_))
+                );
+                post(
+                    &inputs,
+                    Input::History(HistoryFetch {
+                        chat,
+                        before: None,
+                        known_newest,
+                        mark,
+                        result,
+                    }),
+                );
                 posted += 1;
                 if stop {
                     break;
@@ -1671,9 +2180,19 @@ impl<B: Backend> Engine<B> {
         self.history_out = self.history_out.saturating_sub(1);
         match fetch.result {
             Ok(chunk) => {
-                let chunk = self.apply_chunk(&fetch.chat, fetch.before, fetch.known_newest, fetch.mark, chunk);
+                let chunk = self.apply_chunk(
+                    &fetch.chat,
+                    fetch.before,
+                    fetch.known_newest,
+                    fetch.mark,
+                    chunk,
+                );
                 self.settle_delivered(&chunk);
-                let chunk = if fetch.before.is_none() { self.with_outbox(chunk) } else { chunk };
+                let chunk = if fetch.before.is_none() {
+                    self.with_outbox(chunk)
+                } else {
+                    chunk
+                };
                 self.emit(ClientEvent::History(chunk));
             }
             Err(BackendError::SessionExpired) => self.expire(),
@@ -1706,7 +2225,9 @@ impl<B: Backend> Engine<B> {
         let mut chunk = self.store_chunk(chat, before, known_newest, mark, chunk);
         if covers_newest {
             let newest = chunk.messages.last().map(|m| m.timestamp);
-            let tail = self.db(self.cache.newer_than(chat, newest)).unwrap_or_default();
+            let tail = self
+                .db(self.cache.newer_than(chat, newest))
+                .unwrap_or_default();
             chunk.messages.extend(tail);
         }
         chunk
@@ -1739,10 +2260,15 @@ impl<B: Backend> Engine<B> {
                 // the request started (`known_newest`); everything cached above that arrived
                 // live meanwhile and is kept, even when the capped live log forgot it.
                 let moved = self.touched.get(chat).is_some_and(|seq| *seq > mark);
-                let hi = if raced.is_empty() && !moved { None } else { max.or(known_newest).or(Some(MessageTs::MIN)) };
+                let hi = if raced.is_empty() && !moved {
+                    None
+                } else {
+                    max.or(known_newest).or(Some(MessageTs::MIN))
+                };
                 if chunk.reached_start {
                     (None, hi, Some(true))
-                } else if known_newest.is_none_or(|newest| newest >= min.unwrap_or(MessageTs::MAX)) {
+                } else if known_newest.is_none_or(|newest| newest >= min.unwrap_or(MessageTs::MAX))
+                {
                     (min, hi, None)
                 } else {
                     // The chunk does not touch what we have cached: older cache would leave a
@@ -1752,7 +2278,11 @@ impl<B: Backend> Engine<B> {
             }
             Some(before) => {
                 let hi = Some(before.saturating_sub(1));
-                if chunk.reached_start { (None, hi, Some(true)) } else { (min, hi, None) }
+                if chunk.reached_start {
+                    (None, hi, Some(true))
+                } else {
+                    (min, hi, None)
+                }
             }
         };
         replay_live(&mut chunk.messages, &raced, lo, hi);
@@ -1783,10 +2313,16 @@ impl<B: Backend> Engine<B> {
         let span = if others_out {
             Some((lo.unwrap_or(MessageTs::MIN), hi.unwrap_or(MessageTs::MAX)))
         } else {
-            chunk.messages.first().zip(chunk.messages.last()).map(|(first, last)| (first.timestamp, last.timestamp))
+            chunk
+                .messages
+                .first()
+                .zip(chunk.messages.last())
+                .map(|(first, last)| (first.timestamp, last.timestamp))
         };
         let cached = match span {
-            Some((from, to)) => self.db(self.cache.messages_between(chat, from, to)).unwrap_or_default(),
+            Some((from, to)) => self
+                .db(self.cache.messages_between(chat, from, to))
+                .unwrap_or_default(),
             None => Vec::new(),
         };
         let pending: Vec<MessageTs> = if others_out {
@@ -1794,23 +2330,36 @@ impl<B: Backend> Engine<B> {
         } else {
             let range = lo.unwrap_or(MessageTs::MIN)..=hi.unwrap_or(MessageTs::MAX);
             let read = |ts: &MessageTs| span.is_some_and(|(from, to)| (from..=to).contains(ts));
-            self.reaction_inflight.keys().filter(|(own, ts)| own == chat && range.contains(ts) && !read(ts)).map(|(_, ts)| *ts).collect()
+            self.reaction_inflight
+                .keys()
+                .filter(|(own, ts)| own == chat && range.contains(ts) && !read(ts))
+                .map(|(_, ts)| *ts)
+                .collect()
         };
-        let pending: Vec<Message> = pending.into_iter().filter_map(|ts| self.db(self.cache.message(chat, ts)).flatten()).collect();
+        let pending: Vec<Message> = pending
+            .into_iter()
+            .filter_map(|ts| self.db(self.cache.message(chat, ts)).flatten())
+            .collect();
         for message in &mut chunk.messages {
             if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                 message.inherit_reactions(&cached[i]);
             }
         }
         for dropped in &cached {
-            if chunk.messages.binary_search_by_key(&dropped.timestamp, |m| m.timestamp).is_err() {
+            if chunk
+                .messages
+                .binary_search_by_key(&dropped.timestamp, |m| m.timestamp)
+                .is_err()
+            {
                 self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
             }
         }
         for dropped in &pending {
             self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
         }
-        let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
+        let stored = self
+            .cache
+            .replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
         // Requests that started before this one must not take what it stored for stale.
         self.touch(chat);
@@ -1833,7 +2382,9 @@ impl<B: Backend> Engine<B> {
             }
         }
         match self.media_missing.get(&media) {
-            Some(at) if at.elapsed() < self.config.media_missing_ttl => return self.emit(ClientEvent::MediaUnavailable(media)),
+            Some(at) if at.elapsed() < self.config.media_missing_ttl => {
+                return self.emit(ClientEvent::MediaUnavailable(media));
+            }
             Some(_) => {
                 self.media_missing.remove(&media);
             }
@@ -1843,9 +2394,15 @@ impl<B: Backend> Engine<B> {
             Phase::Expired => {}
             Phase::Online => {
                 if self.media_inflight.insert(media.clone()) {
-                    let (backend, inputs, slots) = (self.backend.clone(), self.inputs.clone(), self.media_slots.clone());
+                    let (backend, inputs, slots) = (
+                        self.backend.clone(),
+                        self.inputs.clone(),
+                        self.media_slots.clone(),
+                    );
                     tokio::spawn(async move {
-                        let Ok(_permit) = slots.acquire().await else { return };
+                        let Ok(_permit) = slots.acquire().await else {
+                            return;
+                        };
                         let result = backend.fetch_media(&media).await;
                         post(&inputs, Input::Media { media, result });
                     });
@@ -1886,7 +2443,12 @@ impl<B: Backend> Engine<B> {
         DirBuilder::new().recursive(true).mode(0o700).create(&dir)?;
         let name = media_file_name(media);
         let partial = dir.join(format!("{name}.part"));
-        let mut file = OpenOptions::new().create(true).write(true).truncate(true).mode(0o600).open(&partial)?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&partial)?;
         file.write_all(bytes)?;
         drop(file);
         let path = dir.join(&name);
@@ -1908,18 +2470,44 @@ impl<B: Backend> Engine<B> {
         }
         // An explicit action is refused, never queued: a hidden queue would start a transfer much later.
         if !self.is_online() {
-            return self.emit(ClientEvent::DownloadFailed { media, reason: DownloadFailure::Offline });
+            return self.emit(ClientEvent::DownloadFailed {
+                media,
+                reason: DownloadFailure::Offline,
+            });
         }
         let Some(dir) = self.config.downloads_dir.clone().filter(|dir| dir.is_dir()) else {
-            return self.emit(ClientEvent::DownloadFailed { media, reason: DownloadFailure::Destination });
+            return self.emit(ClientEvent::DownloadFailed {
+                media,
+                reason: DownloadFailure::Destination,
+            });
         };
         self.download_seq += 1;
         let seq = self.download_seq;
-        let (backend, inputs, slots) = (self.backend.clone(), self.inputs.clone(), self.download_slots.clone());
+        let (backend, inputs, slots) = (
+            self.backend.clone(),
+            self.inputs.clone(),
+            self.download_slots.clone(),
+        );
         let task_media = media.clone();
         let handle = tokio::spawn(async move {
-            let result = run_download(&*backend, &slots, &dir, &task_media, name.as_deref(), &inputs, seq).await;
-            post(&inputs, Input::Download { media: task_media, seq, result });
+            let result = run_download(
+                &*backend,
+                &slots,
+                &dir,
+                &task_media,
+                name.as_deref(),
+                &inputs,
+                seq,
+            )
+            .await;
+            post(
+                &inputs,
+                Input::Download {
+                    media: task_media,
+                    seq,
+                    result,
+                },
+            );
         });
         self.downloads.insert(media, Transfer { seq, handle });
     }
@@ -1939,13 +2527,32 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    fn handle_download_progress(&mut self, media: &MediaRef, seq: u64, received: u64, total: Option<u64>) {
-        if self.downloads.get(media).is_some_and(|transfer| transfer.seq == seq) {
-            self.emit(ClientEvent::DownloadProgress { media: media.clone(), received, total });
+    fn handle_download_progress(
+        &mut self,
+        media: &MediaRef,
+        seq: u64,
+        received: u64,
+        total: Option<u64>,
+    ) {
+        if self
+            .downloads
+            .get(media)
+            .is_some_and(|transfer| transfer.seq == seq)
+        {
+            self.emit(ClientEvent::DownloadProgress {
+                media: media.clone(),
+                received,
+                total,
+            });
         }
     }
 
-    fn handle_download_result(&mut self, media: MediaRef, seq: u64, result: Result<(PathBuf, u64), DownloadError>) {
+    fn handle_download_result(
+        &mut self,
+        media: MediaRef,
+        seq: u64,
+        result: Result<(PathBuf, u64), DownloadError>,
+    ) {
         match self.downloads.get(&media) {
             // A newer transfer of the same file owns the state now; this one was cancelled meanwhile.
             Some(transfer) if transfer.seq != seq => return,
@@ -1990,7 +2597,12 @@ mod tests {
     /// A write the engine asked the backend to perform.
     #[derive(Clone, Debug, PartialEq)]
     enum Call {
-        Send { chat: ChatId, payload: PayloadId, text: String, reply: Option<ReplyTarget> },
+        Send {
+            chat: ChatId,
+            payload: PayloadId,
+            text: String,
+            reply: Option<ReplyTarget>,
+        },
         Edit(ChatId, MessageTs, String, Option<ReplyTarget>),
         Delete(ChatId, MessageTs),
         Seen(ChatId, MessageTs),
@@ -2073,7 +2685,12 @@ mod tests {
             self.0.lock().unwrap()
         }
         fn push(&self, event: LiveEvent) {
-            self.state().live.as_ref().expect("subscribed").try_send(event).unwrap();
+            self.state()
+                .live
+                .as_ref()
+                .expect("subscribed")
+                .try_send(event)
+                .unwrap();
         }
         fn set_history(&self, chat: &str, messages: Vec<Message>) {
             self.state().history.insert(id(chat), messages);
@@ -2124,7 +2741,16 @@ mod tests {
                 let reached_start = older.len() <= limit;
                 let messages = older[older.len().saturating_sub(limit)..].to_vec();
                 let payloads = s.history_payloads.get(chat).cloned().unwrap_or_default();
-                (HistoryChunk { chat: chat.clone(), messages, reached_start, replaces: None, payloads }, s.history_gate.clone())
+                (
+                    HistoryChunk {
+                        chat: chat.clone(),
+                        messages,
+                        reached_start,
+                        replaces: None,
+                        payloads,
+                    },
+                    s.history_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2134,7 +2760,10 @@ mod tests {
         async fn fetch_media(&self, media: &MediaRef) -> Result<Vec<u8>, BackendError> {
             let mut s = self.state();
             s.media_calls += 1;
-            s.media.get(&media.id).cloned().ok_or(BackendError::NotFound)
+            s.media
+                .get(&media.id)
+                .cloned()
+                .ok_or(BackendError::NotFound)
         }
         async fn download(
             &self,
@@ -2148,16 +2777,24 @@ mod tests {
                 if let Some(error) = s.download_errors.pop_front() {
                     return Err(error);
                 }
-                (s.files.get(&media.id).cloned().ok_or(BackendError::NotFound)?, s.download_gate.clone())
+                (
+                    s.files
+                        .get(&media.id)
+                        .cloned()
+                        .ok_or(BackendError::NotFound)?,
+                    s.download_gate.clone(),
+                )
             };
             let total = Some(bytes.len() as u64);
             let (head, tail) = bytes.split_at(bytes.len() / 2);
-            out.write_all(head).map_err(|e| BackendError::Storage(e.kind().to_string()))?;
+            out.write_all(head)
+                .map_err(|e| BackendError::Storage(e.kind().to_string()))?;
             progress(head.len() as u64, total);
             if let Some(gate) = gate {
                 gate.notified().await;
             }
-            out.write_all(tail).map_err(|e| BackendError::Storage(e.kind().to_string()))?;
+            out.write_all(tail)
+                .map_err(|e| BackendError::Storage(e.kind().to_string()))?;
             progress(bytes.len() as u64, total);
             Ok(bytes.len() as u64)
         }
@@ -2184,7 +2821,10 @@ mod tests {
                     text: text.into(),
                     reply: reply_to.cloned(),
                 });
-                (s.send_results.pop_front().unwrap_or(Ok(Some(SERVER_TS))), s.send_gate.clone())
+                (
+                    s.send_results.pop_front().unwrap_or(Ok(Some(SERVER_TS))),
+                    s.send_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2198,7 +2838,12 @@ mod tests {
             text: &str,
             reply_to: Option<&ReplyTarget>,
         ) -> Result<(), BackendError> {
-            self.record(Call::Edit(chat.clone(), timestamp, text.into(), reply_to.cloned()))
+            self.record(Call::Edit(
+                chat.clone(),
+                timestamp,
+                text.into(),
+                reply_to.cloned(),
+            ))
         }
         async fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
             self.record(Call::Delete(chat.clone(), timestamp))
@@ -2226,7 +2871,12 @@ mod tests {
             let (result, gate) = {
                 let mut s = self.state();
                 s.search_calls.push((query.into(), limit));
-                (s.search_result.clone().unwrap_or_else(|| Ok(SearchHits::default())), s.search_gate.clone())
+                (
+                    s.search_result
+                        .clone()
+                        .unwrap_or_else(|| Ok(SearchHits::default())),
+                    s.search_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2238,8 +2888,15 @@ mod tests {
             let (result, gate) = {
                 let mut s = self.state();
                 s.members_calls.push(chat.clone());
-                let empty = ChatMembers { chat: chat.id.clone(), users: Vec::new(), partial: false };
-                (s.members_result.clone().unwrap_or(Ok(empty)), s.members_gate.clone())
+                let empty = ChatMembers {
+                    chat: chat.id.clone(),
+                    users: Vec::new(),
+                    partial: false,
+                };
+                (
+                    s.members_result.clone().unwrap_or(Ok(empty)),
+                    s.members_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2250,8 +2907,16 @@ mod tests {
             let (result, gate) = {
                 let mut s = self.state();
                 s.profile_calls += 1;
-                let own = Profile { user: UserId(s.account.clone()), name: None, avatar: None, status_text: None };
-                (s.profile_result.clone().unwrap_or(Ok(own)), s.profile_gate.clone())
+                let own = Profile {
+                    user: UserId(s.account.clone()),
+                    name: None,
+                    avatar: None,
+                    status_text: None,
+                };
+                (
+                    s.profile_result.clone().unwrap_or(Ok(own)),
+                    s.profile_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2262,7 +2927,10 @@ mod tests {
             let (result, gate) = {
                 let mut s = self.state();
                 s.create_calls.push(user.clone());
-                (s.create_results.pop_front().unwrap_or(Ok(None)), s.create_gate.clone())
+                (
+                    s.create_results.pop_front().unwrap_or(Ok(None)),
+                    s.create_gate.clone(),
+                )
             };
             if let Some(gate) = gate {
                 gate.notified().await;
@@ -2290,7 +2958,11 @@ mod tests {
     }
 
     /// Like `start`, in an existing runtime dir: the next run of a client that was stopped.
-    fn start_in(dir: tempfile::TempDir, configure: impl FnOnce(&mut FakeState, &Path), limit: usize) -> Harness {
+    fn start_in(
+        dir: tempfile::TempDir,
+        configure: impl FnOnce(&mut FakeState, &Path),
+        limit: usize,
+    ) -> Harness {
         let fake = Fake::default();
         {
             let mut state = fake.state();
@@ -2307,7 +2979,12 @@ mod tests {
         config.send_backoff_max = Duration::from_millis(40);
         fs::write(&config.session_file, "{}").unwrap();
         let client = ChatClient::spawn(fake.clone(), config).unwrap();
-        Harness { dir, fake, events: client.events(), client }
+        Harness {
+            dir,
+            fake,
+            events: client.events(),
+            client,
+        }
     }
 
     impl Harness {
@@ -2319,16 +2996,23 @@ mod tests {
                     Ok(event) if pred(&event) => return event,
                     Ok(event) => skipped.push(event),
                     Err(async_channel::TryRecvError::Empty) => {
-                        assert!(Instant::now() < deadline, "timed out waiting for {what}; skipped {skipped:?}");
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out waiting for {what}; skipped {skipped:?}"
+                        );
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(async_channel::TryRecvError::Closed) => panic!("event stream closed waiting for {what}"),
+                    Err(async_channel::TryRecvError::Closed) => {
+                        panic!("event stream closed waiting for {what}")
+                    }
                 }
             }
         }
 
         fn online(&self) {
-            self.next("online", |e| *e == ClientEvent::Connection(ConnectionState::Online));
+            self.next("online", |e| {
+                *e == ClientEvent::Connection(ConnectionState::Online)
+            });
         }
 
         fn history(&self, what: &str) -> HistoryChunk {
@@ -2370,10 +3054,15 @@ mod tests {
                         }
                     }
                     Err(async_channel::TryRecvError::Empty) => {
-                        assert!(Instant::now() < deadline, "timed out waiting for {what}; saw {seen:?}");
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out waiting for {what}; saw {seen:?}"
+                        );
                         std::thread::sleep(Duration::from_millis(2));
                     }
-                    Err(async_channel::TryRecvError::Closed) => panic!("event stream closed waiting for {what}"),
+                    Err(async_channel::TryRecvError::Closed) => {
+                        panic!("event stream closed waiting for {what}")
+                    }
                 }
             }
         }
@@ -2391,11 +3080,18 @@ mod tests {
         }
 
         fn send_text(&self, chat: &str, text: &str) {
-            self.client.send(Command::Send { chat: id(chat), text: text.into(), reply_to: None });
+            self.client.send(Command::Send {
+                chat: id(chat),
+                text: text.into(),
+                reply_to: None,
+            });
         }
 
         fn search(&self, n: u64, query: &str) {
-            self.client.send(Command::Search { id: SearchId(n), query: query.into() });
+            self.client.send(Command::Search {
+                id: SearchId(n),
+                query: query.into(),
+            });
         }
     }
 
@@ -2403,13 +3099,26 @@ mod tests {
         chunk.messages.iter().map(|m| m.timestamp).collect()
     }
 
-    fn seed_cache(dir: &Path, chats: &[ChatSummary], chat_id: &str, messages: &[Message], start: bool) {
+    fn seed_cache(
+        dir: &Path,
+        chats: &[ChatSummary],
+        chat_id: &str,
+        messages: &[Message],
+        start: bool,
+    ) {
         let mut cache = Cache::open(dir, &account()).unwrap();
         cache.replace_chats(chats).unwrap();
-        cache.replace_range(&id(chat_id), None, None, messages, Some(start)).unwrap();
+        cache
+            .replace_range(&id(chat_id), None, None, messages, Some(start))
+            .unwrap();
     }
 
-    fn outbox_entry(payload: &str, chat_id: &str, created_us: MessageTs, text: &str) -> OutboxEntry {
+    fn outbox_entry(
+        payload: &str,
+        chat_id: &str,
+        created_us: MessageTs,
+        text: &str,
+    ) -> OutboxEntry {
         OutboxEntry {
             payload: PayloadId(payload.into()),
             chat: id(chat_id),
@@ -2436,7 +3145,10 @@ mod tests {
     }
 
     fn rejected(reason: &str, permanent: bool) -> BackendError {
-        BackendError::Rejected { reason: reason.into(), permanent }
+        BackendError::Rejected {
+            reason: reason.into(),
+            permanent,
+        }
     }
 
     #[test]
@@ -2453,8 +3165,14 @@ mod tests {
         while !order.contains(&"online") {
             assert!(Instant::now() < deadline, "timed out; saw {order:?}");
             match h.events.try_recv() {
-                Ok(ClientEvent::ChatsReplaced(chats)) => order.push(if chats[0].id.0 == "cached" { "cached" } else { "fresh" }),
-                Ok(ClientEvent::Connection(ConnectionState::Connecting)) => order.push("connecting"),
+                Ok(ClientEvent::ChatsReplaced(chats)) => order.push(if chats[0].id.0 == "cached" {
+                    "cached"
+                } else {
+                    "fresh"
+                }),
+                Ok(ClientEvent::Connection(ConnectionState::Connecting)) => {
+                    order.push("connecting")
+                }
                 Ok(ClientEvent::Connection(ConnectionState::Online)) => order.push("online"),
                 Ok(_) => {}
                 Err(_) => std::thread::sleep(Duration::from_millis(2)),
@@ -2463,24 +3181,35 @@ mod tests {
         assert_eq!(order, ["cached", "connecting", "fresh", "online"]);
     }
 
-
     #[test]
     fn offline_start_serves_cached_history_with_offline_indicator() {
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(2), None)], "a", &[msg("a", 1, "one"), msg("a", 2, "two")], true);
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(2), None)],
+                    "a",
+                    &[msg("a", 1, "one"), msg("a", 2, "two")],
+                    true,
+                );
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.client.send(Command::OpenChat(id("a")));
         let chunk = h.history("cached history");
         assert_eq!(stamps(&chunk), [1, 2]);
         assert!(chunk.reached_start);
         assert!(h.fake.state().history_calls.is_empty());
         // Paging while offline answers from cache as well.
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 2 });
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 2,
+        });
         assert_eq!(stamps(&h.history("cached older")), [1]);
     }
 
@@ -2488,9 +3217,18 @@ mod tests {
     fn open_chat_serves_cache_then_fetches_newest() {
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(3), None)], "a", &[msg("a", 1, "1"), msg("a", 2, "2")], false);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(3), None)],
+                    "a",
+                    &[msg("a", 1, "1"), msg("a", 2, "2")],
+                    false,
+                );
                 s.chats = vec![chat("a", Some(3), None)];
-                s.history.insert(id("a"), vec![msg("a", 1, "1"), msg("a", 2, "2"), msg("a", 3, "3")]);
+                s.history.insert(
+                    id("a"),
+                    vec![msg("a", 1, "1"), msg("a", 2, "2"), msg("a", 3, "3")],
+                );
             },
             50,
         );
@@ -2501,7 +3239,10 @@ mod tests {
         let fetched = h.history("server chunk");
         assert_eq!(stamps(&fetched), [1, 2, 3]);
         assert!(fetched.reached_start);
-        assert_eq!(h.fake.state().history_calls.last(), Some(&(id("a"), None, 50)));
+        assert_eq!(
+            h.fake.state().history_calls.last(),
+            Some(&(id("a"), None, 50))
+        );
     }
 
     #[test]
@@ -2509,20 +3250,44 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(120), None)];
-                s.history.insert(id("a"), (1..=120).map(|i| msg("a", i, "m")).collect());
+                s.history
+                    .insert(id("a"), (1..=120).map(|i| msg("a", i, "m")).collect());
             },
             50,
         );
         h.online();
         h.client.send(Command::OpenChat(id("a")));
         let newest = h.history("newest");
-        assert_eq!((newest.messages.first().unwrap().timestamp, newest.messages.len(), newest.reached_start), (71, 50, false));
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 71 });
+        assert_eq!(
+            (
+                newest.messages.first().unwrap().timestamp,
+                newest.messages.len(),
+                newest.reached_start
+            ),
+            (71, 50, false)
+        );
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 71,
+        });
         let middle = h.history("middle");
-        assert_eq!((stamps(&middle)[0], middle.messages.len(), middle.reached_start), (21, 50, false));
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 21 });
+        assert_eq!(
+            (
+                stamps(&middle)[0],
+                middle.messages.len(),
+                middle.reached_start
+            ),
+            (21, 50, false)
+        );
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 21,
+        });
         let first = h.history("first");
-        assert_eq!((stamps(&first)[0], first.messages.len(), first.reached_start), (1, 20, true));
+        assert_eq!(
+            (stamps(&first)[0], first.messages.len(), first.reached_start),
+            (1, 20, true)
+        );
 
         let cached = h.cache().history(&id("a"), None, 500).unwrap();
         assert_eq!(cached.messages.len(), 120);
@@ -2531,33 +3296,62 @@ mod tests {
 
     #[test]
     fn live_upsert_updates_cache_row_preview_and_unread() {
-        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None), chat("b", Some(5), None)], 50);
+        let h = start(
+            |s, _| s.chats = vec![chat("a", Some(1), None), chat("b", Some(5), None)],
+            50,
+        );
         h.online();
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 10, "hello")));
-        let ClientEvent::MessageUpserted(message) = h.next("upsert", |e| matches!(e, ClientEvent::MessageUpserted(_))) else {
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 10, "hello")));
+        let ClientEvent::MessageUpserted(message) =
+            h.next("upsert", |e| matches!(e, ClientEvent::MessageUpserted(_)))
+        else {
             unreachable!()
         };
         assert_eq!(message.timestamp, 10);
-        assert_eq!(h.cache().message(&id("a"), 10).unwrap().unwrap().body, MessageBody::Text("hello".into()));
-        let ClientEvent::ChatUpdated(row) = h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        assert_eq!(
+            h.cache().message(&id("a"), 10).unwrap().unwrap().body,
+            MessageBody::Text("hello".into())
+        );
+        let ClientEvent::ChatUpdated(row) =
+            h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_)))
+        else {
             unreachable!()
         };
-        assert_eq!((row.id.0.as_str(), row.unread, row.last_message.unwrap().text.as_str()), ("a", 1, "hello"));
+        assert_eq!(
+            (
+                row.id.0.as_str(),
+                row.unread,
+                row.last_message.unwrap().text.as_str()
+            ),
+            ("a", 1, "hello")
+        );
 
         // An edit of the latest message refreshes the preview but does not count as unread.
         let mut edited = msg("a", 10, "hello!");
         edited.edited = true;
         h.fake.push(LiveEvent::MessageUpserted(edited));
-        let ClientEvent::ChatUpdated(row) = h.next("edit row update", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        let ClientEvent::ChatUpdated(row) = h.next("edit row update", |e| {
+            matches!(e, ClientEvent::ChatUpdated(_))
+        }) else {
             unreachable!()
         };
-        assert_eq!((row.unread, row.last_message.unwrap().text.as_str()), (1, "hello!"));
+        assert_eq!(
+            (row.unread, row.last_message.unwrap().text.as_str()),
+            (1, "hello!")
+        );
 
         // The backend's authoritative summary is forwarded and cached as is.
         let mut summary = chat("b", Some(11), Some(0));
         summary.unread = 7;
         h.fake.push(LiveEvent::ChatChanged(summary.clone()));
-        assert_eq!(h.next("chat changed", |e| matches!(e, ClientEvent::ChatUpdated(c) if c.id.0 == "b")), ClientEvent::ChatUpdated(summary.clone()));
+        assert_eq!(
+            h.next(
+                "chat changed",
+                |e| matches!(e, ClientEvent::ChatUpdated(c) if c.id.0 == "b")
+            ),
+            ClientEvent::ChatUpdated(summary.clone())
+        );
         assert_eq!(h.cache().chat(&id("b")).unwrap(), Some(summary));
     }
 
@@ -2569,11 +3363,16 @@ mod tests {
         own.outgoing = true;
         own.author_name = Some("Вадим".into());
         h.fake.push(LiveEvent::MessageUpserted(own));
-        let ClientEvent::ChatUpdated(row) = h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        let ClientEvent::ChatUpdated(row) =
+            h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_)))
+        else {
             unreachable!()
         };
         let preview = row.last_message.unwrap();
-        assert_eq!((preview.author.as_deref(), preview.text.as_str(), row.unread), (Some("Вы"), "mine", 0));
+        assert_eq!(
+            (preview.author.as_deref(), preview.text.as_str(), row.unread),
+            (Some("Вы"), "mine", 0)
+        );
     }
 
     #[test]
@@ -2582,37 +3381,83 @@ mod tests {
         h.online();
         h.fake.push(LiveEvent::MessageUpserted(msg("a", 3, "oops")));
         h.next("upsert", |e| matches!(e, ClientEvent::MessageUpserted(_)));
-        h.fake.push(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 3 });
+        h.fake.push(LiveEvent::MessageDeleted {
+            chat: id("a"),
+            timestamp: 3,
+        });
         assert_eq!(
-            h.next("delete", |e| matches!(e, ClientEvent::MessageDeleted { .. })),
-            ClientEvent::MessageDeleted { chat: id("a"), timestamp: 3 }
+            h.next("delete", |e| matches!(
+                e,
+                ClientEvent::MessageDeleted { .. }
+            )),
+            ClientEvent::MessageDeleted {
+                chat: id("a"),
+                timestamp: 3
+            }
         );
-        assert_eq!(h.cache().message(&id("a"), 3).unwrap().unwrap().body, MessageBody::Deleted);
+        assert_eq!(
+            h.cache().message(&id("a"), 3).unwrap().unwrap().body,
+            MessageBody::Deleted
+        );
     }
 
     #[test]
     fn deleting_the_last_message_replaces_the_row_preview_only_for_that_message() {
         let h = start(|s, _| s.chats = vec![chat("a", None, None)], 50);
         h.online();
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 3, "older")));
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 4, "newest")));
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 3, "older")));
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 4, "newest")));
         h.next("preview of 4", |e| matches!(e, ClientEvent::ChatUpdated(c) if c.last_message.as_ref().is_some_and(|p| p.timestamp == 4)));
         h.drain();
 
         // An older message going away leaves the preview alone.
-        h.fake.push(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 3 });
-        h.next("delete of 3", |e| matches!(e, ClientEvent::MessageDeleted { timestamp: 3, .. }));
+        h.fake.push(LiveEvent::MessageDeleted {
+            chat: id("a"),
+            timestamp: 3,
+        });
+        h.next("delete of 3", |e| {
+            matches!(e, ClientEvent::MessageDeleted { timestamp: 3, .. })
+        });
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::ChatUpdated(_))));
-        assert_eq!(h.cache().chat(&id("a")).unwrap().unwrap().last_message.unwrap().text, "newest");
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, ClientEvent::ChatUpdated(_)))
+        );
+        assert_eq!(
+            h.cache()
+                .chat(&id("a"))
+                .unwrap()
+                .unwrap()
+                .last_message
+                .unwrap()
+                .text,
+            "newest"
+        );
 
-        let before = h.cache().chat(&id("a")).unwrap().unwrap().last_message.unwrap();
-        h.fake.push(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 4 });
-        let ClientEvent::ChatUpdated(row) = h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        let before = h
+            .cache()
+            .chat(&id("a"))
+            .unwrap()
+            .unwrap()
+            .last_message
+            .unwrap();
+        h.fake.push(LiveEvent::MessageDeleted {
+            chat: id("a"),
+            timestamp: 4,
+        });
+        let ClientEvent::ChatUpdated(row) =
+            h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_)))
+        else {
             unreachable!()
         };
         let preview = row.last_message.clone().unwrap();
-        assert_eq!((preview.text.as_str(), preview.timestamp, &preview.author), ("Сообщение удалено", 4, &before.author));
+        assert_eq!(
+            (preview.text.as_str(), preview.timestamp, &preview.author),
+            ("Сообщение удалено", 4, &before.author)
+        );
         assert_eq!(h.cache().chat(&id("a")).unwrap(), Some(row));
     }
 
@@ -2622,7 +3467,10 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(3), None)];
-                s.history.insert(id("a"), vec![msg("a", 1, "one"), msg("a", 2, "two"), msg("a", 3, "three")]);
+                s.history.insert(
+                    id("a"),
+                    vec![msg("a", 1, "one"), msg("a", 2, "two"), msg("a", 3, "three")],
+                );
                 s.history_gate = Some(gate.clone());
             },
             50,
@@ -2635,7 +3483,10 @@ mod tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         // The server snapshot is taken; now 2 is deleted and 3 edited before it arrives.
-        h.fake.push(LiveEvent::MessageDeleted { chat: id("a"), timestamp: 2 });
+        h.fake.push(LiveEvent::MessageDeleted {
+            chat: id("a"),
+            timestamp: 2,
+        });
         let mut edited = msg("a", 3, "three!");
         edited.edited = true;
         h.fake.push(LiveEvent::MessageUpserted(edited.clone()));
@@ -2656,30 +3507,49 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(2), None)];
-                s.history.insert(id("a"), vec![msg("a", 1, "1"), msg("a", 2, "2")]);
+                s.history
+                    .insert(id("a"), vec![msg("a", 1, "1"), msg("a", 2, "2")]);
             },
             50,
         );
         h.online();
         h.client.send(Command::OpenChat(id("a")));
         h.history("initial fetch");
-        assert_eq!(stamps(&h.cache().history(&id("a"), None, 50).unwrap()), [1, 2]);
+        assert_eq!(
+            stamps(&h.cache().history(&id("a"), None, 50).unwrap()),
+            [1, 2]
+        );
 
         h.fake.push(LiveEvent::Disconnected);
-        h.next("connecting", |e| *e == ClientEvent::Connection(ConnectionState::Connecting));
+        h.next("connecting", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Connecting)
+        });
         // While we were away: 2 was deleted, 3 and 4 arrived, the list changed.
-        h.fake.set_history("a", vec![msg("a", 1, "1"), msg("a", 3, "3"), msg("a", 4, "4")]);
+        h.fake.set_history(
+            "a",
+            vec![msg("a", 1, "1"), msg("a", 3, "3"), msg("a", 4, "4")],
+        );
         h.fake.state().chats = vec![chat("a", Some(4), None), chat("new", Some(9), None)];
         h.fake.push(LiveEvent::Reconnected);
         h.online();
-        let ClientEvent::ChatsReplaced(chats) = h.next("chat list reload", |e| matches!(e, ClientEvent::ChatsReplaced(_))) else {
+        let ClientEvent::ChatsReplaced(chats) = h.next("chat list reload", |e| {
+            matches!(e, ClientEvent::ChatsReplaced(_))
+        }) else {
             unreachable!()
         };
         assert_eq!(chats.len(), 2);
-        let caught_up = h.next("catch-up", |e| matches!(e, ClientEvent::History(c) if c.messages.len() == 3));
-        let ClientEvent::History(chunk) = caught_up else { unreachable!() };
+        let caught_up = h.next(
+            "catch-up",
+            |e| matches!(e, ClientEvent::History(c) if c.messages.len() == 3),
+        );
+        let ClientEvent::History(chunk) = caught_up else {
+            unreachable!()
+        };
         assert_eq!(stamps(&chunk), [1, 3, 4]);
-        assert_eq!(stamps(&h.cache().history(&id("a"), None, 50).unwrap()), [1, 3, 4]);
+        assert_eq!(
+            stamps(&h.cache().history(&id("a"), None, 50).unwrap()),
+            [1, 3, 4]
+        );
     }
 
     #[test]
@@ -2687,7 +3557,8 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(2), None)];
-                s.history.insert(id("a"), vec![msg("a", 1, "1"), msg("a", 2, "2")]);
+                s.history
+                    .insert(id("a"), vec![msg("a", 1, "1"), msg("a", 2, "2")]);
             },
             2,
         );
@@ -2695,8 +3566,11 @@ mod tests {
         h.client.send(Command::OpenChat(id("a")));
         h.history("initial fetch");
         h.fake.push(LiveEvent::Disconnected);
-        h.next("connecting", |e| *e == ClientEvent::Connection(ConnectionState::Connecting));
-        h.fake.set_history("a", (1..=6).map(|i| msg("a", i, "m")).collect());
+        h.next("connecting", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Connecting)
+        });
+        h.fake
+            .set_history("a", (1..=6).map(|i| msg("a", i, "m")).collect());
         h.fake.push(LiveEvent::Reconnected);
         let ClientEvent::History(chunk) = h.next("catch-up", |e| matches!(e, ClientEvent::History(c) if c.messages.len() == 2 && c.messages[0].timestamp == 5)) else {
             unreachable!()
@@ -2711,11 +3585,18 @@ mod tests {
 
     #[test]
     fn rejected_session_expires_once_and_deletes_the_session_file() {
-        let h = start(|s, _| s.bootstrap_errors = VecDeque::from([BackendError::SessionExpired]), 50);
+        let h = start(
+            |s, _| s.bootstrap_errors = VecDeque::from([BackendError::SessionExpired]),
+            50,
+        );
         h.next("expiry", |e| *e == ClientEvent::SessionExpired);
         assert!(!h.dir.path().join("session.json").exists());
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(h.fake.state().bootstrap_calls, 1, "an expired session must not be retried");
+        assert_eq!(
+            h.fake.state().bootstrap_calls,
+            1,
+            "an expired session must not be retried"
+        );
     }
 
     #[test]
@@ -2730,10 +3611,17 @@ mod tests {
     #[test]
     fn network_failures_retry_with_backoff_until_online() {
         let h = start(
-            |s, _| s.bootstrap_errors = VecDeque::from([BackendError::Network("a".into()), BackendError::Protocol("b".into())]),
+            |s, _| {
+                s.bootstrap_errors = VecDeque::from([
+                    BackendError::Network("a".into()),
+                    BackendError::Protocol("b".into()),
+                ])
+            },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.online();
         assert_eq!(h.fake.state().bootstrap_calls, 3);
     }
@@ -2743,7 +3631,9 @@ mod tests {
         let h = start(|_, _| {}, 50);
         h.online();
         h.fake.state().live = None;
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.online();
         assert_eq!(h.fake.state().bootstrap_calls, 2);
     }
@@ -2756,17 +3646,29 @@ mod tests {
         h.history("open");
         assert_eq!(h.fake.state().watch_calls, [None, Some(id("a"))]);
         h.fake.state().live = None;
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.online();
-        assert_eq!(h.fake.state().watch_calls, [None, Some(id("a")), Some(id("a"))]);
+        assert_eq!(
+            h.fake.state().watch_calls,
+            [None, Some(id("a")), Some(id("a"))]
+        );
     }
 
     #[test]
     fn missing_media_is_not_requested_again_until_the_ttl_passes() {
         let h = start(|_, _| {}, 50);
         h.online();
-        let gone = MediaRef { id: "deleted_user".into(), kind: MediaKind::Avatar };
-        let unavailable = |h: &Harness| h.next("unavailable", |e| *e == ClientEvent::MediaUnavailable(gone.clone()));
+        let gone = MediaRef {
+            id: "deleted_user".into(),
+            kind: MediaKind::Avatar,
+        };
+        let unavailable = |h: &Harness| {
+            h.next("unavailable", |e| {
+                *e == ClientEvent::MediaUnavailable(gone.clone())
+            })
+        };
         h.client.send(Command::FetchMedia(gone.clone()));
         unavailable(&h);
         // Within the TTL (300 ms in tests) the answer comes without asking the server.
@@ -2781,17 +3683,29 @@ mod tests {
 
     #[test]
     fn media_is_downloaded_once_into_the_account_dir() {
-        let h = start(|s, _| { s.media.insert("pic".into(), b"bytes".to_vec()); }, 50);
-        let media = MediaRef { id: "pic".into(), kind: MediaKind::Thumbnail };
+        let h = start(
+            |s, _| {
+                s.media.insert("pic".into(), b"bytes".to_vec());
+            },
+            50,
+        );
+        let media = MediaRef {
+            id: "pic".into(),
+            kind: MediaKind::Thumbnail,
+        };
         // Requested right away, possibly before the connection is up: must be deferred, not lost.
         h.client.send(Command::FetchMedia(media.clone()));
-        let ClientEvent::MediaReady { path, .. } = h.next("media", |e| matches!(e, ClientEvent::MediaReady { .. })) else {
+        let ClientEvent::MediaReady { path, .. } =
+            h.next("media", |e| matches!(e, ClientEvent::MediaReady { .. }))
+        else {
             unreachable!()
         };
         assert!(path.starts_with(h.dir.path().join("media").join(UID)));
         assert_eq!(fs::read(&path).unwrap(), b"bytes");
         h.client.send(Command::FetchMedia(media));
-        h.next("cached media", |e| matches!(e, ClientEvent::MediaReady { .. }));
+        h.next("cached media", |e| {
+            matches!(e, ClientEvent::MediaReady { .. })
+        });
         assert_eq!(h.fake.state().media_calls, 1);
     }
 
@@ -2799,14 +3713,23 @@ mod tests {
     fn sign_out_removes_session_cache_and_media() {
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(1), None)], "a", &[msg("a", 1, "x")], true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(1), None)],
+                    "a",
+                    &[msg("a", 1, "x")],
+                    true,
+                );
                 s.chats = vec![chat("a", Some(1), None)];
                 s.media.insert("pic".into(), b"bytes".to_vec());
             },
             50,
         );
         h.online();
-        h.client.send(Command::FetchMedia(MediaRef { id: "pic".into(), kind: MediaKind::Avatar }));
+        h.client.send(Command::FetchMedia(MediaRef {
+            id: "pic".into(),
+            kind: MediaKind::Avatar,
+        }));
         h.next("media", |e| matches!(e, ClientEvent::MediaReady { .. }));
         let root = h.dir.path();
         assert!(root.join("session.json").exists());
@@ -2824,7 +3747,13 @@ mod tests {
     fn another_account_gets_its_own_cache() {
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("old", Some(1), None)], "old", &[msg("old", 1, "x")], true);
+                seed_cache(
+                    dir,
+                    &[chat("old", Some(1), None)],
+                    "old",
+                    &[msg("old", 1, "x")],
+                    true,
+                );
                 s.account = "other".into();
                 s.chats = vec![chat("new", Some(1), None)];
             },
@@ -2841,10 +3770,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = crate::paths::cache_path(dir.path(), &account());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(&path, b"this is not a sqlite database, but it may hold unsent messages").unwrap();
+        fs::write(
+            &path,
+            b"this is not a sqlite database, but it may hold unsent messages",
+        )
+        .unwrap();
 
         let cache = open_cache(dir.path(), &account());
-        cache.put_draft(&Draft { chat: id("a"), text: "new".into(), reply_to: None }).unwrap();
+        cache
+            .put_draft(&Draft {
+                chat: id("a"),
+                text: "new".into(),
+                reply_to: None,
+            })
+            .unwrap();
         assert_eq!(cache.drafts().unwrap().len(), 1);
         let moved: Vec<_> = fs::read_dir(path.parent().unwrap())
             .unwrap()
@@ -2852,14 +3791,22 @@ mod tests {
             .filter(|p| p.to_string_lossy().contains(".sqlite.broken-"))
             .collect();
         assert_eq!(moved.len(), 1, "{moved:?}");
-        assert_eq!(fs::read(&moved[0]).unwrap(), b"this is not a sqlite database, but it may hold unsent messages");
+        assert_eq!(
+            fs::read(&moved[0]).unwrap(),
+            b"this is not a sqlite database, but it may hold unsent messages"
+        );
     }
 
     // -- sending ----------------------------------------------------------------------------
 
     fn is_settled(chat_id: &str, payload: &PayloadId) -> impl Fn(&ClientEvent) -> bool {
         let (chat_id, payload) = (id(chat_id), payload.clone());
-        move |e| *e == ClientEvent::PendingSettled { chat: chat_id.clone(), payload: payload.clone() }
+        move |e| {
+            *e == ClientEvent::PendingSettled {
+                chat: chat_id.clone(),
+                payload: payload.clone(),
+            }
+        }
     }
 
     fn is_upsert_at(ts: MessageTs) -> impl Fn(&ClientEvent) -> bool {
@@ -2880,25 +3827,62 @@ mod tests {
         let pending = h.upserted("pending message");
         let payload = payload_of(&pending);
         assert_eq!(
-            (pending.chat.clone(), pending.outgoing, pending.author.clone(), pending.body.clone()),
+            (
+                pending.chat.clone(),
+                pending.outgoing,
+                pending.author.clone(),
+                pending.body.clone()
+            ),
             (id("a"), true, account(), MessageBody::Text("hi".into()))
         );
         assert!(pending.timestamp > 5);
 
         let events = h.until("server copy", is_upsert_at(777));
-        let settled = events.iter().position(is_settled("a", &payload)).expect("pending message settled");
-        assert_eq!(settled, events.len() - 2, "the settlement directly precedes the server copy");
-        let ClientEvent::MessageUpserted(copy) = events.last().unwrap() else { unreachable!() };
-        assert_eq!((copy.delivery.clone(), copy.outgoing, copy.author.clone()), (Delivery::Sent, true, account()));
-        assert_eq!(h.cache().message(&id("a"), 777).unwrap().unwrap().body, MessageBody::Text("hi".into()));
+        let settled = events
+            .iter()
+            .position(is_settled("a", &payload))
+            .expect("pending message settled");
+        assert_eq!(
+            settled,
+            events.len() - 2,
+            "the settlement directly precedes the server copy"
+        );
+        let ClientEvent::MessageUpserted(copy) = events.last().unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(
+            (copy.delivery.clone(), copy.outgoing, copy.author.clone()),
+            (Delivery::Sent, true, account())
+        );
+        assert_eq!(
+            h.cache().message(&id("a"), 777).unwrap().unwrap().body,
+            MessageBody::Text("hi".into())
+        );
         assert!(h.cache().outbox().unwrap().is_empty());
-        assert_eq!(h.fake.calls(), [Call::Send { chat: id("a"), payload: payload.clone(), text: "hi".into(), reply: None }]);
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Send {
+                chat: id("a"),
+                payload: payload.clone(),
+                text: "hi".into(),
+                reply: None
+            }]
+        );
 
         // The echo of the same send arrives later: an ordinary upsert, no second settlement.
-        h.fake.push(LiveEvent::Echo { payload, message: own_copy("a", 777, "hi") });
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
+        h.fake.push(LiveEvent::Echo {
+            payload,
+            message: own_copy("a", 777, "hi"),
+        });
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
         let events = h.until("sentinel", is_upsert_at(900));
-        assert!(!events.iter().any(|e| matches!(e, ClientEvent::PendingSettled { .. })), "settled twice: {events:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::PendingSettled { .. })),
+            "settled twice: {events:?}"
+        );
         assert_eq!(events.iter().filter(|e| is_upsert_at(777)(*e)).count(), 1);
     }
 
@@ -2918,19 +3902,28 @@ mod tests {
         let payload = payload_of(&h.upserted("pending message"));
         h.wait_for("the send request", |s| s.calls.len() == 1);
 
-        h.fake.push(LiveEvent::Echo { payload: payload.clone(), message: own_copy("a", 888, "hi") });
+        h.fake.push(LiveEvent::Echo {
+            payload: payload.clone(),
+            message: own_copy("a", 888, "hi"),
+        });
         let events = h.until("echo copy", is_upsert_at(888));
-        let settled = events.iter().position(is_settled("a", &payload)).expect("echo settles the pending message");
+        let settled = events
+            .iter()
+            .position(is_settled("a", &payload))
+            .expect("echo settles the pending message");
         assert_eq!(settled, events.len() - 2);
 
         // The confirmation of the still-running request arrives after the echo.
         gate.notify_one();
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
         let mut seen = h.until("sentinel", is_upsert_at(900));
         h.quiet();
         seen.extend(h.drain());
         assert!(
-            !seen.iter().any(|e| matches!(e, ClientEvent::PendingSettled { .. }) || is_upsert_at(888)(e)),
+            !seen
+                .iter()
+                .any(|e| matches!(e, ClientEvent::PendingSettled { .. }) || is_upsert_at(888)(e)),
             "second signal was not a no-op: {seen:?}"
         );
         assert!(h.cache().outbox().unwrap().is_empty());
@@ -2941,10 +3934,20 @@ mod tests {
     fn echo_of_a_send_from_another_client_is_an_ordinary_upsert() {
         let h = start(|s, _| s.chats = vec![chat("a", Some(5), None)], 50);
         h.online();
-        h.fake.push(LiveEvent::Echo { payload: PayloadId("elsewhere".into()), message: own_copy("a", 50, "from phone") });
+        h.fake.push(LiveEvent::Echo {
+            payload: PayloadId("elsewhere".into()),
+            message: own_copy("a", 50, "from phone"),
+        });
         let events = h.until("upsert", is_upsert_at(50));
-        assert!(!events.iter().any(|e| matches!(e, ClientEvent::PendingSettled { .. })));
-        assert_eq!(h.cache().message(&id("a"), 50).unwrap().unwrap().body, MessageBody::Text("from phone".into()));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::PendingSettled { .. }))
+        );
+        assert_eq!(
+            h.cache().message(&id("a"), 50).unwrap().unwrap().body,
+            MessageBody::Text("from phone".into())
+        );
     }
 
     #[test]
@@ -2963,14 +3966,31 @@ mod tests {
             h.send_text("a", text);
         }
         let pending: Vec<Message> = (0..3).map(|_| h.upserted("pending message")).collect();
-        assert!(pending.windows(2).all(|w| w[0].timestamp < w[1].timestamp), "{pending:?}");
+        assert!(
+            pending.windows(2).all(|w| w[0].timestamp < w[1].timestamp),
+            "{pending:?}"
+        );
 
         let texts = |h: &Harness| -> Vec<String> {
-            h.fake.calls().into_iter().filter_map(|c| if let Call::Send { text, .. } = c { Some(text) } else { None }).collect()
+            h.fake
+                .calls()
+                .into_iter()
+                .filter_map(|c| {
+                    if let Call::Send { text, .. } = c {
+                        Some(text)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         };
         h.wait_for("first send", |s| s.calls.len() == 1);
         h.quiet();
-        assert_eq!(texts(&h), ["one"], "the next send waits for the one in flight");
+        assert_eq!(
+            texts(&h),
+            ["one"],
+            "the next send waits for the one in flight"
+        );
         gate.notify_one();
         h.wait_for("second send", |s| s.calls.len() == 2);
         h.quiet();
@@ -2983,7 +4003,13 @@ mod tests {
         let events = h.until("third settled", is_settled("a", &third));
         let settled: Vec<PayloadId> = events
             .iter()
-            .filter_map(|e| if let ClientEvent::PendingSettled { payload, .. } = e { Some(payload.clone()) } else { None })
+            .filter_map(|e| {
+                if let ClientEvent::PendingSettled { payload, .. } = e {
+                    Some(payload.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(settled, pending.iter().map(payload_of).collect::<Vec<_>>());
         assert_eq!(texts(&h), ["one", "two", "three"]);
@@ -2995,7 +4021,13 @@ mod tests {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(FAR), None)], "a", &[msg("a", FAR, "future")], true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(FAR), None)],
+                    "a",
+                    &[msg("a", FAR, "future")],
+                    true,
+                );
                 s.chats = vec![chat("a", Some(FAR), None)];
                 s.history.insert(id("a"), vec![msg("a", FAR, "future")]);
                 s.send_gate = Some(gate.clone());
@@ -3013,15 +4045,29 @@ mod tests {
     fn reply_target_goes_to_the_backend_and_is_quoted_in_the_pending_message() {
         let h = start(|s, _| s.chats = vec![chat("a", Some(5), None)], 50);
         h.online();
-        let target = ReplyTarget { timestamp: 7, author: Some("Ann".into()), text: "question".into() };
-        h.client.send(Command::Send { chat: id("a"), text: "answer".into(), reply_to: Some(target.clone()) });
+        let target = ReplyTarget {
+            timestamp: 7,
+            author: Some("Ann".into()),
+            text: "question".into(),
+        };
+        h.client.send(Command::Send {
+            chat: id("a"),
+            text: "answer".into(),
+            reply_to: Some(target.clone()),
+        });
         let pending = h.upserted("pending reply");
         assert_eq!(
             pending.reply_to,
-            Some(ReplyQuote { author: Some("Ann".into()), text: "question".into(), timestamp: Some(7) })
+            Some(ReplyQuote {
+                author: Some("Ann".into()),
+                text: "question".into(),
+                timestamp: Some(7)
+            })
         );
         h.wait_for("the send request", |s| !s.calls.is_empty());
-        let Call::Send { reply, .. } = h.fake.calls().remove(0) else { panic!("not a send") };
+        let Call::Send { reply, .. } = h.fake.calls().remove(0) else {
+            panic!("not a send")
+        };
         assert_eq!(reply, Some(target));
     }
 
@@ -3040,24 +4086,40 @@ mod tests {
         let payload = payload_of(&pending);
         let failed = h.upserted("failed message");
         assert_eq!(failed.timestamp, pending.timestamp);
-        assert_eq!(failed.delivery, Delivery::Failed { payload: payload.clone(), reason: "NO_PERMISSION".into() });
-        assert_eq!(h.cache().outbox().unwrap()[0].failed.as_deref(), Some("NO_PERMISSION"));
+        assert_eq!(
+            failed.delivery,
+            Delivery::Failed {
+                payload: payload.clone(),
+                reason: "NO_PERMISSION".into()
+            }
+        );
+        assert_eq!(
+            h.cache().outbox().unwrap()[0].failed.as_deref(),
+            Some("NO_PERMISSION")
+        );
         h.quiet();
         assert_eq!(h.fake.calls().len(), 1, "no automatic retry");
 
         // A failed message must not hold back other chats.
         h.send_text("b", "other");
-        h.next("other chat settled", |e| matches!(e, ClientEvent::PendingSettled { chat, .. } if chat.0 == "b"));
+        h.next(
+            "other chat settled",
+            |e| matches!(e, ClientEvent::PendingSettled { chat, .. } if chat.0 == "b"),
+        );
 
         h.client.send(Command::Retry(payload.clone()));
         let again = h.next("pending again", |e| {
             matches!(e, ClientEvent::MessageUpserted(m) if m.delivery == Delivery::Pending(payload.clone()))
         });
-        assert!(matches!(again, ClientEvent::MessageUpserted(m) if m.timestamp == pending.timestamp));
+        assert!(
+            matches!(again, ClientEvent::MessageUpserted(m) if m.timestamp == pending.timestamp)
+        );
         h.next("retry settled", is_settled("a", &payload));
         let calls = h.fake.calls();
         assert_eq!(calls.len(), 3);
-        assert!(matches!(&calls[2], Call::Send { payload: p, text, .. } if *p == payload && text == "no"));
+        assert!(
+            matches!(&calls[2], Call::Send { payload: p, text, .. } if *p == payload && text == "no")
+        );
         assert!(h.cache().outbox().unwrap().is_empty());
     }
 
@@ -3066,11 +4128,14 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(5), None)];
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.send_text("a", "later");
         let payload = payload_of(&h.upserted("pending message"));
         h.quiet();
@@ -3089,9 +4154,17 @@ mod tests {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(5), None)], "a", &[msg("a", 5, "old")], true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(5), None)],
+                    "a",
+                    &[msg("a", 5, "old")],
+                    true,
+                );
                 let cache = Cache::open(dir, &account()).unwrap();
-                cache.put_outbox(&outbox_entry("p1", "a", 50, "queued")).unwrap();
+                cache
+                    .put_outbox(&outbox_entry("p1", "a", 50, "queued"))
+                    .unwrap();
                 let mut rejected_before = outbox_entry("p2", "a", 60, "refused");
                 rejected_before.failed = Some("NO_PERMISSION".into());
                 cache.put_outbox(&rejected_before).unwrap();
@@ -3108,16 +4181,27 @@ mod tests {
         let fetched = h.history("server chunk");
         for chunk in [catch_up, cached, fetched] {
             assert_eq!(stamps(&chunk), [5, 50, 60]);
-            assert_eq!(chunk.messages[1].delivery, Delivery::Pending(PayloadId("p1".into())));
+            assert_eq!(
+                chunk.messages[1].delivery,
+                Delivery::Pending(PayloadId("p1".into()))
+            );
             assert_eq!(
                 chunk.messages[2].delivery,
-                Delivery::Failed { payload: PayloadId("p2".into()), reason: "NO_PERMISSION".into() }
+                Delivery::Failed {
+                    payload: PayloadId("p2".into()),
+                    reason: "NO_PERMISSION".into()
+                }
             );
         }
         h.quiet();
         assert_eq!(
             h.fake.calls(),
-            [Call::Send { chat: id("a"), payload: PayloadId("p1".into()), text: "queued".into(), reply: None }],
+            [Call::Send {
+                chat: id("a"),
+                payload: PayloadId("p1".into()),
+                text: "queued".into(),
+                reply: None
+            }],
             "only the pending entry is resent"
         );
         gate.notify_one();
@@ -3143,7 +4227,10 @@ mod tests {
         h.next("settled", is_settled("a", &payload));
         let chunk = h.history("server copy");
         assert_eq!(stamps(&chunk), [5]);
-        assert_eq!(h.fake.state().history_calls.last(), Some(&(id("a"), None, 50)));
+        assert_eq!(
+            h.fake.state().history_calls.last(),
+            Some(&(id("a"), None, 50))
+        );
         assert!(h.cache().outbox().unwrap().is_empty());
     }
 
@@ -3152,7 +4239,10 @@ mod tests {
         let h = start(
             |s, _| {
                 s.chats = vec![chat("a", Some(5), None)];
-                s.send_results = VecDeque::from([Err(BackendError::Network("down".into())), Err(rejected("THROTTLED", false))]);
+                s.send_results = VecDeque::from([
+                    Err(BackendError::Network("down".into())),
+                    Err(rejected("THROTTLED", false)),
+                ]);
             },
             50,
         );
@@ -3166,7 +4256,11 @@ mod tests {
         );
         let calls = h.fake.calls();
         assert_eq!(calls.len(), 3);
-        assert!(calls.iter().all(|c| matches!(c, Call::Send { payload: p, .. } if *p == payload)));
+        assert!(
+            calls
+                .iter()
+                .all(|c| matches!(c, Call::Send { payload: p, .. } if *p == payload))
+        );
     }
 
     // -- sends that cannot be stored or that race history -----------------------------------
@@ -3191,15 +4285,41 @@ mod tests {
             50,
         );
         h.online();
-        let reply = ReplyTarget { timestamp: 3, author: Some("Ann".into()), text: "quoted".into() };
-        h.client.send(Command::Send { chat: id("a"), text: "hi".into(), reply_to: Some(reply.clone()) });
-        let events = h.until("refusal", |e| matches!(e, ClientEvent::SendRefused { .. } | ClientEvent::ActionFailed { .. }));
-        let draft = Draft { chat: id("a"), text: "hi".into(), reply_to: Some(reply) };
-        assert_eq!(events.last(), Some(&ClientEvent::SendRefused { draft, reason: STORE_FAILED_REASON.into() }));
+        let reply = ReplyTarget {
+            timestamp: 3,
+            author: Some("Ann".into()),
+            text: "quoted".into(),
+        };
+        h.client.send(Command::Send {
+            chat: id("a"),
+            text: "hi".into(),
+            reply_to: Some(reply.clone()),
+        });
+        let events = h.until("refusal", |e| {
+            matches!(
+                e,
+                ClientEvent::SendRefused { .. } | ClientEvent::ActionFailed { .. }
+            )
+        });
+        let draft = Draft {
+            chat: id("a"),
+            text: "hi".into(),
+            reply_to: Some(reply),
+        };
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::SendRefused {
+                draft,
+                reason: STORE_FAILED_REASON.into()
+            })
+        );
         h.quiet();
         let rest = h.drain();
         assert!(
-            !events.iter().chain(&rest).any(|e| matches!(e, ClientEvent::MessageUpserted(_))),
+            !events
+                .iter()
+                .chain(&rest)
+                .any(|e| matches!(e, ClientEvent::MessageUpserted(_))),
             "no pending message: {events:?} {rest:?}"
         );
         assert_eq!(h.fake.calls(), [], "nothing reaches the server");
@@ -3208,7 +4328,10 @@ mod tests {
     /// Opens the uncached chat "a" with its history held back, sends "hi" (confirmed at 777)
     /// meanwhile, lets `later` more messages (1000, 1001, ...) arrive live, then releases the
     /// history and returns the chunk the UI gets.
-    fn first_history_after_a_confirmed_send(snapshot: Vec<Message>, later: MessageTs) -> (Harness, HistoryChunk) {
+    fn first_history_after_a_confirmed_send(
+        snapshot: Vec<Message>,
+        later: MessageTs,
+    ) -> (Harness, HistoryChunk) {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, _| {
@@ -3225,9 +4348,13 @@ mod tests {
         h.send_text("a", "hi");
         let payload = payload_of(&h.upserted("pending message"));
         h.until("server copy", is_upsert_at(777));
-        assert!(h.cache().outbox().unwrap().is_empty(), "settled before the history arrives: {payload:?}");
+        assert!(
+            h.cache().outbox().unwrap().is_empty(),
+            "settled before the history arrives: {payload:?}"
+        );
         for ts in 1000..1000 + later {
-            h.fake.push(LiveEvent::MessageUpserted(msg("a", ts, "later")));
+            h.fake
+                .push(LiveEvent::MessageUpserted(msg("a", ts, "later")));
         }
         if later > 0 {
             h.until("the last live message", is_upsert_at(999 + later));
@@ -3242,17 +4369,29 @@ mod tests {
         let snapshot = vec![msg("a", 1, "one"), msg("a", 2, "two"), msg("a", 3, "three")];
         let (h, chunk) = first_history_after_a_confirmed_send(snapshot, 0);
         assert_eq!(stamps(&chunk), [1, 2, 3, 777]);
-        assert!(chunk.messages.iter().all(|m| m.delivery == Delivery::Sent), "no pending copy: {chunk:?}");
+        assert!(
+            chunk.messages.iter().all(|m| m.delivery == Delivery::Sent),
+            "no pending copy: {chunk:?}"
+        );
         assert_eq!(chunk.messages[3].body, MessageBody::Text("hi".into()));
-        assert_eq!(stamps(&h.cache().history(&id("a"), None, 50).unwrap()), [1, 2, 3, 777]);
+        assert_eq!(
+            stamps(&h.cache().history(&id("a"), None, 50).unwrap()),
+            [1, 2, 3, 777]
+        );
     }
 
     #[test]
     fn a_send_confirmed_during_the_first_load_of_an_empty_chat_is_part_of_that_history() {
         let (h, chunk) = first_history_after_a_confirmed_send(Vec::new(), 0);
         assert_eq!(stamps(&chunk), [777]);
-        assert!(chunk.messages.iter().all(|m| m.delivery == Delivery::Sent), "no pending copy: {chunk:?}");
-        assert_eq!(stamps(&h.cache().history(&id("a"), None, 50).unwrap()), [777]);
+        assert!(
+            chunk.messages.iter().all(|m| m.delivery == Delivery::Sent),
+            "no pending copy: {chunk:?}"
+        );
+        assert_eq!(
+            stamps(&h.cache().history(&id("a"), None, 50).unwrap()),
+            [777]
+        );
     }
 
     #[test]
@@ -3260,17 +4399,25 @@ mod tests {
         let snapshot = vec![msg("a", 1, "one"), msg("a", 2, "two"), msg("a", 3, "three")];
         let later = LIVE_LOG_CAP as MessageTs + 44;
         let (_h, chunk) = first_history_after_a_confirmed_send(snapshot, later);
-        let expected: Vec<MessageTs> = [1, 2, 3, 777].into_iter().chain(1000..1000 + later).collect();
+        let expected: Vec<MessageTs> = [1, 2, 3, 777]
+            .into_iter()
+            .chain(1000..1000 + later)
+            .collect();
         assert_eq!(stamps(&chunk), expected);
     }
 
     #[test]
-    fn a_confirmed_send_stays_in_the_first_history_of_an_empty_chat_after_the_live_log_overflowed() {
+    fn a_confirmed_send_stays_in_the_first_history_of_an_empty_chat_after_the_live_log_overflowed()
+    {
         let later = LIVE_LOG_CAP as MessageTs + 44;
         let (h, chunk) = first_history_after_a_confirmed_send(Vec::new(), later);
         let expected: Vec<MessageTs> = std::iter::once(777).chain(1000..1000 + later).collect();
         assert_eq!(stamps(&chunk), expected);
-        assert_eq!(stamps(&h.cache().history(&id("a"), None, 500).unwrap()), expected, "the cache keeps them too");
+        assert_eq!(
+            stamps(&h.cache().history(&id("a"), None, 500).unwrap()),
+            expected,
+            "the cache keeps them too"
+        );
     }
 
     #[test]
@@ -3278,13 +4425,27 @@ mod tests {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(5), None)], "a", &[msg("a", 5, "old")], true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(5), None)],
+                    "a",
+                    &[msg("a", 5, "old")],
+                    true,
+                );
                 let cache = Cache::open(dir, &account()).unwrap();
-                cache.put_outbox(&outbox_entry("p1", "a", 50, "queued")).unwrap();
-                cache.put_outbox(&outbox_entry("p2", "a", 70, "later")).unwrap();
+                cache
+                    .put_outbox(&outbox_entry("p1", "a", 50, "queued"))
+                    .unwrap();
+                cache
+                    .put_outbox(&outbox_entry("p2", "a", 70, "later"))
+                    .unwrap();
                 s.chats = vec![chat("a", Some(5), None)];
-                s.history.insert(id("a"), vec![msg("a", 5, "old"), own_copy("a", 60, "queued")]);
-                s.history_payloads.insert(id("a"), vec![PayloadId("p1".into())]);
+                s.history.insert(
+                    id("a"),
+                    vec![msg("a", 5, "old"), own_copy("a", 60, "queued")],
+                );
+                s.history_payloads
+                    .insert(id("a"), vec![PayloadId("p1".into())]);
                 // The resend of p1 stays outstanding: only the history can settle it.
                 s.send_gate = Some(gate.clone());
             },
@@ -3293,23 +4454,44 @@ mod tests {
         h.online();
         let p1 = PayloadId("p1".into());
         let events = h.until("catch-up history", |e| matches!(e, ClientEvent::History(_)));
-        let settled = events.iter().position(is_settled("a", &p1)).expect("p1 settled by the history");
-        assert_eq!(settled, events.len() - 2, "the settlement directly precedes the chunk");
-        let Some(ClientEvent::History(chunk)) = events.last() else { unreachable!() };
+        let settled = events
+            .iter()
+            .position(is_settled("a", &p1))
+            .expect("p1 settled by the history");
+        assert_eq!(
+            settled,
+            events.len() - 2,
+            "the settlement directly precedes the chunk"
+        );
+        let Some(ClientEvent::History(chunk)) = events.last() else {
+            unreachable!()
+        };
         assert_eq!(stamps(chunk), [5, 60, 70]);
         assert_eq!(chunk.messages[1].delivery, Delivery::Sent);
-        assert_eq!(chunk.messages[2].delivery, Delivery::Pending(PayloadId("p2".into())));
+        assert_eq!(
+            chunk.messages[2].delivery,
+            Delivery::Pending(PayloadId("p2".into()))
+        );
         let left = h.cache().outbox().unwrap();
-        assert_eq!(left.iter().map(|e| e.payload.0.as_str()).collect::<Vec<_>>(), ["p2"]);
+        assert_eq!(
+            left.iter()
+                .map(|e| e.payload.0.as_str())
+                .collect::<Vec<_>>(),
+            ["p2"]
+        );
 
         // The answer of the still-running resend arrives late: nothing is left to do for it.
         gate.notify_one();
-        h.fake.push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 900, "sentinel")));
         let mut seen = h.until("sentinel", is_upsert_at(900));
         h.quiet();
         seen.extend(h.drain());
         assert!(
-            !seen.iter().any(|e| matches!(e, ClientEvent::PendingSettled { payload, .. } if *payload == p1) || is_upsert_at(SERVER_TS)(e)),
+            !seen.iter().any(
+                |e| matches!(e, ClientEvent::PendingSettled { payload, .. } if *payload == p1)
+                    || is_upsert_at(SERVER_TS)(e)
+            ),
             "late confirmation was not a no-op: {seen:?}"
         );
     }
@@ -3319,47 +4501,97 @@ mod tests {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(5), None)], "a", &[msg("a", 4, "four"), msg("a", 5, "five")], false);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(5), None)],
+                    "a",
+                    &[msg("a", 4, "four"), msg("a", 5, "five")],
+                    false,
+                );
                 let cache = Cache::open(dir, &account()).unwrap();
-                cache.put_outbox(&outbox_entry("p1", "a", 50, "queued")).unwrap();
-                cache.put_outbox(&outbox_entry("p2", "a", 70, "later")).unwrap();
+                cache
+                    .put_outbox(&outbox_entry("p1", "a", 50, "queued"))
+                    .unwrap();
+                cache
+                    .put_outbox(&outbox_entry("p2", "a", 70, "later"))
+                    .unwrap();
                 s.chats = vec![chat("a", Some(5), None)];
                 s.history.insert(
                     id("a"),
-                    vec![msg("a", 2, "two"), own_copy("a", 3, "queued"), msg("a", 4, "four"), msg("a", 5, "five")],
+                    vec![
+                        msg("a", 2, "two"),
+                        own_copy("a", 3, "queued"),
+                        msg("a", 4, "four"),
+                        msg("a", 5, "five"),
+                    ],
                 );
                 s.send_gate = Some(gate.clone());
-                s.send_results.push_back(Err(BackendError::Network("down".into())));
+                s.send_results
+                    .push_back(Err(BackendError::Network("down".into())));
             },
             2,
         );
         h.online();
         let newest = h.history("catch-up");
-        assert_eq!(stamps(&newest), [4, 5, 50, 70], "the newest page shows both pending messages");
+        assert_eq!(
+            stamps(&newest),
+            [4, 5, 50, 70],
+            "the newest page shows both pending messages"
+        );
         h.wait_for("the first resend", |s| !s.calls.is_empty());
 
         // Only a later, older page carries p1's payload.
-        h.fake.state().history_payloads.insert(id("a"), vec![PayloadId("p1".into())]);
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 4 });
+        h.fake
+            .state()
+            .history_payloads
+            .insert(id("a"), vec![PayloadId("p1".into())]);
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 4,
+        });
         let p1 = PayloadId("p1".into());
         let events = h.until("older page", |e| matches!(e, ClientEvent::History(_)));
-        assert!(events.iter().any(is_settled("a", &p1)), "the older page settled p1: {events:?}");
-        let Some(ClientEvent::History(chunk)) = events.last() else { unreachable!() };
-        assert_eq!(stamps(chunk), [2, 3], "an older page never gets pending messages");
+        assert!(
+            events.iter().any(is_settled("a", &p1)),
+            "the older page settled p1: {events:?}"
+        );
+        let Some(ClientEvent::History(chunk)) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(
+            stamps(chunk),
+            [2, 3],
+            "an older page never gets pending messages"
+        );
         let left = h.cache().outbox().unwrap();
-        assert_eq!(left.iter().map(|e| e.payload.0.as_str()).collect::<Vec<_>>(), ["p2"], "p1 left the durable outbox");
+        assert_eq!(
+            left.iter()
+                .map(|e| e.payload.0.as_str())
+                .collect::<Vec<_>>(),
+            ["p2"],
+            "p1 left the durable outbox"
+        );
 
         // The in-flight resend of p1 fails transiently once it is released. Were p1 still queued,
         // that would hold the queue and resend it after the backoff.
         gate.notify_waiters();
         h.quiet();
         let sends_of = |h: &Harness, payload: &PayloadId| {
-            h.fake.calls().iter().filter(|c| matches!(c, Call::Send { payload: p, .. } if p == payload)).count()
+            h.fake
+                .calls()
+                .iter()
+                .filter(|c| matches!(c, Call::Send { payload: p, .. } if p == payload))
+                .count()
         };
         assert_eq!(sends_of(&h, &p1), 1, "p1 was resent after it was settled");
 
         // Reopening against the same runtime dir shows the server copy and no pending p1.
-        let Harness { dir, client, events, fake: _ } = h;
+        let Harness {
+            dir,
+            client,
+            events,
+            fake: _,
+        } = h;
         drop((client, events));
         std::thread::sleep(Duration::from_millis(50));
         let reopened = start_in(
@@ -3368,7 +4600,12 @@ mod tests {
                 s.chats = vec![chat("a", Some(5), None)];
                 s.history.insert(
                     id("a"),
-                    vec![msg("a", 2, "two"), own_copy("a", 3, "queued"), msg("a", 4, "four"), msg("a", 5, "five")],
+                    vec![
+                        msg("a", 2, "two"),
+                        own_copy("a", 3, "queued"),
+                        msg("a", 4, "four"),
+                        msg("a", 5, "five"),
+                    ],
                 );
                 s.send_gate = Some(Arc::new(tokio::sync::Notify::new()));
             },
@@ -3380,19 +4617,42 @@ mod tests {
         let fetched = reopened.history("server chunk");
         for chunk in [&cached, &fetched] {
             assert_eq!(stamps(chunk), [2, 3, 4, 5, 70]);
-            assert_eq!(chunk.messages[1].delivery, Delivery::Sent, "the server copy of p1");
-            let pending: Vec<_> = chunk.messages.iter().filter(|m| m.delivery != Delivery::Sent).map(payload_of).collect();
-            assert_eq!(pending, [PayloadId("p2".into())], "p1 must not come back as a pending duplicate");
+            assert_eq!(
+                chunk.messages[1].delivery,
+                Delivery::Sent,
+                "the server copy of p1"
+            );
+            let pending: Vec<_> = chunk
+                .messages
+                .iter()
+                .filter(|m| m.delivery != Delivery::Sent)
+                .map(payload_of)
+                .collect();
+            assert_eq!(
+                pending,
+                [PayloadId("p2".into())],
+                "p1 must not come back as a pending duplicate"
+            );
         }
         reopened.quiet();
-        assert_eq!(sends_of(&reopened, &p1), 0, "a restart resent the settled p1");
+        assert_eq!(
+            sends_of(&reopened, &p1),
+            0,
+            "a restart resent the settled p1"
+        );
     }
 
     // -- edits and deletions ----------------------------------------------------------------
 
     fn with_own_message(s: &mut FakeState, dir: &Path) {
         let own = own_copy("a", 3, "old");
-        seed_cache(dir, &[chat("a", Some(3), None)], "a", std::slice::from_ref(&own), true);
+        seed_cache(
+            dir,
+            &[chat("a", Some(3), None)],
+            "a",
+            std::slice::from_ref(&own),
+            true,
+        );
         s.chats = vec![chat("a", Some(3), None)];
         s.history.insert(id("a"), vec![own]);
     }
@@ -3402,14 +4662,26 @@ mod tests {
         let h = start(with_own_message, 50);
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Edit { chat: id("a"), timestamp: 3, text: "new".into() });
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
         let edited = h.upserted("edited message");
-        assert_eq!((edited.timestamp, edited.body.clone(), edited.edited), (3, MessageBody::Text("new".into()), true));
+        assert_eq!(
+            (edited.timestamp, edited.body.clone(), edited.edited),
+            (3, MessageBody::Text("new".into()), true)
+        );
         assert!(edited.outgoing);
         assert_eq!(h.fake.calls(), [Call::Edit(id("a"), 3, "new".into(), None)]);
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.edited), (MessageBody::Text("new".into()), true));
-        let ClientEvent::ChatUpdated(row) = h.next("row preview", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        assert_eq!(
+            (cached.body, cached.edited),
+            (MessageBody::Text("new".into()), true)
+        );
+        let ClientEvent::ChatUpdated(row) =
+            h.next("row preview", |e| matches!(e, ClientEvent::ChatUpdated(_)))
+        else {
             unreachable!()
         };
         assert_eq!(row.last_message.unwrap().text, "new");
@@ -3426,12 +4698,29 @@ mod tests {
         );
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Edit { chat: id("a"), timestamp: 3, text: "new".into() });
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
         let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
-        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason: "NO_PERMISSION".into() }));
-        assert!(!events.iter().any(|e| matches!(e, ClientEvent::MessageUpserted(_))));
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::ActionFailed {
+                chat: id("a"),
+                reason: "NO_PERMISSION".into()
+            })
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::MessageUpserted(_)))
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.edited), (MessageBody::Text("old".into()), false));
+        assert_eq!(
+            (cached.body, cached.edited),
+            (MessageBody::Text("old".into()), false)
+        );
     }
 
     #[test]
@@ -3439,13 +4728,25 @@ mod tests {
         let h = start(with_own_message, 50);
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Delete { chat: id("a"), timestamp: 3 });
+        h.client.send(Command::Delete {
+            chat: id("a"),
+            timestamp: 3,
+        });
         assert_eq!(
-            h.next("deleted", |e| matches!(e, ClientEvent::MessageDeleted { .. })),
-            ClientEvent::MessageDeleted { chat: id("a"), timestamp: 3 }
+            h.next("deleted", |e| matches!(
+                e,
+                ClientEvent::MessageDeleted { .. }
+            )),
+            ClientEvent::MessageDeleted {
+                chat: id("a"),
+                timestamp: 3
+            }
         );
         assert_eq!(h.fake.calls(), [Call::Delete(id("a"), 3)]);
-        assert_eq!(h.cache().message(&id("a"), 3).unwrap().unwrap().body, MessageBody::Deleted);
+        assert_eq!(
+            h.cache().message(&id("a"), 3).unwrap().unwrap().body,
+            MessageBody::Deleted
+        );
     }
 
     #[test]
@@ -3459,10 +4760,20 @@ mod tests {
         );
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Delete { chat: id("a"), timestamp: 3 });
+        h.client.send(Command::Delete {
+            chat: id("a"),
+            timestamp: 3,
+        });
         let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
-        assert!(!events.iter().any(|e| matches!(e, ClientEvent::MessageDeleted { .. })));
-        assert_eq!(h.cache().message(&id("a"), 3).unwrap().unwrap().body, MessageBody::Text("old".into()));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::MessageDeleted { .. }))
+        );
+        assert_eq!(
+            h.cache().message(&id("a"), 3).unwrap().unwrap().body,
+            MessageBody::Text("old".into())
+        );
     }
 
     #[test]
@@ -3470,19 +4781,47 @@ mod tests {
         let h = start(
             |s, dir| {
                 with_own_message(s, dir);
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
-        h.client.send(Command::Edit { chat: id("a"), timestamp: 3, text: "new".into() });
-        h.client.send(Command::Delete { chat: id("a"), timestamp: 3 });
-        let failure = ClientEvent::ActionFailed { chat: id("a"), reason: "Нет соединения".into() };
-        assert_eq!(h.next("edit failure", |e| matches!(e, ClientEvent::ActionFailed { .. })), failure);
-        assert_eq!(h.next("delete failure", |e| matches!(e, ClientEvent::ActionFailed { .. })), failure);
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
+        h.client.send(Command::Delete {
+            chat: id("a"),
+            timestamp: 3,
+        });
+        let failure = ClientEvent::ActionFailed {
+            chat: id("a"),
+            reason: "Нет соединения".into(),
+        };
+        assert_eq!(
+            h.next("edit failure", |e| matches!(
+                e,
+                ClientEvent::ActionFailed { .. }
+            )),
+            failure
+        );
+        assert_eq!(
+            h.next("delete failure", |e| matches!(
+                e,
+                ClientEvent::ActionFailed { .. }
+            )),
+            failure
+        );
         assert!(h.fake.calls().is_empty());
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.edited), (MessageBody::Text("old".into()), false));
+        assert_eq!(
+            (cached.body, cached.edited),
+            (MessageBody::Text("old".into()), false)
+        );
     }
 
     fn start_with_own_message(mutate: impl FnOnce(&mut Message)) -> Harness {
@@ -3490,7 +4829,13 @@ mod tests {
             |s, dir| {
                 let mut own = own_copy("a", 3, "old");
                 mutate(&mut own);
-                seed_cache(dir, &[chat("a", Some(3), None)], "a", std::slice::from_ref(&own), true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(3), None)],
+                    "a",
+                    std::slice::from_ref(&own),
+                    true,
+                );
                 s.chats = vec![chat("a", Some(3), None)];
                 s.history.insert(id("a"), vec![own]);
             },
@@ -3499,7 +4844,11 @@ mod tests {
     }
 
     fn quote(timestamp: Option<MessageTs>) -> ReplyQuote {
-        ReplyQuote { author: Some("Ann".into()), text: "quoted".into(), timestamp }
+        ReplyQuote {
+            author: Some("Ann".into()),
+            text: "quoted".into(),
+            timestamp,
+        }
     }
 
     #[test]
@@ -3507,36 +4856,75 @@ mod tests {
         let h = start_with_own_message(|m| m.reply_to = Some(quote(Some(2))));
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Edit { chat: id("a"), timestamp: 3, text: "new".into() });
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
         h.upserted("edited message");
-        let target = ReplyTarget { timestamp: 2, author: Some("Ann".into()), text: "quoted".into() };
-        assert_eq!(h.fake.calls(), [Call::Edit(id("a"), 3, "new".into(), Some(target))]);
+        let target = ReplyTarget {
+            timestamp: 2,
+            author: Some("Ann".into()),
+            text: "quoted".into(),
+        };
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Edit(id("a"), 3, "new".into(), Some(target))]
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!(cached.reply_to, Some(quote(Some(2))), "the quote survives the local edit");
+        assert_eq!(
+            cached.reply_to,
+            Some(quote(Some(2))),
+            "the quote survives the local edit"
+        );
     }
 
     fn assert_edit_refused(h: &Harness, timestamp: MessageTs) {
         h.online();
         h.history("catch-up");
-        h.client.send(Command::Edit { chat: id("a"), timestamp, text: "new".into() });
-        let failure = ClientEvent::ActionFailed { chat: id("a"), reason: "Это сообщение нельзя изменить".into() };
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp,
+            text: "new".into(),
+        });
+        let failure = ClientEvent::ActionFailed {
+            chat: id("a"),
+            reason: "Это сообщение нельзя изменить".into(),
+        };
         let events = h.until("refusal", |e| matches!(e, ClientEvent::ActionFailed { .. }));
         assert_eq!(events.last(), Some(&failure));
         h.quiet();
-        assert!(h.fake.calls().is_empty(), "no backend call: {:?}", h.fake.calls());
-        assert!(h.drain().iter().all(|e| !matches!(e, ClientEvent::MessageUpserted(_))));
+        assert!(
+            h.fake.calls().is_empty(),
+            "no backend call: {:?}",
+            h.fake.calls()
+        );
+        assert!(
+            h.drain()
+                .iter()
+                .all(|e| !matches!(e, ClientEvent::MessageUpserted(_)))
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.edited), (MessageBody::Text("old".into()), false));
+        assert_eq!(
+            (cached.body, cached.edited),
+            (MessageBody::Text("old".into()), false)
+        );
     }
 
     #[test]
     fn editing_a_reply_without_its_original_timestamp_is_refused() {
-        assert_edit_refused(&start_with_own_message(|m| m.reply_to = Some(quote(None))), 3);
+        assert_edit_refused(
+            &start_with_own_message(|m| m.reply_to = Some(quote(None))),
+            3,
+        );
     }
 
     #[test]
     fn editing_a_forwarded_message_is_refused() {
-        assert_edit_refused(&start_with_own_message(|m| m.forwarded_from = Some("Bob".into())), 3);
+        assert_edit_refused(
+            &start_with_own_message(|m| m.forwarded_from = Some("Bob".into())),
+            3,
+        );
     }
 
     #[test]
@@ -3550,11 +4938,22 @@ mod tests {
     const FIRE: ReactionCode = ReactionCode(100102);
 
     fn counts(pairs: &[(ReactionCode, u32)]) -> Vec<ReactionCount> {
-        pairs.iter().map(|&(code, count)| ReactionCount { code, count }).collect()
+        pairs
+            .iter()
+            .map(|&(code, count)| ReactionCount { code, count })
+            .collect()
     }
 
-    fn reactions(pairs: &[(ReactionCode, u32)], mine: Option<ReactionCode>, version: i64) -> Reactions {
-        Reactions { counts: counts(pairs), mine, version: Some(version) }
+    fn reactions(
+        pairs: &[(ReactionCode, u32)],
+        mine: Option<ReactionCode>,
+        version: i64,
+    ) -> Reactions {
+        Reactions {
+            counts: counts(pairs),
+            mine,
+            version: Some(version),
+        }
     }
 
     /// Message 3 of chat "a" with two LIKEs of others and the server's version 5.
@@ -3565,10 +4964,20 @@ mod tests {
     }
 
     /// `cached` is in the cache at startup, `server` is what the server's history answers.
-    fn start_reacting(cached: Message, server: Message, configure: impl FnOnce(&mut FakeState)) -> Harness {
+    fn start_reacting(
+        cached: Message,
+        server: Message,
+        configure: impl FnOnce(&mut FakeState),
+    ) -> Harness {
         start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(3), None)], "a", std::slice::from_ref(&cached), true);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(3), None)],
+                    "a",
+                    std::slice::from_ref(&cached),
+                    true,
+                );
                 s.chats = vec![chat("a", Some(3), None)];
                 s.history.insert(id("a"), vec![server]);
                 configure(s);
@@ -3588,12 +4997,20 @@ mod tests {
     }
 
     fn toggle(h: &Harness, timestamp: MessageTs, code: ReactionCode) {
-        h.client.send(Command::ToggleReaction { chat: id("a"), timestamp, code });
+        h.client.send(Command::ToggleReaction {
+            chat: id("a"),
+            timestamp,
+            code,
+        });
     }
 
     fn next_reactions(h: &Harness, what: &str) -> (MessageTs, Reactions) {
         match h.next(what, |e| matches!(e, ClientEvent::ReactionsChanged { .. })) {
-            ClientEvent::ReactionsChanged { chat, timestamp, reactions } => {
+            ClientEvent::ReactionsChanged {
+                chat,
+                timestamp,
+                reactions,
+            } => {
                 assert_eq!(chat, id("a"));
                 (timestamp, reactions)
             }
@@ -3611,9 +5028,21 @@ mod tests {
             .collect()
     }
 
-    fn reaction_push(timestamp: MessageTs, pairs: &[(ReactionCode, u32)], version: i64) -> LiveEvent {
-        let update = ReactionsUpdate { counts: counts(pairs), version: Some(version), mine: None };
-        LiveEvent::ReactionsChanged { chat: id("a"), timestamp, update }
+    fn reaction_push(
+        timestamp: MessageTs,
+        pairs: &[(ReactionCode, u32)],
+        version: i64,
+    ) -> LiveEvent {
+        let update = ReactionsUpdate {
+            counts: counts(pairs),
+            version: Some(version),
+            mine: None,
+        };
+        LiveEvent::ReactionsChanged {
+            chat: id("a"),
+            timestamp,
+            update,
+        }
     }
 
     fn cached_reactions(h: &Harness) -> Reactions {
@@ -3632,12 +5061,20 @@ mod tests {
         let overlay = reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5);
         assert_eq!(next_reactions(&h, "overlay"), (3, overlay.clone()));
         h.wait_for("the request", |s| !s.calls.is_empty());
-        assert_eq!(cached_reactions(&h), reacted().reactions, "an unconfirmed choice is not cached");
+        assert_eq!(
+            cached_reactions(&h),
+            reacted().reactions,
+            "an unconfirmed choice is not cached"
+        );
         gate.notify_one();
         h.quiet();
         assert_eq!(cached_reactions(&h), overlay);
         assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, Some(FIRE))]);
-        assert_eq!(h.drain(), [], "the confirmation emits nothing and touches no preview");
+        assert_eq!(
+            h.drain(),
+            [],
+            "the confirmation emits nothing and touches no preview"
+        );
     }
 
     #[test]
@@ -3646,22 +5083,48 @@ mod tests {
         message.reactions = reactions(&[(LIKE, 2)], Some(LIKE), 5);
         let h = start_reacting_online(message, |_| {});
         toggle(&h, 3, LIKE);
-        assert_eq!(next_reactions(&h, "removal"), (3, reactions(&[(LIKE, 1)], None, 5)));
+        assert_eq!(
+            next_reactions(&h, "removal"),
+            (3, reactions(&[(LIKE, 1)], None, 5))
+        );
         h.wait_for("the removal", |s| s.calls.len() == 1);
         h.quiet();
         toggle(&h, 3, FIRE);
-        assert_eq!(next_reactions(&h, "choice"), (3, reactions(&[(LIKE, 1), (FIRE, 1)], Some(FIRE), 5)));
+        assert_eq!(
+            next_reactions(&h, "choice"),
+            (3, reactions(&[(LIKE, 1), (FIRE, 1)], Some(FIRE), 5))
+        );
         h.wait_for("the choice", |s| s.calls.len() == 2);
-        assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, None), Call::React(id("a"), 3, Some(FIRE))]);
+        assert_eq!(
+            h.fake.calls(),
+            [
+                Call::React(id("a"), 3, None),
+                Call::React(id("a"), 3, Some(FIRE))
+            ]
+        );
     }
 
     #[test]
     fn a_rejected_request_rolls_the_overlay_back_and_reports_the_reason() {
-        let h = start_reacting_online(reacted(), |s| s.write_results = VecDeque::from([Err(rejected("NO_PERMISSION", true))]));
+        let h = start_reacting_online(reacted(), |s| {
+            s.write_results = VecDeque::from([Err(rejected("NO_PERMISSION", true))])
+        });
         toggle(&h, 3, FIRE);
         let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
-        assert_eq!(shown(&events), [reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5), reacted().reactions]);
-        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason: "NO_PERMISSION".into() }));
+        assert_eq!(
+            shown(&events),
+            [
+                reactions(&[(LIKE, 2), (FIRE, 1)], Some(FIRE), 5),
+                reacted().reactions
+            ]
+        );
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::ActionFailed {
+                chat: id("a"),
+                reason: "NO_PERMISSION".into()
+            })
+        );
         assert_eq!(cached_reactions(&h), reacted().reactions);
         // The entry is gone: the user may choose again.
         toggle(&h, 3, FIRE);
@@ -3671,12 +5134,21 @@ mod tests {
     #[test]
     fn a_choice_while_offline_is_refused_at_once_without_an_overlay() {
         let h = start_reacting(reacted(), reacted(), |s| {
-            s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+            s.bootstrap_errors =
+                std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
         });
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         toggle(&h, 3, FIRE);
         let events = h.until("refusal", |e| matches!(e, ClientEvent::ActionFailed { .. }));
-        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason: "Нет соединения".into() }));
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::ActionFailed {
+                chat: id("a"),
+                reason: "Нет соединения".into()
+            })
+        );
         assert!(shown(&events).is_empty());
         h.quiet();
         assert!(h.fake.calls().is_empty());
@@ -3700,7 +5172,10 @@ mod tests {
         assert_eq!(h.fake.calls(), [Call::React(id("a"), 3, Some(FIRE))]);
         // Confirmed: the next choice is asked for again, from the confirmed state.
         toggle(&h, 3, FIRE);
-        assert_eq!(next_reactions(&h, "removal").1, reactions(&[(LIKE, 2)], None, 5));
+        assert_eq!(
+            next_reactions(&h, "removal").1,
+            reactions(&[(LIKE, 2)], None, 5)
+        );
         gate.notify_one();
         h.wait_for("the removal", |s| s.calls.len() == 2);
     }
@@ -3709,10 +5184,20 @@ mod tests {
         toggle(h, timestamp, FIRE);
         let events = h.until("refusal", |e| matches!(e, ClientEvent::ActionFailed { .. }));
         let reason = "На это сообщение нельзя отреагировать".to_owned();
-        assert_eq!(events.last(), Some(&ClientEvent::ActionFailed { chat: id("a"), reason }));
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::ActionFailed {
+                chat: id("a"),
+                reason
+            })
+        );
         assert!(shown(&events).is_empty());
         h.quiet();
-        assert!(h.fake.calls().is_empty(), "no backend call: {:?}", h.fake.calls());
+        assert!(
+            h.fake.calls().is_empty(),
+            "no backend call: {:?}",
+            h.fake.calls()
+        );
         assert!(shown(&h.drain()).is_empty());
     }
 
@@ -3721,7 +5206,10 @@ mod tests {
         let mut pending = reacted();
         pending.delivery = Delivery::Pending(PayloadId("p".into()));
         let mut failed = reacted();
-        failed.delivery = Delivery::Failed { payload: PayloadId("p".into()), reason: "no".into() };
+        failed.delivery = Delivery::Failed {
+            payload: PayloadId("p".into()),
+            reason: "no".into(),
+        };
         let mut deleted = reacted();
         deleted.body = MessageBody::Deleted;
         for message in [pending, failed, deleted] {
@@ -3737,7 +5225,10 @@ mod tests {
         h.fake.push(reaction_push(3, &[(FIRE, 9)], 4));
         h.fake.push(reaction_push(3, &[(FIRE, 1)], 6));
         // The first event shown is the newer one: the stale two emitted nothing.
-        assert_eq!(next_reactions(&h, "newer event"), (3, reactions(&[(FIRE, 1)], None, 6)));
+        assert_eq!(
+            next_reactions(&h, "newer event"),
+            (3, reactions(&[(FIRE, 1)], None, 6))
+        );
         assert_eq!(cached_reactions(&h), reactions(&[(FIRE, 1)], None, 6));
     }
 
@@ -3756,7 +5247,10 @@ mod tests {
         assert_eq!(next_reactions(&h, "server state"), (3, server.clone()));
         gate.notify_one();
         let events = h.until("failure", |e| matches!(e, ClientEvent::ActionFailed { .. }));
-        assert!(shown(&events).is_empty(), "the pushed state is the truth: {events:?}");
+        assert!(
+            shown(&events).is_empty(),
+            "the pushed state is the truth: {events:?}"
+        );
         assert_eq!(cached_reactions(&h), server);
     }
 
@@ -3772,7 +5266,11 @@ mod tests {
         assert_eq!(next_reactions(&h, "server state"), (3, server.clone()));
         gate.notify_one();
         h.quiet();
-        assert_eq!(cached_reactions(&h), server, "the confirmation must not write the overlay over it");
+        assert_eq!(
+            cached_reactions(&h),
+            server,
+            "the confirmation must not write the overlay over it"
+        );
         assert_eq!(h.drain(), []);
     }
 
@@ -3824,9 +5322,15 @@ mod tests {
         let chunk = h.history("raced history");
         let expected = reactions(&[(LIKE, 2), (FIRE, 1)], None, 6);
         let row = &chunk.messages[0];
-        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), expected.clone()));
+        assert_eq!(
+            (row.body.clone(), row.reactions.clone()),
+            (MessageBody::Text("hi!".into()), expected.clone())
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), expected));
+        assert_eq!(
+            (cached.body, cached.reactions),
+            (MessageBody::Text("hi!".into()), expected)
+        );
     }
 
     /// Rejected pushes for a cached message replay nothing and must not push the edit, which does,
@@ -3845,7 +5349,11 @@ mod tests {
         h.quiet();
         history.notify_one();
         let chunk = h.history("raced history");
-        let row = chunk.messages.iter().find(|m| m.timestamp == 3).expect("message 3");
+        let row = chunk
+            .messages
+            .iter()
+            .find(|m| m.timestamp == 3)
+            .expect("message 3");
         assert_eq!(row.body, MessageBody::Text("hi!".into()));
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
         assert_eq!(cached.body, MessageBody::Text("hi!".into()));
@@ -3865,7 +5373,10 @@ mod tests {
         h.quiet();
         history.notify_one();
         h.history("raced history");
-        assert!(h.cache().message(&id("a"), 4).unwrap().is_some(), "the live message must stay");
+        assert!(
+            h.cache().message(&id("a"), 4).unwrap().is_some(),
+            "the live message must stay"
+        );
     }
 
     /// Opens chat "a" online with `snapshot` as the server's answer: the fetch takes it now and
@@ -3894,7 +5405,10 @@ mod tests {
     }
 
     fn with_reactions(reactions: Reactions) -> Message {
-        Message { reactions, ..reacted() }
+        Message {
+            reactions,
+            ..reacted()
+        }
     }
 
     #[test]
@@ -3911,11 +5425,17 @@ mod tests {
         wait_cached(&h, "the confirmation", |r| *r == overlay);
         history.notify_one();
         let chunk = h.history("old snapshot");
-        assert_eq!(chunk.messages[0].reactions, overlay, "the UI must keep the confirmed choice");
+        assert_eq!(
+            chunk.messages[0].reactions, overlay,
+            "the UI must keep the confirmed choice"
+        );
         assert_eq!(cached_reactions(&h), overlay);
         // The next click asks for the removal, not for the same choice again.
         toggle(&h, 3, FIRE);
-        assert_eq!(next_reactions(&h, "removal").1, reactions(&[(LIKE, 2)], None, 5));
+        assert_eq!(
+            next_reactions(&h, "removal").1,
+            reactions(&[(LIKE, 2)], None, 5)
+        );
         h.wait_for("the removal", |s| s.calls.len() == 2);
         assert_eq!(h.fake.calls()[1], Call::React(id("a"), 3, None));
     }
@@ -3972,11 +5492,22 @@ mod tests {
         assert_eq!(cached_reactions(&h), server);
         react.notify_one();
         h.quiet();
-        assert_eq!(cached_reactions(&h), server, "the confirmation must not restore the overlay");
-        assert_eq!(shown(&h.drain()), [], "nothing is shown for the confirmation");
+        assert_eq!(
+            cached_reactions(&h),
+            server,
+            "the confirmation must not restore the overlay"
+        );
+        assert_eq!(
+            shown(&h.drain()),
+            [],
+            "nothing is shown for the confirmation"
+        );
         // The entry is gone: the next choice starts from the state history delivered.
         toggle(&h, 3, LIKE);
-        assert_eq!(next_reactions(&h, "next choice").1, reactions(&[(LIKE, 3), (FIRE, 2)], Some(LIKE), 7));
+        assert_eq!(
+            next_reactions(&h, "next choice").1,
+            reactions(&[(LIKE, 3), (FIRE, 2)], Some(LIKE), 7)
+        );
     }
 
     #[test]
@@ -3993,15 +5524,25 @@ mod tests {
         history.notify_one();
         let chunk = h.history("raced history");
         let row = &chunk.messages[0];
-        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), newer.clone()));
+        assert_eq!(
+            (row.body.clone(), row.reactions.clone()),
+            (MessageBody::Text("hi!".into()), newer.clone())
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), newer));
+        assert_eq!(
+            (cached.body, cached.reactions),
+            (MessageBody::Text("hi!".into()), newer)
+        );
     }
 
     #[test]
     fn a_versionless_snapshot_row_does_not_override_the_cached_state_and_an_edit_still_applies() {
         let h = start_reacting_online(reacted(), |_| {});
-        let versionless = Reactions { counts: counts(&[(FIRE, 1)]), mine: None, version: None };
+        let versionless = Reactions {
+            counts: counts(&[(FIRE, 1)]),
+            mine: None,
+            version: None,
+        };
         let history = hold_next_history(&h, with_reactions(versionless));
         let mut edited = msg("a", 3, "hi!");
         edited.edited = true;
@@ -4010,31 +5551,57 @@ mod tests {
         history.notify_one();
         let chunk = h.history("raced history");
         let row = &chunk.messages[0];
-        assert_eq!((row.body.clone(), row.reactions.clone()), (MessageBody::Text("hi!".into()), reacted().reactions));
+        assert_eq!(
+            (row.body.clone(), row.reactions.clone()),
+            (MessageBody::Text("hi!".into()), reacted().reactions)
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+        assert_eq!(
+            (cached.body, cached.reactions),
+            (MessageBody::Text("hi!".into()), reacted().reactions)
+        );
     }
 
     #[test]
     fn a_history_row_older_than_the_cached_state_keeps_the_cached_state() {
-        let h = start_reacting(reacted(), with_reactions(reactions(&[(LIKE, 1)], None, 4)), |_| {});
+        let h = start_reacting(
+            reacted(),
+            with_reactions(reactions(&[(LIKE, 1)], None, 4)),
+            |_| {},
+        );
         h.online();
-        assert_eq!(h.history("catch-up").messages[0].reactions, reacted().reactions);
+        assert_eq!(
+            h.history("catch-up").messages[0].reactions,
+            reacted().reactions
+        );
         assert_eq!(cached_reactions(&h), reacted().reactions);
     }
 
     fn versionless_push(timestamp: MessageTs, pairs: &[(ReactionCode, u32)]) -> LiveEvent {
-        let update = ReactionsUpdate { counts: counts(pairs), version: None, mine: None };
-        LiveEvent::ReactionsChanged { chat: id("a"), timestamp, update }
+        let update = ReactionsUpdate {
+            counts: counts(pairs),
+            version: None,
+            mine: None,
+        };
+        LiveEvent::ReactionsChanged {
+            chat: id("a"),
+            timestamp,
+            update,
+        }
     }
 
     #[test]
-    fn a_versionless_push_never_overrides_a_versioned_state_and_a_later_versioned_one_ends_the_newest() {
+    fn a_versionless_push_never_overrides_a_versioned_state_and_a_later_versioned_one_ends_the_newest()
+     {
         let h = start_reacting_online(reacted(), |_| {});
         let history = hold_next_history(&h, reacted());
         h.fake.push(versionless_push(3, &[(LIKE, 3)]));
         h.quiet();
-        assert_eq!(shown(&h.drain()), [], "nothing changes for a versionless push over version 5");
+        assert_eq!(
+            shown(&h.drain()),
+            [],
+            "nothing changes for a versionless push over version 5"
+        );
         assert_eq!(cached_reactions(&h), reacted().reactions);
         h.fake.push(reaction_push(3, &[(LIKE, 4)], 6));
         let newest = reactions(&[(LIKE, 4)], None, 6);
@@ -4055,7 +5622,10 @@ mod tests {
         h.quiet();
         assert_eq!(shown(&h.drain()), []);
         history.notify_one();
-        assert_eq!(h.history("bare snapshot").messages[0].reactions, reacted().reactions);
+        assert_eq!(
+            h.history("bare snapshot").messages[0].reactions,
+            reacted().reactions
+        );
         assert_eq!(cached_reactions(&h), reacted().reactions);
     }
 
@@ -4079,7 +5649,14 @@ mod tests {
         let h = start_reacting_online(reacted(), |_| {});
         // Request A takes a snapshot without a version; request B takes version 6 and is
         // delivered first; an edit says nothing about reactions; then A is delivered.
-        let first = hold_next_history(&h, with_reactions(Reactions { counts: counts(&[(LIKE, 1)]), mine: None, version: None }));
+        let first = hold_next_history(
+            &h,
+            with_reactions(Reactions {
+                counts: counts(&[(LIKE, 1)]),
+                mine: None,
+                version: None,
+            }),
+        );
         let newer = reactions(&[(LIKE, 4)], None, 6);
         let second = hold_next_history(&h, with_reactions(newer.clone()));
         second.notify_one();
@@ -4090,10 +5667,19 @@ mod tests {
         assert_eq!(h.upserted("edit").reactions, newer);
         first.notify_one();
         let chunk = h.history("first request");
-        assert_eq!((chunk.messages[0].body.clone(), chunk.messages[0].reactions.clone()), (MessageBody::Text("hi!".into()), newer.clone()));
+        assert_eq!(
+            (
+                chunk.messages[0].body.clone(),
+                chunk.messages[0].reactions.clone()
+            ),
+            (MessageBody::Text("hi!".into()), newer.clone())
+        );
         assert_eq!(cached_reactions(&h), newer);
         h.fake.push(reaction_push(3, &[(LIKE, 5)], 7));
-        assert_eq!(next_reactions(&h, "later push").1, reactions(&[(LIKE, 5)], None, 7));
+        assert_eq!(
+            next_reactions(&h, "later push").1,
+            reactions(&[(LIKE, 5)], None, 7)
+        );
     }
 
     #[test]
@@ -4108,9 +5694,15 @@ mod tests {
         edited.edited = true;
         h.fake.push(LiveEvent::MessageUpserted(edited));
         let upserted = h.upserted("edit");
-        assert_eq!((upserted.body, upserted.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+        assert_eq!(
+            (upserted.body, upserted.reactions),
+            (MessageBody::Text("hi!".into()), reacted().reactions)
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
-        assert_eq!((cached.body, cached.reactions), (MessageBody::Text("hi!".into()), reacted().reactions));
+        assert_eq!(
+            (cached.body, cached.reactions),
+            (MessageBody::Text("hi!".into()), reacted().reactions)
+        );
     }
 
     #[test]
@@ -4119,7 +5711,10 @@ mod tests {
         server.reactions = reactions(&[(FIRE, 1)], None, 7);
         let h = start_reacting(reacted(), server.clone(), |_| {});
         h.online();
-        assert_eq!(h.history("catch-up").messages[0].reactions, server.reactions);
+        assert_eq!(
+            h.history("catch-up").messages[0].reactions,
+            server.reactions
+        );
         assert_eq!(cached_reactions(&h), server.reactions);
     }
 
@@ -4138,13 +5733,21 @@ mod tests {
         let h = start_reacting_online(reacted(), |_| {});
         // Message 4 is not cached: the cache cannot judge the push, so the log keeps it for the
         // request that inserts the row, which was taken at version 5.
-        let older = Message { timestamp: 4, reactions: reactions(&[(LIKE, 2)], None, 5), ..reacted() };
+        let older = Message {
+            timestamp: 4,
+            reactions: reactions(&[(LIKE, 2)], None, 5),
+            ..reacted()
+        };
         let history = hold_next_history(&h, older);
         h.fake.push(reaction_push(4, &[(LIKE, 3)], 6));
         h.quiet();
         history.notify_one();
         let chunk = h.history("raced history");
-        let row = chunk.messages.iter().find(|m| m.timestamp == 4).expect("message 4");
+        let row = chunk
+            .messages
+            .iter()
+            .find(|m| m.timestamp == 4)
+            .expect("message 4");
         assert_eq!(row.reactions, reactions(&[(LIKE, 3)], None, 6));
         let cached = h.cache().message(&id("a"), 4).unwrap().unwrap();
         assert_eq!(cached.reactions, reactions(&[(LIKE, 3)], None, 6));
@@ -4164,28 +5767,45 @@ mod tests {
     // -- read markers -----------------------------------------------------------------------
 
     fn unread_chat(unread: u32) -> ChatSummary {
-        ChatSummary { unread, ..chat("a", Some(10), None) }
+        ChatSummary {
+            unread,
+            ..chat("a", Some(10), None)
+        }
     }
 
     #[test]
     fn read_markers_are_deduplicated_and_clear_the_counter_for_the_newest_message_only() {
         let h = start(|s, _| s.chats = vec![unread_chat(3)], 50);
         h.online();
-        let mark = |timestamp| h.client.send(Command::MarkRead { chat: id("a"), timestamp });
+        let mark = |timestamp| {
+            h.client.send(Command::MarkRead {
+                chat: id("a"),
+                timestamp,
+            })
+        };
         mark(5);
         mark(5);
         mark(4);
         h.wait_for("first marker", |s| !s.calls.is_empty());
         mark(10);
         h.wait_for("second marker", |s| s.calls.len() == 2);
-        let ClientEvent::ChatUpdated(row) = h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_))) else {
+        let ClientEvent::ChatUpdated(row) =
+            h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(_)))
+        else {
             unreachable!()
         };
-        assert_eq!((row.id.0.as_str(), row.unread), ("a", 0), "marking an older message changes nothing");
+        assert_eq!(
+            (row.id.0.as_str(), row.unread),
+            ("a", 0),
+            "marking an older message changes nothing"
+        );
         assert_eq!(h.cache().chat(&id("a")).unwrap().unwrap().unread, 0);
         mark(10);
         h.quiet();
-        assert_eq!(h.fake.calls(), [Call::Seen(id("a"), 5), Call::Seen(id("a"), 10)]);
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Seen(id("a"), 5), Call::Seen(id("a"), 10)]
+        );
     }
 
     #[test]
@@ -4198,11 +5818,21 @@ mod tests {
             50,
         );
         h.online();
-        h.client.send(Command::MarkRead { chat: id("a"), timestamp: 10 });
-        h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(c) if c.unread == 0));
+        h.client.send(Command::MarkRead {
+            chat: id("a"),
+            timestamp: 10,
+        });
+        h.next(
+            "row update",
+            |e| matches!(e, ClientEvent::ChatUpdated(c) if c.unread == 0),
+        );
         h.wait_for("marker request", |s| s.calls.len() == 1);
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::ActionFailed { .. })));
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, ClientEvent::ActionFailed { .. }))
+        );
     }
 
     // -- typing -----------------------------------------------------------------------------
@@ -4218,12 +5848,23 @@ mod tests {
             name: Some("Ann".into()),
             timeout: Duration::from_secs(5),
         });
-        let ClientEvent::Typing { chat, user, name, until } = h.next("typing", |e| matches!(e, ClientEvent::Typing { .. }))
+        let ClientEvent::Typing {
+            chat,
+            user,
+            name,
+            until,
+        } = h.next("typing", |e| matches!(e, ClientEvent::Typing { .. }))
         else {
             unreachable!()
         };
-        assert_eq!((chat, user, name), (id("a"), UserId("u2".into()), Some("Ann".into())));
-        assert!(until >= before + Duration::from_secs(5) && until <= Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            (chat, user, name),
+            (id("a"), UserId("u2".into()), Some("Ann".into()))
+        );
+        assert!(
+            until >= before + Duration::from_secs(5)
+                && until <= Instant::now() + Duration::from_secs(5)
+        );
     }
 
     #[test]
@@ -4238,15 +5879,25 @@ mod tests {
         };
         h.fake.push(typing(UID));
         h.fake.push(typing("u2"));
-        let events = h.until("someone else typing", |e| matches!(e, ClientEvent::Typing { .. }));
+        let events = h.until("someone else typing", |e| {
+            matches!(e, ClientEvent::Typing { .. })
+        });
         assert_eq!(events.len(), 1, "own typing must be dropped: {events:?}");
         assert!(matches!(&events[0], ClientEvent::Typing { user, .. } if user.0 == "u2"));
     }
 
     #[test]
     fn typing_while_offline_is_not_reported() {
-        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        let h = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect()
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.client.send(Command::Typing(id("a")));
         h.quiet();
         assert!(h.fake.calls().is_empty());
@@ -4258,23 +5909,36 @@ mod tests {
             |s, dir| {
                 seed_cache(dir, &[unread_chat(1)], "a", &[], false);
                 s.chats = vec![unread_chat(1)];
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         for timestamp in [7, 10, 8] {
-            h.client.send(Command::MarkRead { chat: id("a"), timestamp });
+            h.client.send(Command::MarkRead {
+                chat: id("a"),
+                timestamp,
+            });
         }
         // The counter drops at once, even though nothing can be sent yet.
-        h.next("row update", |e| matches!(e, ClientEvent::ChatUpdated(c) if c.unread == 0));
+        h.next(
+            "row update",
+            |e| matches!(e, ClientEvent::ChatUpdated(c) if c.unread == 0),
+        );
         h.quiet();
         assert!(h.fake.calls().is_empty());
 
         h.fake.state().bootstrap_errors.clear();
         h.wait_for("deferred marker", |s| !s.calls.is_empty());
         h.quiet();
-        assert_eq!(h.fake.calls(), [Call::Seen(id("a"), 10)], "only the newest request is sent, once");
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Seen(id("a"), 10)],
+            "only the newest request is sent, once"
+        );
     }
 
     #[test]
@@ -4282,13 +5946,21 @@ mod tests {
         let h = start(|s, _| s.chats = vec![unread_chat(2)], 50);
         h.online();
         h.fake.push(LiveEvent::Disconnected);
-        h.next("connecting", |e| *e == ClientEvent::Connection(ConnectionState::Connecting));
-        h.client.send(Command::MarkRead { chat: id("a"), timestamp: 10 });
+        h.next("connecting", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Connecting)
+        });
+        h.client.send(Command::MarkRead {
+            chat: id("a"),
+            timestamp: 10,
+        });
         h.quiet();
         assert!(h.fake.calls().is_empty());
         h.fake.push(LiveEvent::Reconnected);
         h.wait_for("deferred marker", |s| !s.calls.is_empty());
-        h.client.send(Command::MarkRead { chat: id("a"), timestamp: 10 });
+        h.client.send(Command::MarkRead {
+            chat: id("a"),
+            timestamp: 10,
+        });
         h.quiet();
         assert_eq!(h.fake.calls(), [Call::Seen(id("a"), 10)]);
     }
@@ -4313,8 +5985,18 @@ mod tests {
         let config = ClientConfig::new(dir.path(), dir.path().join("session.json"), account());
         let (commands, command_rx) = async_channel::unbounded();
         let (event_tx, events) = async_channel::unbounded();
-        tokio::spawn(Engine::run(Arc::new(fake.clone()), config, command_rx, event_tx));
-        Paused { fake, commands, events, _dir: dir }
+        tokio::spawn(Engine::run(
+            Arc::new(fake.clone()),
+            config,
+            command_rx,
+            event_tx,
+        ));
+        Paused {
+            fake,
+            commands,
+            events,
+            _dir: dir,
+        }
     }
 
     impl Paused {
@@ -4327,14 +6009,22 @@ mod tests {
         }
 
         async fn online(&self) {
-            while self.events.recv().await.unwrap() != ClientEvent::Connection(ConnectionState::Online) {}
+            while self.events.recv().await.unwrap()
+                != ClientEvent::Connection(ConnectionState::Online)
+            {}
         }
 
         fn sends(&self) -> Vec<PayloadId> {
             self.fake
                 .calls()
                 .into_iter()
-                .filter_map(|c| if let Call::Send { payload, .. } = c { Some(payload) } else { None })
+                .filter_map(|c| {
+                    if let Call::Send { payload, .. } = c {
+                        Some(payload)
+                    } else {
+                        None
+                    }
+                })
                 .collect()
         }
     }
@@ -4347,11 +6037,18 @@ mod tests {
         p.send(Command::Typing(id("a")));
         p.send(Command::Typing(id("b")));
         p.pass(Duration::from_secs(3)).await;
-        assert_eq!(p.fake.calls(), [Call::Typing(id("a")), Call::Typing(id("b"))]);
+        assert_eq!(
+            p.fake.calls(),
+            [Call::Typing(id("a")), Call::Typing(id("b"))]
+        );
 
         p.send(Command::Typing(id("a")));
         p.pass(Duration::from_millis(900)).await;
-        assert_eq!(p.fake.calls().len(), 2, "3.9 s after the last report is too early");
+        assert_eq!(
+            p.fake.calls().len(),
+            2,
+            "3.9 s after the last report is too early"
+        );
         p.pass(Duration::from_millis(200)).await;
         p.send(Command::Typing(id("a")));
         p.pass(Duration::from_millis(10)).await;
@@ -4369,20 +6066,38 @@ mod tests {
     async fn transient_send_failures_back_off_5_10_up_to_60_seconds() {
         let p = start_paused(|s| {
             s.send_results = (0..14)
-                .map(|i| if i % 2 == 0 { Err(BackendError::Network("down".into())) } else { Err(rejected("THROTTLED", false)) })
+                .map(|i| {
+                    if i % 2 == 0 {
+                        Err(BackendError::Network("down".into()))
+                    } else {
+                        Err(rejected("THROTTLED", false))
+                    }
+                })
                 .collect();
         });
         p.online().await;
-        p.send(Command::Send { chat: id("a"), text: "hi".into(), reply_to: None });
+        p.send(Command::Send {
+            chat: id("a"),
+            text: "hi".into(),
+            reply_to: None,
+        });
         p.pass(Duration::from_millis(200)).await;
         // Invariant: the clock stands 0.2 s after the latest attempt.
         for failures in 1..=14u32 {
             let backoff = Duration::from_secs(u64::from((5 * failures).min(60)));
             assert_eq!(p.sends().len(), failures as usize);
             p.pass(backoff - Duration::from_millis(400)).await;
-            assert_eq!(p.sends().len(), failures as usize, "retried before the {backoff:?} backoff ended");
+            assert_eq!(
+                p.sends().len(),
+                failures as usize,
+                "retried before the {backoff:?} backoff ended"
+            );
             p.pass(Duration::from_millis(400)).await;
-            assert_eq!(p.sends().len(), failures as usize + 1, "not retried after the {backoff:?} backoff");
+            assert_eq!(
+                p.sends().len(),
+                failures as usize + 1,
+                "not retried after the {backoff:?} backoff"
+            );
         }
         let sends = p.sends();
         assert!(sends.iter().all(|payload| *payload == sends[0]));
@@ -4390,15 +6105,25 @@ mod tests {
         while let Ok(event) = p.events.try_recv() {
             events.push(event);
         }
-        assert!(events.iter().any(|e| matches!(e, ClientEvent::PendingSettled { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::PendingSettled { .. }))
+        );
         assert!(!events.iter().any(|e| matches!(e, ClientEvent::MessageUpserted(m) if matches!(m.delivery, Delivery::Failed { .. }))));
     }
 
     #[tokio::test(start_paused = true)]
     async fn a_new_connection_retries_a_held_queue_at_once() {
-        let p = start_paused(|s| s.send_results = VecDeque::from([Err(BackendError::Network("down".into()))]));
+        let p = start_paused(|s| {
+            s.send_results = VecDeque::from([Err(BackendError::Network("down".into()))])
+        });
         p.online().await;
-        p.send(Command::Send { chat: id("a"), text: "hi".into(), reply_to: None });
+        p.send(Command::Send {
+            chat: id("a"),
+            text: "hi".into(),
+            reply_to: None,
+        });
         p.pass(Duration::from_secs(1)).await;
         assert_eq!(p.sends().len(), 1);
         p.fake.push(LiveEvent::Disconnected);
@@ -4416,17 +6141,32 @@ mod tests {
             if cond(&drafts) {
                 return drafts;
             }
-            assert!(Instant::now() < deadline, "timed out waiting for {what}; drafts {drafts:?}");
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what}; drafts {drafts:?}"
+            );
             std::thread::sleep(Duration::from_millis(2));
         }
     }
 
     #[test]
     fn startup_emits_the_stored_drafts() {
-        let reply = ReplyTarget { timestamp: 4, author: Some("Ann".into()), text: "hi".into() };
+        let reply = ReplyTarget {
+            timestamp: 4,
+            author: Some("Ann".into()),
+            text: "hi".into(),
+        };
         let stored = vec![
-            Draft { chat: id("a"), text: "unsent".into(), reply_to: Some(reply) },
-            Draft { chat: id("b"), text: "also".into(), reply_to: None },
+            Draft {
+                chat: id("a"),
+                text: "unsent".into(),
+                reply_to: Some(reply),
+            },
+            Draft {
+                chat: id("b"),
+                text: "also".into(),
+                reply_to: None,
+            },
         ];
         let h = start(
             |_, dir| {
@@ -4437,15 +6177,25 @@ mod tests {
             },
             50,
         );
-        assert_eq!(h.next("drafts", |e| matches!(e, ClientEvent::Drafts(_))), ClientEvent::Drafts(stored));
+        assert_eq!(
+            h.next("drafts", |e| matches!(e, ClientEvent::Drafts(_))),
+            ClientEvent::Drafts(stored)
+        );
     }
 
     #[test]
     fn drafts_are_saved_and_removed_when_nothing_is_left() {
         let h = start(|_, _| {}, 50);
-        assert_eq!(h.next("drafts", |e| matches!(e, ClientEvent::Drafts(_))), ClientEvent::Drafts(Vec::new()));
+        assert_eq!(
+            h.next("drafts", |e| matches!(e, ClientEvent::Drafts(_))),
+            ClientEvent::Drafts(Vec::new())
+        );
         let save = |text: &str, reply_to: Option<ReplyTarget>| {
-            h.client.send(Command::SaveDraft(Draft { chat: id("a"), text: text.into(), reply_to }));
+            h.client.send(Command::SaveDraft(Draft {
+                chat: id("a"),
+                text: text.into(),
+                reply_to,
+            }));
         };
         save("x", None);
         wait_drafts(&h, "the draft", |d| d.len() == 1);
@@ -4454,7 +6204,11 @@ mod tests {
         save("", None);
         wait_drafts(&h, "the removal", |d| d.is_empty());
         // A reply target alone is a draft.
-        let target = ReplyTarget { timestamp: 4, author: None, text: "q".into() };
+        let target = ReplyTarget {
+            timestamp: 4,
+            author: None,
+            text: "q".into(),
+        };
         save("", Some(target.clone()));
         let drafts = wait_drafts(&h, "the reply-only draft", |d| d.len() == 1);
         assert_eq!(drafts[0].reply_to, Some(target));
@@ -4466,8 +6220,20 @@ mod tests {
             |s, dir| {
                 s.chats = vec![chat("a", Some(5), None), chat("b", Some(5), None)];
                 let cache = Cache::open(dir, &account()).unwrap();
-                cache.put_draft(&Draft { chat: id("a"), text: "typing".into(), reply_to: None }).unwrap();
-                cache.put_draft(&Draft { chat: id("b"), text: "keep".into(), reply_to: None }).unwrap();
+                cache
+                    .put_draft(&Draft {
+                        chat: id("a"),
+                        text: "typing".into(),
+                        reply_to: None,
+                    })
+                    .unwrap();
+                cache
+                    .put_draft(&Draft {
+                        chat: id("b"),
+                        text: "keep".into(),
+                        reply_to: None,
+                    })
+                    .unwrap();
             },
             50,
         );
@@ -4475,7 +6241,10 @@ mod tests {
         h.send_text("a", "typing");
         h.upserted("pending message");
         let drafts = h.cache().drafts().unwrap();
-        assert_eq!(drafts.iter().map(|d| d.chat.0.as_str()).collect::<Vec<_>>(), ["b"]);
+        assert_eq!(
+            drafts.iter().map(|d| d.chat.0.as_str()).collect::<Vec<_>>(),
+            ["b"]
+        );
     }
 
     #[test]
@@ -4484,7 +6253,13 @@ mod tests {
             |s, dir| {
                 s.chats = vec![chat("a", Some(5), None)];
                 let cache = Cache::open(dir, &account()).unwrap();
-                cache.put_draft(&Draft { chat: id("a"), text: "typing".into(), reply_to: None }).unwrap();
+                cache
+                    .put_draft(&Draft {
+                        chat: id("a"),
+                        text: "typing".into(),
+                        reply_to: None,
+                    })
+                    .unwrap();
                 drop(cache);
                 rusqlite::Connection::open(crate::paths::cache_path(dir, &account()))
                     .unwrap()
@@ -4496,11 +6271,30 @@ mod tests {
         h.online();
         h.send_text("a", "typing");
         let events = h.until("refusal", |e| matches!(e, ClientEvent::SendRefused { .. }));
-        let draft = Draft { chat: id("a"), text: "typing".into(), reply_to: None };
-        assert_eq!(events.last(), Some(&ClientEvent::SendRefused { draft, reason: STORE_FAILED_REASON.into() }));
-        assert!(!events.iter().any(|e| matches!(e, ClientEvent::MessageUpserted(_))), "no pending message: {events:?}");
+        let draft = Draft {
+            chat: id("a"),
+            text: "typing".into(),
+            reply_to: None,
+        };
+        assert_eq!(
+            events.last(),
+            Some(&ClientEvent::SendRefused {
+                draft,
+                reason: STORE_FAILED_REASON.into()
+            })
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::MessageUpserted(_))),
+            "no pending message: {events:?}"
+        );
         h.quiet();
-        assert_eq!(h.fake.calls(), [], "nothing may be sent without a stored entry");
+        assert_eq!(
+            h.fake.calls(),
+            [],
+            "nothing may be sent without a stored entry"
+        );
         assert_eq!(h.cache().drafts().unwrap().len(), 1, "the draft survives");
         assert!(h.cache().outbox().unwrap().is_empty());
 
@@ -4510,7 +6304,9 @@ mod tests {
             .execute_batch("DROP TRIGGER refuse")
             .unwrap();
         h.send_text("a", "typing");
-        h.next("settled", |e| matches!(e, ClientEvent::PendingSettled { .. }));
+        h.next("settled", |e| {
+            matches!(e, ClientEvent::PendingSettled { .. })
+        });
         assert_eq!(h.fake.calls().len(), 1);
         assert!(h.cache().drafts().unwrap().is_empty());
     }
@@ -4521,9 +6317,16 @@ mod tests {
     fn loading_chats_history_and_older_pages_never_write() {
         let h = start(
             |s, dir| {
-                seed_cache(dir, &[chat("a", Some(120), None)], "a", &[msg("a", 119, "x"), msg("a", 120, "y")], false);
+                seed_cache(
+                    dir,
+                    &[chat("a", Some(120), None)],
+                    "a",
+                    &[msg("a", 119, "x"), msg("a", 120, "y")],
+                    false,
+                );
                 s.chats = vec![chat("a", Some(120), None), chat("b", Some(1), None)];
-                s.history.insert(id("a"), (1..=120).map(|i| msg("a", i, "m")).collect());
+                s.history
+                    .insert(id("a"), (1..=120).map(|i| msg("a", i, "m")).collect());
                 s.history.insert(id("b"), vec![msg("b", 1, "only")]);
             },
             50,
@@ -4533,7 +6336,10 @@ mod tests {
         h.client.send(Command::OpenChat(id("a")));
         h.history("cached newest page");
         h.history("fetched newest page");
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 71 });
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 71,
+        });
         h.history("older page");
         h.client.send(Command::OpenChat(id("b")));
         h.history("second chat");
@@ -4545,49 +6351,89 @@ mod tests {
         h.history("catch-up of the other chat");
         // Paging while offline answers from the cache.
         h.fake.state().live = None;
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
-        h.client.send(Command::LoadOlder { chat: id("a"), before: 71 });
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
+        h.client.send(Command::LoadOlder {
+            chat: id("a"),
+            before: 71,
+        });
         h.history("cached older page");
 
         h.quiet();
-        assert!(h.fake.state().history_calls.len() >= 6, "the scenario must have loaded history");
+        assert!(
+            h.fake.state().history_calls.len() >= 6,
+            "the scenario must have loaded history"
+        );
         assert_eq!(h.fake.calls(), [], "loading must never write");
     }
 
     #[test]
     fn a_gallery_previews_like_an_image() {
-        let item = GalleryItem { media: MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail }, width: 4, height: 3, name: None };
-        let gallery = |caption: Option<&str>| MessageBody::Gallery { items: vec![item.clone()], caption: caption.map(Into::into) };
+        let item = GalleryItem {
+            media: MediaRef {
+                id: "b/1".into(),
+                kind: MediaKind::Thumbnail,
+            },
+            width: 4,
+            height: 3,
+            name: None,
+        };
+        let gallery = |caption: Option<&str>| MessageBody::Gallery {
+            items: vec![item.clone()],
+            caption: caption.map(Into::into),
+        };
         assert_eq!(preview_text(&gallery(None)).as_deref(), Some("Фото"));
-        assert_eq!(preview_text(&gallery(Some("отпуск"))).as_deref(), Some("отпуск"));
+        assert_eq!(
+            preview_text(&gallery(Some("отпуск"))).as_deref(),
+            Some("отпуск")
+        );
     }
 
     #[test]
     fn the_fake_streams_scripted_bytes_with_progress_and_scripted_errors() {
         let fake = Fake::default();
-        let original = MediaRef { id: "b/1".into(), kind: MediaKind::File };
+        let original = MediaRef {
+            id: "b/1".into(),
+            kind: MediaKind::File,
+        };
         fake.state().files.insert("b/1".into(), b"hello".to_vec());
-        fake.state().download_errors.push_back(BackendError::Network("boom".into()));
-        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        fake.state()
+            .download_errors
+            .push_back(BackendError::Network("boom".into()));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         let run = |media: &MediaRef| {
             let seen = Mutex::new(Vec::new());
             let mut out = Vec::new();
-            let result = runtime.block_on(fake.download(media, &mut out, &|received, total| seen.lock().unwrap().push((received, total))));
+            let result = runtime.block_on(fake.download(media, &mut out, &|received, total| {
+                seen.lock().unwrap().push((received, total))
+            }));
             (result, out, seen.into_inner().unwrap())
         };
         assert_eq!(run(&original).0, Err(BackendError::Network("boom".into())));
         let (result, out, progress) = run(&original);
         assert_eq!((result, out.as_slice()), (Ok(5), b"hello".as_slice()));
         assert_eq!(progress, [(2, Some(5)), (5, Some(5))]);
-        let missing = MediaRef { id: "b/2".into(), kind: MediaKind::File };
+        let missing = MediaRef {
+            id: "b/2".into(),
+            kind: MediaKind::File,
+        };
         assert_eq!(run(&missing).0, Err(BackendError::NotFound));
-        assert_eq!(fake.state().download_calls, [original.clone(), original, missing]);
+        assert_eq!(
+            fake.state().download_calls,
+            [original.clone(), original, missing]
+        );
     }
 
     // -- downloads ------------------------------------------------------------------------
 
     fn original(id: &str) -> MediaRef {
-        MediaRef { id: id.into(), kind: MediaKind::File }
+        MediaRef {
+            id: id.into(),
+            kind: MediaKind::File,
+        }
     }
 
     /// A started client whose Downloads folder exists and whose server holds `files`.
@@ -4612,18 +6458,27 @@ mod tests {
         /// Names in the Downloads folder, sorted; empty when the folder does not exist.
         fn listing(&self) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(self.downloads())
-                .map(|entries| entries.map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect())
+                .map(|entries| {
+                    entries
+                        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
                 .unwrap_or_default();
             names.sort();
             names
         }
 
         fn download(&self, media: &MediaRef, name: &str) {
-            self.client.send(Command::Download { media: media.clone(), name: Some(name.into()) });
+            self.client.send(Command::Download {
+                media: media.clone(),
+                name: Some(name.into()),
+            });
         }
 
         fn downloaded(&self) -> PathBuf {
-            match self.next("downloaded", |e| matches!(e, ClientEvent::Downloaded { .. })) {
+            match self.next("downloaded", |e| {
+                matches!(e, ClientEvent::Downloaded { .. })
+            }) {
                 ClientEvent::Downloaded { path, .. } => path,
                 _ => unreachable!(),
             }
@@ -4666,12 +6521,22 @@ mod tests {
         h.online();
         h.download(&original("b/1"), "report.pdf");
         let events = h.until("saved", |e| matches!(e, ClientEvent::Downloaded { .. }));
-        let Some(ClientEvent::Downloaded { media, path }) = events.last() else { unreachable!() };
+        let Some(ClientEvent::Downloaded { media, path }) = events.last() else {
+            unreachable!()
+        };
         assert_eq!(*media, original("b/1"));
         assert_eq!(*path, h.downloads().join("report.pdf"));
         assert_eq!(fs::read(path).unwrap(), b"hello world");
-        assert_eq!(h.listing(), ["report.pdf"], "no partial file is left behind");
-        assert!(events.iter().any(|e| matches!(e, ClientEvent::DownloadProgress { .. })));
+        assert_eq!(
+            h.listing(),
+            ["report.pdf"],
+            "no partial file is left behind"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::DownloadProgress { .. }))
+        );
     }
 
     #[test]
@@ -4680,7 +6545,10 @@ mod tests {
         h.online();
         h.download(&original("b/1"), "../../.ssh/authorized_keys");
         assert_eq!(h.downloaded(), h.downloads().join("authorized_keys"));
-        h.client.send(Command::Download { media: original("b/2"), name: None });
+        h.client.send(Command::Download {
+            media: original("b/2"),
+            name: None,
+        });
         assert_eq!(h.downloaded(), h.downloads().join("Файл"));
         assert!(!h.dir.path().join(".ssh").exists());
         assert_eq!(h.listing().len(), 2);
@@ -4697,44 +6565,67 @@ mod tests {
         assert_eq!(h.downloaded(), h.downloads().join("report (1).pdf"));
         h.download(&original("b/1"), "other.txt");
         assert_eq!(h.downloaded(), h.downloads().join("other (1).txt"));
-        assert_eq!(fs::read(h.downloads().join("report.pdf")).unwrap(), b"hello");
-        assert_eq!(fs::read(h.downloads().join("report (1).pdf")).unwrap(), b"hello");
+        assert_eq!(
+            fs::read(h.downloads().join("report.pdf")).unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            fs::read(h.downloads().join("report (1).pdf")).unwrap(),
+            b"hello"
+        );
         assert_eq!(fs::read(h.downloads().join("other.txt")).unwrap(), b"mine");
     }
 
     #[test]
     fn cancel_stops_the_transfer_and_removes_the_partial() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
         h.online();
         h.download(&original("b/1"), "report.pdf");
         h.wait_for("the transfer", |s| s.download_calls.len() == 1);
         assert_eq!(h.listing(), ["report.pdf.part"]);
         h.client.send(Command::CancelDownload(original("b/1")));
-        h.next("cancelled", |e| *e == ClientEvent::DownloadCancelled(original("b/1")));
+        h.next("cancelled", |e| {
+            *e == ClientEvent::DownloadCancelled(original("b/1"))
+        });
         h.eventually("the partial to go", || h.listing().is_empty());
         gate.notify_one();
         h.quiet();
         let seen = h.drain();
-        assert!(!seen.iter().any(|e| matches!(e, ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. })), "{seen:?}");
+        assert!(
+            !seen.iter().any(|e| matches!(
+                e,
+                ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. }
+            )),
+            "{seen:?}"
+        );
         assert!(h.listing().is_empty());
     }
 
     #[test]
     fn a_download_started_after_a_cancel_is_its_own_transfer() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
         h.online();
         h.download(&original("b/1"), "report.pdf");
         h.wait_for("the first transfer", |s| s.download_calls.len() == 1);
         h.client.send(Command::CancelDownload(original("b/1")));
-        h.next("cancelled", |e| *e == ClientEvent::DownloadCancelled(original("b/1")));
+        h.next("cancelled", |e| {
+            *e == ClientEvent::DownloadCancelled(original("b/1"))
+        });
         h.download(&original("b/1"), "report.pdf");
         h.wait_for("the second transfer", |s| s.download_calls.len() == 2);
         h.open_gate(&gate, "the file", || h.listing() == ["report.pdf"]);
         assert_eq!(h.downloaded(), h.downloads().join("report.pdf"));
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. })));
+        assert!(!h.drain().iter().any(|e| matches!(
+            e,
+            ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. }
+        )));
     }
 
     #[test]
@@ -4749,14 +6640,29 @@ mod tests {
         });
         h.online();
         let media = original("b/1");
-        for expected in [DownloadFailure::NotFound, DownloadFailure::Disk, DownloadFailure::Network, DownloadFailure::Other] {
+        for expected in [
+            DownloadFailure::NotFound,
+            DownloadFailure::Disk,
+            DownloadFailure::Network,
+            DownloadFailure::Other,
+        ] {
             h.download(&media, "a.bin");
-            h.next("failure", |e| *e == ClientEvent::DownloadFailed { media: media.clone(), reason: expected });
+            h.next("failure", |e| {
+                *e == ClientEvent::DownloadFailed {
+                    media: media.clone(),
+                    reason: expected,
+                }
+            });
             assert!(h.listing().is_empty(), "{expected:?} left a file");
         }
         // Nothing scripted and no such file on the server: a 404.
         h.download(&media, "a.bin");
-        h.next("not found", |e| *e == ClientEvent::DownloadFailed { media: media.clone(), reason: DownloadFailure::NotFound });
+        h.next("not found", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: media.clone(),
+                reason: DownloadFailure::NotFound,
+            }
+        });
         assert!(h.listing().is_empty());
     }
 
@@ -4765,13 +6671,21 @@ mod tests {
         let h = start(
             |s, dir| {
                 fs::create_dir(dir.join("Downloads")).unwrap();
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.download(&original("b/1"), "a.bin");
-        h.next("refusal", |e| *e == ClientEvent::DownloadFailed { media: original("b/1"), reason: DownloadFailure::Offline });
+        h.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: original("b/1"),
+                reason: DownloadFailure::Offline,
+            }
+        });
         h.quiet();
         assert!(h.fake.state().download_calls.is_empty());
         assert!(h.listing().is_empty());
@@ -4779,7 +6693,12 @@ mod tests {
 
     #[test]
     fn a_missing_or_unusable_folder_fails_fast_without_asking_the_backend() {
-        let missing = start(|s, _| { s.files.insert("b/1".into(), b"x".to_vec()); }, 50);
+        let missing = start(
+            |s, _| {
+                s.files.insert("b/1".into(), b"x".to_vec());
+            },
+            50,
+        );
         let not_a_folder = start(
             |s, dir| {
                 fs::write(dir.join("Downloads"), "a file, not a folder").unwrap();
@@ -4790,18 +6709,28 @@ mod tests {
         for h in [&missing, &not_a_folder] {
             h.online();
             h.download(&original("b/1"), "a.bin");
-            h.next("refusal", |e| *e == ClientEvent::DownloadFailed { media: original("b/1"), reason: DownloadFailure::Destination });
+            h.next("refusal", |e| {
+                *e == ClientEvent::DownloadFailed {
+                    media: original("b/1"),
+                    reason: DownloadFailure::Destination,
+                }
+            });
             h.quiet();
             assert!(h.fake.state().download_calls.is_empty());
         }
-        assert!(!missing.downloads().exists(), "a missing folder is not created");
+        assert!(
+            !missing.downloads().exists(),
+            "a missing folder is not created"
+        );
         assert!(fs::metadata(not_a_folder.downloads()).unwrap().is_file());
     }
 
     #[test]
     fn a_second_download_of_a_running_file_starts_no_second_transfer() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let h = start_downloads(&[("b/1", b"hello world")], |s| s.download_gate = Some(gate.clone()));
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
         h.online();
         h.download(&original("b/1"), "a.bin");
         h.download(&original("b/1"), "b.bin");
@@ -4811,15 +6740,25 @@ mod tests {
         h.open_gate(&gate, "the file", || h.listing() == ["a.bin"]);
         h.downloaded();
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. })), "reported twice");
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Downloaded { .. })),
+            "reported twice"
+        );
         assert_eq!(h.fake.state().download_calls.len(), 1);
     }
 
     #[test]
     fn the_fourth_concurrent_download_waits_for_a_slot() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let files: Vec<(String, Vec<u8>)> = (1..=4).map(|i| (format!("f/{i}"), vec![i as u8; 8])).collect();
-        let listed: Vec<(&str, &[u8])> = files.iter().map(|(id, bytes)| (id.as_str(), bytes.as_slice())).collect();
+        let files: Vec<(String, Vec<u8>)> = (1..=4)
+            .map(|i| (format!("f/{i}"), vec![i as u8; 8]))
+            .collect();
+        let listed: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
+            .collect();
         let h = start_downloads(&listed, |s| s.download_gate = Some(gate.clone()));
         h.online();
         for i in 1..=4 {
@@ -4827,11 +6766,21 @@ mod tests {
         }
         h.wait_for("three transfers", |s| s.download_calls.len() == 3);
         h.quiet();
-        assert_eq!(h.fake.state().download_calls.len(), 3, "the fourth must wait");
+        assert_eq!(
+            h.fake.state().download_calls.len(),
+            3,
+            "the fourth must wait"
+        );
         assert_eq!(h.listing().len(), 3, "the fourth has no partial yet");
         gate.notify_one();
         h.wait_for("the fourth transfer", |s| s.download_calls.len() == 4);
-        h.open_gate(&gate, "all four files", || h.listing().iter().filter(|name| !name.ends_with(".part")).count() == 4);
+        h.open_gate(&gate, "all four files", || {
+            h.listing()
+                .iter()
+                .filter(|name| !name.ends_with(".part"))
+                .count()
+                == 4
+        });
         for _ in 0..4 {
             h.downloaded();
         }
@@ -4846,7 +6795,9 @@ mod tests {
         let progress: Vec<(u64, Option<u64>)> = events
             .iter()
             .filter_map(|e| match e {
-                ClientEvent::DownloadProgress { received, total, .. } => Some((*received, *total)),
+                ClientEvent::DownloadProgress {
+                    received, total, ..
+                } => Some((*received, *total)),
                 _ => None,
             })
             .collect();
@@ -4885,20 +6836,29 @@ mod tests {
 
     #[test]
     fn session_expiry_during_a_download_ends_the_session_and_removes_the_partial() {
-        let h = start_downloads(&[], |s| s.download_errors = VecDeque::from([BackendError::SessionExpired]));
+        let h = start_downloads(&[], |s| {
+            s.download_errors = VecDeque::from([BackendError::SessionExpired])
+        });
         h.online();
         h.download(&original("b/1"), "a.bin");
         h.next("expired", |e| *e == ClientEvent::SessionExpired);
         assert!(h.listing().is_empty());
         assert!(!h.dir.path().join("session.json").exists());
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::DownloadFailed { .. })), "expiry is not a download failure");
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, ClientEvent::DownloadFailed { .. })),
+            "expiry is not a download failure"
+        );
     }
 
     #[test]
     fn expiry_aborts_every_running_download() {
         let gate = Arc::new(tokio::sync::Notify::new());
-        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two")], |s| s.download_gate = Some(gate.clone()));
+        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
         h.online();
         h.download(&original("b/1"), "a.bin");
         h.download(&original("b/2"), "b.bin");
@@ -4909,33 +6869,65 @@ mod tests {
         h.eventually("the partials to go", || h.listing().is_empty());
         gate.notify_one();
         h.quiet();
-        assert!(!h.drain().iter().any(|e| matches!(e, ClientEvent::Downloaded { .. })));
+        assert!(
+            !h.drain()
+                .iter()
+                .any(|e| matches!(e, ClientEvent::Downloaded { .. }))
+        );
         assert!(h.listing().is_empty());
     }
 
     #[test]
     fn originals_never_go_through_the_preview_path_and_previews_never_download() {
-        let h = start_downloads(&[("b/1", b"one")], |s| { s.media.insert("b/1".into(), b"preview".to_vec()); });
+        let h = start_downloads(&[("b/1", b"one")], |s| {
+            s.media.insert("b/1".into(), b"preview".to_vec());
+        });
         h.online();
         h.client.send(Command::FetchMedia(original("b/1")));
-        h.client.send(Command::Download { media: MediaRef { id: "b/1".into(), kind: MediaKind::Thumbnail }, name: Some("a.bin".into()) });
+        h.client.send(Command::Download {
+            media: MediaRef {
+                id: "b/1".into(),
+                kind: MediaKind::Thumbnail,
+            },
+            name: Some("a.bin".into()),
+        });
         h.quiet();
         assert_eq!(h.fake.state().media_calls, 0);
         assert!(h.fake.state().download_calls.is_empty());
         let seen = h.drain();
-        assert!(!seen.iter().any(|e| is_download_event(e) || matches!(e, ClientEvent::MediaReady { .. } | ClientEvent::MediaUnavailable(_))), "{seen:?}");
+        assert!(
+            !seen.iter().any(|e| is_download_event(e)
+                || matches!(
+                    e,
+                    ClientEvent::MediaReady { .. } | ClientEvent::MediaUnavailable(_)
+                )),
+            "{seen:?}"
+        );
         assert!(h.listing().is_empty());
     }
 
     fn hits(title: &str) -> SearchHits {
         SearchHits {
-            chats: vec![ChatHit { id: id("a"), kind: ChatKind::Group, title: title.into(), avatar: None }],
+            chats: vec![ChatHit {
+                id: id("a"),
+                kind: ChatKind::Group,
+                title: title.into(),
+                avatar: None,
+            }],
             ..SearchHits::default()
         }
     }
 
     fn search_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
-        events.iter().filter(|e| matches!(e, ClientEvent::SearchResults { .. } | ClientEvent::SearchFailed { .. })).collect()
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ClientEvent::SearchResults { .. } | ClientEvent::SearchFailed { .. }
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -4944,10 +6936,24 @@ mod tests {
         let h = start(|s, _| s.search_result = Some(Ok(expected.clone())), 50);
         h.online();
         h.search(1, "ab");
-        let event = h.next("results", |e| matches!(e, ClientEvent::SearchResults { .. }));
-        assert_eq!(event, ClientEvent::SearchResults { id: SearchId(1), hits: expected });
-        assert_eq!(h.fake.state().search_calls, [("ab".to_string(), SEARCH_LIMIT)]);
-        assert!(h.cache().chats().unwrap().is_empty(), "search results are held in memory only");
+        let event = h.next("results", |e| {
+            matches!(e, ClientEvent::SearchResults { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::SearchResults {
+                id: SearchId(1),
+                hits: expected
+            }
+        );
+        assert_eq!(
+            h.fake.state().search_calls,
+            [("ab".to_string(), SEARCH_LIMIT)]
+        );
+        assert!(
+            h.cache().chats().unwrap().is_empty(),
+            "search results are held in memory only"
+        );
     }
 
     #[test]
@@ -4968,7 +6974,13 @@ mod tests {
         h.open_gate(&gate, "both answers", || h.fake.state().search_done == 2);
         h.quiet();
         let events = h.drain();
-        assert_eq!(search_events(&events), [&ClientEvent::SearchResults { id: SearchId(2), hits: hits("Team") }]);
+        assert_eq!(
+            search_events(&events),
+            [&ClientEvent::SearchResults {
+                id: SearchId(2),
+                hits: hits("Team")
+            }]
+        );
     }
 
     #[test]
@@ -4988,55 +7000,107 @@ mod tests {
 
     #[test]
     fn search_offline_fails_fast_without_asking_the_backend() {
-        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        let h = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect()
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.search(1, "ab");
-        h.next("refusal", |e| *e == ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Offline });
+        h.next("refusal", |e| {
+            *e == ClientEvent::SearchFailed {
+                id: SearchId(1),
+                reason: SearchFailure::Offline,
+            }
+        });
         h.quiet();
         assert!(h.fake.state().search_calls.is_empty());
     }
 
     #[test]
     fn a_failed_search_reports_failed() {
-        let h = start(|s, _| s.search_result = Some(Err(BackendError::Network("reset".into()))), 50);
+        let h = start(
+            |s, _| s.search_result = Some(Err(BackendError::Network("reset".into()))),
+            50,
+        );
         h.online();
         h.search(1, "ab");
-        h.next("failure", |e| *e == ClientEvent::SearchFailed { id: SearchId(1), reason: SearchFailure::Failed });
+        h.next("failure", |e| {
+            *e == ClientEvent::SearchFailed {
+                id: SearchId(1),
+                reason: SearchFailure::Failed,
+            }
+        });
         assert_eq!(h.fake.state().search_calls.len(), 1);
     }
 
     #[test]
     fn session_expiry_during_a_search_ends_the_session() {
-        let h = start(|s, _| s.search_result = Some(Err(BackendError::SessionExpired)), 50);
+        let h = start(
+            |s, _| s.search_result = Some(Err(BackendError::SessionExpired)),
+            50,
+        );
         h.online();
         h.search(1, "ab");
         h.next("expired", |e| *e == ClientEvent::SessionExpired);
         assert!(!h.dir.path().join("session.json").exists());
         h.quiet();
         let events = h.drain();
-        assert!(search_events(&events).is_empty(), "expiry is not a search failure: {events:?}");
+        assert!(
+            search_events(&events).is_empty(),
+            "expiry is not a search failure: {events:?}"
+        );
     }
 
     // -- members and profile --------------------------------------------------------------
 
     fn member(user: &str, name: &str, role: MemberRole) -> Member {
-        Member { user: UserId(user.into()), name: Some(name.into()), avatar: None, role, me: false }
+        Member {
+            user: UserId(user.into()),
+            name: Some(name.into()),
+            avatar: None,
+            role,
+            me: false,
+        }
     }
 
     fn listed(chat_id: &str) -> ChatMembers {
         ChatMembers {
             chat: id(chat_id),
-            users: vec![member("u1", "Анна", MemberRole::Admin), member("u2", "Борис", MemberRole::Member)],
+            users: vec![
+                member("u1", "Анна", MemberRole::Admin),
+                member("u2", "Борис", MemberRole::Member),
+            ],
             partial: false,
         }
     }
 
     fn members_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
-        events.iter().filter(|e| matches!(e, ClientEvent::Members(_) | ClientEvent::MembersFailed { .. })).collect()
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ClientEvent::Members(_) | ClientEvent::MembersFailed { .. }
+                )
+            })
+            .collect()
     }
 
     fn profile_events(events: &[ClientEvent]) -> Vec<&ClientEvent> {
-        events.iter().filter(|e| matches!(e, ClientEvent::Profile(_) | ClientEvent::ProfileFailed { .. })).collect()
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    ClientEvent::Profile(_) | ClientEvent::ProfileFailed { .. }
+                )
+            })
+            .collect()
     }
 
     fn members_of(chat_id: &str) -> Command {
@@ -5057,8 +7121,16 @@ mod tests {
         h.client.send(members_of("a"));
         let event = h.next("members", |e| matches!(e, ClientEvent::Members(_)));
         assert_eq!(event, ClientEvent::Members(expected));
-        assert_eq!(h.fake.state().members_calls, [chat("a", Some(1), None)], "the backend gets the cached row");
-        assert_eq!(h.cache().chats().unwrap(), [chat("a", Some(1), None)], "only the chat row is stored");
+        assert_eq!(
+            h.fake.state().members_calls,
+            [chat("a", Some(1), None)],
+            "the backend gets the cached row"
+        );
+        assert_eq!(
+            h.cache().chats().unwrap(),
+            [chat("a", Some(1), None)],
+            "only the chat row is stored"
+        );
     }
 
     #[test]
@@ -5086,8 +7158,17 @@ mod tests {
         );
         h.online();
         h.client.send(members_of("a"));
-        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
-        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: reason.into(), offline: false });
+        let event = h.next("failure", |e| {
+            matches!(e, ClientEvent::MembersFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::MembersFailed {
+                chat: id("a"),
+                reason: reason.into(),
+                offline: false
+            }
+        );
     }
 
     #[test]
@@ -5101,8 +7182,17 @@ mod tests {
         );
         h.online();
         h.client.send(members_of("a"));
-        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
-        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: OFFLINE_REASON.into(), offline: false });
+        let event = h.next("failure", |e| {
+            matches!(e, ClientEvent::MembersFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::MembersFailed {
+                chat: id("a"),
+                reason: OFFLINE_REASON.into(),
+                offline: false
+            }
+        );
     }
 
     #[test]
@@ -5110,14 +7200,26 @@ mod tests {
         let h = start(
             |s, dir| {
                 seed_cache(dir, &[chat("a", Some(1), None)], "a", &[], false);
-                s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
             },
             50,
         );
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.client.send(members_of("a"));
-        let event = h.next("refusal", |e| matches!(e, ClientEvent::MembersFailed { .. }));
-        assert_eq!(event, ClientEvent::MembersFailed { chat: id("a"), reason: OFFLINE_REASON.into(), offline: true });
+        let event = h.next("refusal", |e| {
+            matches!(e, ClientEvent::MembersFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::MembersFailed {
+                chat: id("a"),
+                reason: OFFLINE_REASON.into(),
+                offline: true
+            }
+        );
         h.quiet();
         assert!(h.fake.state().members_calls.is_empty());
     }
@@ -5127,14 +7229,24 @@ mod tests {
         let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
         h.online();
         h.client.send(members_of("nope"));
-        let event = h.next("failure", |e| matches!(e, ClientEvent::MembersFailed { .. }));
-        assert_eq!(event, ClientEvent::MembersFailed { chat: id("nope"), reason: UNKNOWN_CHAT_REASON.into(), offline: false });
+        let event = h.next("failure", |e| {
+            matches!(e, ClientEvent::MembersFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::MembersFailed {
+                chat: id("nope"),
+                reason: UNKNOWN_CHAT_REASON.into(),
+                offline: false
+            }
+        );
         h.quiet();
         assert!(h.fake.state().members_calls.is_empty());
     }
 
     #[test]
-    fn a_second_request_for_a_running_member_load_is_dropped_but_other_chats_and_later_retries_are_served() {
+    fn a_second_request_for_a_running_member_load_is_dropped_but_other_chats_and_later_retries_are_served()
+     {
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start(
             |s, _| {
@@ -5151,7 +7263,11 @@ mod tests {
         h.client.send(members_of("b"));
         h.wait_for("the other chat", |s| s.members_calls.len() == 2);
         h.quiet();
-        assert_eq!(h.fake.state().members_calls.len(), 2, "the duplicate never reached the backend");
+        assert_eq!(
+            h.fake.state().members_calls.len(),
+            2,
+            "the duplicate never reached the backend"
+        );
         let seen = std::cell::RefCell::new(Vec::new());
         h.open_gate(&gate, "both answers", || {
             seen.borrow_mut().extend(h.drain());
@@ -5160,7 +7276,11 @@ mod tests {
         h.quiet();
         seen.borrow_mut().extend(h.drain());
         let seen = seen.into_inner();
-        assert_eq!(members_events(&seen).len(), 2, "one answer per chat: {seen:?}");
+        assert_eq!(
+            members_events(&seen).len(),
+            2,
+            "one answer per chat: {seen:?}"
+        );
 
         // Once answered, the chat can be loaded again (the retry of an error state).
         h.client.send(members_of("a"));
@@ -5181,7 +7301,10 @@ mod tests {
         h.next("expired", |e| *e == ClientEvent::SessionExpired);
         h.quiet();
         let events = h.drain();
-        assert!(members_events(&events).is_empty(), "expiry is not a member failure: {events:?}");
+        assert!(
+            members_events(&events).is_empty(),
+            "expiry is not a member failure: {events:?}"
+        );
     }
 
     #[test]
@@ -5189,38 +7312,79 @@ mod tests {
         let own = Profile {
             user: account(),
             name: Some("Ян".into()),
-            avatar: Some(MediaRef { id: "av".into(), kind: MediaKind::Avatar }),
+            avatar: Some(MediaRef {
+                id: "av".into(),
+                kind: MediaKind::Avatar,
+            }),
             status_text: Some("в отпуске".into()),
         };
         let h = start(|s, _| s.profile_result = Some(Ok(own.clone())), 50);
         h.online();
         h.client.send(Command::LoadProfile);
-        assert_eq!(h.next("profile", |e| matches!(e, ClientEvent::Profile(_))), ClientEvent::Profile(own));
+        assert_eq!(
+            h.next("profile", |e| matches!(e, ClientEvent::Profile(_))),
+            ClientEvent::Profile(own)
+        );
         assert_eq!(h.fake.state().profile_calls, 1);
         assert!(h.cache().chats().unwrap().is_empty());
     }
 
     #[test]
     fn a_rejected_profile_carries_the_reason_and_a_network_failure_the_offline_text() {
-        let h = start(|s, _| s.profile_result = Some(Err(rejected("нет доступа", true))), 50);
+        let h = start(
+            |s, _| s.profile_result = Some(Err(rejected("нет доступа", true))),
+            50,
+        );
         h.online();
         h.client.send(Command::LoadProfile);
-        let event = h.next("failure", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
-        assert_eq!(event, ClientEvent::ProfileFailed { reason: "нет доступа".into(), offline: false });
+        let event = h.next("failure", |e| {
+            matches!(e, ClientEvent::ProfileFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::ProfileFailed {
+                reason: "нет доступа".into(),
+                offline: false
+            }
+        );
 
         h.fake.state().profile_result = Some(Err(BackendError::Network("reset".into())));
         h.client.send(Command::LoadProfile);
-        let event = h.next("failure", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
-        assert_eq!(event, ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: false });
+        let event = h.next("failure", |e| {
+            matches!(e, ClientEvent::ProfileFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::ProfileFailed {
+                reason: OFFLINE_REASON.into(),
+                offline: false
+            }
+        );
     }
 
     #[test]
     fn the_profile_offline_is_answered_at_once_without_asking_the_backend() {
-        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        let h = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect()
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.client.send(Command::LoadProfile);
-        let event = h.next("refusal", |e| matches!(e, ClientEvent::ProfileFailed { .. }));
-        assert_eq!(event, ClientEvent::ProfileFailed { reason: OFFLINE_REASON.into(), offline: true });
+        let event = h.next("refusal", |e| {
+            matches!(e, ClientEvent::ProfileFailed { .. })
+        });
+        assert_eq!(
+            event,
+            ClientEvent::ProfileFailed {
+                reason: OFFLINE_REASON.into(),
+                offline: true
+            }
+        );
         h.quiet();
         assert_eq!(h.fake.state().profile_calls, 0);
     }
@@ -5234,7 +7398,11 @@ mod tests {
         h.wait_for("the first request", |s| s.profile_calls == 1);
         h.client.send(Command::LoadProfile);
         h.quiet();
-        assert_eq!(h.fake.state().profile_calls, 1, "the duplicate never reached the backend");
+        assert_eq!(
+            h.fake.state().profile_calls,
+            1,
+            "the duplicate never reached the backend"
+        );
         let seen = std::cell::RefCell::new(Vec::new());
         h.open_gate(&gate, "the answer", || {
             seen.borrow_mut().extend(h.drain());
@@ -5251,13 +7419,19 @@ mod tests {
 
     #[test]
     fn session_expiry_during_a_profile_load_ends_the_session() {
-        let h = start(|s, _| s.profile_result = Some(Err(BackendError::SessionExpired)), 50);
+        let h = start(
+            |s, _| s.profile_result = Some(Err(BackendError::SessionExpired)),
+            50,
+        );
         h.online();
         h.client.send(Command::LoadProfile);
         h.next("expired", |e| *e == ClientEvent::SessionExpired);
         h.quiet();
         let events = h.drain();
-        assert!(profile_events(&events).is_empty(), "expiry is not a profile failure: {events:?}");
+        assert!(
+            profile_events(&events).is_empty(),
+            "expiry is not a profile failure: {events:?}"
+        );
     }
 
     // -- chat creation --------------------------------------------------------------------
@@ -5270,13 +7444,17 @@ mod tests {
     }
 
     fn create_with(user: &str) -> Command {
-        Command::CreatePrivateChat { user: UserId(user.into()) }
+        Command::CreatePrivateChat {
+            user: UserId(user.into()),
+        }
     }
 
     fn is_creation_outcome(event: &ClientEvent) -> bool {
         matches!(
             event,
-            ClientEvent::ChatCreated { .. } | ClientEvent::CreationFailed { .. } | ClientEvent::CreationUnverified { .. }
+            ClientEvent::ChatCreated { .. }
+                | ClientEvent::CreationFailed { .. }
+                | ClientEvent::CreationUnverified { .. }
         )
     }
 
@@ -5291,15 +7469,31 @@ mod tests {
 
     #[test]
     fn a_created_chat_is_announced_with_the_replys_id_after_the_list_was_refreshed() {
-        let h = start(|s, _| s.create_results = VecDeque::from([Ok(Some(id("p")))]), 50);
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Ok(Some(id("p")))]),
+            50,
+        );
         h.online();
         h.fake.state().chats = vec![private("p", "u9")];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
-        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: false
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "p")),
+            "the list comes first: {seen:?}"
+        );
         assert_eq!(h.fake.state().create_calls, [UserId("u9".into())]);
-        assert_eq!(h.cache().chats().unwrap(), [private("p", "u9")], "the refreshed list is stored");
+        assert_eq!(
+            h.cache().chats().unwrap(),
+            [private("p", "u9")],
+            "the refreshed list is stored"
+        );
     }
 
     #[test]
@@ -5310,8 +7504,17 @@ mod tests {
         h.fake.state().chats = vec![chat("g", Some(2), None), private("p", "u9")];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
-        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: false
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "p")),
+            "the list comes first: {seen:?}"
+        );
     }
 
     #[test]
@@ -5319,22 +7522,42 @@ mod tests {
         let h = start(|_, _| {}, 50);
         h.online();
         h.client.send(create_with("u9"));
-        h.next("created", |e| *e == ClientEvent::ChatCreated { chat: None, existing: false });
+        h.next("created", |e| {
+            *e == ClientEvent::ChatCreated {
+                chat: None,
+                existing: false,
+            }
+        });
         assert_eq!(h.fake.state().create_calls.len(), 1);
     }
 
     #[test]
     fn a_rejected_creation_carries_the_reason_and_neither_refreshes_nor_retries() {
         let reason = "нельзя создать чат с этим человеком";
-        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(rejected(reason, true)))]), 50);
+        let h = start(
+            |s, _| {
+                s.create_results =
+                    VecDeque::from([Err(CreateError::Failed(rejected(reason, true)))])
+            },
+            50,
+        );
         h.online();
         h.fake.state().chats = vec![private("p", "u9")];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::CreationFailed { reason: reason.into(), unknown: false }));
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::CreationFailed {
+                reason: reason.into(),
+                unknown: false
+            })
+        );
         h.quiet();
         let later = h.drain();
-        assert!(!seen.iter().chain(&later).any(|e| lists(e, "p")), "nothing was created, so no refresh: {seen:?} {later:?}");
+        assert!(
+            !seen.iter().chain(&later).any(|e| lists(e, "p")),
+            "nothing was created, so no refresh: {seen:?} {later:?}"
+        );
         assert!(creation_events(&later).is_empty());
         assert_eq!(h.fake.state().create_calls.len(), 1);
     }
@@ -5342,49 +7565,101 @@ mod tests {
     #[test]
     fn a_request_that_never_left_is_a_plain_failure_with_the_offline_text() {
         let h = start(
-            |s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(BackendError::Network("no route".into())))]),
+            |s, _| {
+                s.create_results = VecDeque::from([Err(CreateError::Failed(
+                    BackendError::Network("no route".into()),
+                ))])
+            },
             50,
         );
         h.online();
         h.client.send(create_with("u9"));
         let event = h.next("the outcome", is_creation_outcome);
-        assert_eq!(event, ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+        assert_eq!(
+            event,
+            ClientEvent::CreationFailed {
+                reason: OFFLINE_REASON.into(),
+                unknown: false
+            }
+        );
     }
 
     #[test]
     fn an_unknown_result_refreshes_the_list_says_so_and_never_retries() {
-        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]),
+            50,
+        );
         h.online();
         h.fake.state().chats = vec![chat("g", Some(2), None)];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true }));
-        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "g")), "the list was refreshed first: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::CreationFailed {
+                reason: CREATION_UNKNOWN_REASON.into(),
+                unknown: true
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "g")),
+            "the list was refreshed first: {seen:?}"
+        );
         h.quiet();
         assert!(creation_events(&h.drain()).is_empty());
-        assert_eq!(h.fake.state().create_calls.len(), 1, "the backend was called once and never again by itself");
+        assert_eq!(
+            h.fake.state().create_calls.len(),
+            1,
+            "the backend was called once and never again by itself"
+        );
     }
 
     #[test]
     fn a_private_chat_that_appeared_after_an_unknown_result_is_opened_not_created_again() {
-        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]),
+            50,
+        );
         h.online();
         h.fake.state().chats = vec![private("p", "u9")];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: true }));
-        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: true
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "p")),
+            "the list comes first: {seen:?}"
+        );
         h.quiet();
         assert_eq!(h.fake.state().create_calls.len(), 1);
     }
 
     #[test]
     fn offline_a_creation_is_refused_at_once_without_a_request() {
-        let h = start(|s, _| s.bootstrap_errors = std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect(), 50);
-        h.next("offline", |e| *e == ClientEvent::Connection(ConnectionState::Offline));
+        let h = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect()
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
         h.client.send(create_with("u9"));
         let event = h.next("refusal", is_creation_outcome);
-        assert_eq!(event, ClientEvent::CreationFailed { reason: OFFLINE_REASON.into(), unknown: false });
+        assert_eq!(
+            event,
+            ClientEvent::CreationFailed {
+                reason: OFFLINE_REASON.into(),
+                unknown: false
+            }
+        );
         h.quiet();
         assert!(h.fake.state().create_calls.is_empty());
     }
@@ -5399,7 +7674,11 @@ mod tests {
         h.client.send(create_with("u9"));
         h.client.send(create_with("u8"));
         h.quiet();
-        assert_eq!(h.fake.state().create_calls.len(), 1, "the duplicates never reached the backend");
+        assert_eq!(
+            h.fake.state().create_calls.len(),
+            1,
+            "the duplicates never reached the backend"
+        );
         let seen = std::cell::RefCell::new(Vec::new());
         h.open_gate(&gate, "the answer", || {
             seen.borrow_mut().extend(h.drain());
@@ -5408,7 +7687,11 @@ mod tests {
         h.quiet();
         seen.borrow_mut().extend(h.drain());
         let seen = seen.into_inner();
-        assert_eq!(creation_events(&seen).len(), 1, "one answer for the one creation: {seen:?}");
+        assert_eq!(
+            creation_events(&seen).len(),
+            1,
+            "one answer for the one creation: {seen:?}"
+        );
 
         h.client.send(create_with("u8"));
         h.wait_for("the later request", |s| s.create_calls.len() == 2);
@@ -5416,11 +7699,20 @@ mod tests {
 
     #[test]
     fn an_existing_private_chat_is_reported_without_asking_the_backend() {
-        let h = start(|s, _| s.chats = vec![private("p", "u9"), chat("g", Some(2), None)], 50);
+        let h = start(
+            |s, _| s.chats = vec![private("p", "u9"), chat("g", Some(2), None)],
+            50,
+        );
         h.online();
         h.client.send(create_with("u9"));
         let event = h.next("existing", is_creation_outcome);
-        assert_eq!(event, ClientEvent::ChatCreated { chat: Some(id("p")), existing: true });
+        assert_eq!(
+            event,
+            ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: true
+            }
+        );
         h.quiet();
         assert!(h.fake.state().create_calls.is_empty());
     }
@@ -5428,7 +7720,10 @@ mod tests {
     #[test]
     fn session_expiry_during_a_creation_ends_the_session() {
         let h = start(
-            |s, _| s.create_results = VecDeque::from([Err(CreateError::Failed(BackendError::SessionExpired))]),
+            |s, _| {
+                s.create_results =
+                    VecDeque::from([Err(CreateError::Failed(BackendError::SessionExpired))])
+            },
             50,
         );
         h.online();
@@ -5436,77 +7731,151 @@ mod tests {
         h.next("expired", |e| *e == ClientEvent::SessionExpired);
         h.quiet();
         let events = h.drain();
-        assert!(creation_events(&events).is_empty(), "expiry is not a creation failure: {events:?}");
+        assert!(
+            creation_events(&events).is_empty(),
+            "expiry is not a creation failure: {events:?}"
+        );
     }
 
     #[test]
     fn an_unknown_result_with_an_unreadable_list_is_not_reported_as_a_checked_one() {
-        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]),
+            50,
+        );
         h.online();
         h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::CreationUnverified { reason: CREATION_UNVERIFIED_REASON.into() }));
-        assert!(!seen.iter().any(|e| matches!(e, ClientEvent::ChatsReplaced(_))), "no list was read: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::CreationUnverified {
+                reason: CREATION_UNVERIFIED_REASON.into()
+            })
+        );
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e, ClientEvent::ChatsReplaced(_))),
+            "no list was read: {seen:?}"
+        );
         h.quiet();
         assert!(creation_events(&h.drain()).is_empty());
-        assert_eq!(h.fake.state().create_calls.len(), 1, "never retried by itself");
+        assert_eq!(
+            h.fake.state().create_calls.len(),
+            1,
+            "never retried by itself"
+        );
     }
 
     #[test]
-    fn after_an_unverified_result_the_next_attempt_checks_the_list_first_and_sends_nothing_while_it_fails() {
+    fn after_an_unverified_result_the_next_attempt_checks_the_list_first_and_sends_nothing_while_it_fails()
+     {
         let h = start(
-            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into())), Ok(Some(id("p")))]),
+            |s, _| {
+                s.create_results = VecDeque::from([
+                    Err(CreateError::Unknown("timeout".into())),
+                    Ok(Some(id("p"))),
+                ])
+            },
             50,
         );
         h.online();
         // The refresh after the unknown result fails, and so does the check before the second attempt.
-        h.fake.state().chat_list_errors =
-            VecDeque::from([BackendError::Network("down".into()), BackendError::Network("still down".into())]);
+        h.fake.state().chat_list_errors = VecDeque::from([
+            BackendError::Network("down".into()),
+            BackendError::Network("still down".into()),
+        ]);
         h.client.send(create_with("u9"));
-        h.next("unverified", |e| matches!(e, ClientEvent::CreationUnverified { .. }));
+        h.next("unverified", |e| {
+            matches!(e, ClientEvent::CreationUnverified { .. })
+        });
 
         h.client.send(create_with("u9"));
         let event = h.next("the check failed", is_creation_outcome);
-        assert_eq!(event, ClientEvent::CreationUnverified { reason: LIST_CHECK_FAILED_REASON.into() });
+        assert_eq!(
+            event,
+            ClientEvent::CreationUnverified {
+                reason: LIST_CHECK_FAILED_REASON.into()
+            }
+        );
         h.quiet();
-        assert_eq!(h.fake.state().create_calls.len(), 1, "no second request without a successful list check");
+        assert_eq!(
+            h.fake.state().create_calls.len(),
+            1,
+            "no second request without a successful list check"
+        );
 
         // The list is readable again and does not hold the chat: now the creation goes out.
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: false }));
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: false
+            })
+        );
         assert_eq!(h.fake.state().create_calls.len(), 2);
     }
 
     #[test]
     fn the_check_before_a_new_attempt_opens_a_chat_that_exists_instead_of_creating_another() {
-        let h = start(|s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]), 50);
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]),
+            50,
+        );
         h.online();
         h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
         h.client.send(create_with("u9"));
-        h.next("unverified", |e| matches!(e, ClientEvent::CreationUnverified { .. }));
+        h.next("unverified", |e| {
+            matches!(e, ClientEvent::CreationUnverified { .. })
+        });
 
         // The chat was created after all; it shows up once the list can be read.
         h.fake.state().chats = vec![private("p", "u9")];
         h.client.send(create_with("u9"));
         let seen = h.until("the outcome", is_creation_outcome);
-        assert_eq!(seen.last(), Some(&ClientEvent::ChatCreated { chat: Some(id("p")), existing: true }));
-        assert!(seen[..seen.len() - 1].iter().any(|e| lists(e, "p")), "the list comes first: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("p")),
+                existing: true
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "p")),
+            "the list comes first: {seen:?}"
+        );
         h.quiet();
-        assert_eq!(h.fake.state().create_calls.len(), 1, "only the first request ever left");
+        assert_eq!(
+            h.fake.state().create_calls.len(),
+            1,
+            "only the first request ever left"
+        );
     }
 
     #[test]
     fn a_checked_unknown_result_leaves_no_check_owed() {
         let h = start(
-            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into())), Ok(Some(id("p")))]),
+            |s, _| {
+                s.create_results = VecDeque::from([
+                    Err(CreateError::Unknown("timeout".into())),
+                    Ok(Some(id("p"))),
+                ])
+            },
             50,
         );
         h.online();
         h.client.send(create_with("u9"));
         let event = h.next("the outcome", is_creation_outcome);
-        assert_eq!(event, ClientEvent::CreationFailed { reason: CREATION_UNKNOWN_REASON.into(), unknown: true });
+        assert_eq!(
+            event,
+            ClientEvent::CreationFailed {
+                reason: CREATION_UNKNOWN_REASON.into(),
+                unknown: true
+            }
+        );
 
         // The list was read, so the user's next press goes straight to the backend.
         h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);

@@ -5,10 +5,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const US: i64 = 1_000_000;
 const WEEKDAYS: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const MONTHS: [&str; 12] = [
-    "января", "февраля", "марта", "апреля", "мая", "июня",
-    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+    "января",
+    "февраля",
+    "марта",
+    "апреля",
+    "мая",
+    "июня",
+    "июля",
+    "августа",
+    "сентября",
+    "октября",
+    "ноября",
+    "декабря",
 ];
-const AVATAR_COLORS: [u32; 7] = [0xc4585f, 0xd08a4f, 0x8a79c9, 0x5fa84a, 0x4aa8ab, 0x4a8dc0, 0xc9608c];
+const AVATAR_COLORS: [u32; 7] = [
+    0xc4585f, 0xd08a4f, 0x8a79c9, 0x5fa84a, 0x4aa8ab, 0x4a8dc0, 0xc9608c,
+];
 
 /// Source of "now" and the local UTC offset; fixed in tests.
 #[derive(Clone, Copy, Debug)]
@@ -23,7 +35,9 @@ impl Clock {
 
     #[cfg(test)]
     pub fn fixed(now_us: i64, utc_offset_secs: i32) -> Self {
-        Self { fixed: Some((now_us, utc_offset_secs)) }
+        Self {
+            fixed: Some((now_us, utc_offset_secs)),
+        }
     }
 
     pub fn now_us(self) -> i64 {
@@ -122,13 +136,27 @@ pub fn clock_time(ts_us: i64, clock: Clock) -> String {
 /// `HH:MM:SS.mmm` in local time, for log lines.
 pub fn log_time(ts_us: i64, clock: Clock) -> String {
     let c = local(ts_us, clock);
-    format!("{:02}:{:02}:{:02}.{:03}", c.secs / 3600, c.secs / 60 % 60, c.secs % 60, ts_us.rem_euclid(US) / 1000)
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        c.secs / 3600,
+        c.secs / 60 % 60,
+        c.secs % 60,
+        ts_us.rem_euclid(US) / 1000
+    )
 }
 
 /// `YYYYMMDD-HHMMSS` in UTC; sorts in time order, for file names.
 pub fn utc_stamp(ts_us: i64) -> String {
     let c = civil(ts_us, 0);
-    format!("{:04}{:02}{:02}-{:02}{:02}{:02}", c.year, c.month, c.dom, c.secs / 3600, c.secs / 60 % 60, c.secs % 60)
+    format!(
+        "{:04}{:02}{:02}-{:02}{:02}{:02}",
+        c.year,
+        c.month,
+        c.dom,
+        c.secs / 3600,
+        c.secs / 60 % 60,
+        c.secs % 60
+    )
 }
 
 /// Chat row time: today `HH:MM`, within the last week the weekday, otherwise `DD.MM.YY`.
@@ -168,9 +196,9 @@ pub fn initials(name: &str) -> String {
 
 /// Stable avatar color for a server id (FNV-1a).
 pub fn avatar_color(key: &str) -> u32 {
-    let hash = key
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3));
+    let hash = key.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3)
+    });
     AVATAR_COLORS[(hash % AVATAR_COLORS.len() as u64) as usize]
 }
 
@@ -272,8 +300,9 @@ mod tests {
     #[test]
     fn avatar_color_is_stable() {
         assert_eq!(avatar_color("0/0/abc"), avatar_color("0/0/abc"));
-        let colors: std::collections::HashSet<_> =
-            (0..64).map(|i| avatar_color(&format!("chat-{i}"))).collect();
+        let colors: std::collections::HashSet<_> = (0..64)
+            .map(|i| avatar_color(&format!("chat-{i}")))
+            .collect();
         assert!(colors.len() > 3);
     }
 

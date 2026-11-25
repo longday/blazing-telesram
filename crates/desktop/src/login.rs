@@ -1,8 +1,8 @@
 //! Sign-in window: a GPUI window hosting an incognito wry WebView on the Telemost page.
 //! The WebView is polled for the Yandex `Session_id` cookie; the caller verifies the cookies.
 use gpui::{
-    App, Context, IntoElement, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds, WindowHandle,
-    WindowOptions, div, prelude::*, px, rgb, size,
+    App, Context, IntoElement, Render, Subscription, Task, TitlebarOptions, Window, WindowBounds,
+    WindowHandle, WindowOptions, div, prelude::*, px, rgb, size,
 };
 use std::{
     cell::{Cell, RefCell},
@@ -74,7 +74,9 @@ fn has_session(cookies: &[LoginCookie]) -> bool {
 /// Scheme and host only: paths and queries of sign-in URLs may carry tokens.
 fn origin(url: &str) -> &str {
     let after_scheme = url.find("://").map_or(0, |i| i + 3);
-    let end = url[after_scheme..].find(['/', '?', '#']).map_or(url.len(), |i| after_scheme + i);
+    let end = url[after_scheme..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| after_scheme + i);
     &url[..end]
 }
 
@@ -96,7 +98,11 @@ impl SignInWindow {
         let view = window.viewport_size();
         let bounds = Rect {
             position: LogicalPosition::new(0.0, 0.0).into(),
-            size: LogicalSize::new(f64::from(f32::from(view.width)), f64::from(f32::from(view.height))).into(),
+            size: LogicalSize::new(
+                f64::from(f32::from(view.width)),
+                f64::from(f32::from(view.height)),
+            )
+            .into(),
         };
         if let Err(error) = webview.set_bounds(bounds) {
             tracing::warn!(%error, "sign-in webview resize failed");
@@ -120,7 +126,10 @@ pub fn open_sign_in_window(
     let bounds = crate::fitted_window_bounds(size(px(480.), px(720.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions { title: Some("Вход в Яндекс".into()), ..Default::default() }),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Вход в Яндекс".into()),
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let failure = Rc::new(Cell::new(None::<String>));
@@ -241,12 +250,18 @@ mod tests {
 
     #[test]
     fn session_expiry_has_no_timestamp() {
-        let c = Cookie::build(("a", "b")).expires(Expiration::Session).build();
+        let c = Cookie::build(("a", "b"))
+            .expires(Expiration::Session)
+            .build();
         assert_eq!(convert_cookie(&c).expires_unix, None);
     }
 
     fn cookie(name: &str, value: &str, domain: &str) -> LoginCookie {
-        convert_cookie(&Cookie::build((name.to_owned(), value.to_owned())).domain(domain.to_owned()).build())
+        convert_cookie(
+            &Cookie::build((name.to_owned(), value.to_owned()))
+                .domain(domain.to_owned())
+                .build(),
+        )
     }
 
     #[test]
@@ -261,8 +276,14 @@ mod tests {
 
     #[test]
     fn origin_drops_path_and_query() {
-        assert_eq!(origin("https://passport.yandex.ru/auth?retpath=x&token=t"), "https://passport.yandex.ru");
-        assert_eq!(origin("https://sso.yandex.ru#frag"), "https://sso.yandex.ru");
+        assert_eq!(
+            origin("https://passport.yandex.ru/auth?retpath=x&token=t"),
+            "https://passport.yandex.ru"
+        );
+        assert_eq!(
+            origin("https://sso.yandex.ru#frag"),
+            "https://sso.yandex.ru"
+        );
         assert_eq!(origin("about:blank"), "about:blank");
     }
 }
