@@ -1775,9 +1775,12 @@ impl<B: Backend> Engine<B> {
         // outside the snapshot's own range included, is merged into it, never the other way
         // round, so a state the cache rejected cannot come back through the snapshot (design
         // D5, "Invariant"). The rows are read once, before `replace_range` overwrites them.
-        // While another request is out, or an own choice is unanswered, the whole replaced range
-        // is read: rows that are not put back leave the cache, and their state moves to the ledger.
-        let span = if self.history_out > 0 || self.reaction_inflight.keys().any(|(own, _)| own == chat) {
+        // While another request is out, the whole replaced range is read: rows that are not put
+        // back leave the cache, and their state moves to the ledger for that request. Without one,
+        // only the rows of the chunk are read, plus, one by one, the rows of unanswered own
+        // choices of this chat that the range drops: their state is what a later push meets.
+        let others_out = self.history_out > 0;
+        let span = if others_out {
             Some((lo.unwrap_or(MessageTs::MIN), hi.unwrap_or(MessageTs::MAX)))
         } else {
             chunk.messages.first().zip(chunk.messages.last()).map(|(first, last)| (first.timestamp, last.timestamp))
@@ -1786,6 +1789,14 @@ impl<B: Backend> Engine<B> {
             Some((from, to)) => self.db(self.cache.messages_between(chat, from, to)).unwrap_or_default(),
             None => Vec::new(),
         };
+        let pending: Vec<MessageTs> = if others_out {
+            Vec::new()
+        } else {
+            let range = lo.unwrap_or(MessageTs::MIN)..=hi.unwrap_or(MessageTs::MAX);
+            let read = |ts: &MessageTs| span.is_some_and(|(from, to)| (from..=to).contains(ts));
+            self.reaction_inflight.keys().filter(|(own, ts)| own == chat && range.contains(ts) && !read(ts)).map(|(_, ts)| *ts).collect()
+        };
+        let pending: Vec<Message> = pending.into_iter().filter_map(|ts| self.db(self.cache.message(chat, ts)).flatten()).collect();
         for message in &mut chunk.messages {
             if let Ok(i) = cached.binary_search_by_key(&message.timestamp, |m| m.timestamp) {
                 message.inherit_reactions(&cached[i]);
@@ -1795,6 +1806,9 @@ impl<B: Backend> Engine<B> {
             if chunk.messages.binary_search_by_key(&dropped.timestamp, |m| m.timestamp).is_err() {
                 self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
             }
+        }
+        for dropped in &pending {
+            self.hold_reactions(chat, dropped.timestamp, &dropped.reactions);
         }
         let stored = self.cache.replace_range(chat, lo, hi, &chunk.messages, history_start);
         self.db(stored);
