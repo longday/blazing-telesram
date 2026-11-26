@@ -5,7 +5,9 @@
 //! [`ALLOWED_METHODS`] lists every name it can put on the wire. Writes (messages, edits,
 //! deletions, read markers, typing, reactions; all the socket method `push`) are a separate closed
 //! set in [`crate::write`]; presence heartbeats, pins and every other mutating variant are not
-//! representable at all.
+//! representable at all. Reading who reacted is a read, not a write: [`ReadRequest::ListReactions`]
+//! (socket `list_reactions`) only ever sends `Mode: 0` (reactions, no read markers) and has no
+//! invite hash.
 
 use serde_json::{Value, json};
 
@@ -15,7 +17,7 @@ use crate::frame::RequestFrame;
 pub const HISTORY_CHUNK: u32 = 50;
 
 /// Every method name `ReadRequest` can put on the wire.
-pub const ALLOWED_METHODS: [&str; 7] = [
+pub const ALLOWED_METHODS: [&str; 8] = [
     "request_user",
     "get_users_data",
     "history",
@@ -23,7 +25,12 @@ pub const ALLOWED_METHODS: [&str; 7] = [
     "search",
     "whoami",
     "get_chat_members",
+    "list_reactions",
 ];
+
+/// Reactor entries per `list_reactions` page: the web client's `2 x 15`. Provisional until the
+/// live check of `add-reaction-list` task 3.1 fixes the largest honoured `Limit`.
+pub const REACTORS_PAGE: u32 = 30;
 
 /// Members per `get_chat_members` page, what the web client asks for (the server default is 20).
 pub const MEMBERS_PAGE: u32 = 50;
@@ -71,6 +78,15 @@ pub enum ReadRequest {
         limit: u32,
         guid_offset: Option<String>,
         roles: Option<Vec<RoleFilter>>,
+    },
+    /// Socket `list_reactions`: who reacted to the message `timestamp` of `chat`. One page of up
+    /// to `limit` entries; `before` is the `MaxTimestamp` cursor for the next (older) page. The
+    /// wire `Mode` is always 0 (reactions only) and no invite hash is sent.
+    ListReactions {
+        chat: String,
+        timestamp: i64,
+        before: Option<i64>,
+        limit: u32,
     },
 }
 
@@ -134,6 +150,7 @@ impl ReadRequest {
             Self::Search { .. } => "search",
             Self::Whoami { .. } => "whoami",
             Self::ChatMembers { .. } => "get_chat_members",
+            Self::ListReactions { .. } => "list_reactions",
             Self::SubscribeChat { .. } => "subscribe",
         }
     }
@@ -147,7 +164,8 @@ impl ReadRequest {
             Self::ChatList
             | Self::History { .. }
             | Self::SubscribeChat { .. }
-            | Self::Whoami { .. } => Route::Socket,
+            | Self::Whoami { .. }
+            | Self::ListReactions { .. } => Route::Socket,
         }
     }
 
@@ -199,6 +217,23 @@ impl ReadRequest {
                 limit,
             } => {
                 let mut body = json!({ "ChatId": chat, "Limit": limit });
+                if let Some(before) = before {
+                    body["MaxTimestamp"] = Value::from(*before);
+                }
+                body
+            }
+            Self::ListReactions {
+                chat,
+                timestamp,
+                before,
+                limit,
+            } => {
+                let mut body = json!({
+                    "ChatId": chat,
+                    "Timestamp": timestamp,
+                    "Limit": limit,
+                    "Mode": 0,
+                });
                 if let Some(before) = before {
                     body["MaxTimestamp"] = Value::from(*before);
                 }
@@ -278,6 +313,18 @@ mod tests {
                 guid_offset: Some("g-last".into()),
                 roles: Some(vec![RoleFilter::Admin, RoleFilter::Member]),
             },
+            ReadRequest::ListReactions {
+                chat: "0/0/c".into(),
+                timestamp: 1_784_117_592_261_029,
+                before: None,
+                limit: REACTORS_PAGE,
+            },
+            ReadRequest::ListReactions {
+                chat: "0/0/c".into(),
+                timestamp: 1_784_117_592_261_029,
+                before: Some(1_784_117_500_000_000),
+                limit: 15,
+            },
         ];
         for request in &all {
             match request {
@@ -288,7 +335,8 @@ mod tests {
                 | ReadRequest::SubscribeChat { .. }
                 | ReadRequest::Search { .. }
                 | ReadRequest::Whoami { .. }
-                | ReadRequest::ChatMembers { .. } => {}
+                | ReadRequest::ChatMembers { .. }
+                | ReadRequest::ListReactions { .. } => {}
             }
         }
         all
@@ -352,10 +400,15 @@ mod tests {
         "ban",
     ];
 
+    /// `list_reactions` contains the marker "reaction" but is a read (who reacted); it is the one
+    /// reviewed exception. The write set stays `push` only (`crate::write`).
+    const READ_ONLY_EXCEPTIONS: [&str; 1] = ["list_reactions"];
+
     fn looks_mutating(method: &str) -> bool {
-        MUTATING_MARKERS
-            .iter()
-            .any(|marker| method.contains(marker))
+        !READ_ONLY_EXCEPTIONS.contains(&method)
+            && MUTATING_MARKERS
+                .iter()
+                .any(|marker| method.contains(marker))
     }
 
     #[test]
@@ -379,7 +432,7 @@ mod tests {
         ] {
             assert!(looks_mutating(method), "{method} must be flagged");
         }
-        for method in ["whoami", "get_chat_members", "search"] {
+        for method in ["whoami", "get_chat_members", "search", "list_reactions"] {
             assert!(!looks_mutating(method), "{method} must not be flagged");
         }
     }
@@ -398,10 +451,11 @@ mod tests {
                 "subscribe",
                 "search",
                 "whoami",
-                "get_chat_members"
+                "get_chat_members",
+                "list_reactions"
             ]
         );
-        assert_eq!(ALLOWED_METHODS.len(), 7);
+        assert_eq!(ALLOWED_METHODS.len(), 8);
         assert!(
             !ALLOWED_METHODS.contains(&"get_group_members"),
             "answers bad_request for every shape"
@@ -427,6 +481,66 @@ mod tests {
             (0, 4, "whoami")
         );
         assert_eq!(frame.body, json!({ "Guid": "g-self", "RequestId": "rid" }));
+    }
+
+    #[test]
+    fn reactors_read_is_a_socket_request_with_mode_zero() {
+        let first = ReadRequest::ListReactions {
+            chat: "0/0/c".into(),
+            timestamp: 1_784_117_592_261_029,
+            before: None,
+            limit: REACTORS_PAGE,
+        };
+        assert_eq!(REACTORS_PAGE, 30);
+        assert_eq!(first.method(), "list_reactions");
+        assert_eq!(first.route(), Route::Socket);
+        assert!(first.registry_body().is_none());
+        let ctx = SocketContext {
+            req_id: 9,
+            request_id: "rid",
+            subscription_id: None,
+        };
+        let frame = first.socket_frame(&ctx).unwrap();
+        assert_eq!(
+            (frame.service_index, frame.req_id, frame.method.as_str()),
+            (0, 9, "list_reactions")
+        );
+        // A first page has no cursor; `Mode` is the integer 0, not a string or an omitted key.
+        assert_eq!(
+            frame.body,
+            json!({
+                "ChatId": "0/0/c",
+                "Timestamp": 1_784_117_592_261_029_i64,
+                "Limit": 30,
+                "Mode": 0,
+                "RequestId": "rid",
+            })
+        );
+        assert!(frame.body.get("MaxTimestamp").is_none());
+        assert!(frame.body["Mode"].is_i64());
+        assert_eq!(frame.body["Mode"].as_i64(), Some(0));
+    }
+
+    #[test]
+    fn a_later_reactors_page_carries_the_cursor() {
+        let (method, body) = encode(&ReadRequest::ListReactions {
+            chat: "c".into(),
+            timestamp: 5,
+            before: Some(1_784_117_500_000_000),
+            limit: 15,
+        });
+        assert_eq!(method, "list_reactions");
+        assert_eq!(
+            body,
+            json!({
+                "ChatId": "c",
+                "Timestamp": 5,
+                "Limit": 15,
+                "Mode": 0,
+                "MaxTimestamp": 1_784_117_500_000_000_i64,
+                "RequestId": "rid",
+            })
+        );
     }
 
     #[test]
