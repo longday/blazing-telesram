@@ -29,7 +29,7 @@ use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEnt
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
-use yandex_proto::wire::{Relation, WireBody, WireFile, WireMessage};
+use yandex_proto::wire::{Relation, WireBody, WireChat, WireFile, WireMessage};
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError};
@@ -55,6 +55,7 @@ search is read-only: per entity it prints total/limit/page/pages and the raw ite
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
 whoami, members and reactors are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
 reactors is read-only (a socket list_reactions, so BT_WRITE_ONLY_CHAT does not apply): it prints one page of the users who reacted to the message with that timestamp in <chat>, in server order; --before <micros> asks for the page older than that cursor, --limit <n> (at least 1, default 30) sets the page size. It always sends Mode 0; there is no --mode
+chats prints `pinned=<micros>` after the unread count of a chat that has a pinned message (the message's timestamp); a chat without a pin prints nothing extra
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -516,19 +517,27 @@ async fn connect(session: &Session, config: ClientConfig) -> Result<(Client, Xiv
 async fn chats() -> Result<(), Failure> {
     let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
     for chat in client.chat_list().await.map_err(fail)? {
-        let preview = chat.last_message.as_ref().map(describe).unwrap_or_default();
-        println!(
-            "{}\t{:?}\t{}\tunread={}{}\tts={}\t{preview}",
-            chat.id,
-            chat.kind,
-            chat.title.as_deref().unwrap_or("-"),
-            chat.unread,
-            if chat.muted { " muted" } else { "" },
-            chat.last_activity
-                .map_or_else(|| "-".to_owned(), |t| t.to_string()),
-        );
+        println!("{}", chat_line(&chat));
     }
     Ok(())
+}
+
+/// One `chats` row: id, kind, title, unread (with the muted flag and, for a chat that has one,
+/// the pinned message's timestamp), activity timestamp, last message.
+fn chat_line(chat: &WireChat) -> String {
+    let preview = chat.last_message.as_ref().map(describe).unwrap_or_default();
+    format!(
+        "{}\t{:?}\t{}\tunread={}{}{}\tts={}\t{preview}",
+        chat.id,
+        chat.kind,
+        chat.title.as_deref().unwrap_or("-"),
+        chat.unread,
+        if chat.muted { " muted" } else { "" },
+        chat.pinned
+            .map_or_else(String::new, |t| format!(" pinned={t}")),
+        chat.last_activity
+            .map_or_else(|| "-".to_owned(), |t| t.to_string()),
+    )
 }
 
 async fn history(chat: &str, before: Option<i64>) -> Result<(), Failure> {
@@ -1111,7 +1120,7 @@ fn reactions_note(message: &WireMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use yandex_proto::wire::{WireForwarded, WireRef};
+    use yandex_proto::wire::{WireChatKind, WireForwarded, WireRef};
 
     const GUID: &str = "c9a71201-70b5-992e-61f2-b27e2d3fc8fb";
 
@@ -1358,6 +1367,46 @@ mod tests {
         assert_eq!(describe(&row), "20\t?\tmine (important)");
         row.edited = true;
         assert_eq!(describe(&row), "20\t?\tmine (edited) (important)");
+    }
+
+    fn chat(pinned: Option<i64>, pin_action_ts: Option<i64>) -> WireChat {
+        WireChat {
+            id: "c1".into(),
+            kind: WireChatKind::Group,
+            title: Some("Team".into()),
+            avatar_id: None,
+            partner_guid: None,
+            last_activity: Some(500),
+            unread: 2,
+            muted: false,
+            pinned,
+            pin_action_ts,
+            last_message: None,
+            raw: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn a_chat_line_prints_the_pinned_timestamp_only_when_the_chat_has_a_pin() {
+        assert_eq!(
+            chat_line(&chat(None, None)),
+            "c1\tGroup\tTeam\tunread=2\tts=500\t"
+        );
+        assert_eq!(
+            chat_line(&chat(Some(123), Some(900))),
+            "c1\tGroup\tTeam\tunread=2 pinned=123\tts=500\t"
+        );
+        // An unpin snapshot keeps its action time but is no pin.
+        assert_eq!(
+            chat_line(&chat(None, Some(900))),
+            "c1\tGroup\tTeam\tunread=2\tts=500\t"
+        );
+        let mut muted = chat(Some(7), None);
+        muted.muted = true;
+        assert_eq!(
+            chat_line(&muted),
+            "c1\tGroup\tTeam\tunread=2 muted pinned=7\tts=500\t"
+        );
     }
 
     #[test]
