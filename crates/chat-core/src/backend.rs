@@ -4,8 +4,8 @@
 //! a private chat.
 
 use crate::model::{
-    ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId,
-    Profile, ReactorsPage, ReplyTarget, SearchHits, UserId,
+    ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessagePreview, MessageTs,
+    PayloadId, Profile, ReactorsPage, ReplyTarget, SearchHits, UserId,
 };
 use crate::reactions::{ReactionCode, ReactionsUpdate};
 use std::io::Write;
@@ -78,6 +78,14 @@ pub enum LiveEvent {
     },
     /// Authoritative summary (unread counter, preview, pin, mute) of one chat.
     ChatChanged(ChatSummary),
+    /// The pinned message of `chat` changed. `pinned` is `None` when nothing is pinned any more;
+    /// `at` is the server's timestamp of the action when it carries one, for ordering against
+    /// chat-list entries (`ChatSummary.pin_action_ts`).
+    PinChanged {
+        chat: ChatId,
+        pinned: Option<MessageTs>,
+        at: Option<i64>,
+    },
     Disconnected,
     Reconnected,
     /// The subscription cannot continue; `SessionExpired` ends the session, anything else
@@ -213,4 +221,13 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         user: &UserId,
     ) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
+
+    /// The one-line preview of the message `(chat, timestamp)`, or `Ok(None)` when the server
+    /// no longer has it. One read request, never a push; offline fails fast with `Network`.
+    /// Nothing is persisted.
+    fn message_preview(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+    ) -> impl Future<Output = Result<Option<MessagePreview>, BackendError>> + Send;
 }
