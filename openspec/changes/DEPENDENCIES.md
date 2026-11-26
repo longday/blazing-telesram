@@ -40,17 +40,17 @@ Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are firs
 
 ## add-reaction-list (RL)
 
-Done: 1.1, 1.2, 1.3, 2.1 (RL-proto, on `main`), 4.1, 4.2, 5.1, 6.1-6.5 (merged into `integ/reaction-list-app`, head `6a9205a`; 6.5 merged 2026-11-27, build 0 warnings, `cargo test --workspace` 389 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline), 6.6 (no work: flat list), 7.1. All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 (on `main`); **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (in progress on `integ/reaction-list-app`; merges to `main` after 6.7). 3.1 and 8.2 are live reads in the VM (no write, no approval); they are still blocked: the VM has no outbound network (the host's full-tunnel VPN breaks the VM NAT).
+Done: 1.1, 1.2, 1.3, 2.1 (RL-proto), 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (RL-app) — all on `main` (RL-app merged 2026-11-27 as `b85d478`; build 0 warnings, `cargo test --workspace` 402 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline, `openspec validate --all --strict` 17/17), 6.6 (no work: flat list), 7.1. All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 and **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7, both on `main`. 3.1 and 8.2 are live reads in the VM (no write, no approval); they are still blocked: the VM has no outbound network (the host's full-tunnel VPN breaks the VM NAT).
 
 | ID | Status | Needs | Files |
 |----|--------|-------|-------|
 | 3.1 | blocked: the VM network; **[live]** | 2.1 (done) | `research.md`, the fixture |
-| 6.7 | ready (6.1-6.5 are merged into integ) | | `tests.rs` |
-| 8.1, 8.2, 8.3 | blocked-by 6.7 (and the VM network for 8.2 **[live]**) | | final run, `research.md`, archive |
+| 8.1 | ready (6.7 is on `main`); final run of the build/test/lint matrix | 6.7 (done) | none |
+| 8.2, 8.3 | 8.2 blocked: the VM network **[live]**; 8.3 (archive) blocked-by 8.2 | 8.1 | `research.md`, archive |
 
 ## add-pins-and-importance-view (PIN)
 
-Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer) and 5.2 (in the same integ branch, `ce2d7ab`, head). Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
+Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer) and 5.2 (in the same integ branch, `ce2d7ab`, head). Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. RL-app is on `main`, so PIN's tasks on files shared with RL are no longer queued behind it.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
@@ -58,7 +58,7 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 | 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
 | 1.2 | **done**, merged into `integ/pins-and-importance-view` (`b48b666`); holds no file any more (rule 1, merged into the integration branch) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
-| 2.1 | ready; start after RL-app merges | 1.1 | `model.rs`, `fixtures.rs` |
+| 2.1 | ready (RL-app is on `main`); shares no file with REV 1.1/2.1/3.1 | 1.1 | `model.rs`, `fixtures.rs` |
 | 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
 | 2.3 | blocked-by 2.2 (1.2 is done in integ) | 2.2 | chat-core `client.rs` |
 | 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
@@ -77,25 +77,25 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 
 ## add-reveal-downloaded-file (REV)
 
-Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; 1.1, 2.1 and 3.1 cannot compile apart, so they start together once RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
+Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; 1.1, 2.1 and 3.1 cannot compile apart, so they start together; RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 1.1 | ready once RL-app is on `main` (6.1/6.4/6.5 hold `store.rs` on `integ/reaction-list-app` until then); start together with 2.1 and 3.1. PIN 4.1 (`store.rs`) is not started and locks nothing (rule 6) | | `store.rs` |
-| 2.1 | ready once RL-app is on `main`, together with 1.1 and 3.1 (it cannot compile apart from them; `viewer.rs` itself is in no other change) | 1.1 contract (D3) | `viewer.rs` |
+| 1.1 | ready (RL-app is on `main`); start together with 2.1 and 3.1. PIN 4.1 (`store.rs`) is not started and locks nothing (rule 6) | | `store.rs` |
+| 2.1 | ready, together with 1.1 and 3.1 (it cannot compile apart from them; `viewer.rs` itself is in no other change) | 1.1 contract (D3) | `viewer.rs` |
 | 2.2 | blocked-by 2.1; after PIN 4.2 has merged (same `timeline.rs`) | 1.1, 2.1 | `timeline.rs` |
-| 3.1 | ready once RL-app is on `main` (6.2 holds `main.rs` until then), together with 1.1 and 2.1 | 1.1 contract | `main.rs` |
-| 4.1 | blocked-by 1.1, 2.1, 2.2; after RL-app (6.7) and PIN 4.4 have merged (same `tests.rs`) | 1.1, 2.1, 2.2 | `tests.rs` |
+| 3.1 | ready (RL-app is on `main`), together with 1.1 and 2.1 | 1.1 contract | `main.rs` |
+| 4.1 | blocked-by 1.1, 2.1, 2.2; after PIN 4.4 has merged (same `tests.rs`; RL-app's 6.7 is on `main`) | 1.1, 2.1, 2.2 | `tests.rs` |
 | 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
 | 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
 | 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
 
-Unit **REV** shares files with: RL-app (`store.rs` 6.1/6.4/6.5, `main.rs` 6.2, `tests.rs` 6.7; all held until RL-app merges to `main`), PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tests.rs` 4.4) and CM-G (`tests.rs`; not started, locks nothing, rule 6). It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`. 2.1 (`viewer.rs`) may be written ahead on a branch but, as part of the unit, merges only with it.
+Unit **REV** shares files with: PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tests.rs` 4.4) and CM-G (`tests.rs`; not started, locks nothing, rule 6). RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`. 2.1 (`viewer.rs`) may be written ahead on a branch but, as part of the unit, merges only with it.
 
 ## Ready now
 
-- Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`). PIN has nothing startable: 1.1, 1.2, 5.1 and 5.2 are done; 2.1 waits for RL-app and the rest of its column for 2.1 or 2.2.
-- Queued behind RL-app on shared files (rule 1): **PIN 2.1** and **REV 1.1 + 2.1 + 3.1** (start together once RL-app merges to `main`; they cannot compile apart). Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency and no file overlap (rule 1): **REV 1.1 + 2.1 + 3.1** as one unit (`store.rs`, `viewer.rs`, `main.rs`) and **PIN 2.1** (`model.rs`, `fixtures.rs`); the two sets are disjoint, so they run in parallel. **RL 8.1** (final run, no files) is also ready. Each chain then unlocks the rest of its column above.
+- RL 3.1 and 8.2 stay blocked on the VM network; RL 8.3 (archive) waits for 8.2.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
 ## Needs the user
