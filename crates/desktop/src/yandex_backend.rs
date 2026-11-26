@@ -1250,6 +1250,7 @@ mod tests {
             }),
             body,
             edited: false,
+            important: false,
             relation,
             reactions: None,
             raw: serde_json::Value::Null,

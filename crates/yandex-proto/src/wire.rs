@@ -219,6 +219,9 @@ pub struct WireMessage {
     pub from: Option<WireSender>,
     pub body: WireBody,
     pub edited: bool,
+    /// `Plain`/`Ephemeral.IsImportant` is `true`. Missing, `false`, non-bool, a deleted message
+    /// and a non-`Plain` kind all give `false`.
+    pub important: bool,
     pub relation: Relation,
     /// `Some` when any of `Reactions`, `ReactionsVersion`, `RecentUserReactions` is present.
     pub reactions: Option<WireReactions>,
@@ -648,6 +651,8 @@ pub fn parse_server_message(raw: &Json, chat_hint: Option<&str>) -> Result<WireM
         from: sender(info),
         body,
         edited,
+        important: !deleted
+            && plain.is_some_and(|p| p.get("IsImportant").and_then(Json::as_bool) == Some(true)),
         relation,
         reactions: reactions(raw),
         raw: raw.clone(),
@@ -1102,6 +1107,92 @@ mod tests {
             parse_server_message(&m, None).unwrap().body,
             WireBody::Other("Image".into())
         );
+    }
+
+    #[test]
+    fn importance_flag_is_read_from_plain_and_ephemeral() {
+        let important = |plain: Json, info: Json| {
+            parse_server_message(&msg(plain, info), None)
+                .unwrap()
+                .important
+        };
+        let text = || json!({ "MessageText": "x" });
+        let info = || json!({ "Timestamp": 5 });
+
+        assert!(important(
+            json!({ "ChatId": "c", "Text": text(), "IsImportant": true }),
+            info()
+        ));
+        assert!(!important(
+            json!({ "ChatId": "c", "Text": text(), "IsImportant": false }),
+            info()
+        ));
+        assert!(!important(json!({ "ChatId": "c", "Text": text() }), info()));
+        assert!(!important(
+            json!({ "ChatId": "c", "Text": text(), "IsImportant": null }),
+            info()
+        ));
+        for junk in [json!("true"), json!(1), json!([true]), json!({})] {
+            assert!(
+                !important(
+                    json!({ "ChatId": "c", "Text": text(), "IsImportant": junk }),
+                    info()
+                ),
+                "{junk}"
+            );
+        }
+
+        // The flag is meta, not content: a body made of the flag alone stays empty.
+        let m = parse_server_message(
+            &msg(json!({ "ChatId": "c", "IsImportant": true }), info()),
+            None,
+        )
+        .unwrap();
+        assert!(m.important);
+        assert_eq!(m.body, WireBody::Empty);
+
+        // `Ephemeral` is read like `Plain`.
+        let ephemeral = json!({
+            "ClientMessage": { "Ephemeral": { "ChatId": "c", "Text": text(), "IsImportant": true } },
+            "ServerMessageInfo": info()
+        });
+        assert!(parse_server_message(&ephemeral, None).unwrap().important);
+
+        // A deleted message and a non-`Plain` kind are never important.
+        assert!(!important(
+            json!({ "ChatId": "c", "IsImportant": true }),
+            json!({ "Timestamp": 5, "Version": 2, "Deleted": true })
+        ));
+        let system = json!({
+            "ClientMessage": { "SystemMessage": { "ChatId": "c", "IsImportant": true } },
+            "ServerMessageInfo": info()
+        });
+        assert!(!parse_server_message(&system, None).unwrap().important);
+    }
+
+    #[test]
+    fn importance_flag_survives_a_push() {
+        let pushed = |flag: Json| {
+            let body = msg(
+                json!({ "ChatId": "c", "Text": { "MessageText": "x" }, "IsImportant": flag }),
+                json!({ "Timestamp": 5, "Version": 2 }),
+            );
+            let Ok(PushEvent::MessageUpserted(m)) = decode_push(&body) else {
+                panic!("not an upsert")
+            };
+            m
+        };
+        assert!(pushed(json!(true)).important);
+        assert!(!pushed(json!(false)).important);
+
+        let gone = msg(
+            json!({ "ChatId": "c", "IsImportant": true }),
+            json!({ "Timestamp": 5, "Version": 3, "Deleted": true }),
+        );
+        assert!(matches!(
+            decode_push(&gone),
+            Ok(PushEvent::MessageDeleted { .. })
+        ));
     }
 
     #[test]
