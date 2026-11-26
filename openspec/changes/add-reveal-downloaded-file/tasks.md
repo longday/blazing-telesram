@@ -30,7 +30,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
   - Tests: `action_line` gives `reveal: true` for `Saved` and `false` for no state, `Running` and every `Failed(_)`, with `online` true and false; the existing assertions still hold with the new field.
   - Done when: these tests exist.
 
-- [ ] 2.2 The file card link (D5)
+- [x] 2.2 The file card link (D5)
   - Owns: `crates/desktop/src/timeline.rs`.
   - Depends on: 1.1, 2.1. Waits until PIN 4.2 has merged or is not started (rule 1).
   - Do: `action_row` destructures the new `reveal` field and, when true, renders a «Показать в Finder» (`REVEAL_LABEL`) link between the status text and the download button: selector `msg-{ts}-reveal`, element id `file-reveal-{ts}`, `ACCENT`, `cursor_pointer`, click `store.update(cx, |s, cx| s.reveal_download(&original, cx))`; always enabled; the row keeps its 18 px height and `flex_1 min_w_0 truncate` status, the card its 300 px width; the doc comment of `file_card` lists the new selector.
