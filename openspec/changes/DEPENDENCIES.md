@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-26. Three changes are open: **CM** `add-chat-members-and-creation`, **RL** `add-reaction-list`, **PIN** `add-pins-and-importance-view`. Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-27. Four changes are open: **CM** `add-chat-members-and-creation`, **RL** `add-reaction-list`, **PIN** `add-pins-and-importance-view`, **REV** `add-reveal-downloaded-file`. Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -40,59 +40,66 @@ Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are firs
 
 ## add-reaction-list (RL)
 
-All open questions (Q1-Q6) were answered on 2026-11-26 and the spec and design are finished (7.1 done); 6.6 needs no work (flat list). Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1; **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (starts after RL-proto is on `main`). 3.1 and 8.2 are live reads in the VM (no write, no approval; they need the VM's outbound network, which it lacked on 2026-11-26).
+Done: 1.1, 1.2, 1.3, 2.1 (RL-proto, on `main`), 4.1, 4.2, 5.1, 6.1-6.5 (merged into `integ/reaction-list-app`, head `6a9205a`; 6.5 merged 2026-11-27, build 0 warnings, `cargo test --workspace` 389 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline), 6.6 (no work: flat list), 7.1. All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 (on `main`); **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (in progress on `integ/reaction-list-app`; merges to `main` after 6.7). 3.1 and 8.2 are live reads in the VM (no write, no approval); they are still blocked: the VM has no outbound network (the host's full-tunnel VPN breaks the VM NAT).
 
 | ID | Status | Needs | Files |
 |----|--------|-------|-------|
-| 1.1 | ready | | `request.rs` |
-| 1.2 | ready | | `wire.rs`, `tests/wire_fixtures.rs`, new fixture |
-| 1.3 | blocked-by 1.1, 1.2 | | yandex-proto `client.rs` |
-| 2.1 | blocked-by 1.3 | | `bt-probe.rs` |
-| 3.1 | blocked-by 2.1 and the VM network; **[live]** | 2.1 | `research.md`, the fixture |
-| 4.1 | ready (CM-G holds nothing, rule 6) | | `model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs` |
-| 4.2 | blocked-by 4.1 | 4.1 | chat-core `client.rs` |
-| 5.1 | blocked-by 1.3, 4.1 | 1.3, 4.1 | `yandex_backend.rs` |
-| 6.1 | blocked-by 4.1 | 4.1 | `store.rs` |
-| 6.2 | blocked-by 4.1, 6.1 | 4.1, 6.1 | `reactors.rs`, `theme.rs`, `main.rs` |
-| 6.3, 6.4, 6.5 | blocked-by 6.1, 6.2 | 6.1, 6.2 | `composer.rs`, `desktop.rs` (6.3); `store.rs`, `reactors.rs` (6.4, 6.5) |
-| 6.7 | blocked-by 6.1-6.5 | | `tests.rs` |
-| 8.1, 8.2, 8.3 | blocked-by the units; 8.2 **[live]** | | final run, `research.md`, archive |
+| 3.1 | blocked: the VM network; **[live]** | 2.1 (done) | `research.md`, the fixture |
+| 6.7 | ready (6.1-6.5 are merged into integ) | | `tests.rs` |
+| 8.1, 8.2, 8.3 | blocked-by 6.7 (and the VM network for 8.2 **[live]**) | | final run, `research.md`, archive |
 
 ## add-pins-and-importance-view (PIN)
 
-Done: 1.1. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 may merge alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
+Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer) and 5.2 (in the same integ branch, `ce2d7ab`, head). Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | blocked: VM network; **[live]** reads only | | `research.md` |
 | 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
-| 1.2 | ready; start after RL 1.2 merges (same `wire.rs`) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
+| 1.2 | **done**, merged into `integ/pins-and-importance-view` (`b48b666`); holds no file any more (rule 1, merged into the integration branch) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
 | 2.1 | ready; start after RL-app merges | 1.1 | `model.rs`, `fixtures.rs` |
 | 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
-| 2.3 | blocked-by 2.2 (and 1.2 for the unit) | 2.2 | chat-core `client.rs` |
+| 2.3 | blocked-by 2.2 (1.2 is done in integ) | 2.2 | chat-core `client.rs` |
 | 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
 | 3.1 | blocked-by 2.1 | 1.1, 2.1 | `yandex_backend.rs` |
-| 3.2 | blocked-by 1.2, 2.2, 3.1 | | `yandex_backend.rs` |
-| 3.3 | blocked-by 3.2, 5.2; closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
+| 3.2 | blocked-by 2.2, 3.1 (1.2 is done in integ) | 1.2, 2.2, 3.1 | `yandex_backend.rs` |
+| 3.3 | blocked-by 3.2 (5.2 is done in integ); closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
 | 4.1 | blocked-by 2.2 | 2.2 | `store.rs` |
 | 4.2 | blocked-by 2.1 | 2.1 | `timeline.rs`, `theme.rs` |
 | 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
 | 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
-| 5.1 | ready; start after RL 2.1 merges (same `bt-probe.rs`) | 1.1 | `bt-probe.rs` |
-| 5.2 | blocked-by 1.2 (and RL 2.1) | 1.2 | `bt-probe.rs` |
+| 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
+| 5.2 | **done**, merged into `integ/pins-and-importance-view` (`537f7eb`, merge `ce2d7ab`); holds no file any more (rule 1) | 1.2 | `bt-probe.rs` |
 | 6.1 | after the units | | build/test/lint matrix |
 | 6.2 | blocked: network and the user's approval of the target; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
 | 6.3 | after the units | | this file, archive |
 
+## add-reveal-downloaded-file (REV)
+
+Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; 1.1, 2.1 and 3.1 cannot compile apart, so they start together once RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 1.1 | ready once RL-app is on `main` (6.1/6.4/6.5 hold `store.rs` on `integ/reaction-list-app` until then); start together with 2.1 and 3.1. PIN 4.1 (`store.rs`) is not started and locks nothing (rule 6) | | `store.rs` |
+| 2.1 | ready once RL-app is on `main`, together with 1.1 and 3.1 (it cannot compile apart from them; `viewer.rs` itself is in no other change) | 1.1 contract (D3) | `viewer.rs` |
+| 2.2 | blocked-by 2.1; after PIN 4.2 has merged (same `timeline.rs`) | 1.1, 2.1 | `timeline.rs` |
+| 3.1 | ready once RL-app is on `main` (6.2 holds `main.rs` until then), together with 1.1 and 2.1 | 1.1 contract | `main.rs` |
+| 4.1 | blocked-by 1.1, 2.1, 2.2; after RL-app (6.7) and PIN 4.4 have merged (same `tests.rs`) | 1.1, 2.1, 2.2 | `tests.rs` |
+| 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
+| 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
+| 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
+
+Unit **REV** shares files with: RL-app (`store.rs` 6.1/6.4/6.5, `main.rs` 6.2, `tests.rs` 6.7; all held until RL-app merges to `main`), PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tests.rs` 4.4) and CM-G (`tests.rs`; not started, locks nothing, rule 6). It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`. 2.1 (`viewer.rs`) may be written ahead on a branch but, as part of the unit, merges only with it.
+
 ## Ready now
 
-- Startable without the user, no unmet dependency, disjoint files (a first wave): **RL 1.1** (`request.rs`), **RL 1.2** (`wire.rs`), **RL 4.1** (`model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs`).
-- Ready by dependencies but queued behind RL on shared files (rule 1): **PIN 1.2** (after RL 1.2), **PIN 5.1** (after RL 2.1), **PIN 2.1** (after RL-app). Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`). PIN has nothing startable: 1.1, 1.2, 5.1 and 5.2 are done; 2.1 waits for RL-app and the rest of its column for 2.1 or 2.2.
+- Queued behind RL-app on shared files (rule 1): **PIN 2.1** and **REV 1.1 + 2.1 + 3.1** (start together once RL-app merges to `main`; they cannot compile apart). Each chain then unlocks the rest of its column above.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
 ## Needs the user
 
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation); deferred by the user, so these three and 6.3, 6.4, 7.1 stay open.
 - PIN 0.2 and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
-- RL 3.1 and 8.2 and PIN 0.1 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.
+- RL 3.1 and 8.2, PIN 0.1 and REV 5.2 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.
