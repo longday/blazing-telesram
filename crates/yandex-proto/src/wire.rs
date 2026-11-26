@@ -268,6 +268,12 @@ pub struct WireChat {
     /// `LastSeqNo - LastSeenByMeSeqNo`, clamped at zero.
     pub unread: u32,
     pub muted: bool,
+    /// The pinned message's timestamp: `PinnedMessageInfo.PinnedMessageTs`, else the first
+    /// positive entry of `ChatInfo.PinnedMessageTimestamps`. Zero and negative values are no pin.
+    pub pinned: Option<Micros>,
+    /// `PinnedMessageInfo.LastActionTsMcs` when positive, also when `pinned` is `None` (an
+    /// unpin snapshot keeps its action time).
+    pub pin_action_ts: Option<Micros>,
     pub last_message: Option<WireMessage>,
     /// The chat entry without its `Messages`.
     pub raw: Json,
@@ -294,9 +300,17 @@ pub enum PushEvent {
         timestamp: Micros,
     },
     /// Something that changes the chat row or its history without carrying a message:
-    /// read state moved on another device, pin, history cleared, state sync.
+    /// read state moved on another device, history cleared, state sync, chat approval.
     ChatChanged {
         chat: String,
+    },
+    /// The chat's message pin changed (`Pin` push): `pinned` is the pinned message's timestamp,
+    /// `None` when nothing is pinned now; `at` is `ServerMessageInfo.Timestamp`, the action time
+    /// that orders this push against a chat-list entry's `pin_action_ts`.
+    PinChanged {
+        chat: String,
+        pinned: Option<Micros>,
+        at: Option<Micros>,
     },
     /// Someone is typing: `user` is the typist's guid. `timeout_secs` is the lifetime of the
     /// indicator when the push states one.
@@ -332,6 +346,11 @@ fn string(value: &Json, key: &str) -> Option<String> {
         .as_str()
         .filter(|s| !s.is_empty())
         .map(str::to_owned)
+}
+
+/// A timestamp that is positive: zero and negative values read as "none".
+fn positive_micros(value: &Json) -> Option<Micros> {
+    micros(value).filter(|&t| t > 0)
 }
 
 /// Accepts a JSON integer, an integral float and a digit string.
@@ -728,7 +747,23 @@ fn parse_chat(entry: &Json) -> Option<WireChat> {
     if let Some(o) = raw.as_object_mut() {
         o.remove("Messages");
     }
+    // `PinnedMessageInfo` is the server's current pin and wins; the array's first positive entry
+    // is the fallback. The action time is read whenever the info is there, also without a pin.
+    let pin_info = present(entry, "PinnedMessageInfo");
+    let pinned = pin_info
+        .and_then(|p| p.get("PinnedMessageTs"))
+        .and_then(positive_micros)
+        .or_else(|| {
+            info.and_then(|i| i.get("PinnedMessageTimestamps"))
+                .and_then(Json::as_array)
+                .and_then(|stamps| stamps.iter().find_map(positive_micros))
+        });
+    let pin_action_ts = pin_info
+        .and_then(|p| p.get("LastActionTsMcs"))
+        .and_then(positive_micros);
     Some(WireChat {
+        pinned,
+        pin_action_ts,
         kind,
         title,
         avatar_id,
@@ -1001,12 +1036,22 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
             });
         }
     }
+    // `Pin` is a snapshot of the chat's pin: a `Timestamp` means that message is pinned now, no
+    // `Timestamp` means nothing is. `ServerMessageInfo.Timestamp` is the action time. A `Pin`
+    // without a `ChatId` falls through to `Ignored`.
+    if let Some((pin, chat)) = present(client, "Pin").and_then(|p| Some((p, string(p, "ChatId")?)))
+    {
+        return Ok(PushEvent::PinChanged {
+            chat,
+            pinned: pin.get("Timestamp").and_then(positive_micros),
+            at: present(body, "ServerMessageInfo").and_then(|i| int_field(i, "Timestamp")),
+        });
+    }
     // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
     // modifier, not the event.
     const MODIFIERS: [&str; 1] = ["NotificationBehaviour"];
     let chat_changing = [
         "SeenMarker",
-        "Pin",
         "ClearUserHistory",
         "StateSync",
         "ChatApproval",
@@ -1326,6 +1371,229 @@ mod tests {
             decode_push(&json!({})),
             Err(WireError::Missing("ClientMessage"))
         );
+    }
+
+    fn pinned_chat(entry: Json) -> (Option<Micros>, Option<Micros>) {
+        let mut chat = json!({ "ChatId": "c" });
+        for (key, value) in entry.as_object().unwrap() {
+            chat[key] = value.clone();
+        }
+        let chat = parse_chat(&chat).unwrap();
+        (chat.pinned, chat.pin_action_ts)
+    }
+
+    #[test]
+    fn chat_pin_forms() {
+        // `PinnedMessageInfo` wins over the array, whose first entry is only a fallback.
+        let both = json!({
+            "PinnedMessageInfo": { "PinnedMessageTs": 30, "LastActionTsMcs": 40 },
+            "ChatInfo": { "PinnedMessageTimestamps": [10, 20] }
+        });
+        assert_eq!(pinned_chat(both), (Some(30), Some(40)));
+
+        let array = json!({ "ChatInfo": { "PinnedMessageTimestamps": [20, 10] } });
+        assert_eq!(pinned_chat(array), (Some(20), None));
+        let skipping = json!({ "ChatInfo": { "PinnedMessageTimestamps": [0, -3, "x", "70", 80] } });
+        assert_eq!(
+            pinned_chat(skipping),
+            (Some(70), None),
+            "first positive entry"
+        );
+
+        assert_eq!(pinned_chat(json!({})), (None, None));
+        assert_eq!(
+            pinned_chat(json!({ "ChatInfo": { "Name": "n" } })),
+            (None, None)
+        );
+        assert_eq!(
+            pinned_chat(json!({ "ChatInfo": { "PinnedMessageTimestamps": [] } })),
+            (None, None)
+        );
+        assert_eq!(
+            pinned_chat(json!({ "ChatInfo": { "PinnedMessageTimestamps": "5" } })),
+            (None, None),
+            "not an array"
+        );
+
+        // The shared timestamp reader: integral floats and digit strings.
+        let float =
+            json!({ "PinnedMessageInfo": { "PinnedMessageTs": 3.0e15, "LastActionTsMcs": "41" } });
+        assert_eq!(pinned_chat(float), (Some(3_000_000_000_000_000), Some(41)));
+    }
+
+    #[test]
+    fn chat_pin_zero_and_negative_values_mean_none() {
+        let zero = json!({ "PinnedMessageInfo": { "PinnedMessageTs": 0, "LastActionTsMcs": 0 } });
+        assert_eq!(pinned_chat(zero), (None, None));
+        let negative =
+            json!({ "PinnedMessageInfo": { "PinnedMessageTs": -1, "LastActionTsMcs": -2 } });
+        assert_eq!(pinned_chat(negative), (None, None));
+        // A non-positive `PinnedMessageTs` falls back to the array.
+        let fallback = json!({
+            "PinnedMessageInfo": { "PinnedMessageTs": 0, "LastActionTsMcs": 9 },
+            "ChatInfo": { "PinnedMessageTimestamps": [7] }
+        });
+        assert_eq!(pinned_chat(fallback), (Some(7), Some(9)));
+    }
+
+    #[test]
+    fn chat_unpin_snapshot_keeps_the_action_timestamp() {
+        let absent = json!({ "PinnedMessageInfo": { "LastActionTsMcs": 50 } });
+        assert_eq!(pinned_chat(absent), (None, Some(50)));
+        let zero = json!({ "PinnedMessageInfo": { "PinnedMessageTs": 0, "LastActionTsMcs": 50 } });
+        assert_eq!(pinned_chat(zero), (None, Some(50)));
+        let null =
+            json!({ "PinnedMessageInfo": { "PinnedMessageTs": null, "LastActionTsMcs": 50 } });
+        assert_eq!(pinned_chat(null), (None, Some(50)));
+        // The action time belongs to `PinnedMessageInfo` only.
+        let array_only =
+            json!({ "ChatInfo": { "PinnedMessageTimestamps": [5], "LastActionTsMcs": 50 } });
+        assert_eq!(pinned_chat(array_only), (Some(5), None));
+    }
+
+    #[test]
+    fn chat_entry_keeps_the_pin_keys_in_raw() {
+        let entry = json!({
+            "ChatId": "c",
+            "PinnedMessageInfo": { "PinnedMessageTs": 30, "LastActionTsMcs": 40 },
+            "Messages": []
+        });
+        let chat = parse_chat(&entry).unwrap();
+        assert_eq!(chat.raw["PinnedMessageInfo"]["PinnedMessageTs"], 30);
+        assert!(chat.raw.get("Messages").is_none());
+    }
+
+    fn pin_push(pin: Json, info: Json) -> Json {
+        json!({ "ClientMessage": { "Pin": pin }, "ServerMessageInfo": info })
+    }
+
+    #[test]
+    fn pin_push_is_a_snapshot_of_the_pin() {
+        let set = pin_push(
+            json!({ "ChatId": "c", "Timestamp": 7 }),
+            json!({ "Timestamp": 90 }),
+        );
+        assert_eq!(
+            decode_push(&set),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: Some(7),
+                at: Some(90)
+            })
+        );
+        // A missing `Timestamp` means nothing is pinned; the action time still travels.
+        let removed = pin_push(json!({ "ChatId": "c" }), json!({ "Timestamp": 91 }));
+        assert_eq!(
+            decode_push(&removed),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: None,
+                at: Some(91)
+            })
+        );
+        for zero in [json!(0), json!(-4), json!(null), json!("x")] {
+            let push = pin_push(
+                json!({ "ChatId": "c", "Timestamp": zero }),
+                json!({ "Timestamp": 92 }),
+            );
+            assert_eq!(
+                decode_push(&push),
+                Ok(PushEvent::PinChanged {
+                    chat: "c".into(),
+                    pinned: None,
+                    at: Some(92)
+                }),
+                "{zero}"
+            );
+        }
+        // Digit strings are read as every other timestamp.
+        let string = pin_push(
+            json!({ "ChatId": "c", "Timestamp": "7" }),
+            json!({ "Timestamp": "90" }),
+        );
+        assert_eq!(
+            decode_push(&string),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: Some(7),
+                at: Some(90)
+            })
+        );
+    }
+
+    #[test]
+    fn pin_push_without_a_server_timestamp_has_no_action_time() {
+        let no_info = json!({ "ClientMessage": { "Pin": { "ChatId": "c", "Timestamp": 7 } } });
+        assert_eq!(
+            decode_push(&no_info),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: Some(7),
+                at: None
+            })
+        );
+        for info in [json!({}), json!({ "Timestamp": null })] {
+            let push = pin_push(json!({ "ChatId": "c", "Timestamp": 7 }), info.clone());
+            assert_eq!(
+                decode_push(&push),
+                Ok(PushEvent::PinChanged {
+                    chat: "c".into(),
+                    pinned: Some(7),
+                    at: None
+                }),
+                "{info}"
+            );
+        }
+        // A present timestamp is passed through as is (D1: "when present"); the engine compares it.
+        for at in [0, -1] {
+            let push = pin_push(
+                json!({ "ChatId": "c", "Timestamp": 7 }),
+                json!({ "Timestamp": at }),
+            );
+            assert_eq!(
+                decode_push(&push),
+                Ok(PushEvent::PinChanged {
+                    chat: "c".into(),
+                    pinned: Some(7),
+                    at: Some(at)
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn pin_push_without_a_chat_is_ignored() {
+        for pin in [
+            json!({}),
+            json!({ "Timestamp": 7 }),
+            json!({ "ChatId": "" }),
+        ] {
+            let push = pin_push(pin.clone(), json!({ "Timestamp": 90 }));
+            assert_eq!(
+                decode_push(&push),
+                Ok(PushEvent::Ignored { kind: "Pin".into() }),
+                "{pin}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_chat_changing_pushes_stay_chat_changed() {
+        for kind in [
+            "SeenMarker",
+            "ClearUserHistory",
+            "StateSync",
+            "ChatApproval",
+        ] {
+            let mut client = json!({});
+            client[kind] = json!({ "ChatId": "c" });
+            let push = json!({ "ClientMessage": client, "ServerMessageInfo": {} });
+            assert_eq!(
+                decode_push(&push),
+                Ok(PushEvent::ChatChanged { chat: "c".into() }),
+                "{kind}"
+            );
+        }
     }
 
     #[test]
