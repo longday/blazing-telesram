@@ -1925,6 +1925,177 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_importance_flag_is_copied_from_the_wire_row() {
+        let users = HashMap::new();
+        let mapped = |important: bool, from: &str| {
+            let mut row = wire(WireBody::Text("hi".into()), Relation::None, from);
+            row.important = important;
+            message(&row, "me", &users).important
+        };
+        assert!(mapped(true, "u1"));
+        assert!(mapped(true, "me"));
+        assert!(!mapped(false, "u1"));
+        assert!(!mapped(false, "me"));
+
+        // A deleted row keeps whatever the wire says; the view decides what to show.
+        let mut deleted = wire(WireBody::Deleted, Relation::None, "u1");
+        deleted.important = true;
+        let deleted = message(&deleted, "me", &users);
+        assert_eq!(
+            (deleted.body, deleted.important),
+            (MessageBody::Deleted, true)
+        );
+
+        // The live path maps the same field: an edit push carries the flag as well.
+        let mut push = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        push.important = true;
+        let LiveEvent::MessageUpserted(pushed) = upserted(&push, "me", &users) else {
+            panic!("upsert")
+        };
+        assert!(pushed.important);
+    }
+
+    /// Every wire body with the one-line text each surface must show for it. The strings are the
+    /// ones the adapter produced before `MessageBody::preview_text` moved to core.
+    fn preview_cases() -> Vec<(WireBody, &'static str)> {
+        let file = |name: Option<&str>| WireFile {
+            id: "b/1".into(),
+            name: name.map(Into::into),
+            size: Some(3),
+        };
+        let image = || yandex_proto::wire::WireImage {
+            file: file(Some("a.jpg")),
+            width: 4,
+            height: 3,
+            animated: false,
+        };
+        vec![
+            (WireBody::Text("привет".into()), "привет"),
+            (WireBody::Image(image()), "Фото"),
+            (
+                WireBody::Gallery {
+                    items: vec![image(), image()],
+                    text: None,
+                },
+                "Фото",
+            ),
+            (
+                WireBody::Gallery {
+                    items: vec![image()],
+                    text: Some("отпуск".into()),
+                },
+                "отпуск",
+            ),
+            // An empty gallery is text, with its caption or without.
+            (
+                WireBody::Gallery {
+                    items: Vec::new(),
+                    text: Some("подпись".into()),
+                },
+                "подпись",
+            ),
+            (WireBody::File(file(Some("a.pdf"))), "a.pdf"),
+            (WireBody::File(file(None)), "Файл"),
+            (
+                WireBody::Voice {
+                    file: file(None),
+                    duration: Some(2),
+                },
+                "[Голосовое сообщение]",
+            ),
+            (
+                WireBody::Sticker {
+                    id: "s".into(),
+                    set_id: None,
+                },
+                "[Стикер]",
+            ),
+            (WireBody::Poll { title: "Q".into() }, "[Опрос: Q]"),
+            (
+                WireBody::System {
+                    kind: "ChatCreatedInfo".into(),
+                    text: Some("Чат создан".into()),
+                },
+                "Чат создан",
+            ),
+            (
+                WireBody::System {
+                    kind: "ChatCreatedInfo".into(),
+                    text: None,
+                },
+                "[ChatCreatedInfo]",
+            ),
+            (WireBody::Deleted, "Сообщение удалено"),
+            (WireBody::Empty, ""),
+            (WireBody::Other("Foo".into()), "[Foo]"),
+        ]
+    }
+
+    #[test]
+    fn the_chat_row_preview_text_is_unchanged() {
+        for (wire_body, expected) in preview_cases() {
+            let chat = WireChat {
+                id: "0/0/a".into(),
+                kind: WireChatKind::Group,
+                title: Some("Team".into()),
+                avatar_id: None,
+                partner_guid: None,
+                last_activity: Some(10),
+                unread: 0,
+                muted: false,
+                last_message: Some(wire(wire_body.clone(), Relation::None, "u1")),
+                pinned: None,
+                pin_action_ts: None,
+                raw: serde_json::Value::Null,
+            };
+            let preview = summary(&chat, "me", &HashMap::new()).last_message.unwrap();
+            assert_eq!(preview.text, expected, "{wire_body:?}");
+        }
+    }
+
+    #[test]
+    fn search_hit_text_is_unchanged() {
+        let items = SearchItems {
+            messages: preview_cases()
+                .into_iter()
+                .map(|(body, _)| WireSearchMessage {
+                    body,
+                    ..search_message("0/1/g", None, "")
+                })
+                .collect(),
+            ..SearchItems::default()
+        };
+        let hits = search_hits(&items, "me", &HashMap::new(), &listed_chats(), 100);
+        let texts: Vec<_> = hits.messages.iter().map(|m| m.text.as_str()).collect();
+        let expected: Vec<_> = preview_cases().into_iter().map(|(_, text)| text).collect();
+        assert_eq!(texts, expected);
+    }
+
+    #[test]
+    fn the_reply_original_fallback_text_is_unchanged() {
+        for (wire_body, expected) in preview_cases() {
+            let relation = Relation::Reply {
+                quote: None,
+                reference: None,
+                original: Some(WireForwarded {
+                    chat: None,
+                    timestamp: Some(5),
+                    from: None,
+                    body: wire_body.clone(),
+                }),
+            };
+            let reply = message(
+                &wire(WireBody::Text("a".into()), relation, "u1"),
+                "me",
+                &HashMap::new(),
+            )
+            .reply_to
+            .unwrap();
+            assert_eq!(reply.text, expected, "{wire_body:?}");
+        }
+    }
+
     fn search_message(
         chat: &str,
         from: Option<(&str, Option<&str>)>,
