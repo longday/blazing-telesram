@@ -1,0 +1,96 @@
+# Design
+
+## Context
+
+See `proposal.md` (motivation, decisions 1-8, open questions Q1-Q6) and `research.md` (protocol evidence, offsets into the web bundle). Contracts below are fixed so that protocol, core, adapter and UI work can proceed in parallel; where a contract depends on an open question it is written for the **recommended** option and marked `[Qn]`; if the answer differs, the marked contract and the tasks blocked by that question change, nothing else.
+
+Current code this change extends:
+
+- `yandex-proto::wire`: `parse_server_message` builds `WireMessage` for history rows and pushes; `PLAIN_META_KEYS` lists `IsImportant` as "not content" and drops it. `parse_chat` builds `WireChat` from a chat entry and keeps the entry without `Messages` in `raw`. `decode_push` folds `Pin` into `ChatChanged { chat }` (with `SeenMarker`, `ClearUserHistory`, `StateSync`, `ChatApproval`).
+- `desktop::yandex_backend`: the live loop answers `ChatChanged` with `client.chat_list()` and emits `LiveEvent::ChatChanged(summary)`; `summary()` maps `WireChat` to `ChatSummary` (and sets `pinned_rank: None`); `preview(&MessageBody)` makes the one-line text and placeholders; `message()` maps `WireMessage` to `Message`.
+- `chat-core`: `ChatSummary` and `Message` are cached as JSON (`chats.json`, `messages.json`); `LiveEvent::ChatChanged` writes the summary and emits `ChatUpdated`; `MessagePreview { author, text, timestamp }` exists. The cache's `messages` table is flat and `chat_state.history_start` plus `replace_range` define what counts as history.
+- `desktop`: the chat header is `chat-header` in `desktop.rs`; the bubble is `timeline.rs::bubble`; the store applies per-message changes with `TimelineChange::Delta`.
+
+## Goals / Non-Goals
+
+**Goals:** the pinned message and the importance flag are displayed, live, cached; the cache never shows a gap as history; no write is added.
+
+**Non-Goals:** everything in the proposal's Non-goals.
+
+## Decisions
+
+### D1. Wire model and decoding (`yandex-proto`)
+
+```rust
+WireMessage { .., pub important: bool }          // Plain|Ephemeral .IsImportant == true; missing, false or non-bool is false
+pub struct WirePin { pub timestamp: Micros, pub action_ts: Option<Micros> }
+WireChat { .., pub pinned: Option<WirePin> }    // [Q1] one pin
+PushEvent::PinChanged { chat: String, pinned: Option<Micros>, at: Option<Micros> }  // [Q1][Q5]
+```
+
+- `important` is read in `parse_server_message` from the `Plain`/`Ephemeral` object; `IsImportant` stays in `PLAIN_META_KEYS` (it is still not content). A deleted message and a non-`Plain` kind give `false`.
+- `WireChat.pinned` (`parse_chat`): `PinnedMessageInfo.PinnedMessageTs` if present and positive, with `action_ts = PinnedMessageInfo.LastActionTsMcs`; else the first positive entry of `ChatInfo.PinnedMessageTimestamps` (the web client's `eW`), `action_ts = None`; else `None`. Values go through the same `micros` reader as every timestamp (ints, integral floats, digit strings). A zero or negative value is "no pin".
+- `PushEvent::PinChanged`: `decode_push` handles `ClientMessage.Pin` with a `ChatId` before the `chat_changing` list. `pinned = Pin.Timestamp` when positive, else `None` (the web client's `ek`: a missing `Timestamp` means nothing is pinned). `at = ServerMessageInfo.Timestamp` when present `[Q5]`. A `Pin` without `ChatId` falls to `Ignored { kind: "Pin" }`. `Pin` is removed from the `chat_changing` array. `xiva.rs::push_kind` gets the arm (`"PinChanged"`); the debug line logs the kind only, as for the other kinds (no chat id, no timestamp).
+- `[Q1]` if several pins are wanted, `pinned` becomes a `Vec` and the decoder keeps `PinnedMessageTimestamps` whole; nothing else in this file changes.
+
+Alternative rejected: keep `Pin` in `ChatChanged` and read the pin from the refetched list. It costs a full chat-list request per pin and depends on whether list entries carry `PinnedMessageInfo` (unobserved; task 0.1). The decoder reads the list entry anyway (for the initial state), but the live path must not depend on it.
+
+### D2. Optional read: chat info (`yandex-proto`, task 1.3, only if 0.1 says so)
+
+If chat-list entries (`history { Limit: 1, ChatDataFilter: {} }`) do not carry the pin but a single-chat read does, one variant is added: `ReadRequest::ChatInfo { chat }`, socket `history { ChatId, Limit: 0, ChatDataFilter: {} }` (the web client's `getChat`), parsed by the existing `parse_chat`. `ALLOWED_METHODS` does not change (method `history`); the `every_request` test and its exhaustive `match` gain the variant. The adapter calls it for the open chat. If list entries do carry the pin, this task is dropped and no read request is added.
+
+### D3. Domain types (`chat-core`)
+
+```rust
+pub struct PinnedMessage { pub timestamp: MessageTs, pub preview: Option<MessagePreview> }  // Clone, PartialEq, serde
+ChatSummary { .., #[serde(default)] pub pinned_message: Option<PinnedMessage> }              // not pinned_rank
+Message { .., #[serde(default)] pub important: bool }
+LiveEvent::PinChanged { chat: ChatId, pinned: Option<MessageTs>, at: Option<i64> }
+ClientEvent::PinChanged { chat: ChatId, pinned: Option<PinnedMessage> }
+Backend::message_preview(&self, chat: &ChatId, timestamp: MessageTs)
+    -> impl Future<Output = Result<Option<MessagePreview>, BackendError>> + Send
+```
+
+- `ChatSummary.pinned_message` is the only place a pin lives; `pinned_rank` and everything about the chat pin are untouched. Rows cached before the field existed load with `None` (JSON `serde(default)`; no SQL migration, `cache.rs` gets a legacy-row test only).
+- `Message.important` defaults to `false` for old rows and for pending local messages (`outgoing_message`).
+- `Backend::message_preview` returns the preview of one message (`Ok(None)` when the server no longer has it); offline fails fast with `Network`. The adapter implements it with `ReadRequest::History { before: Some(ts + 1), limit: 1 }` (decision 4) and the shared preview function (D4).
+- `ClientEvent::PinChanged` is separate from `ChatUpdated` on purpose: the store applies it without touching the row (spec: a pin change must not change a row's preview, unread or position), and tests can assert that nothing else is emitted. `ChatUpdated` still carries the summary, including `pinned_message`, from chat-list refreshes.
+
+### D4. The one-line text is shared
+
+`yandex_backend.rs::preview(&MessageBody) -> String` moves to `chat-core` as `MessageBody::preview_text(&self) -> String` (same strings), because the engine now builds a preview when a pinned message is edited, deleted or found in the cache (D5), and the adapter keeps calling it. The text of a preview is never logged.
+
+### D5. Engine rules (`chat-core::client`) `[Q1][Q5]`
+
+1. **Pin push.** `LiveEvent::PinChanged { chat, pinned, at }`: read the cached summary of `chat`; none -> ignore (the next chat-list load brings the chat and its pin). Otherwise compute the new `pinned_message`: `None` if `pinned` is `None`; the existing value (preview kept) if the timestamp is the same; else `PinnedMessage { timestamp, preview: None }`. Apply the arbitration rule `[Q5]` first: recommended, remember per chat the latest action timestamp seen (`pin_action_ts`, in memory), ignore an input whose action timestamp is older than that, and fall back to "last arrival wins" when either side has none. Write the summary to the cache, emit `ClientEvent::PinChanged`, then resolve the preview (rule 3). No `ChatUpdated`, no preview/unread change, no typing effect.
+2. **Chat-list refresh.** Summaries from `chat_list()` carry `pinned_message { timestamp, preview: None }` (or `None`). When the cached summary has the same pinned timestamp its resolved preview is kept; a different timestamp or no pin replaces it. The same arbitration applies (`action_ts` of the entry against `pin_action_ts`). A pin that disappears from the list disappears from the cache (spec "Unpinned while offline").
+3. **Resolving the preview**, for the open chat only, when its pin has no preview: (a) the cached message `cache.message(chat, ts)` -> `MessagePreview` through `preview_text` and the author as the chat row does it (`"Вы"` for outgoing, else the author name); (b) else, online, one `Backend::message_preview` request, at most one in flight per `(chat, ts)`; (c) the result is applied only if the chat's pin still has that timestamp, then cached and emitted as `ClientEvent::PinChanged`; (d) offline, or a failure, leaves the preview empty without an error event; the next opening tries again. The resolved preview is part of the cached summary (`chats.json`), so it shows offline.
+4. **Follow-through.** On `LiveEvent::MessageUpserted` and `MessageDeleted` for a message whose timestamp equals the chat's pinned timestamp, rebuild the preview from the message (a deletion gives the deleted placeholder), write it and emit `PinChanged`. A history chunk that contains the pinned message does the same when its copy differs.
+5. **Not stored as history.** Rules 1-4 never call `upsert_message`, `replace_range` or `chat_state` for the pinned message; the pinned preview is only in the chat's JSON.
+6. **Importance.** Nothing beyond the new field: `MessageUpserted` and history chunks replace the whole message, so `important` follows the newest copy; `inherit_reactions` does not touch it. `[Q4]` if the observation shows that a flag-only change sets `LastEditTimestamp`, the upsert path keeps the cached `edited` when the incoming body equals the cached one and only `important` differs.
+
+### D6. Adapter (`desktop::yandex_backend`)
+
+`message()` copies `wire.important`. `summary()` maps `WireChat.pinned` to `pinned_message` with `preview: None`; `pinned_rank` stays `None` and is not this change's business. The live loop maps `PushEvent::PinChanged` to `LiveEvent::PinChanged` (a small pure function, tested like the reaction mapping) and `ChatChanged` keeps its refetch for the remaining kinds. `message_preview` is the one-message `History` read plus `Users` loading for the author's name (the same helper as the other reads); it goes through the read path, never `push`.
+
+### D7. UI (`desktop`)
+
+- **Store:** `ChatStore` keeps the open chat's `pinned: Option<PinnedMessage>` from the summary and from `ClientEvent::PinChanged`; it emits a UI change only when the value differs and never touches the timeline, rows or typing state.
+- **Bar:** one row between `chat-header` and the timeline, selector `pinned-message`; label "Закреплённое сообщение", then author (not for private chats) and the preview text, one line, truncated; no preview yet shows the label alone. No unpin control, no pin glyph shared with the chat-row marker (selector and wording keep the two apart). Click `[Q2]`: scrolls to the message when it is loaded, otherwise nothing.
+- **Marker `[Q3]`:** "⚡" as plain text next to the time in the bubble footer of a non-deleted message with `important`; selector `msg-{ts}-important`; a new theme colour for the glyph. It does not alter the bubble's width logic beyond its own footprint in the footer.
+
+### D8. `bt-probe`
+
+`history` appends a flag marker to rows with `important` (as it prints reaction state), `chats` prints the pinned timestamp of a chat that has one; `listen` already prints pushes through `Debug`, so `PinChanged` shows up. No new command, no write.
+
+### D9. The edit hazard `[Q6]`
+
+If Q6 is answered B: `WriteRequest::Edit` gains `important: bool`; `client_message` adds `"IsImportant": true` to the `Plain` only when it is true (non-important edits stay byte-identical, and the existing frame tests keep passing); `Backend::edit` gains the flag, the engine passes the cached message's value. No new `WriteRequest` variant, no change to `CLIENT_MESSAGE_VARIANTS`. If A or C, this decision is dropped.
+
+## Risks / Trade-offs
+
+- **Everything unobserved is inferred.** The pin keys come from the web client's decoder, not from a captured reply; the importance-change path is an inference from one reducer. Mitigation: the decoder is tolerant (missing keys mean "none"), fixtures are marked synthetic until 0.1/0.2 replace them, and the questions that depend on observation are blocked, not guessed.
+- **A stale pin after a race** (Q5 A) is possible until the next refresh; B removes it if the action timestamps are comparable.
+- **Preview freshness.** A pinned preview resolved once is refreshed by edits and deletions the client sees live; an edit made while the client was offline shows at the next resolve only if the preview is dropped on reconnect. Decision: on `Reconnected` the open chat's preview is re-resolved (one read), other chats' stay as cached until opened.
+- **Privacy.** The pinned text sits in `chats.json` next to the last-message preview that is already there; no new location, no logging of text.
+- **Sharing files** with `add-chat-members-and-creation` and `add-reaction-list` (Impact in the proposal): the contracts above add fields and one trait method; Rule 2 of `DEPENDENCIES.md` (merges compile with no stubs) is why 2.2 and 3.2 and 4.1/4.3 land as one unit.
