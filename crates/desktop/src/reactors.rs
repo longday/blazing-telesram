@@ -7,7 +7,7 @@
 //! `exhausted`, `loading_more` and `more_failed`, never the total (design D5, D6).
 
 use crate::format::{Clock, clock_time, day_label};
-use crate::store::{ChatStore, ReactorsState, ReactorsView};
+use crate::store::{ChatStore, MESSAGE_GONE, ReactorsState, ReactorsView};
 use crate::theme::*;
 use crate::widgets::{avatar, button};
 use bt_chat_core::model::{ConnectionState, Reactor};
@@ -31,6 +31,8 @@ pub enum Body<'a> {
     Offline,
     /// The server refused or the request failed; the text is the reason.
     Failed(&'a str),
+    /// The message was deleted while the list was open: no entries, and nothing to retry.
+    Gone,
     /// `shown` entries (`rows`) are listed in server order. `skipped` entries had no identity;
     /// `total` is the message's known reaction count, when the message is known.
     Ready {
@@ -62,6 +64,7 @@ pub fn body(state: &ReactorsState, connection: ConnectionState, total: Option<us
     match state {
         ReactorsState::Loading => Body::Loading,
         ReactorsState::Failed { offline: true, .. } => Body::Offline,
+        ReactorsState::Failed { reason, .. } if reason == MESSAGE_GONE => Body::Gone,
         ReactorsState::Failed { reason, .. } => Body::Failed(reason),
         ReactorsState::Ready { .. } if connection != ConnectionState::Online => Body::Offline,
         ReactorsState::Ready {
@@ -292,7 +295,7 @@ fn more_row(
 /// The list surface for the open list `view`; the host places it (a popover anchored where the menu
 /// was) and closes it. `on_retry` runs for every «Повторить» (a failed or offline list, a failed next
 /// page), `on_more` for «Показать ещё».
-/// Debug selectors: `reactors-list`, `reactors-loading`, `reactors-offline`, `reactors-error`,
+/// Debug selectors: `reactors-list`, `reactors-loading`, `reactors-offline`, `reactors-gone`, `reactors-error`,
 /// `reactors-error-reason`, `reactors-retry`, `reactors-header`, `reactors-empty`, `reactors-more`,
 /// `reactors-more-error` and the row selectors of `row`.
 pub fn render(
@@ -311,6 +314,7 @@ pub fn render(
             .child(notice("reactors-offline", "Нет соединения"))
             .child(div().px(px(16.)).pb(px(10.)).child(retry_button(on_retry)))
             .into_any_element(),
+        Body::Gone => notice("reactors-gone", "Сообщение удалено").into_any_element(),
         Body::Failed(reason) => div()
             .flex()
             .flex_col()
@@ -394,7 +398,7 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     // Not `super::*`: it would bring gpui's `test` attribute macro over `#[test]`.
-    use super::{Body, More, UNKNOWN_NAME, body, header_text, reacted_at, row_text};
+    use super::{Body, MESSAGE_GONE, More, UNKNOWN_NAME, body, header_text, reacted_at, row_text};
     use crate::format::Clock;
     use crate::store::ReactorsState;
     use bt_chat_core::model::{ConnectionState, MediaRef, Reactor, UserId};
@@ -485,6 +489,17 @@ mod tests {
                 more: More::Hidden,
             }
         );
+    }
+
+    #[test]
+    fn a_deleted_message_is_gone_and_not_a_failure_to_retry() {
+        let gone = ReactorsState::Failed {
+            reason: MESSAGE_GONE.into(),
+            offline: false,
+        };
+        for connection in [ConnectionState::Online, ConnectionState::Offline] {
+            assert_eq!(body(&gone, connection, Some(2)), Body::Gone);
+        }
     }
 
     #[test]

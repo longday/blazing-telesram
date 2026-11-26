@@ -9,7 +9,7 @@ use bt_chat_core::model::{
     UserId,
 };
 use bt_chat_core::reactions::{ReactionCode, Reactions};
-use gpui::{Context, EventEmitter};
+use gpui::{Context, EventEmitter, Task};
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,11 @@ use std::time::{Duration, Instant};
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Shortest query (in `char`s, after `trim()`) that is sent to the server.
 pub const SEARCH_MIN_CHARS: usize = 2;
+/// How long the open reactor list waits after a change of its message's reactions before it reads
+/// again from the first page; a burst of changes inside it causes one read.
+pub const REACTORS_REFRESH_DELAY: Duration = Duration::from_secs(1);
+/// The failure of an open reactor list whose message was deleted; there is nothing to retry.
+pub const MESSAGE_GONE: &str = "Сообщение удалено";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
@@ -139,8 +144,8 @@ pub enum RequestKind {
 /// The one open list of the people who reacted to a message, held in memory only and dropped on close.
 /// `generation` is the token of the request the list last sent; an answer is applied only when it
 /// carries it, so an answer to a closed list, an earlier opening of the same message or a superseded
-/// page is dropped. `base_version` is the message's reaction version when the list was last read
-/// from the first page.
+/// page is dropped. `base_version` is the message's reaction version when the first page was last
+/// asked for.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReactorsView {
     pub chat: ChatId,
@@ -163,6 +168,8 @@ pub enum ReactorsState {
         /// The smallest timestamp seen; the next page is asked with it as `before`.
         oldest: Option<MessageTs>,
         exhausted: bool,
+        /// A request that gates the next page is out: that page itself, or a read of the first page
+        /// (refresh, retry) that will replace the rows. Nothing else is asked meanwhile.
         loading_more: bool,
         more_failed: Option<String>,
     },
@@ -170,6 +177,37 @@ pub enum ReactorsState {
         reason: String,
         offline: bool,
     },
+}
+
+/// The debounce of the open list's refresh as pure state, so tests drive it without a clock. Each
+/// `schedule` hands out a ticket and disarms every earlier one; the timer holding the latest ticket
+/// fires once, unless the schedule was cancelled meanwhile.
+#[derive(Debug, Default)]
+struct RefreshSchedule {
+    last: u64,
+    armed: Option<u64>,
+}
+
+impl RefreshSchedule {
+    fn schedule(&mut self) -> u64 {
+        self.last += 1;
+        self.armed = Some(self.last);
+        self.last
+    }
+
+    fn cancel(&mut self) {
+        self.armed = None;
+    }
+
+    /// Whether the timer with `ticket` is the armed one; it disarms the schedule.
+    fn fire(&mut self, ticket: u64) -> bool {
+        if self.armed == Some(ticket) {
+            self.armed = None;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Where the one chat creation the store lets run stands. There is no state while none was started or
@@ -269,6 +307,10 @@ pub struct ChatStore {
     /// The last `LoadReactors` token handed out; only grows, so it is never reset by close, reopen
     /// or sign-out.
     next_request: u64,
+    /// When the open list is read again after a change of its message's reactions.
+    refresh: RefreshSchedule,
+    /// The timer of `refresh`; replacing or dropping it cancels the wait.
+    refresh_timer: Option<Task<()>>,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -310,6 +352,8 @@ impl ChatStore {
             pending_open: None,
             reactors: None,
             next_request: 0,
+            refresh: RefreshSchedule::default(),
+            refresh_timer: None,
         }
     }
 
@@ -343,8 +387,15 @@ impl ChatStore {
                 chat,
                 timestamp,
                 reactions,
-            } => self.set_reactions(&chat, timestamp, reactions, cx),
-            ClientEvent::MessageDeleted { chat, timestamp } => self.delete(&chat, timestamp, cx),
+            } => {
+                let version = reactions.version;
+                self.set_reactions(&chat, timestamp, reactions, cx);
+                self.reactions_changed(&chat, timestamp, version, cx);
+            }
+            ClientEvent::MessageDeleted { chat, timestamp } => {
+                self.delete(&chat, timestamp, cx);
+                self.reactors_gone(&chat, timestamp, cx);
+            }
             ClientEvent::MediaReady { media, path } => {
                 self.media.insert(media.clone(), path);
                 cx.emit(StoreEvent::Media(media));
@@ -376,6 +427,7 @@ impl ChatStore {
                 self.members.clear();
                 self.profile = None;
                 self.reactors = None;
+                self.cancel_refresh();
                 self.creation = None;
                 self.creating = None;
                 self.pending_open = None;
@@ -853,17 +905,11 @@ impl ChatStore {
     /// It replaces any list already open; a request still out for that one, or for an earlier opening
     /// of this message, is superseded by the new token.
     pub fn open_reactors(&mut self, chat: ChatId, timestamp: MessageTs, cx: &mut Context<Self>) {
-        let base_version = self.timelines.get(&chat).and_then(|t| {
-            let i = t
-                .messages
-                .binary_search_by_key(&timestamp, |m| m.timestamp)
-                .ok()?;
-            t.messages[i].reactions.version
-        });
+        self.cancel_refresh();
         self.reactors = Some(ReactorsView {
             chat,
             timestamp,
-            base_version,
+            base_version: None,
             generation: 0,
             kind: RequestKind::First,
             state: ReactorsState::Loading,
@@ -873,6 +919,7 @@ impl ChatStore {
 
     /// Closes the list and forgets it; answers still on the way are dropped when they arrive.
     pub fn close_reactors(&mut self, cx: &mut Context<Self>) {
+        self.cancel_refresh();
         if self.reactors.take().is_some() {
             cx.emit(StoreEvent::Reactors);
             cx.notify();
@@ -918,15 +965,31 @@ impl ChatStore {
     }
 
     /// Sends a `LoadReactors` for the open list with a fresh token, which supersedes any request
-    /// still out. `First` leaves the state as it is (the caller sets `Loading` when the rows must
-    /// go); `More` is sent only for a shown list that is not exhausted and has no page out, and
-    /// marks it `loading_more`.
+    /// still out. `First` records the message's current reaction version as `base_version`, takes
+    /// over a refresh still waiting for its delay (this read is that refresh) and leaves the rows as
+    /// they are (the caller sets `Loading` when the rows must go); on a shown list it marks
+    /// `loading_more`, so that no next page is asked from the old rows while this read is out. `More`
+    /// is sent only for a shown list that is not exhausted and has no request out, and marks it
+    /// `loading_more`.
     fn request_reactors(&mut self, kind: RequestKind, cx: &mut Context<Self>) {
         let Some(view) = self.reactors.as_mut() else {
             return;
         };
         let before = match kind {
-            RequestKind::First => None,
+            RequestKind::First => {
+                view.base_version = reactions_version(&self.timelines, &view.chat, view.timestamp);
+                self.refresh.cancel();
+                if let ReactorsState::Ready {
+                    loading_more,
+                    more_failed,
+                    ..
+                } = &mut view.state
+                {
+                    *loading_more = true;
+                    *more_failed = None;
+                }
+                None
+            }
             RequestKind::More => match &mut view.state {
                 ReactorsState::Ready {
                     oldest: Some(oldest),
@@ -1051,6 +1114,82 @@ impl ChatStore {
             (_, state) => *state = ReactorsState::Failed { reason, offline },
         }
         cx.emit(StoreEvent::Reactors);
+    }
+
+    /// A change of the reactions of `(chat, ts)`, now at `version`, reached the store. When it is the
+    /// open list's message, the list is shown or loading, and the version is not the one the list
+    /// was read at, the read from the first page is (re)scheduled after `REACTORS_REFRESH_DELAY`.
+    /// A failed list is not refreshed: it already offers a retry.
+    fn reactions_changed(
+        &mut self,
+        chat: &ChatId,
+        ts: MessageTs,
+        version: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .reactors
+            .as_ref()
+            .filter(|v| v.chat == *chat && v.timestamp == ts)
+        else {
+            return;
+        };
+        if view.base_version == version || matches!(view.state, ReactorsState::Failed { .. }) {
+            return;
+        }
+        let ticket = self.refresh.schedule();
+        self.refresh_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(REACTORS_REFRESH_DELAY).await;
+            this.update(cx, |store, cx| store.refresh_reactors(ticket, cx))
+                .ok();
+        }));
+    }
+
+    /// The delay of a refresh ran out: reads the first page again with a fresh token, which
+    /// supersedes any request still out. A timer that was cancelled or superseded, or a list that
+    /// closed or failed meanwhile, does nothing.
+    fn refresh_reactors(&mut self, ticket: u64, cx: &mut Context<Self>) {
+        if !self.refresh.fire(ticket) {
+            return;
+        }
+        let Some(view) = self.reactors.as_ref() else {
+            return;
+        };
+        if matches!(view.state, ReactorsState::Failed { .. }) {
+            return;
+        }
+        self.request_reactors(RequestKind::First, cx);
+    }
+
+    /// Turns the open list of `(chat, ts)` into the "message gone" failure, drops the answer it
+    /// was waiting for (a fresh token, nothing sent) and cancels its refresh.
+    fn reactors_gone(&mut self, chat: &ChatId, ts: MessageTs, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .reactors
+            .as_mut()
+            .filter(|v| v.chat == *chat && v.timestamp == ts)
+        else {
+            return;
+        };
+        let gone = ReactorsState::Failed {
+            reason: MESSAGE_GONE.into(),
+            offline: false,
+        };
+        if view.state == gone {
+            return;
+        }
+        self.next_request += 1;
+        view.generation = self.next_request;
+        view.state = gone;
+        self.cancel_refresh();
+        cx.emit(StoreEvent::Reactors);
+        cx.notify();
+    }
+
+    /// Forgets a scheduled refresh and its timer. Not for use from the timer's own task.
+    fn cancel_refresh(&mut self) {
+        self.refresh.cancel();
+        self.refresh_timer = None;
     }
 
     /// Asks the core to start a private chat with `user`. The state becomes `InFlight` at once; while
@@ -1346,6 +1485,17 @@ impl ChatStore {
             },
         });
     }
+}
+
+/// The reaction version of the loaded message `(chat, ts)`; `None` when it is not loaded or has none.
+fn reactions_version(
+    timelines: &HashMap<ChatId, Timeline>,
+    chat: &ChatId,
+    ts: MessageTs,
+) -> Option<i64> {
+    let messages = &timelines.get(chat)?.messages;
+    let i = messages.binary_search_by_key(&ts, |m| m.timestamp).ok()?;
+    messages[i].reactions.version
 }
 
 /// Whether a page ends the list. Decided from the page alone, with strict cursor progress: no
@@ -3093,6 +3243,311 @@ mod tests {
             rig.apply(cx, full(1));
             rig.apply(cx, ClientEvent::SignedOut);
             assert_eq!(rig.view(cx), None);
+        }
+
+        /// A live change of the open message's reactions to `version`.
+        fn changed_at(ts: MessageTs, version: i64) -> ClientEvent {
+            ClientEvent::ReactionsChanged {
+                chat: chat(),
+                timestamp: ts,
+                reactions: Reactions {
+                    counts: vec![ReactionCount {
+                        code: ReactionCode(1),
+                        count: version as u32,
+                    }],
+                    mine: None,
+                    version: Some(version),
+                },
+            }
+        }
+
+        fn changed(version: i64) -> ClientEvent {
+            changed_at(TS, version)
+        }
+
+        fn deleted(ts: MessageTs) -> ClientEvent {
+            ClientEvent::MessageDeleted {
+                chat: chat(),
+                timestamp: ts,
+            }
+        }
+
+        /// Lets `millis` of the test clock pass and runs what became due.
+        fn wait(cx: &mut TestAppContext, millis: u64) {
+            cx.executor()
+                .advance_clock(std::time::Duration::from_millis(millis));
+            cx.run_until_parked();
+        }
+
+        /// A rig whose message `TS` is loaded at reaction version 1 and whose list is open
+        /// (token 1); the open's command and events are taken.
+        fn live(cx: &mut TestAppContext) -> Rig {
+            let rig = Rig::new(cx);
+            with_reactions(cx, &rig, 1, 1);
+            rig.open(cx);
+            rig.commands();
+            rig.take_events();
+            rig
+        }
+
+        #[test]
+        fn only_the_latest_ticket_fires_and_only_once() {
+            let mut schedule = RefreshSchedule::default();
+            let first = schedule.schedule();
+            let second = schedule.schedule();
+            assert!(second > first);
+            assert!(!schedule.fire(first), "superseded by the second");
+            assert!(schedule.fire(second));
+            assert!(!schedule.fire(second), "fired already");
+
+            let third = schedule.schedule();
+            schedule.cancel();
+            assert!(!schedule.fire(third), "cancelled");
+            assert!(!schedule.fire(0), "nothing was scheduled with this ticket");
+        }
+
+        #[gpui::test]
+        fn a_burst_of_changes_gives_one_read_after_the_delay(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            wait(cx, 600);
+            rig.apply(cx, changed(3));
+            wait(cx, 600);
+            assert!(
+                rig.commands().is_empty(),
+                "the delay restarted with the second change"
+            );
+
+            wait(cx, 400);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            let view = rig.view(cx).unwrap();
+            assert_eq!(
+                (view.generation, view.kind, view.base_version),
+                (2, RequestKind::First, Some(3))
+            );
+            assert_eq!(
+                rows(&view),
+                guids("a", REACTORS_PAGE),
+                "the rows stay until the answer"
+            );
+
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty(), "one read for the whole burst");
+        }
+
+        #[gpui::test]
+        fn a_refresh_is_not_scheduled_for_an_unchanged_version_another_message_or_a_failed_list(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(1));
+            rig.apply(cx, changed_at(TS + 1, 2));
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty());
+
+            let rig = live(cx);
+            rig.apply(cx, failure(1, "x", false));
+            rig.apply(cx, changed(2));
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty(), "a failed list offers a retry");
+
+            // A change before the first answer is refreshed: that answer may predate it.
+            let rig = live(cx);
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+        }
+
+        #[gpui::test]
+        fn closing_or_reopening_cancels_the_refresh(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            rig.close(cx);
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty(), "closed before the delay ran out");
+
+            rig.open(cx);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            rig.apply(cx, changed(3));
+            rig.close(cx);
+            rig.open(cx);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+            wait(cx, 5000);
+            assert!(
+                rig.commands().is_empty(),
+                "the timer of the closed list does nothing"
+            );
+        }
+
+        #[gpui::test]
+        fn a_refresh_records_the_version_it_read(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            assert_eq!(rig.view(cx).unwrap().base_version, Some(2));
+
+            rig.apply(cx, changed(2));
+            wait(cx, 5000);
+            assert!(
+                rig.commands().is_empty(),
+                "the list was read at this version"
+            );
+
+            rig.apply(cx, changed(3));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+        }
+
+        #[gpui::test]
+        fn a_refresh_supersedes_a_next_page_and_the_late_page_is_dropped(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.more(cx);
+            assert_eq!(rig.commands(), [load(Some(200), 2)]);
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+            let view = rig.view(cx).unwrap();
+            assert_eq!((view.generation, view.kind), (3, RequestKind::First));
+            assert_eq!(rows(&view), guids("a", REACTORS_PAGE));
+
+            rig.take_events();
+            let late = page(2, &guids("late", 3), 3, Some(100));
+            rig.apply(cx, late.clone());
+            rig.apply(cx, failure(2, "x", false));
+            assert_eq!(rows(&rig.view(cx).unwrap()), guids("a", REACTORS_PAGE));
+            assert!(rig.take_events().is_empty());
+
+            rig.more(cx);
+            assert!(
+                rig.commands().is_empty(),
+                "no next page is asked from the old rows while the refresh is out"
+            );
+
+            rig.apply(cx, page(3, &guids("n", 2), 2, Some(900)));
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), ["n0", "n1"]);
+            assert_eq!(flags(&view), (true, false, None));
+
+            rig.apply(cx, late);
+            rig.apply(cx, failure(2, "x", false));
+            assert_eq!(rows(&rig.view(cx).unwrap()), ["n0", "n1"]);
+        }
+
+        #[gpui::test]
+        fn a_refresh_of_a_deep_list_shows_the_first_page_and_paging_continues_from_it(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.more(cx);
+            rig.apply(
+                cx,
+                page(2, &guids("b", REACTORS_PAGE), REACTORS_PAGE, Some(100)),
+            );
+            assert_eq!(rows(&rig.view(cx).unwrap()).len(), 2 * REACTORS_PAGE);
+            rig.commands();
+
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+            assert_eq!(
+                rows(&rig.view(cx).unwrap()).len(),
+                2 * REACTORS_PAGE,
+                "the deep list stays until the answer"
+            );
+
+            rig.apply(cx, full(3));
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), guids("a", REACTORS_PAGE));
+            assert_eq!(flags(&view), (false, false, None));
+            assert!(matches!(
+                view.state,
+                ReactorsState::Ready {
+                    oldest: Some(200),
+                    ..
+                }
+            ));
+            rig.more(cx);
+            assert_eq!(rig.commands(), [load(Some(200), 4)]);
+        }
+
+        #[gpui::test]
+        fn a_failed_refresh_is_failed_and_not_the_old_list_with_a_retry(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            rig.commands();
+            rig.apply(cx, failure(2, "сбой", false));
+            assert_eq!(
+                rig.view(cx).unwrap().state,
+                ReactorsState::Failed {
+                    reason: "сбой".into(),
+                    offline: false
+                }
+            );
+
+            rig.retry(cx);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+            assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+        }
+
+        #[gpui::test]
+        fn a_retry_takes_over_the_refresh_that_is_waiting(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            rig.retry(cx);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            assert_eq!(rig.view(cx).unwrap().base_version, Some(2));
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty(), "one read, not two");
+        }
+
+        #[gpui::test]
+        fn a_deletion_says_the_message_is_gone_and_cancels_the_refresh(cx: &mut TestAppContext) {
+            for ready in [false, true] {
+                let rig = live(cx);
+                if ready {
+                    rig.apply(cx, full(1));
+                }
+                rig.apply(cx, changed(2));
+                rig.apply(cx, deleted(TS + 1));
+                assert_ne!(
+                    rig.view(cx).unwrap().state,
+                    ReactorsState::Failed {
+                        reason: MESSAGE_GONE.into(),
+                        offline: false
+                    },
+                    "another message was deleted"
+                );
+                rig.take_events();
+
+                rig.apply(cx, deleted(TS));
+                let gone = ReactorsState::Failed {
+                    reason: MESSAGE_GONE.into(),
+                    offline: false,
+                };
+                assert_eq!(rig.view(cx).unwrap().state, gone);
+                assert!(rig.take_events().contains(&StoreEvent::Reactors));
+
+                wait(cx, 5000);
+                assert!(rig.commands().is_empty(), "the timer was cancelled");
+
+                rig.apply(cx, page(1, &guids("late", 2), 2, Some(1)));
+                rig.apply(cx, failure(1, "x", false));
+                assert_eq!(
+                    rig.view(cx).unwrap().state,
+                    gone,
+                    "the answer the list was waiting for is dropped"
+                );
+            }
         }
     }
 
