@@ -23,6 +23,24 @@ When the open chat has a pinned message the client SHALL show a bar between the 
 - **WHEN** a chat has no pinned message
 - **THEN** no bar is shown and the timeline starts directly under the header
 
+#### Scenario: More than one pinned message
+- **GIVEN** the server reports more than one pinned message for the chat
+- **WHEN** the chat is shown
+- **THEN** one bar is shown, for the most recently pinned message
+
+### Requirement: Click on the bar
+A click on the bar SHALL scroll the timeline to the pinned message when that message is among the loaded messages. When it is not loaded, the click SHALL do nothing: no request, no loading state, no error and no change of the timeline.
+
+#### Scenario: Pinned message is loaded
+- **GIVEN** the pinned message is among the loaded messages
+- **WHEN** the user clicks the bar
+- **THEN** the timeline scrolls to that message
+
+#### Scenario: Pinned message is not loaded
+- **GIVEN** the pinned message is older than the loaded history
+- **WHEN** the user clicks the bar
+- **THEN** nothing happens
+
 ### Requirement: Pin source
 The client SHALL show the pin the server reports, from the chat list and from live changes. The text of the pinned message SHALL come from its loaded or cached copy, otherwise be requested once from the server, for the open chat only. That separate lookup SHALL NOT add the message to the chat's cached history.
 
@@ -67,6 +85,19 @@ While connected, a pin, an unpin or a change of the pinned message made by anoth
 #### Scenario: Chat that is not open
 - **WHEN** a pin changes in a chat that is not open
 - **THEN** that chat's row keeps its preview, unread counter and position, and opening the chat shows the new state
+
+### Requirement: Older pin state does not win
+A pin state that the server reports as older than one already applied (for example a chat list reply produced before an unpin) SHALL NOT replace it. When the server gives no ordering between two states, the one received last SHALL win.
+
+#### Scenario: Older state arrives late
+- **GIVEN** a message was unpinned and the client has shown the bar disappear
+- **WHEN** a chat list reply that the server produced before the unpin arrives afterwards
+- **THEN** the bar stays gone
+
+#### Scenario: No ordering available
+- **GIVEN** the server gives no ordering between two pin states
+- **WHEN** both have been received
+- **THEN** the bar shows the one received last
 
 ### Requirement: Pinned message follows edits and deletions
 While a message is pinned, an edit of it SHALL change the text in the bar and its deletion SHALL change the bar to the deleted placeholder, in the same way as in the timeline.

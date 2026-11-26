@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-26. One change is open: **CM** `add-chat-members-and-creation`. Source: its `tasks.md`.
+Owner: Integrator. Updated: 2026-11-26. Three changes are open: **CM** `add-chat-members-and-creation`, **RL** `add-reaction-list`, **PIN** `add-pins-and-importance-view`. Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -19,7 +19,8 @@ Owner: Integrator. Updated: 2026-11-26. One change is open: **CM** `add-chat-mem
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it.
 3. **Zero build warnings** (`cargo build --workspace --all-targets`; no CI and no `-D warnings`, but `main` builds with 0 warnings). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. A unit therefore contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used.
 4. **Cargo, `bt-probe` and the app run only in the Tart VM `bt-vm`, never on the host** (rule `containers.md`). Procedure: sync the tree to test into `~/bt/src-<name>` (tracked and untracked, no ignored files; `~/bt/src` is shared, so concurrent agents use their own directory), put `$HOME/.cargo/bin` in `PATH` (`tart exec` lacks it), build and run there; `.runtime` for live runs is the VM's `~/bt/.runtime`. Remove the `~/bt/src-<name>` directory when the task is done. `git` and `openspec` on the host are fine.
-5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2. Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**.
+5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; RL 3.1, 8.2; PIN 0.1, 0.2, 6.2 (reads only, except PIN 6.2's one self-chat edit). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**.
+6. **A task that is not started locks nothing.** Rule 1 holds files only for started, unmerged tasks. Tasks gated on approvals, live runs or open questions (for example CM 6.3, 6.4, 7.1) hold no file until the moment they start; whoever starts a file first keeps it until its unit merges, the other waits.
 
 ## add-chat-members-and-creation (CM)
 
@@ -35,12 +36,63 @@ Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1 and t
 | 6.F | conditional | 0.1 FAIL or 6.2 FAIL | removes group wording and code |
 | 7.1 | blocked-by CM 6.4 (or 6.F) | | |
 
-Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are first called by the dialog of 6.4). Files: `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`, `new_chat.rs`, `desktop.rs`, `tests.rs`. No other change is open, so nothing else holds them. Gate: live PASS of 6.2.
+Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are first called by the dialog of 6.4). Files: `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`, `new_chat.rs`, `desktop.rs`, `tests.rs`. Gate: live PASS of 6.2. 6.3, 6.4 and 7.1 are not started and gated on approvals, so by rule 6 they lock none of these files: RL and PIN may use them now; if CM-G starts while an RL or PIN unit holds a file, it waits for that unit to merge.
+
+## add-reaction-list (RL)
+
+All open questions (Q1-Q6) were answered on 2026-11-26 and the spec and design are finished (7.1 done); 6.6 needs no work (flat list). Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1; **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (starts after RL-proto is on `main`). 3.1 and 8.2 are live reads in the VM (no write, no approval; they need the VM's outbound network, which it lacked on 2026-11-26).
+
+| ID | Status | Needs | Files |
+|----|--------|-------|-------|
+| 1.1 | ready | | `request.rs` |
+| 1.2 | ready | | `wire.rs`, `tests/wire_fixtures.rs`, new fixture |
+| 1.3 | blocked-by 1.1, 1.2 | | yandex-proto `client.rs` |
+| 2.1 | blocked-by 1.3 | | `bt-probe.rs` |
+| 3.1 | blocked-by 2.1 and the VM network; **[live]** | 2.1 | `research.md`, the fixture |
+| 4.1 | ready (CM-G holds nothing, rule 6) | | `model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs` |
+| 4.2 | blocked-by 4.1 | 4.1 | chat-core `client.rs` |
+| 5.1 | blocked-by 1.3, 4.1 | 1.3, 4.1 | `yandex_backend.rs` |
+| 6.1 | blocked-by 4.1 | 4.1 | `store.rs` |
+| 6.2 | blocked-by 4.1, 6.1 | 4.1, 6.1 | `reactors.rs`, `theme.rs`, `main.rs` |
+| 6.3, 6.4, 6.5 | blocked-by 6.1, 6.2 | 6.1, 6.2 | `composer.rs`, `desktop.rs` (6.3); `store.rs`, `reactors.rs` (6.4, 6.5) |
+| 6.7 | blocked-by 6.1-6.5 | | `tests.rs` |
+| 8.1, 8.2, 8.3 | blocked-by the units; 8.2 **[live]** | | final run, `research.md`, archive |
+
+## add-pins-and-importance-view (PIN)
+
+Done: 1.1. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 may merge alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | blocked: VM network; **[live]** reads only | | `research.md` |
+| 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
+| 1.2 | ready; start after RL 1.2 merges (same `wire.rs`) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
+| 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
+| 2.1 | ready; start after RL-app merges | 1.1 | `model.rs`, `fixtures.rs` |
+| 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
+| 2.3 | blocked-by 2.2 (and 1.2 for the unit) | 2.2 | chat-core `client.rs` |
+| 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
+| 3.1 | blocked-by 2.1 | 1.1, 2.1 | `yandex_backend.rs` |
+| 3.2 | blocked-by 1.2, 2.2, 3.1 | | `yandex_backend.rs` |
+| 3.3 | blocked-by 3.2, 5.2; closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
+| 4.1 | blocked-by 2.2 | 2.2 | `store.rs` |
+| 4.2 | blocked-by 2.1 | 2.1 | `timeline.rs`, `theme.rs` |
+| 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
+| 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
+| 5.1 | ready; start after RL 2.1 merges (same `bt-probe.rs`) | 1.1 | `bt-probe.rs` |
+| 5.2 | blocked-by 1.2 (and RL 2.1) | 1.2 | `bt-probe.rs` |
+| 6.1 | after the units | | build/test/lint matrix |
+| 6.2 | blocked: network and the user's approval of the target; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
+| 6.3 | after the units | | this file, archive |
 
 ## Ready now
 
-- Nothing is startable without the user. CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
+- Startable without the user, no unmet dependency, disjoint files (a first wave): **RL 1.1** (`request.rs`), **RL 1.2** (`wire.rs`), **RL 4.1** (`model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs`).
+- Ready by dependencies but queued behind RL on shared files (rule 1): **PIN 1.2** (after RL 1.2), **PIN 5.1** (after RL 2.1), **PIN 2.1** (after RL-app). Each chain then unlocks the rest of its column above.
+- CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
 ## Needs the user
 
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation); deferred by the user, so these three and 6.3, 6.4, 7.1 stay open.
+- PIN 0.2 and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
+- RL 3.1 and 8.2 and PIN 0.1 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.

@@ -12,8 +12,29 @@ The user SHALL be able to open a list of the people who reacted to a sent messag
 - **WHEN** a message has no reactions, is deleted, or is still pending
 - **THEN** no list can be opened for it
 
+### Requirement: Opening the list
+The context menu of a sent, non-deleted message that has at least one reaction SHALL offer an entry «Кто отреагировал». Choosing it SHALL open the list in a popover anchored where the menu was, and SHALL close the menu. Escape or a click outside SHALL close the popover. A chip click and a right click on a chip SHALL keep their present behaviour (toggling the own reaction, opening the menu).
+
+#### Scenario: Entry in the menu
+- **GIVEN** a sent message with reactions
+- **WHEN** the user right-clicks it
+- **THEN** the menu offers «Кто отреагировал»
+
+#### Scenario: Entry chosen
+- **WHEN** the user chooses «Кто отреагировал»
+- **THEN** the menu closes and the list opens next to where the menu was
+
+#### Scenario: Closing
+- **GIVEN** the list is open
+- **WHEN** the user presses Escape or clicks outside it
+- **THEN** the list closes
+
+#### Scenario: Chips unchanged
+- **WHEN** the user left-clicks a reaction chip
+- **THEN** their own reaction is toggled as before and no list opens
+
 ### Requirement: Reactor entries
-Each entry SHALL show the person's avatar and name, the emoji of the reaction they chose (the neutral glyph for a type the client has no emoji for), and when they reacted. The user's own entry SHALL be marked. Entries SHALL be in the order the server reports them.
+Each entry SHALL show the person's avatar and name, the emoji of the reaction they chose (the neutral glyph for a type the client has no emoji for), and when they reacted. The user's own entry SHALL be marked. Entries SHALL be in the order the server reports them, in one flat list: the list SHALL NOT be grouped, tabbed or filtered by reaction type.
 
 #### Scenario: Entries of two people
 - **GIVEN** a sent message that two people reacted to, one with 👍 and one with ❤️
@@ -28,6 +49,11 @@ Each entry SHALL show the person's avatar and name, the emoji of the reaction th
 #### Scenario: Unknown reaction type
 - **WHEN** an entry's reaction type has no confirmed emoji
 - **THEN** the entry shows the neutral glyph instead of being hidden
+
+#### Scenario: Mixed types in one list
+- **GIVEN** a message with reactions of several types
+- **WHEN** the user opens its list
+- **THEN** all entries are in one list, each with its own emoji, and there are no tabs or sections
 
 
 ### Requirement: Complete or labelled
@@ -57,6 +83,46 @@ The list SHALL NOT present a partial list as complete. It SHALL either show ever
 - **WHEN** the server reports a reaction without any identity for the person
 - **THEN** the entry is counted toward the total and the list says how many entries it could not show
 
+### Requirement: Loading more
+The list SHALL load the first page of 30 entries and, when the server has more, show a «Показать ещё» row at its end. Choosing the row SHALL request the next page and append it, one request per choice. The row SHALL be offered according to the server's pages, never the message's known counts, and be absent when there are no more entries. While loading it SHALL show that; if that page fails, the shown entries SHALL stay and the row SHALL offer to try again.
+
+#### Scenario: More entries
+- **GIVEN** the first page is shown and the server has more entries
+- **WHEN** the user chooses «Показать ещё»
+- **THEN** the next page is requested and its entries are appended below the shown ones
+
+#### Scenario: No more entries
+- **GIVEN** the server returned every entry
+- **WHEN** the list is shown
+- **THEN** there is no «Показать ещё» row and no further request is made
+
+#### Scenario: Next page fails
+- **GIVEN** the first page is shown
+- **WHEN** the request for the next page fails
+- **THEN** the shown entries stay and the row offers to try again
+
+### Requirement: List stays current
+While the list is open, a change of the message's reactions SHALL make the list read again from its first page after a short delay (about one second, so that a burst of changes causes one read). The entries already shown SHALL stay on screen until the new first page replaces them; paging then starts over from that page. If the message is deleted meanwhile, the list SHALL say that the message is gone. If the re-read fails, the list SHALL show the failure with a way to try again.
+
+#### Scenario: Someone reacts while the list is open
+- **GIVEN** the list is open
+- **WHEN** another person adds a reaction to the message
+- **THEN** the list reads again from the first page and shows the new entry without user action
+
+#### Scenario: Burst of changes
+- **WHEN** several reactions to the message change within a second
+- **THEN** one re-read follows, not one per change
+
+#### Scenario: Deep list refreshed
+- **GIVEN** the user loaded several pages
+- **WHEN** the reactions change
+- **THEN** the list shows the first page again and «Показать ещё» continues from there
+
+#### Scenario: Re-read fails
+- **GIVEN** the list is open and the re-read fails
+- **WHEN** the failure arrives
+- **THEN** the list shows the failure with a retry instead of entries of an earlier time
+
 ### Requirement: Names of reactors
 An entry's name SHALL come from the data the server sent with the reaction; when that has none, from the user lookup the client already uses for message authors; when that has none, SHALL be the placeholder "Неизвестный". An entry SHALL NOT show a blank name or a raw user id.
 
@@ -84,7 +150,7 @@ Opening the list, and anything it does to show more entries, SHALL only read fro
 - **THEN** no reactor list is available until the user opens one again
 
 ### Requirement: Failed and offline list
-While the list loads, the user SHALL see that it is loading. When the server refuses or the request fails, the list SHALL show the reason and a way to try again. When the client has no connection, the list SHALL say there is no connection, SHALL NOT show entries from an earlier time as current, and SHALL offer to try again. A failure SHALL NOT change the message's chips.
+While the list loads, the user SHALL see that it is loading. When the server refuses or the request fails, the list SHALL show the reason and a way to try again. When the client has no connection, the list SHALL say «Нет соединения» and offer to try again, SHALL NOT show entries from an earlier time as current, and SHALL NOT keep the list in the offline cache. A failure SHALL NOT change the message's chips.
 
 #### Scenario: Loading
 - **WHEN** the user opens the list and the answer has not arrived
@@ -97,7 +163,7 @@ While the list loads, the user SHALL see that it is loading. When the server ref
 #### Scenario: Offline
 - **GIVEN** the client is offline
 - **WHEN** the user opens the list
-- **THEN** it says there is no connection and shows no entries
+- **THEN** it says «Нет соединения» with a retry and shows no entries, and no request is sent
 
 #### Scenario: Message deleted meanwhile
 - **GIVEN** the list is loading

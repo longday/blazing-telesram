@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Shows which messages their author or a participant marked as important, keeps that state current while connected and in the offline cache. Display only: the client neither marks messages as important nor sends the flag.
+Shows which messages their author or a participant marked as important, keeps that state current while connected and in the offline cache. Display only: the client neither marks nor unmarks messages as important; the one flag it sends is the existing one, repeated when the user edits an own message that is already important.
 
 ## ADDED Requirements
 
 ### Requirement: Important marker
-A message that the server reports as important SHALL show a marker in its bubble, in the timeline of any chat kind, for incoming and outgoing messages. A message that is not important and a deleted message SHALL show no marker. The marker SHALL NOT change the bubble's text, size class or position in the timeline.
+A message that the server reports as important SHALL show a marker in its bubble, in the timeline of any chat kind, for incoming and outgoing messages. The marker is a small lightning-bolt glyph next to the message time in the bubble footer. A message that is not important and a deleted message SHALL show no marker. The marker SHALL NOT change the bubble's text, size class or position in the timeline.
 
 #### Scenario: Important incoming message
 - **WHEN** another user's message is reported important
@@ -62,13 +62,23 @@ A cached message SHALL keep its importance flag, so cached history shows the mar
 - **WHEN** the app starts
 - **THEN** its messages load without markers and without errors
 
-### Requirement: Importance is display only
-The client SHALL NOT offer marking or unmarking a message as important, SHALL NOT offer an "important" option in the composer, and SHALL NOT send the flag with any message or request. Messages the client sends SHALL be sent as not important.
+### Requirement: Importance is shown, not changed
+The client SHALL NOT offer marking or unmarking a message as important and SHALL NOT offer an "important" option in the composer. Messages the client sends SHALL be sent as not important. When the user edits one of their own messages that is important, the edit request SHALL carry the important flag so that the edit does not clear it; an edit of a message that is not important SHALL NOT carry it. No other request SHALL carry the flag.
 
 #### Scenario: Message menu
 - **WHEN** the user opens the context menu of a message
 - **THEN** it has no entry that changes importance
 
-#### Scenario: Composer
-- **WHEN** the user sends or edits a message
+#### Scenario: New message
+- **WHEN** the user sends a message
 - **THEN** the request does not set the importance flag
+
+#### Scenario: Editing an important own message
+- **GIVEN** the user's own message is important
+- **WHEN** the user edits its text
+- **THEN** the edit request carries the important flag and the message is still shown with the marker afterwards
+
+#### Scenario: Editing an ordinary message
+- **GIVEN** the user's own message is not important
+- **WHEN** the user edits its text
+- **THEN** the edit request does not carry the important flag

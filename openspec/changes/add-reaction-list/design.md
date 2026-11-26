@@ -2,7 +2,7 @@
 
 ## Context
 
-`proposal.md` states the motivation, the decisions taken from evidence (numbered there 1-6, cited here as P1-P6) and the open questions (Q1-Q6). `research.md` holds the protocol facts and marks what a live read must still confirm (**[probe]**).
+`proposal.md` states the motivation, the decisions taken from evidence (numbered there 1-6, cited here as P1-P6) and the answered questions (Q1-Q6, all answered on 2026-11-26). `research.md` holds the protocol facts and marks what a live read must still confirm (**[probe]**).
 
 Code this change extends:
 
@@ -15,7 +15,7 @@ Code this change extends:
 
 **Goals:**
 - The complete list of reactors of a message, read-only, honest about being partial.
-- Contracts fixed here so protocol, core, adapter and UI tasks can proceed in parallel; the contracts do not depend on the open questions.
+- Contracts fixed here so protocol, core, adapter and UI tasks can proceed in parallel; the contracts are written for the answers of Q1-Q6 (proposal, "Answered questions").
 
 **Non-Goals:**
 - The proposal's non-goals (readers, profile opening, caching, per-type server filter).
@@ -80,22 +80,27 @@ One open list at a time, in memory:
 ```rust
 pub struct ReactorsView { chat: ChatId, timestamp: MessageTs, base_version: Option<i64>,
                           generation: u64,        // token of the one request outstanding for this list
+                          kind: RequestKind,      // First (replaces the rows) | More (appends)
                           state: ReactorsState }  // dropped on close
 pub enum ReactorsState { Loading,
                          Ready { rows: Vec<Reactor>, skipped: usize, oldest: Option<MessageTs>,
-                                 exhausted: bool, loading_more: bool },
+                                 exhausted: bool, loading_more: bool, more_failed: Option<String> },
                          Failed { reason: String, offline: bool } }
 ```
 
-The store keeps a counter `next_request` that only grows (never reset by close or reopen). Every `LoadReactors` it sends (open, reopen, retry, load more, refresh) takes a fresh value, sets `generation` to it and thereby supersedes any request still out. A `Reactors` or `ReactorsFailed` is applied only if its `(chat, timestamp)` is the open list **and** its `request` equals `generation`; anything else is dropped (an answer after close, after reopening the same message, or to the page before a refresh). Rows are appended in server order and de-duplicated by guid (the web client does the same).
+The store keeps a counter `next_request` that only grows (never reset by close or reopen). Every `LoadReactors` it sends (open, reopen, retry, load more, refresh) takes a fresh value, sets `generation` to it and thereby supersedes any request still out. A `Reactors` or `ReactorsFailed` is applied only if its `(chat, timestamp)` is the open list **and** its `request` equals `generation`; anything else is dropped (an answer after close, after reopening the same message, or to the page before a refresh). A `First` answer replaces the rows; a `More` answer appends in server order and de-duplicates by guid (the web client does the same).
 
-**End of list** is decided from the page, with strict cursor progress; known counts never decide it. After a page requested with cursor `before` and limit `L`: the list is `exhausted` when `oldest` is `None`, or `raw < L`, or `before` is `Some(b)` and `oldest >= b` (the cursor did not move, so the page is a repeat; continuing would loop). Otherwise the next page is requested with `before = oldest`. An inclusive bound that repeats the boundary entry is harmless: de-duplication drops it and the page still progresses unless it contains nothing older. `raw < L` means "end" only if the probe confirms that a short page is never a server cap (P3 in `research.md`); until then `REACTORS_PAGE` is kept at or below the largest honoured `Limit`, so a short page is an end. The message's known counts only label progress: `total` is the sum of the counts, recomputed from the store's current message; a count that lags low or high changes the header "N из M", never whether more pages are requested or offered. `base_version` is the message's reaction version when the list was opened, the hook for open question 3.
+**End of list** is decided from the page, with strict cursor progress; known counts never decide it. After a page requested with cursor `before` and limit `L`: the list is `exhausted` when `oldest` is `None`, or `raw < L`, or `before` is `Some(b)` and `oldest >= b` (the cursor did not move, so the page is a repeat; continuing would loop). Otherwise the next page is requested with `before = oldest`. An inclusive bound that repeats the boundary entry is harmless: de-duplication drops it and the page still progresses unless it contains nothing older. `raw < L` means "end" only if the probe confirms that a short page is never a server cap (P3 in `research.md`); until then `REACTORS_PAGE` is kept at or below the largest honoured `Limit`, so a short page is an end. The message's known counts only label progress: `total` is the sum of the counts, recomputed from the store's current message; a count that lags low or high changes the header "N из M", never whether more pages are requested or offered. `base_version` is the message's reaction version when the list was last read from the first page; it drives the refresh below.
+
+**Load more (Q2).** The row «Показать ещё» (`!exhausted`) sends `LoadReactors { before: oldest }` with `kind = More` and sets `loading_more`; the answer is appended and de-duplicated. A failed `More` keeps `rows`, clears `loading_more` and sets `more_failed` (the row turns into a retry); a retry takes a fresh token. A failed `First` is `Failed`.
+
+**Refresh (Q3).** A `ClientEvent::ReactionsChanged` for the open list's message whose version differs from `base_version` (re)starts a 1 s debounce timer in the store; when it fires, the store sends `LoadReactors { before: None }` with `kind = First` and a fresh token, which supersedes any request still out (a `More` in flight, or an earlier refresh), and sets `base_version` to the version current at that moment. The rows stay displayed (state unchanged) until the answer, which replaces them wholesale and recomputes `exhausted`, `oldest`, `skipped`; paging then continues from that page. A failed refresh is `Failed` (an earlier list must not look current). A deleted message turns the list into the "message gone" failure and cancels the timer. Closing the list cancels the timer; a timer that fires for a closed or different list does nothing.
 
 ### D6. View (`desktop`), P4
 
-A pure `body(state, connection, total) -> Body {Loading, Offline, Failed(reason), Ready { rows, shown, total, skipped, more }}` like `info_panel::body`, tested without a window. A `Ready` list while the connection is not online renders `Offline` (as the member panel does). The row is avatar, name (placeholder "Неизвестный", own entry suffixed "Вы"), the emoji of the code through `reactions::emoji` or `NEUTRAL_GLYPH`, and the time through the existing `format` helpers. Debug selectors `reactor-{guid}`. The header "N из M" appears only when `shown + skipped < total`, and a non-zero `skipped` adds "K без данных" (spec "Complete or labelled").
+A pure `body(state, connection, total) -> Body {Loading, Offline, Failed(reason), Ready { rows, shown, total, skipped, more: More }}` like `info_panel::body`, tested without a window, with `More = Hidden | Offer | Loading | Retry(reason)` derived from `exhausted`, `loading_more` and `more_failed` (never from `total`). A `Ready` list while the connection is not online renders `Offline`, as does a `Failed { offline: true }`: the text «Нет соединения» and a retry (Q4); an offline retry sends a fresh `First` request, which the engine refuses at once while still offline (D4 step 2). The row is avatar, name (placeholder "Неизвестный", own entry suffixed "Вы"), the emoji of the code through `reactions::emoji` or `NEUTRAL_GLYPH`, and the time through the existing `format` helpers; one flat list, no tabs, sections or filters (Q5). Debug selectors `reactor-{guid}`, `reactors-more`, `reactors-retry`. The header "N из M" appears only when `shown + skipped < total`, and a non-zero `skipped` adds "K без данных" (spec "Complete or labelled").
 
-`more` in `Ready` is `!exhausted` of the store state (D5), never derived from `total`; `total` only feeds the header.
+`more` is `Hidden` when the store state is `exhausted`, never derived from `total`; `total` only feeds the header.
 
 ### D7. Probe and verification
 
@@ -103,18 +108,18 @@ A pure `body(state, connection, total) -> Body {Loading, Offline, Failed(reason)
 
 ### D8. Ordering with other changes
 
-`add-chat-members-and-creation` edits `bt-probe.rs`, `backend.rs`, `model.rs`, `client.rs`, `store.rs`, `yandex_backend.rs` (see `DEPENDENCIES.md`: its CM-G unit holds them until merged). This change's tasks that touch those files start only when no other in-flight task holds them (rule 1). The pins slice may add a menu entry in `composer.rs`; whichever lands second adapts.
+`add-chat-members-and-creation` (unit CM-G: 6.3, 6.4, 7.1, not started, gated on approvals) holds no files (`DEPENDENCIES.md` rule 1), so the files of this change are free to take; whoever starts first holds a file until its unit merges. `add-pins-and-importance-view` shares `wire.rs`, `request.rs`, `bt-probe.rs` and the app files (`backend.rs`, `model.rs`, `fixtures.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`, `desktop.rs`, `tests.rs`); the order is this change first (RL-proto, then RL-app), the pins tasks on those files after the matching unit has merged. The pins slice adds no menu entry, so `composer.rs` is touched only here.
 
-## Pending decisions (to finish after the answers)
+## Decisions after the answers
 
-Each line names what the answer fixes. None of these is in a task until answered.
+The answers of 2026-11-26 (proposal "Answered questions"); each fixes the contract named here.
 
-- **Q1 entry point** fixes: which of `composer.rs` (menu entry, with a `message-editing` delta "Message context menu") and `timeline.rs` (a chip gesture, with a `message-reactions` delta for the chip's right-click behaviour) is edited; the anchor of the popover; spec requirement "Opening the list". Recommended: menu entry.
-- **Q2 paging** fixes: whether the store requests the next page on a click (recommended), automatically until the bound, or incrementally; spec requirement "Loading more". D5's cursor and `more` rule hold in every case.
-- **Q3 staleness** fixes: the store's reaction to `base_version` changing (refetch from page 1 with debounce, recommended; an "outdated" row; nothing); spec requirement "List stays current". The store already sees `ClientEvent::ReactionsChanged`.
-- **Q4 offline** fixes: nothing new (recommended: D4 step 2 and the "Failed and offline list" requirement already express it); the other option adds a cached partial list and a cache-shape change.
-- **Q5 types** fixes: flat list (recommended, D6 as written) or tabs/sections (D6 and a filter state); spec requirement on grouping.
-- **Q6 verification target** fixes how task 3.1 picks a multi-reactor message.
+- **Q1 = A, entry point.** `composer.rs`: the entry «Кто отреагировал» (selector `menu-reactors`) for a sent, non-deleted message with at least one reaction; `open_menu` opens the menu even when this entry is its only content. `desktop.rs` hosts the popover, anchored where the menu was, and closes the menu when the entry is chosen. Chip gestures are untouched. Spec: "Opening the list" in `reaction-list` and the `message-editing` delta "Message context menu".
+- **Q2 = A, paging.** First page `REACTORS_PAGE` = 30, then «Показать ещё» one request per click; load-more failure keeps the rows (D5). Spec: "Loading more".
+- **Q3 = A, staleness.** Debounced (1 s) re-read from the first page on a version change; rows stay until the answer; failed refresh is `Failed` (D5). Spec: "List stays current".
+- **Q4 = A, offline.** No new contract: D4 step 2 refuses at once, D6 renders «Нет соединения» with a retry, nothing is cached. Spec: "Failed and offline list" (text now names «Нет соединения» and the retry).
+- **Q5 = A, types.** One flat list in server order with a glyph per row (D6). Spec: "Reactor entries" (flat, no grouping). No filter state in the store.
+- **Q6 = A, verification target.** Task 3.1 picks a multi-reactor message by a read-only `bt-probe history` count scan inside `bt-vm`; names and guids stay in the VM.
 
 ## Risks / Trade-offs
 

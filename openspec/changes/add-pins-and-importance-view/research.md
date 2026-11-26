@@ -36,11 +36,11 @@ Today `decode_push` (`wire.rs:928-940`) maps `Pin` together with `SeenMarker`, `
 
 ### One pin or several
 
-The web client shows **one**: the selector at offset 1030883 is `function ee(e){ let t=e.pinned_messages; if(t) return t[0] }`. `PinnedMessageTimestamps` is an array, so an older or multi-pin shape exists, but the `Pin` push and `PinnedMessageInfo` carry exactly one timestamp. Whether a chat can hold several pins at once is not settled by any source (open question Q1).
+The web client shows **one**: the selector at offset 1030883 is `function ee(e){ let t=e.pinned_messages; if(t) return t[0] }`. `PinnedMessageTimestamps` is an array, so an older or multi-pin shape exists, but the `Pin` push and `PinnedMessageInfo` carry exactly one timestamp. Whether a chat can hold several pins at once is not settled by any source. Decided (proposal Q1 = A): one bar, the latest pin.
 
 ### Ordering of the two sources
 
-The chat merge function `A` (offset 1776334) keeps the pin of the stored chat when the incoming chat entry has an older `pinned_timestamp` (`LastActionTsMcs`), and applies an incoming entry whose `pinned_timestamp` differs. That is the web client's answer to "a slow chat-list reply arrives after a newer `Pin` push": order by `LastActionTsMcs`. The push body does not carry that field in the notes; whether `ServerMessageInfo.Timestamp` of the `Pin` push plays that role is unknown (open question Q5).
+The chat merge function `A` (offset 1776334) keeps the pin of the stored chat when the incoming chat entry has an older `pinned_timestamp` (`LastActionTsMcs`), and applies an incoming entry whose `pinned_timestamp` differs. That is the web client's answer to "a slow chat-list reply arrives after a newer `Pin` push": order by `LastActionTsMcs`. The push body does not carry that field in the notes; whether `ServerMessageInfo.Timestamp` of the `Pin` push plays that role is unknown. Decided (proposal Q5 = B): order by the action timestamp, else last arrival; task 0.2 checks that the two are comparable.
 
 ### Fetching the pinned message's text
 
