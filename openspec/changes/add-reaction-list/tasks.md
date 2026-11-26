@@ -33,7 +33,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: a page decodes in server order with guid, name, avatar, code and timestamp; a missing `UserReactions` key is an empty list (`raw` 0, `oldest` `None`); an entry without `Type` and one without `UserInfo.Guid` count in `skipped`, are not returned, but still count in `raw` and their `Timestamp` still counts in `oldest` (a page whose oldest entry is malformed: `oldest` is that entry's timestamp); an entry without `Timestamp` keeps `timestamp: None` and does not affect `oldest`; a reply that is not an object is a `Protocol` error; the existing `WireReactor` tests are untouched.
   - Done when: these tests exist.
 
-- [ ] 1.3 Client method
+- [x] 1.3 Client method
   - Owns: `crates/yandex-proto/src/client.rs`.
   - Depends on: 1.1, 1.2.
   - Do: `Client::reactors(chat, timestamp, before, limit)` through the socket request path of `history`/`whoami`, parsed with `parse_reactors`.
@@ -42,7 +42,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 2. bt-probe
 
-- [ ] 2.1 `bt-probe reactors`
+- [x] 2.1 `bt-probe reactors`
   - Owns: `crates/yandex-proto/src/bin/bt-probe.rs`.
   - Depends on: 1.3 (`add-chat-members-and-creation` 2.2/6.1, which also edit this file, are already merged).
   - Do: `reactors <chat> <micros> [--before <micros>] [--limit <n>]`, read-only, prints the parsed reply with `{:#?}` on stdout and a header on stderr, like `members`; `USAGE` and the module docs say it is a read and not covered by `BT_WRITE_ONLY_CHAT`. It sends only `Mode: 0` (the one request form of D1); there is no `--mode`.
