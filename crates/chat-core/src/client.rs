@@ -7906,20 +7906,59 @@ mod tests {
         h.wait_for("the second request", |s| s.create_calls.len() == 2);
     }
 
+    /// Loopback echo server on a plain thread, so it does not depend on the runtime under test.
+    /// Dropping it stops and joins the thread, on the failure path too.
+    struct EchoServer {
+        addr: std::net::SocketAddr,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl EchoServer {
+        fn start() -> Self {
+            use std::io::Read;
+            use std::sync::atomic::Ordering;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = stop.clone();
+            let thread = std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let Ok(mut stream) = stream else { return };
+                    // A client that connects and goes silent must not block the join.
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                    let mut buf = [0u8; 4];
+                    if stream.read_exact(&mut buf).is_ok() {
+                        let _ = stream.write_all(&buf);
+                    }
+                }
+            });
+            Self {
+                addr,
+                stop,
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for EchoServer {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Wakes the blocked `accept`; the thread sees the flag and returns.
+            let _ = std::net::TcpStream::connect(self.addr);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
     #[test]
     fn runtime_supports_socket_io_backends() {
-        use std::io::Read;
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let Ok(mut stream) = stream else { return };
-                let mut buf = [0u8; 4];
-                if stream.read_exact(&mut buf).is_ok() {
-                    let _ = stream.write_all(&buf);
-                }
-            }
-        });
+        let server = EchoServer::start();
+        let addr = server.addr;
 
         let h = start(
             |s, _| {
