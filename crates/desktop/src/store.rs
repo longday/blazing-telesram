@@ -1117,9 +1117,9 @@ impl ChatStore {
     }
 
     /// A change of the reactions of `(chat, ts)`, now at `version`, reached the store. When it is the
-    /// open list's message, the list is shown or loading, and the version is not the one the list
-    /// was read at, the read from the first page is (re)scheduled after `REACTORS_REFRESH_DELAY`.
-    /// A failed list is not refreshed: it already offers a retry.
+    /// open list's message, the message is not gone, and the version is not the one the list was
+    /// read at, the read from the first page is (re)scheduled after `REACTORS_REFRESH_DELAY`,
+    /// whatever the list shows meanwhile (a failure of an older read does not make it current).
     fn reactions_changed(
         &mut self,
         chat: &ChatId,
@@ -1134,7 +1134,7 @@ impl ChatStore {
         else {
             return;
         };
-        if view.base_version == version || matches!(view.state, ReactorsState::Failed { .. }) {
+        if view.base_version == version || is_gone(&view.state) {
             return;
         }
         let ticket = self.refresh.schedule();
@@ -1146,17 +1146,21 @@ impl ChatStore {
     }
 
     /// The delay of a refresh ran out: reads the first page again with a fresh token, which
-    /// supersedes any request still out. A timer that was cancelled or superseded, or a list that
-    /// closed or failed meanwhile, does nothing.
+    /// supersedes any request still out. A failed list goes back to `Loading` first, as for a
+    /// retry. A timer that was cancelled or superseded, or a list that closed or whose message is
+    /// gone meanwhile, does nothing.
     fn refresh_reactors(&mut self, ticket: u64, cx: &mut Context<Self>) {
         if !self.refresh.fire(ticket) {
             return;
         }
-        let Some(view) = self.reactors.as_ref() else {
+        let Some(view) = self.reactors.as_mut() else {
             return;
         };
-        if matches!(view.state, ReactorsState::Failed { .. }) {
+        if is_gone(&view.state) {
             return;
+        }
+        if matches!(view.state, ReactorsState::Failed { .. }) {
+            view.state = ReactorsState::Loading;
         }
         self.request_reactors(RequestKind::First, cx);
     }
@@ -1485,6 +1489,11 @@ impl ChatStore {
             },
         });
     }
+}
+
+/// The failure of a list whose message was deleted: the one state a change of reactions cannot mend.
+fn is_gone(state: &ReactorsState) -> bool {
+    matches!(state, ReactorsState::Failed { reason, .. } if reason == MESSAGE_GONE)
 }
 
 /// The reaction version of the loaded message `(chat, ts)`; `None` when it is not loaded or has none.
@@ -3337,7 +3346,7 @@ mod tests {
         }
 
         #[gpui::test]
-        fn a_refresh_is_not_scheduled_for_an_unchanged_version_another_message_or_a_failed_list(
+        fn no_refresh_for_an_unchanged_version_another_message_or_a_gone_message(
             cx: &mut TestAppContext,
         ) {
             let rig = live(cx);
@@ -3348,16 +3357,76 @@ mod tests {
             assert!(rig.commands().is_empty());
 
             let rig = live(cx);
-            rig.apply(cx, failure(1, "x", false));
+            rig.apply(cx, deleted(TS));
             rig.apply(cx, changed(2));
             wait(cx, 5000);
-            assert!(rig.commands().is_empty(), "a failed list offers a retry");
+            assert!(rig.commands().is_empty(), "a gone message is terminal");
+        }
 
-            // A change before the first answer is refreshed: that answer may predate it.
+        #[gpui::test]
+        fn a_change_before_the_first_answer_is_refreshed(cx: &mut TestAppContext) {
+            // That answer may predate the change.
             let rig = live(cx);
             rig.apply(cx, changed(2));
             wait(cx, 1000);
             assert_eq!(rig.commands(), [load(None, 2)]);
+        }
+
+        #[gpui::test]
+        fn a_failure_during_the_delay_does_not_lose_the_refresh(cx: &mut TestAppContext) {
+            for offline in [false, true] {
+                let rig = live(cx);
+                rig.apply(cx, changed(2));
+                rig.apply(cx, failure(1, "x", offline));
+                assert!(matches!(
+                    rig.view(cx).unwrap().state,
+                    ReactorsState::Failed { .. }
+                ));
+                assert!(rig.commands().is_empty());
+
+                wait(cx, 1000);
+                assert_eq!(rig.commands(), [load(None, 2)]);
+                let view = rig.view(cx).unwrap();
+                assert_eq!(view.state, ReactorsState::Loading);
+                assert_eq!(view.base_version, Some(2));
+
+                rig.apply(cx, page(2, &guids("n", 2), 2, Some(900)));
+                assert_eq!(rows(&rig.view(cx).unwrap()), ["n0", "n1"]);
+            }
+        }
+
+        #[gpui::test]
+        fn a_change_while_the_list_is_failed_refreshes_it(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, failure(1, "x", false));
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+        }
+
+        #[gpui::test]
+        fn a_failed_refresh_is_refreshed_again_by_a_later_change(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            wait(cx, 1000);
+            rig.commands();
+            rig.apply(cx, failure(2, "x", false));
+            rig.apply(cx, changed(3));
+            wait(cx, 1000);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+        }
+
+        #[gpui::test]
+        fn signing_out_with_a_refresh_waiting_sends_nothing(cx: &mut TestAppContext) {
+            let rig = live(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, changed(2));
+            rig.apply(cx, ClientEvent::SignedOut);
+            assert_eq!(rig.view(cx), None);
+            wait(cx, 5000);
+            assert!(rig.commands().is_empty(), "the timer was cancelled");
         }
 
         #[gpui::test]
