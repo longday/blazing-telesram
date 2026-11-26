@@ -630,6 +630,8 @@ mod tests {
                 muted: false,
                 pinned_rank: None,
                 partner: None,
+                pinned_message: None,
+                pin_action_ts: None,
             }
         }
 

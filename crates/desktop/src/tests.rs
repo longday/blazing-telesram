@@ -71,6 +71,8 @@ fn chat(id: &str, kind: ChatKind, title: &str, last: Option<i64>) -> ChatSummary
         muted: false,
         pinned_rank: None,
         partner: None,
+        pinned_message: None,
+        pin_action_ts: None,
     }
 }
 

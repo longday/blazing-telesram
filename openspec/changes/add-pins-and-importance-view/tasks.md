@@ -32,7 +32,7 @@ Ordering and file ownership (`DEPENDENCIES.md` rule 1: one owner per file per ta
 
 ## 4. UI (`desktop`) [after RL-app merges]
 
-- [ ] 4.1 `store.rs`: the open chat's `pinned` from the summary and from `ClientEvent::PinChanged`; no timeline, row or typing effect; an update with an equal value emits nothing. Depends on 2.2.
+- [x] 4.1 `store.rs`: the open chat's `pinned` from the summary and from `ClientEvent::PinChanged`; no timeline, row or typing effect; an update with an equal value emits nothing. Depends on 2.2.
   - Also owns `desktop/src/search_results.rs` and the `chat()` helper in `desktop/src/tests.rs` (a two-line literal adaptation; PIN 4.4 is not started, rule 6): add `pinned_message: None`, `pin_action_ts: None` in `store.rs::row()`, `search_results.rs::private()` and `tests.rs::chat()`. `ChatStore::apply` handles `ClientEvent::PinChanged` per D7 (no change to timeline, row order, last-message preview, unread, typing; equal value causes no UI update). With 2.3 and 3.2 merged, the workspace builds and tests green again.
 - [x] 4.2 `timeline.rs`, `theme.rs`: the "⚡" important marker next to the time in the bubble footer of a non-deleted message (D7, Q3), selector `msg-{ts}-important`, a theme colour; the bubble's text and size class unchanged. Depends on 2.1.
 - [ ] 4.3 `desktop.rs`: the `pinned-message` bar under `chat-header`; label, author (not in private chats), one truncated line, label alone without a preview; no unpin control; a click scrolls to a loaded message and does nothing otherwise (Q2: no request, no loading, no error). Depends on 4.1.
