@@ -136,7 +136,7 @@ Ordering on `bt-probe.rs` (Integrator, `DEPENDENCIES.md` rule 1): task 6.1 is th
   - Done when: the findings are in `research.md`; any contradiction of D2, D3, P3 or P4 is reflected in `design.md`, `proposal.md` and the specs (for example `Remove` carrying `Type`, several reactions per user).
   - Result: done 2026-11-26 in the self chat on the approved disposable message (left in place, user's instruction; state `100101` x1, version 7). Findings in `research.md` "Live verification": `REPLACE` with no prior reaction is the add and the sender gets its own full-state push; `REPLACE` with another type moves the single own reaction; `Remove` without `Type` is accepted; history rows carry `Reactions`/`ReactionsVersion`/`RecentUserReactions`; the app shows the chip, the menu row with the own type marked, move and removal by the same type; a refused write (network off) is rolled back with an error toast after the ping timeout (20-26 s). No contradiction of D2, D3, P3 or P4; `design.md` D2 wording ("unverified" to "confirmed") and `proposal.md` decision 3 updated, no spec change.
 
-- [ ] 7.3 Archive
+- [x] 7.3 Archive
   - Owns: the change directory and `openspec/specs` through the archive workflow.
   - Depends on: 7.1, 7.2 and every task above checked.
   - Do: follow the `openspec-archive-change` skill.

@@ -7,15 +7,19 @@ Lets the user act on messages through a context menu and change or remove the me
 ## Requirements
 
 ### Requirement: Message context menu
-Right-clicking a message SHALL open a menu with Reply for every sent message with content, Copy text for every message with text, Delete for the user's own sent messages, and Edit for those of them the server can rewrite without losing content: not forwarded messages and not replies whose original is outside the chat or has no known id. A pending or failed message offers Copy text only. Escape or a click outside SHALL close it.
+Right-clicking a message SHALL open a menu with Reply for every sent message with content, Copy text for every message with text, Delete for the user's own sent messages, and Edit for those of them the server can rewrite without losing content. For every sent message that is not deleted it SHALL also show the reaction row defined by the message-reactions capability above the other entries. A pending or failed message offers Copy text only. Escape or a click outside SHALL close it.
 
 #### Scenario: Own message
 - **WHEN** the user right-clicks their own sent message
-- **THEN** the menu offers Reply, Edit, Copy text and Delete
+- **THEN** the menu offers the reaction row, Reply, Edit, Copy text and Delete
 
 #### Scenario: Other user's message
 - **WHEN** the user right-clicks another user's message
-- **THEN** the menu offers Reply and Copy text only
+- **THEN** the menu offers the reaction row, Reply and Copy text only
+
+#### Scenario: Edit not offered
+- **WHEN** the user right-clicks their own sent message that is forwarded, or a reply whose original is outside the chat or has no known id
+- **THEN** the menu does not offer Edit
 
 #### Scenario: Copy text
 - **WHEN** the user chooses Copy text
