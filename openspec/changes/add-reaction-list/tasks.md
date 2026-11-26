@@ -19,7 +19,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 1. Protocol (`yandex-proto`)
 
-- [ ] 1.1 `list_reactions` read request (D1)
+- [x] 1.1 `list_reactions` read request (D1)
   - Owns: `crates/yandex-proto/src/request.rs`.
   - Depends on: nothing.
   - Do: `ReadRequest::ListReactions {chat, timestamp, before, limit}`; `method()`, `route()` (socket), `socket_frame()` body `{ChatId, Timestamp, Limit, Mode: 0, MaxTimestamp?}`; `ALLOWED_METHODS` with eight names; `REACTORS_PAGE` (30, provisional until 3.1); module docs list reactions reads.

@@ -594,7 +594,8 @@ mod tests {
                 "subscribe",
                 "search",
                 "whoami",
-                "get_chat_members"
+                "get_chat_members",
+                "list_reactions"
             ]
         );
     }
