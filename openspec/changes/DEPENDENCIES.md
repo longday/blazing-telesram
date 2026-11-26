@@ -66,7 +66,7 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 | 3.2 | blocked-by 2.2, 3.1 (1.2 is done in integ) | 1.2, 2.2, 3.1 | `yandex_backend.rs` |
 | 3.3 | blocked-by 3.2 (5.2 is done in integ); closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
 | 4.1 | blocked-by 2.2 | 2.2 | `store.rs` |
-| 4.2 | blocked-by 2.1 **and by REV 2.2** (REV 2.2 started first and holds `timeline.rs` until it merges into `integ/reveal-downloaded-file`; PIN 4.2 is not started and locked nothing, rule 6) | 2.1, REV 2.2 | `timeline.rs`, `theme.rs` |
+| 4.2 | blocked-by 2.1 only (REV 2.2 is merged into `integ/reveal-downloaded-file`, `timeline.rs` is released) | 2.1 | `timeline.rs`, `theme.rs` |
 | 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
 | 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
 | 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
@@ -77,24 +77,24 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 
 ## add-reveal-downloaded-file (REV)
 
-Proposed 2026-11-27. Local action only: no protocol, core or server change (decisions in its `design.md`). One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; 1.1, 2.1 and 3.1 cannot compile apart, so they start together; RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. Integration branch `integ/reveal-downloaded-file`: **1.1, 2.1 and 3.1 are merged into it** (1.1 `96772e9`, 3.1 `72bf5fa`, 2.1 `764a891`, head `2187144`, 2026-11-27; fmt green; `cargo check -p blazing-telesram --all-targets --locked --offline` in the VM fails only at `timeline.rs::action_row` (the `ActionLine` pattern lacks `reveal`), which is 2.2's job, so the unit builds only after 2.2); the D3 note that `reveal_download` calls `cx.notify()` after clearing a deleted file is in `design.md`. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1).
+Proposed 2026-11-27. Local action only: no protocol, core or server change (decisions in its `design.md`). One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. Integration branch `integ/reveal-downloaded-file`: **1.1, 2.1, 2.2 and 3.1 are merged into it** (1.1 `96772e9`, 3.1 `72bf5fa`, 2.1 `764a891`, 2.2 `df3ce5c`, head `5df8abc`, 2026-11-27). Checks on the integ tree in the VM: `cargo fmt --all --check` green, `cargo build --workspace --all-targets --locked --offline` 0 warnings, `cargo test -p blazing-telesram --locked --offline` 403 passed, `openspec validate add-reveal-downloaded-file --strict` valid. The unit now compiles warning-free; it reaches `main` with 4.1 (tests) and 5.1. The D3 note that `reveal_download` calls `cx.notify()` after clearing a deleted file is in `design.md`. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1).
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 1.1 | **done**, merged into `integ/reveal-downloaded-file` (`96772e9`); holds no file any more (rule 1: `store.rs` is released) | | `store.rs` |
 | 2.1 | **done**, merged into `integ/reveal-downloaded-file` (`764a891`); holds no file any more (rule 1: `viewer.rs` is released) | 1.1 (done) | `viewer.rs` |
-| 2.2 | **in flight** (started 2026-11-27 first, branch `rev/2.2` off integ head `2187144`); holds `timeline.rs` until it merges into `integ/reveal-downloaded-file` (rule 1); PIN 4.2 waits for it | 1.1, 2.1 (done) | `timeline.rs` |
+| 2.2 | **done**, merged into `integ/reveal-downloaded-file` (`df3ce5c`); holds no file any more (rule 1: `timeline.rs` is released) | 1.1, 2.1 (done) | `timeline.rs` |
 | 3.1 | **done**, merged into `integ/reveal-downloaded-file` (`72bf5fa`); holds no file any more (rule 1: `main.rs` is released) | 1.1 | `main.rs` |
-| 4.1 | blocked-by 2.1, 2.2; **after PIN 2.1 has merged into `integ/pins-and-importance-view`** (PIN 2.1 owns every file with a `Message` literal, `tests.rs` included) and after PIN 4.4 (same `tests.rs`); RL-app's 6.7 is on `main` | 1.1 (done), 2.1, 2.2 | `tests.rs` |
+| 4.1 | blocked-by PIN 2.1: wait for it to merge into `integ/pins-and-importance-view` (PIN 2.1 owns every file with a `Message` literal, `tests.rs` included) and then PIN 4.4 (same `tests.rs`); 1.1, 2.1, 2.2 are done; RL-app's 6.7 is on `main` | PIN 2.1, PIN 4.4 | `tests.rs` |
 | 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
 | 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
 | 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
 
-Unit **REV** shares files with: PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tests.rs` 4.4) and CM-G (`tests.rs`; not started, locks nothing, rule 6). `timeline.rs`: REV 2.2 started first, so PIN 4.2 queues behind it. RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`. 2.1 (`viewer.rs`) may be written ahead on a branch but, as part of the unit, merges only with it.
+Unit **REV** shares files with: PIN-app (`tests.rs` 4.4; `store.rs` 4.1 and `timeline.rs` 4.2 are free for PIN now, REV released both) and CM-G (`tests.rs`; not started, locks nothing, rule 6). RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`.
 
 ## Ready now
 
-- Startable without the user, no unmet dependency and no file overlap (rule 1): **PIN 2.1** (every file with a `Message` literal, see its row). **REV 2.2** is already in flight and holds `timeline.rs`; PIN 4.2 is blocked-by it. Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency and no file overlap (rule 1): **PIN 2.1** (every file with a `Message` literal, see its row); it unlocks PIN 2.2, 4.2 and REV 4.1's `tests.rs`. REV 4.1 is the only REV task left before 5.1.
 - RL 3.1 and 8.2 stay blocked on the VM network; RL 8.3 (archive) waits for 8.2.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
