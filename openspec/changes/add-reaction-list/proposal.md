@@ -28,7 +28,7 @@ Reactions are visible as counts (`add-message-reactions`), but the user cannot s
 - `crates/chat-core`: `model.rs`, `backend.rs`, `client.rs` (engine and fake backend).
 - `crates/desktop`: `yandex_backend.rs`, `store.rs`, a new list view module, and whatever open question 1 selects (`composer.rs` for the menu entry, `timeline.rs` for a chip gesture).
 - Specs: new `reaction-list`; no change to `message-sending` (a read is not a write) and none to `offline-cache` (nothing is cached; see decision 3).
-- Risk: the request shape is documented, not yet observed: the `Mode` semantics disagree between the bundle (`ALL = 2`) and the notes (2 answers reactions only), the cursor bound and the largest `Limit` are unknown, and no multi-reactor message has been read. All reads are read-only; the live verification (task 3.1) gates the tasks that depend on those facts.
+- Risk: the request shape is documented, not yet observed: the cursor bound, the order, the largest `Limit`, and whether a short page is always the end are unknown, and no multi-reactor message has been read (the client sends only `Mode: 0`, so the sources' disagreement on `Mode` 2 does not matter unless the server refuses 0). All reads are read-only; the live verification (task 3.1) gates the tasks that depend on those facts.
 - Overlap: `crates/desktop/src/desktop/composer.rs` and `store.rs` are also edited by the pins slice if it lands first; the one that lands second adapts (`DEPENDENCIES.md` rule 1).
 
 ## Non-goals
@@ -54,7 +54,7 @@ Taken from the evidence without asking, each reversible in `design.md`:
 3. **Never cached.** The list is fetched on demand and held in memory while shown, like the member list (`add-chat-members-and-creation` decision 8): who reacted changes on the server, and a stale list shown as current is misleading. Offline therefore says so (open question 4 only asks whether to show a labelled partial list instead).
 4. **Names.** Inline `UserInfo` first, then the adapter's existing users cache (`get_users_data`), then "Неизвестный", the placeholder the timeline already uses; never a blank row and never a raw guid (D3).
 5. **Reactions only.** The request sends `Mode: 0`; reads are not asked for (non-goal).
-6. **Honest counts.** The server sends no total, so a list that is not complete says how many of how many it shows, using the message's known counts (spec "Complete or labelled").
+6. **Honest counts, counts do not page.** The server sends no total, so a list that is not complete says how many of how many it shows, using the message's known counts (spec "Complete or labelled"). Whether more pages exist is decided from the page itself (a short page, or a cursor that did not move), never from the counts, which can lag in either direction (design D5).
 
 ## Open questions
 

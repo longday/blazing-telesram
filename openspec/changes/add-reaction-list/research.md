@@ -19,7 +19,7 @@ Date 2026-11-26. Read-only. Static evidence only (public web bundle, protocol no
 |------|----------|-------|
 | Transport | A | socket method `list_reactions` (not the HTTP registry); like `history`, so `Route::Socket` and the frame's own `RequestId` |
 | Request body | B, notes 14.3 | `{ChatId, Timestamp, Limit, MaxTimestamp?, Mode?, InviteHash?}`; `Timestamp` is the message's (it is its only id, notes 17.11) |
-| `Mode` | C, notes 17.12 | 0 reactions only; 1 reads only (`UserReads` + `ReadsCount`); 2 `ALL` in the bundle, but notes 17.12 say live: default, 0 and 2 all answer `UserReactions` only, 3 is an error. The client sends **`0`** (reads are out of scope) **[probe: explicit 0 vs omitted, and 2]** |
+| `Mode` | C, notes 17.12 | 0 reactions only; 1 reads only (`UserReads` + `ReadsCount`); 2 `ALL` in the bundle, but notes 17.12 say live: default, 0 and 2 all answer `UserReactions` only, 3 is an error. The client sends **`0`** and nothing else (reads are out of scope; the 2-vs-notes disagreement is therefore not tested). If the server refuses an explicit `0`, the request omits `Mode` (notes: default answers reactions) **[probe: `0` accepted]** |
 | `InviteHash` | B | for chats joined by invite link; our `history` sends none either, so none here |
 | Paging | E, B | `Limit` + `MaxTimestamp`; no `Offset`, no `Type` filter: the list is always every type, grouped by the client |
 | Reply | D, notes 17.12 | `UserReactions: [{Type: int, Timestamp: int(microseconds, when the user reacted), UserInfo{Guid, DisplayName, AvatarId, ...}}]`; the key is absent when empty (B defaults it) |
@@ -32,7 +32,7 @@ Date 2026-11-26. Read-only. Static evidence only (public web bundle, protocol no
 ### Paging, from the web client (E)
 
 - First page limit: `2 * maxItems`: 16 for the list under the reaction picker (`maxItems 8`), 30 for the item in the message menu (`maxItems 15`). Our probe and the server cap are open **[probe: largest accepted `Limit`]** (the notes show 50 in the shape).
-- The list starts from the message's `RecentUserReactions` (no request) and the first fetch takes the cursor from its last entry: `MaxTimestamp = Timestamp of the last entry loaded`, `Mode = ONLY_REACTIONS`. So the order is **newest reaction first** and `MaxTimestamp` bounds the older page **[probe: order, and whether the bound is inclusive: the web client de-duplicates by guid, which suggests it can repeat the boundary entry]**.
+- The list starts from the message's `RecentUserReactions` (no request) and the first fetch takes the cursor from its last entry: `MaxTimestamp = Timestamp of the last entry loaded`, `Mode = ONLY_REACTIONS`. So the order is **newest reaction first** and `MaxTimestamp` bounds the older page **[probe: order, and whether the bound is inclusive: the web client de-duplicates by guid, which suggests it can repeat the boundary entry]**. The web client decides "more" from counts; this client does not (design D5: page exhaustion plus strict cursor progress), because a lagging count would either hide reactors or, with a repeating boundary, loop.
 - The query key includes `ReactionsVersion` and the reads version, so a version change in the store starts a new query (the old ones are removed): the web client's answer to staleness is "refetch under the new version", from the first page.
 - Retry: unlimited retries with the connection, `cancelInOffline: false`, i.e. the web client waits for the network instead of failing.
 
@@ -57,11 +57,11 @@ Chips are not the entry point: a click on a chip toggles the own reaction in thi
 
 ## Verification plan (task 3.1, read-only, inside `bt-vm`)
 
-New command `bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>] [--mode <n>]` (reads only; no write guard needed, nothing is sent but `list_reactions`). Targets: the disposable self-chat message left by `add-message-reactions` task 7.2 (✅ x1, one reactor: the account) for the shape, and any message with two or more reactors found by scanning `bt-probe history` of the user's chats (counts only) for paging. Questions:
+New command `bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]` (reads only; no write guard needed, nothing is sent but `list_reactions`, always with `Mode: 0`). Targets: the disposable self-chat message left by `add-message-reactions` task 7.2 (✅ x1, one reactor: the account) for the shape, and any message with two or more reactors found by scanning `bt-probe history` of the user's chats (counts only) for paging. Questions:
 
-1. P1 Shape: exact keys, `UserInfo` fields present, key absence when empty; `Mode` omitted vs `0` vs `2` give the same.
-2. P2 Order and cursor: newest first; whether `MaxTimestamp` is inclusive; what an out-of-range cursor returns (empty reply, not an error).
-3. P3 `Limit`: the largest value honoured; what happens at `0`, `1`, a very large value.
+1. P1 Shape: exact keys, `UserInfo` fields present, key absence when empty; an explicit `Mode: 0` is accepted.
+2. P2 Order and cursor: newest first; whether `MaxTimestamp` is inclusive (a repeated boundary entry); what an out-of-range cursor returns (empty reply, not an error); that the oldest `Timestamp` of a page strictly decreases from page to page unless the page is a repeat.
+3. P3 `Limit`: the largest value honoured; what happens at `0`, `1`, a very large value; whether a page shorter than the `Limit` asked is always the end of the list or can be a server cap (decides design D5's `raw < limit` rule and the final `REACTORS_PAGE`).
 4. P4 Consistency: sum of entries over all pages equals `sum(Reactions[].Count)` of the message row; the own entry appears; no repeated guid.
 5. P5 Errors: a deleted message, a timestamp that does not exist, a message in a chat the account cannot read (a channel the account only follows): the status and `Details` strings the adapter must map.
 

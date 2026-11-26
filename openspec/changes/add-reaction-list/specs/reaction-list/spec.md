@@ -43,6 +43,16 @@ The list SHALL NOT present a partial list as complete. It SHALL either show ever
 - **WHEN** the list is shown
 - **THEN** it says 30 of 45 are shown
 
+#### Scenario: Known count lower than the list
+- **GIVEN** the message's known reaction count is lower than the number of people the server has
+- **WHEN** the user reaches the end of the loaded entries
+- **THEN** the remaining people are still offered, because the end of the list is decided from the server's pages, not from the count
+
+#### Scenario: Known count higher than the list
+- **GIVEN** the message's known reaction count is higher than the number of people the server returns
+- **WHEN** the server has no more entries
+- **THEN** no further page is requested or offered, and the list says how many of how many it shows
+
 #### Scenario: Unidentifiable entry
 - **WHEN** the server reports a reaction without any identity for the person
 - **THEN** the entry is counted toward the total and the list says how many entries it could not show
@@ -93,3 +103,16 @@ While the list loads, the user SHALL see that it is loading. When the server ref
 - **GIVEN** the list is loading
 - **WHEN** the message is deleted
 - **THEN** the list shows that the message is gone and no entries
+
+### Requirement: Answers match the list shown
+The list SHALL show only answers to the request that belongs to the list currently open. An answer to a list the user closed, to an earlier opening of the same message, or to a page requested before a refresh SHALL be discarded, whether it carries entries or a failure.
+
+#### Scenario: Reopened message
+- **GIVEN** the user opened the list of a message, closed it and opened it again before the first answer arrived
+- **WHEN** the first answer arrives
+- **THEN** it changes nothing, and the list shows the answer to the second opening
+
+#### Scenario: Refresh with an older page in flight
+- **GIVEN** the list is refreshed while a request for an older page is still out
+- **WHEN** the older page or its failure arrives
+- **THEN** it is discarded and the refreshed first page is not mixed with it

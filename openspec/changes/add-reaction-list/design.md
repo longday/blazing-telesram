@@ -33,7 +33,9 @@ pub const REACTORS_PAGE: u32 = 30;     // provisional: the web client's 2 x 15; 
 
 pub struct WireReactorEntry { pub guid: String, pub display_name: Option<String>, pub avatar_id: Option<String>,
                               pub code: i64, pub timestamp: Option<Micros> }
-pub struct WireReactors { pub entries: Vec<WireReactorEntry>, pub skipped: usize }
+pub struct WireReactors { pub entries: Vec<WireReactorEntry>, pub skipped: usize,
+                          pub raw: usize,                    // entries on the wire page, before any is dropped
+                          pub oldest: Option<Micros> }       // smallest `Timestamp` over ALL raw entries
 pub fn parse_reactors(body: &Json) -> Result<WireReactors, ProtoError>
 Client::reactors(&self, chat: &str, timestamp: i64, before: Option<i64>, limit: u32) -> Result<WireReactors, ProtoError>
 ```
@@ -42,18 +44,20 @@ Client::reactors(&self, chat: &str, timestamp: i64, before: Option<i64>, limit: 
 
 Alternative rejected: add the sender to `WireReactor`. It would change every `RecentUserReactions` consumer (the push path needs only the guid) for no gain.
 
+`raw` and `oldest` are taken from the page as the server sent it, before an entry is dropped for lacking `Type` or `Guid`: the cursor and the end-of-list test must not depend on which entries the client could show (a page whose oldest entries are malformed would otherwise move the cursor back to a newer entry and repeat them, or end early). `raw == entries.len() + skipped`.
+
 ### D2. Domain and backend seam (`chat-core`), P2, P5
 
 ```rust
 pub struct Reactor { pub user: UserId, pub name: Option<String>, pub avatar: Option<MediaRef>,
                      pub code: ReactionCode, pub at: Option<MessageTs>, pub me: bool }
-pub struct ReactorsPage { pub chat: ChatId, pub timestamp: MessageTs, pub reactors: Vec<Reactor>,
-                          pub skipped: usize, pub next: Option<MessageTs> }
+pub struct ReactorsPage { pub chat: ChatId, pub timestamp: MessageTs, pub request: u64, pub reactors: Vec<Reactor>,
+                          pub skipped: usize, pub raw: usize, pub oldest: Option<MessageTs> }
 Backend::reactors(&self, chat: &ChatId, timestamp: MessageTs, before: Option<MessageTs>, limit: usize)
     -> impl Future<Output = Result<ReactorsPage, BackendError>> + Send
 ```
 
-One page per call; no loop in the backend. `next` is the oldest `at` of the page when it has any (the cursor for the next call), otherwise `None`. Whether another page exists is not the backend's call: the server sends no total, so the store decides from the message's known counts and the cursor (D5). `skipped` is the wire's `skipped` (entries without identity); the adapter drops nothing else.
+One page per call; no loop in the backend. `raw` and `oldest` pass through from the wire (D1); the backend does not decide whether another page exists. The store does, from the page itself (D5), never from the message's known counts. `skipped` is the wire's `skipped` (entries without identity); the adapter drops nothing else. `request` is the caller's token, copied into the page by the engine (D4), not by the backend.
 
 ### D3. Names (adapter), P4
 
@@ -61,12 +65,13 @@ One page per call; no loop in the backend. `next` is the oldest `at` of the page
 
 ### D4. Engine (`chat-core::client`), P3
 
-`Command::LoadReactors { chat, timestamp, before: Option<MessageTs> }` -> `ClientEvent::Reactors(ReactorsPage)` | `ClientEvent::ReactorsFailed { chat, timestamp, reason, offline }`, mirroring `LoadMembers`/`MembersFailed`:
+`Command::LoadReactors { chat, timestamp, before: Option<MessageTs>, request: u64 }` -> `ClientEvent::Reactors(ReactorsPage)` | `ClientEvent::ReactorsFailed { chat, timestamp, request, reason, offline }`, mirroring `LoadMembers`/`MembersFailed`. `request` is a load-generation token chosen by the store; the engine echoes it unchanged on every outcome, including the refusals of steps 1 and 2, and never interprets it:
 
 1. The cached message must exist, be `Delivery::Sent` and not `Deleted`; otherwise `ReactorsFailed` with a constant reason ("Список недоступен"); nothing is sent.
 2. Not online: `ReactorsFailed { offline: true }` with `OFFLINE_REASON`, no request.
 3. The backend call runs as a read (not an action: nothing is queued or replayed, there is nothing to undo); a failure maps as for members (`Network` is offline, `Rejected` carries its reason, `SessionExpired` expires the session as elsewhere).
 4. Nothing is written to the cache and nothing changes the message's `reactions`.
+5. Matching an answer to a list is the store's job (D5): `(chat, timestamp)` alone cannot tell an answer to the list the user closed from one to the list they reopened for the same message, or an old page from the page of a refresh.
 
 ### D5. Store (`desktop::store`), P3
 
@@ -74,20 +79,27 @@ One open list at a time, in memory:
 
 ```rust
 pub struct ReactorsView { chat: ChatId, timestamp: MessageTs, base_version: Option<i64>,
-                          state: ReactorsState }                       // dropped on close
-pub enum ReactorsState { Loading, Ready { rows: Vec<Reactor>, skipped: usize, next: Option<MessageTs>, more_in_flight: bool },
+                          generation: u64,        // token of the one request outstanding for this list
+                          state: ReactorsState }  // dropped on close
+pub enum ReactorsState { Loading,
+                         Ready { rows: Vec<Reactor>, skipped: usize, oldest: Option<MessageTs>,
+                                 exhausted: bool, loading_more: bool },
                          Failed { reason: String, offline: bool } }
 ```
 
-Rows are appended in server order and de-duplicated by guid (the web client does the same; a cursor bound that repeats the boundary entry is harmless **[probe P2]**). A reply or failure for a `(chat, timestamp)` that is not the open list is ignored (a late answer after close or reopen). "More" is `rows.len() + skipped < total && next.is_some()` where `total` is the sum of the message's known counts; it is recomputed from the store's current message, so a count that changed meanwhile shows in the header. `base_version` is the message's reaction version when the list was opened, the hook for open question 3.
+The store keeps a counter `next_request` that only grows (never reset by close or reopen). Every `LoadReactors` it sends (open, reopen, retry, load more, refresh) takes a fresh value, sets `generation` to it and thereby supersedes any request still out. A `Reactors` or `ReactorsFailed` is applied only if its `(chat, timestamp)` is the open list **and** its `request` equals `generation`; anything else is dropped (an answer after close, after reopening the same message, or to the page before a refresh). Rows are appended in server order and de-duplicated by guid (the web client does the same).
+
+**End of list** is decided from the page, with strict cursor progress; known counts never decide it. After a page requested with cursor `before` and limit `L`: the list is `exhausted` when `oldest` is `None`, or `raw < L`, or `before` is `Some(b)` and `oldest >= b` (the cursor did not move, so the page is a repeat; continuing would loop). Otherwise the next page is requested with `before = oldest`. An inclusive bound that repeats the boundary entry is harmless: de-duplication drops it and the page still progresses unless it contains nothing older. `raw < L` means "end" only if the probe confirms that a short page is never a server cap (P3 in `research.md`); until then `REACTORS_PAGE` is kept at or below the largest honoured `Limit`, so a short page is an end. The message's known counts only label progress: `total` is the sum of the counts, recomputed from the store's current message; a count that lags low or high changes the header "N из M", never whether more pages are requested or offered. `base_version` is the message's reaction version when the list was opened, the hook for open question 3.
 
 ### D6. View (`desktop`), P4
 
 A pure `body(state, connection, total) -> Body {Loading, Offline, Failed(reason), Ready { rows, shown, total, skipped, more }}` like `info_panel::body`, tested without a window. A `Ready` list while the connection is not online renders `Offline` (as the member panel does). The row is avatar, name (placeholder "Неизвестный", own entry suffixed "Вы"), the emoji of the code through `reactions::emoji` or `NEUTRAL_GLYPH`, and the time through the existing `format` helpers. Debug selectors `reactor-{guid}`. The header "N из M" appears only when `shown + skipped < total`, and a non-zero `skipped` adds "K без данных" (spec "Complete or labelled").
 
+`more` in `Ready` is `!exhausted` of the store state (D5), never derived from `total`; `total` only feeds the header.
+
 ### D7. Probe and verification
 
-`bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>] [--mode <n>]` prints the parsed reply like `members` does (`{:#?}`, names and guids on stdout, header on stderr). It is a read: it is not covered by `BT_WRITE_ONLY_CHAT` and the write guard tests stay as they are. `--mode` exists only for P1 (the probe may send 0, 2 or omit it) and is not an app capability. Unit and fixture tests carry everything except server behaviour; server behaviour is task 3.1 (research "Verification plan"). The fixture `research-reactors-page.json` is synthetic until 3.1 yields a sanitized live shape.
+`bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]` prints the parsed reply like `members` does (`{:#?}`, names and guids on stdout, header on stderr). It is a read: it is not covered by `BT_WRITE_ONLY_CHAT` and the write guard tests stay as they are. It sends the one form the app sends (`Mode: 0`); there is no `--mode`, because the request contract (D1) has no other mode and the app never sends one. If the server refuses `Mode: 0`, 3.1 reopens D1 (omit `Mode`). Unit and fixture tests carry everything except server behaviour; server behaviour is task 3.1 (research "Verification plan"). The fixture `research-reactors-page.json` is synthetic until 3.1 yields a sanitized live shape.
 
 ### D8. Ordering with other changes
 
@@ -106,8 +118,8 @@ Each line names what the answer fixes. None of these is in a task until answered
 
 ## Risks / Trade-offs
 
-- **Unobserved request.** The shape is documented, not yet seen: `Mode` 2 disagrees between sources, the cursor bound, order and `Limit` cap are inferred from the web client's code. Mitigation: task 3.1 before the tasks that depend on those facts; `REACTORS_PAGE` and the dedupe stay adjustable.
-- **Count mismatch.** The header total comes from the message's known counts, which can lag the server. A list may show more entries than the total, or fewer; the header uses `max(shown, total)` and never claims completeness it cannot see.
+- **Unobserved request.** The shape is documented, not yet seen: the cursor bound, order, the `Limit` cap and whether a short page is always the end are inferred from the web client's code (`Mode` 2 disagreement between sources is not tested: the client never sends it). Mitigation: task 3.1 before the tasks that depend on those facts; `REACTORS_PAGE` and the dedupe stay adjustable.
+- **Count mismatch.** The header total comes from the message's known counts, which can lag the server. A list may show more entries than the total, or fewer; counts label progress only and never prove completeness or stop paging (D5): a low count cannot hide reactors, a high count cannot loop. If the list ends (D5) while shown + skipped is below the total, the header keeps "N из M" and offers no more.
 - **Names via two sources.** A name can differ between the reply and the users cache; the reply wins (it is the fresher), the cache is only a fallback.
 - **Privacy.** Reactor names and guids are on stdout of a probe run and in VM logs; they stay out of artifacts, fixtures are sanitized like the existing ones.
 - **Channel/unreadable chats.** The server may refuse the list for chats the account follows only; the refusal is a `Failed` state with the reason, not a special case.
