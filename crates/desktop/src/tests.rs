@@ -7445,6 +7445,15 @@ fn pin_in_store(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Optio
     })
 }
 
+/// What the bar of `chat_id` shows under its label, as the bar itself builds it from the store's pin.
+fn pin_line(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Option<String> {
+    h.store.read_with(cx, |s, _| {
+        let chat = s.chat(&ChatId(chat_id.into()))?;
+        let pinned = chat.pinned_message.as_ref()?;
+        crate::desktop::pinned_message_text(chat.kind, pinned.preview.as_ref())
+    })
+}
+
 fn summary_in_store(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> ChatSummary {
     h.store.read_with(cx, |s, _| {
         s.chat(&ChatId(chat_id.into()))
@@ -7555,6 +7564,7 @@ fn a_pin_change_shows_replaces_and_removes_the_bar_without_scrolling(cx: &mut Te
         )],
     );
     assert!(shown(cx, "pinned-message") && shown(cx, "pinned-message-text"));
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 50".into()));
     let full = pin_bar_height(cx);
     assert!(full > 0.);
     assert!(
@@ -7584,6 +7594,7 @@ fn a_pin_change_shows_replaces_and_removes_the_bar_without_scrolling(cx: &mut Te
         )],
     );
     assert_eq!(pin_in_store(&h, cx, "g").map(|p| p.timestamp), Some(ts(60)));
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 60".into()));
     assert_eq!(pin_bar_height(cx), full);
     assert_eq!(renders.get(), 2);
 
@@ -7599,6 +7610,7 @@ fn a_pin_change_shows_replaces_and_removes_the_bar_without_scrolling(cx: &mut Te
         )],
     );
     assert!(pin_bar_height(cx) < full, "the label alone is one line");
+    assert_eq!(pin_line(&h, cx, "g"), None);
     assert_eq!(pin_offset(&h, cx), offset);
     assert_eq!(pin_anchor(&h, cx), anchor);
 
@@ -7738,12 +7750,7 @@ fn the_bar_shows_the_placeholder_of_a_photo_and_of_a_deleted_message(cx: &mut Te
         );
         assert!(shown(cx, "pinned-message"), "{placeholder}");
         assert!(shown(cx, "pinned-message-text"), "{placeholder}");
-        assert_eq!(
-            pin_in_store(&h, cx, "g")
-                .and_then(|p| p.preview)
-                .map(|p| p.text),
-            Some(placeholder.to_string())
-        );
+        assert_eq!(pin_line(&h, cx, "g"), Some(format!("ALICE: {placeholder}")));
     }
 }
 
@@ -7818,6 +7825,7 @@ fn a_launch_offline_shows_the_cached_bar_and_marker_with_the_offline_indicator(
         shown(cx, "pinned-message") && shown(cx, "pinned-message-text"),
         "the bar comes from the cached summary, before any history"
     );
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 1".into()));
     h.feed(
         cx,
         [history(
@@ -7830,6 +7838,11 @@ fn a_launch_offline_shows_the_cached_bar_and_marker_with_the_offline_indicator(
         )],
     );
     assert!(shown(cx, msg!(1, "important")), "the cached flag is shown");
+    assert_eq!(
+        pin_line(&h, cx, "g"),
+        Some("ALICE: сообщение 1".into()),
+        "the cached text is kept"
+    );
     assert!(!shown(cx, msg!(2, "important")));
     assert!(shown(cx, "connection-indicator"), "still offline");
     assert_eq!(h.commands(), [Command::OpenChat(chat_g())]);
@@ -8060,4 +8073,62 @@ fn a_cache_from_before_pins_and_importance_loads_without_bar_marker_or_error(
     assert!(!shown(cx, msg!(1, "important")));
     assert_eq!(toast(&h, cx), None);
     assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn the_bar_line_names_the_author_outside_private_chats_and_is_one_line(_cx: &mut TestAppContext) {
+    use crate::desktop::pinned_message_text as line;
+    let by = |author: Option<&str>, text: &str| MessagePreview {
+        author: author.map(str::to_string),
+        text: text.into(),
+        timestamp: ts(1),
+    };
+    let said = by(Some("ALICE"), "привет");
+    assert_eq!(
+        line(ChatKind::Group, Some(&said)),
+        Some("ALICE: привет".into())
+    );
+    assert_eq!(
+        line(ChatKind::Channel, Some(&said)),
+        Some("ALICE: привет".into())
+    );
+    assert_eq!(
+        line(ChatKind::Private, Some(&said)),
+        Some("привет".into()),
+        "no author in a private chat"
+    );
+    assert_eq!(
+        line(ChatKind::Group, Some(&by(None, "привет"))),
+        Some("привет".into()),
+        "an unknown author is not named"
+    );
+    assert_eq!(
+        line(
+            ChatKind::Group,
+            Some(&by(Some("ALICE"), "раз\n\n  два   три\n"))
+        ),
+        Some("ALICE: раз два три".into())
+    );
+
+    // The placeholders of a message without text are the ones of the chat row.
+    let photo = MessageBody::Image {
+        media: media("m1", MediaKind::Thumbnail),
+        width: 800,
+        height: 600,
+        caption: None,
+        name: None,
+    };
+    let placeholder = |body: &MessageBody| by(Some("ALICE"), &body.preview_text());
+    assert_eq!(
+        line(ChatKind::Group, Some(&placeholder(&photo))),
+        Some("ALICE: Фото".into())
+    );
+    assert_eq!(
+        line(ChatKind::Private, Some(&placeholder(&MessageBody::Deleted))),
+        Some("Сообщение удалено".into())
+    );
+
+    // No text yet: nothing under the label.
+    assert_eq!(line(ChatKind::Group, None), None);
+    assert_eq!(line(ChatKind::Private, None), None);
 }

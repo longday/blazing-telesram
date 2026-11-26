@@ -19,7 +19,8 @@ use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs, UserId,
+    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessagePreview,
+    MessageTs, UserId,
 };
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
@@ -1349,12 +1350,7 @@ impl Desktop {
         // Author only outside private chats; no preview yet leaves the label alone.
         let pinned_bar = summary.and_then(|c| {
             let pinned = c.pinned_message.as_ref()?;
-            let line = pinned.preview.as_ref().map(|p| match &p.author {
-                Some(author) if c.kind != ChatKind::Private => {
-                    format!("{author}: {}", one_line(&p.text))
-                }
-                _ => one_line(&p.text),
-            });
+            let line = pinned_message_text(c.kind, pinned.preview.as_ref());
             Some(
                 div()
                     .id("pinned-message")
@@ -1542,6 +1538,18 @@ fn connection_text(state: ConnectionState) -> Option<&'static str> {
         ConnectionState::Connecting => Some("Подключение…"),
         ConnectionState::Offline => Some("Нет сети · переподключение…"),
     }
+}
+
+/// The line of the pinned-message bar under its label: the author only outside private chats, then the
+/// text on one line. `None` while the text of the pinned message is not known: the label stays alone.
+pub(crate) fn pinned_message_text(
+    kind: ChatKind,
+    preview: Option<&MessagePreview>,
+) -> Option<String> {
+    preview.map(|p| match &p.author {
+        Some(author) if kind != ChatKind::Private => format!("{author}: {}", one_line(&p.text)),
+        _ => one_line(&p.text),
+    })
 }
 
 /// What a chat row shows under the title.
