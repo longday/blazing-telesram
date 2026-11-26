@@ -56,7 +56,7 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 |----|--------|-------|---------------|
 | 0.1 | blocked: VM network; **[live]** reads only | | `research.md` |
 | 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
-| 1.2 | **done**, in `integ/pins-and-importance-view` (`b48b666`); its files (`wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs`) stay with PIN-app until that unit merges to `main` (rule 1) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
+| 1.2 | **done**, merged into `integ/pins-and-importance-view` (`b48b666`); holds no file any more (rule 1, merged into the integration branch) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
 | 2.1 | ready; start after RL-app merges | 1.1 | `model.rs`, `fixtures.rs` |
 | 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
@@ -70,7 +70,7 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 | 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
 | 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
 | 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
-| 5.2 | **done**, in `integ/pins-and-importance-view` (`537f7eb`, merged `ce2d7ab`); `bt-probe.rs` stays with PIN-app until it merges | 1.2 | `bt-probe.rs` |
+| 5.2 | **done**, merged into `integ/pins-and-importance-view` (`537f7eb`, merge `ce2d7ab`); holds no file any more (rule 1) | 1.2 | `bt-probe.rs` |
 | 6.1 | after the units | | build/test/lint matrix |
 | 6.2 | blocked: network and the user's approval of the target; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
 | 6.3 | after the units | | this file, archive |
