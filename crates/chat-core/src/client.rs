@@ -2675,10 +2675,25 @@ mod tests {
         create_gate: Option<Arc<tokio::sync::Notify>>,
         /// Failures of the next `chat_list` calls, one per call, then the list again.
         chat_list_errors: VecDeque<BackendError>,
+        /// When set, `bootstrap` and `history` do a real TCP round trip with this echo server
+        /// first, which panics ("IO is disabled") on a runtime built without the I/O driver.
+        socket_addr: Option<std::net::SocketAddr>,
     }
 
     #[derive(Clone, Default)]
     struct Fake(Arc<Mutex<FakeState>>);
+
+    /// Writes four bytes to the echo server at `addr` and expects them back.
+    async fn roundtrip(addr: std::net::SocketAddr) -> Result<(), BackendError> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let io = |e: io::Error| BackendError::Network(e.to_string());
+        let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(io)?;
+        stream.write_all(b"ping").await.map_err(io)?;
+        let mut buf = [0u8; 4];
+        stream.read_exact(&mut buf).await.map_err(io)?;
+        assert_eq!(&buf, b"ping");
+        Ok(())
+    }
 
     impl Fake {
         fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
@@ -2707,6 +2722,10 @@ mod tests {
 
     impl Backend for Fake {
         async fn bootstrap(&self) -> Result<UserId, BackendError> {
+            let addr = self.state().socket_addr;
+            if let Some(addr) = addr {
+                roundtrip(addr).await?;
+            }
             let mut s = self.state();
             s.bootstrap_calls += 1;
             match s.bootstrap_errors.pop_front() {
@@ -2727,6 +2746,10 @@ mod tests {
             before: Option<MessageTs>,
             limit: usize,
         ) -> Result<HistoryChunk, BackendError> {
+            let addr = self.state().socket_addr;
+            if let Some(addr) = addr {
+                roundtrip(addr).await?;
+            }
             let (chunk, gate) = {
                 let mut s = self.state();
                 s.history_calls.push((chat.clone(), before, limit));
@@ -7881,6 +7904,47 @@ mod tests {
         h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
         h.client.send(create_with("u9"));
         h.wait_for("the second request", |s| s.create_calls.len() == 2);
+    }
+
+    #[test]
+    fn runtime_supports_socket_io_backends() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut buf = [0u8; 4];
+                if stream.read_exact(&mut buf).is_ok() {
+                    let _ = stream.write_all(&buf);
+                }
+            }
+        });
+
+        let h = start(
+            |s, _| {
+                s.socket_addr = Some(addr);
+                s.chats = vec![chat("a", Some(1), None)];
+                s.history.insert(id("a"), vec![msg("a", 1, "x")]);
+            },
+            50,
+        );
+        h.client.send(Command::OpenChat(id("a")));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (mut online, mut history) = (false, false);
+        while !(online && history) {
+            assert!(
+                Instant::now() < deadline,
+                "stuck: online={online} history={history}"
+            );
+            match h.events.try_recv() {
+                Ok(ClientEvent::Connection(ConnectionState::Online)) => online = true,
+                Ok(ClientEvent::History(chunk)) if chunk.messages.len() == 1 => history = true,
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_millis(2)),
+            }
+        }
     }
 
     mod reaction_model;
