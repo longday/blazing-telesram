@@ -6,4 +6,4 @@
 
 ## 2. Cleanup
 
-- [ ] 2.1 After 1.1 is merged into `main`, delete the local branches `omp/task/CoreSync`, `omp/task/DesktopUi`, `omp/task/FrameCodec`, `omp/task/ProtoTrace`, `omp/task/SignInWindow` (`git branch -D`, local only; they are not merged). Verify: `git branch --list 'omp/task/*'` prints nothing.
+- [x] 2.1 After 1.1 is merged into `main`, delete the local branches `omp/task/CoreSync`, `omp/task/DesktopUi`, `omp/task/FrameCodec`, `omp/task/ProtoTrace`, `omp/task/SignInWindow` (`git branch -D`, local only; they are not merged). Verify: `git branch --list 'omp/task/*'` prints nothing.
