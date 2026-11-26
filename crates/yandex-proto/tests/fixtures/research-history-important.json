@@ -1,0 +1,17 @@
+{
+  "_synthetic": "SYNTHETIC fixture built from the documented shape (Plain.IsImportant, notes 11.1, web bundle deserializePlainMessage); not a live capture. Replace with a sanitised capture once task 0.1 observes a real row. Placeholders only.",
+  "Chats": [
+    {
+      "ChatId": "0/0/44444444-4444-4444-8444-444444444444",
+      "Messages": [
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": true, "Text": { "MessageText": "important text" } } }, "ServerMessageInfo": { "Timestamp": 1784000000002001, "SeqNo": 1, "Version": 2, "From": { "Guid": "g-anna", "DisplayName": "Anna" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": false, "Text": { "MessageText": "flag false" } } }, "ServerMessageInfo": { "Timestamp": 1784000000002002, "SeqNo": 2, "Version": 1, "From": { "Guid": "g-anna", "DisplayName": "Anna" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "Text": { "MessageText": "flag missing" } } }, "ServerMessageInfo": { "Timestamp": 1784000000002003, "SeqNo": 3, "Version": 1, "From": { "Guid": "g-boris", "DisplayName": "Boris" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": "true", "Text": { "MessageText": "flag not a bool" } } }, "ServerMessageInfo": { "Timestamp": 1784000000002004, "SeqNo": 4, "Version": 1, "From": { "Guid": "g-boris", "DisplayName": "Boris" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": true, "Image": { "FileInfo": { "Id2": "bucket-a/99999999-9999-4999-8999-999999999999", "Name": "photo.jpg", "Size": 123456 }, "Width": 1280, "Height": 720 } } }, "ServerMessageInfo": { "Timestamp": 1784000000002005, "SeqNo": 5, "Version": 1, "From": { "Guid": "g-anna", "DisplayName": "Anna" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": true } }, "ServerMessageInfo": { "Timestamp": 1784000000002006, "SeqNo": 6, "Version": 3, "Deleted": true, "From": { "Guid": "g-anna", "DisplayName": "Anna" } } } },
+        { "ServerMessage": { "ClientMessage": { "Plain": { "ChatId": "0/0/44444444-4444-4444-8444-444444444444", "IsImportant": true, "Text": { "MessageText": "important and edited" } } }, "ServerMessageInfo": { "Timestamp": 1784000000002007, "SeqNo": 7, "Version": 2, "LastEditTimestamp": 1784000000009998, "From": { "Guid": "g-boris", "DisplayName": "Boris" } } } }
+      ]
+    }
+  ]
+}

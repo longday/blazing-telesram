@@ -21,6 +21,7 @@ fn fixtures_hold_no_credentials() {
         "push-edit",
         "push-deleted",
         "push-reaction-removed",
+        "history-important",
     ]
     .map(|n| format!("research-{n}"));
     let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"]
@@ -217,6 +218,57 @@ fn push_fixtures() {
             timestamp: 1_784_000_000_001_002
         })
     );
+}
+
+/// Synthetic page (`research-history-important.json`, built from the documented `IsImportant`
+/// shape, not a live capture): the flag is true only for a literal JSON `true` on a live message.
+#[test]
+fn synthetic_history_marks_important_rows() {
+    let chat = "0/0/44444444-4444-4444-8444-444444444444";
+    let page = parse_history(&fixture("research-history-important.json"), chat, 50).unwrap();
+    assert_eq!(page.messages.len(), 7);
+    assert_eq!(page.skipped, 0);
+    let flags: Vec<bool> = page.messages.iter().map(|m| m.important).collect();
+    assert_eq!(
+        flags,
+        [true, false, false, false, true, false, true],
+        "true, false, missing, non-bool, photo, deleted, edited"
+    );
+    assert!(matches!(&page.messages[0].body, WireBody::Text(t) if t == "important text"));
+    assert!(matches!(page.messages[4].body, WireBody::Image(_)));
+    assert_eq!(page.messages[5].body, WireBody::Deleted);
+    assert!(page.messages[6].edited);
+    assert_eq!(
+        page.messages[0].raw["ClientMessage"]["Plain"]["IsImportant"], true,
+        "raw keeps the flag"
+    );
+}
+
+/// Every existing fixture predates the importance flag: all of its messages are not important.
+#[test]
+fn existing_fixtures_decode_as_not_important() {
+    let chat = "0/0/33333333-3333-4333-8333-333333333333";
+    let page = parse_history(&fixture("research-history-page.json"), chat, 50).unwrap();
+    assert!(page.messages.iter().all(|m| !m.important));
+
+    let chats = parse_chat_list(
+        &fixture("research-chat-list.json"),
+        &DEFAULT_EXCLUDED_NAMESPACES,
+    )
+    .unwrap();
+    let last: Vec<_> = chats
+        .iter()
+        .filter_map(|c| c.last_message.as_ref())
+        .collect();
+    assert!(!last.is_empty());
+    assert!(last.iter().all(|m| !m.important));
+
+    for name in ["research-push-edit.json", "live-push-message.json"] {
+        let Ok(PushEvent::MessageUpserted(m)) = decode_push(&fixture(name)) else {
+            panic!("{name}")
+        };
+        assert!(!m.important, "{name}");
+    }
 }
 
 /// Pushes captured on a live account (2026-11-20), identifiers and text replaced.

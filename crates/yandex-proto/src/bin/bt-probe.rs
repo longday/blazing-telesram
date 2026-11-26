@@ -1054,6 +1054,7 @@ mod tests {
             from: None,
             body: WireBody::Text("mine".into()),
             edited: false,
+            important: false,
             relation,
             reactions: None,
             raw: serde_json::Value::Null,
