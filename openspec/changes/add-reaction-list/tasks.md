@@ -66,7 +66,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: serde-free; a `Reactor` literal helper in `fixtures.rs` if the test harness needs one. Compiles only inside RL-app.
   - Done when: the types match D2 exactly (other tasks code against them).
 
-- [ ] 4.2 Engine: `LoadReactors` (D4)
+- [x] 4.2 Engine: `LoadReactors` (D4)
   - Owns: `crates/chat-core/src/client.rs` (engine and its tests; the fake backend gains `reactors`).
   - Depends on: 4.1.
   - Do: D4 steps 1-5: the cached-message guard, the offline refusal without a request, the read, the failure mapping, no cache write and no change to `Message.reactions`; the `request` token is copied into every `Reactors` and `ReactorsFailed`, refusals included.
