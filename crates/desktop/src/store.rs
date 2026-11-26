@@ -1631,6 +1631,7 @@ mod tests {
             forwarded_from: None,
             delivery: bt_chat_core::model::Delivery::Sent,
             reactions: Default::default(),
+            important: false,
         }
     }
 

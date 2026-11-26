@@ -435,18 +435,6 @@ fn replay_live(
     }
 }
 
-fn preview_text(body: &MessageBody) -> Option<String> {
-    match body {
-        MessageBody::Text(text) => Some(text.clone()),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            Some(caption.clone().unwrap_or_else(|| "Фото".into()))
-        }
-        MessageBody::File { name, .. } => Some(name.clone()),
-        MessageBody::Unsupported(kind) => Some(format!("[{kind}]")),
-        MessageBody::Deleted => None,
-    }
-}
-
 fn fnv1a(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| {
         (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
@@ -1258,9 +1246,10 @@ impl<B: Backend> Engine<B> {
         let Some(mut chat) = self.db(self.cache.chat(&message.chat)).flatten() else {
             return;
         };
-        let Some(text) = preview_text(&message.body) else {
+        if matches!(message.body, MessageBody::Deleted) {
             return;
-        };
+        }
+        let text = message.body.preview_text();
         let last = chat.last_message.as_ref().map(|p| p.timestamp);
         if last.is_some_and(|last| last > message.timestamp) {
             return;
@@ -1393,6 +1382,7 @@ impl<B: Backend> Engine<B> {
             forwarded_from: None,
             delivery,
             reactions: Default::default(),
+            important: false,
         }
     }
 
@@ -6542,11 +6532,8 @@ mod tests {
             items: vec![item.clone()],
             caption: caption.map(Into::into),
         };
-        assert_eq!(preview_text(&gallery(None)).as_deref(), Some("Фото"));
-        assert_eq!(
-            preview_text(&gallery(Some("отпуск"))).as_deref(),
-            Some("отпуск")
-        );
+        assert_eq!(gallery(None).preview_text(), "Фото");
+        assert_eq!(gallery(Some("отпуск")).preview_text(), "отпуск");
     }
 
     #[test]

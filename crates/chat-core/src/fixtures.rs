@@ -34,6 +34,7 @@ pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
         forwarded_from: None,
         delivery: Delivery::Sent,
         reactions: Default::default(),
+        important: false,
     }
 }
 
