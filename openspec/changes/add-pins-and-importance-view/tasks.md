@@ -31,7 +31,7 @@ Ordering and file ownership (`DEPENDENCIES.md` rule 1: one owner per file per ta
 ## 4. UI (`desktop`) [after RL-app merges]
 
 - [ ] 4.1 `store.rs`: the open chat's `pinned` from the summary and from `ClientEvent::PinChanged`; no timeline, row or typing effect; an update with an equal value emits nothing. Depends on 2.2.
-- [ ] 4.2 `timeline.rs`, `theme.rs`: the "⚡" important marker next to the time in the bubble footer of a non-deleted message (D7, Q3), selector `msg-{ts}-important`, a theme colour; the bubble's text and size class unchanged. Depends on 2.1.
+- [x] 4.2 `timeline.rs`, `theme.rs`: the "⚡" important marker next to the time in the bubble footer of a non-deleted message (D7, Q3), selector `msg-{ts}-important`, a theme colour; the bubble's text and size class unchanged. Depends on 2.1.
 - [ ] 4.3 `desktop.rs`: the `pinned-message` bar under `chat-header`; label, author (not in private chats), one truncated line, label alone without a preview; no unpin control; a click scrolls to a loaded message and does nothing otherwise (Q2: no request, no loading, no error). Depends on 4.1.
 - [ ] 4.4 [blocked: 4.1-4.3] `tests.rs`: bar appears, replaced, disappears with a pin change and the timeline does not scroll; the chat row marker and order unchanged by a message pin; the bar for a photo and a deleted message; offline launch shows the cached bar and marker with the offline indicator; marker present for incoming and own messages, absent for deleted; marker appears and disappears on a live flag change; no menu entry or bar control for pin/unpin/importance; a legacy cache starts without errors.
 
