@@ -55,6 +55,14 @@ pub struct MessagePreview {
     pub timestamp: MessageTs,
 }
 
+/// The pinned message of a chat. `preview` is resolved lazily (only for the open chat) and is
+/// `None` until then, or when it could not be resolved; it is cached with the summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PinnedMessage {
+    pub timestamp: MessageTs,
+    pub preview: Option<MessagePreview>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatSummary {
     pub id: ChatId,
@@ -70,6 +78,15 @@ pub struct ChatSummary {
     /// cached before the field existed, which load as `None` until the next list refresh.
     #[serde(default)]
     pub partner: Option<UserId>,
+    /// The message pinned in the chat (not `pinned_rank`, which is the chat's own pin). Absent
+    /// in rows cached before the field existed, which load as `None`.
+    #[serde(default)]
+    pub pinned_message: Option<PinnedMessage>,
+    /// The latest pin action timestamp (microseconds) applied for this chat, from a chat-list
+    /// entry or a push. Kept when the pin is removed and never decreased; the engine compares
+    /// it to discard stale pin updates. Absent in rows cached before the field existed.
+    #[serde(default)]
+    pub pin_action_ts: Option<i64>,
 }
 
 /// What a member may do in a chat. The server's `role` `"admin"` is `Admin`; every other value,
@@ -379,6 +396,13 @@ pub enum ClientEvent {
     ChatUpdated(ChatSummary),
     History(HistoryChunk),
     MessageUpserted(Message),
+    /// The pinned message of `chat` changed (a pin push, or the preview of the pin was
+    /// resolved or rebuilt). Carries nothing else on purpose: the row, its preview, unread
+    /// counter and position are untouched, and so is the timeline.
+    PinChanged {
+        chat: ChatId,
+        pinned: Option<PinnedMessage>,
+    },
     /// The reactions of a loaded message changed (a server update, or the optimistic overlay
     /// of the user's own choice and its rollback). Carries no message body on purpose: it
     /// must not look like a new or edited message.
