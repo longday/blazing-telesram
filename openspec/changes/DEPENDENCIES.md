@@ -40,23 +40,13 @@ Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are firs
 
 ## add-reaction-list (RL)
 
-All open questions (Q1-Q6) were answered on 2026-11-26 and the spec and design are finished (7.1 done); 6.6 needs no work (flat list). Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1; **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (starts after RL-proto is on `main`). 3.1 and 8.2 are live reads in the VM (no write, no approval; they need the VM's outbound network, which it lacked on 2026-11-26).
+Done: 1.1, 1.2, 1.3, 2.1 (RL-proto, on `main`), 4.1, 4.2, 5.1, 6.1-6.5 (merged into `integ/reaction-list-app`, head `6a9205a`; 6.5 merged 2026-11-27, build 0 warnings, `cargo test --workspace` 389 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline), 6.6 (no work: flat list), 7.1. All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 (on `main`); **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (in progress on `integ/reaction-list-app`; merges to `main` after 6.7). 3.1 and 8.2 are live reads in the VM (no write, no approval); they are still blocked: the VM has no outbound network (the host's full-tunnel VPN breaks the VM NAT).
 
 | ID | Status | Needs | Files |
 |----|--------|-------|-------|
-| 1.1 | ready | | `request.rs` |
-| 1.2 | ready | | `wire.rs`, `tests/wire_fixtures.rs`, new fixture |
-| 1.3 | blocked-by 1.1, 1.2 | | yandex-proto `client.rs` |
-| 2.1 | blocked-by 1.3 | | `bt-probe.rs` |
-| 3.1 | blocked-by 2.1 and the VM network; **[live]** | 2.1 | `research.md`, the fixture |
-| 4.1 | ready (CM-G holds nothing, rule 6) | | `model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs` |
-| 4.2 | blocked-by 4.1 | 4.1 | chat-core `client.rs` |
-| 5.1 | blocked-by 1.3, 4.1 | 1.3, 4.1 | `yandex_backend.rs` |
-| 6.1 | blocked-by 4.1 | 4.1 | `store.rs` |
-| 6.2 | blocked-by 4.1, 6.1 | 4.1, 6.1 | `reactors.rs`, `theme.rs`, `main.rs` |
-| 6.3, 6.4, 6.5 | blocked-by 6.1, 6.2 | 6.1, 6.2 | `composer.rs`, `desktop.rs` (6.3); `store.rs`, `reactors.rs` (6.4, 6.5) |
-| 6.7 | blocked-by 6.1-6.5 | | `tests.rs` |
-| 8.1, 8.2, 8.3 | blocked-by the units; 8.2 **[live]** | | final run, `research.md`, archive |
+| 3.1 | blocked: the VM network; **[live]** | 2.1 (done) | `research.md`, the fixture |
+| 6.7 | ready (6.1-6.5 are merged into integ) | | `tests.rs` |
+| 8.1, 8.2, 8.3 | blocked-by 6.7 (and the VM network for 8.2 **[live]**) | | final run, `research.md`, archive |
 
 ## add-pins-and-importance-view (PIN)
 
@@ -87,8 +77,8 @@ Done: 1.1. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (
 
 ## Ready now
 
-- Startable without the user, no unmet dependency, disjoint files (a first wave): **RL 1.1** (`request.rs`), **RL 1.2** (`wire.rs`), **RL 4.1** (`model.rs`, `backend.rs`, `lib.rs`, `fixtures.rs`).
-- Ready by dependencies but queued behind RL on shared files (rule 1): **PIN 1.2** (after RL 1.2), **PIN 5.1** (after RL 2.1), **PIN 2.1** (after RL-app). Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`); **PIN 1.2** (RL 1.2 is on `main`), **PIN 5.2** needs PIN 1.2.
+- Queued behind RL-app on shared files (rule 1): **PIN 2.1** (after RL-app merges to `main`). Each chain then unlocks the rest of its column above.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
 ## Needs the user
