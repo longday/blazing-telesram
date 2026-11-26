@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-26. Three changes are open: **CM** `add-chat-members-and-creation`, **RL** `add-reaction-list`, **PIN** `add-pins-and-importance-view`. Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-27. Four changes are open: **CM** `add-chat-members-and-creation`, **RL** `add-reaction-list`, **PIN** `add-pins-and-importance-view`, **REV** `add-reveal-downloaded-file`. Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -75,14 +75,32 @@ Done: 1.1. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (
 | 6.2 | blocked: network and the user's approval of the target; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
 | 6.3 | after the units | | this file, archive |
 
+## add-reveal-downloaded-file (REV)
+
+Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 1.1 | ready after RL-app (6.1/6.4/6.5 hold `store.rs` on `integ/reaction-list-app` until it merges to `main`) and PIN 4.1 have merged | | `store.rs` |
+| 2.1 | ready now (`viewer.rs` is in no other change) | 1.1 contract (D3) | `viewer.rs` |
+| 2.2 | blocked-by 2.1; after PIN 4.2 has merged (same `timeline.rs`) | 1.1, 2.1 | `timeline.rs` |
+| 3.1 | ready after RL-app has merged (6.2 holds `main.rs` until then) | 1.1 contract | `main.rs` |
+| 4.1 | blocked-by 1.1, 2.1, 2.2; after RL-app (6.7) and PIN 4.4 have merged (same `tests.rs`) | 1.1, 2.1, 2.2 | `tests.rs` |
+| 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
+| 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
+| 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
+
+Unit **REV** shares files with: RL-app (`store.rs` 6.1/6.4/6.5, `main.rs` 6.2, `tests.rs` 6.7; all held until RL-app merges to `main`), PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tests.rs` 4.4) and CM-G (`tests.rs`; not started, locks nothing, rule 6). It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`. 2.1 (`viewer.rs`) may be written ahead on a branch but, as part of the unit, merges only with it.
+
 ## Ready now
 
 - Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`); **PIN 1.2** (RL 1.2 is on `main`), **PIN 5.2** needs PIN 1.2.
 - Queued behind RL-app on shared files (rule 1): **PIN 2.1** (after RL-app merges to `main`). Each chain then unlocks the rest of its column above.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
+- Free of every open task's files, startable now but only as part of the REV unit: **REV 2.1** (`viewer.rs`); the rest of REV queues behind RL and PIN (above).
 
 ## Needs the user
 
 - Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation); deferred by the user, so these three and 6.3, 6.4, 7.1 stay open.
 - PIN 0.2 and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
-- RL 3.1 and 8.2 and PIN 0.1 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.
+- RL 3.1 and 8.2, PIN 0.1 and REV 5.2 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.
