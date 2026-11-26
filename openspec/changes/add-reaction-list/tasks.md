@@ -105,7 +105,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: menu content for a sent message with reactions, without reactions, pending, failed, deleted, own and other's (the existing menu tests' style); the popover opens at the menu's anchor and closes with Escape and an outside click; a left click on a chip still toggles the own reaction and opens no list.
   - Done when: these tests exist.
 
-- [ ] 6.4 Loading more (Q2 = A; spec "Loading more")
+- [x] 6.4 Loading more (Q2 = A; spec "Loading more")
   - Owns: `crates/desktop/src/store.rs`, `crates/desktop/src/reactors.rs`.
   - Depends on: 6.1, 6.2. The cursor and short-page rules are adjustable by 3.1's findings (`REACTORS_PAGE`), not a gate for the code.
   - Do: the «Показать ещё» row (selector `reactors-more`) when not `exhausted`, `Loading` while a page is out, `Retry(reason)` (selector `reactors-retry`) after a failed page that keeps the rows; choosing it sends `LoadReactors { before: oldest }`, `kind = More`, fresh token (D5 "Load more").
