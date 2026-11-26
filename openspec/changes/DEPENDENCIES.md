@@ -50,7 +50,7 @@ Done: 1.1, 1.2, 1.3, 2.1 (RL-proto), 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (RL-app) — al
 
 ## add-pins-and-importance-view (PIN)
 
-Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer) and 5.2 (in the same integ branch, `ce2d7ab`, head). Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. RL-app is on `main`, so PIN's tasks on files shared with RL are no longer queued behind it.
+Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer), 5.2 (same integ branch, `ce2d7ab`) and 2.1 (merged `--no-ff` as `06f58ba`, 2026-11-27; implementation commit `97c9e2c`). Integ head `351de8f` carries a bridge commit: the adapter did not compile against 1.2's wire (`PushEvent::PinChanged`, `WireChat.pinned`/`pin_action_ts`), so `PinChanged` is matched together with `ChatChanged` (refetch of the row, the behaviour before 1.2) and the three test `WireChat` literals set both fields to `None`; PIN 3.2 replaces that arm with the real mapping. Integ checks in the VM: `cargo fmt --all --check` green, `cargo build --workspace --all-targets --locked --offline` 0 warnings, `cargo test --workspace --locked --offline` 402 + 242 + 199 + 31 + 4 + 18 green, clippy at the 11-warning baseline, `openspec validate add-pins-and-importance-view --strict` valid. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. RL-app is on `main`, so PIN's tasks on files shared with RL are no longer queued behind it.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
@@ -58,15 +58,15 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 | 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
 | 1.2 | **done**, merged into `integ/pins-and-importance-view` (`b48b666`); holds no file any more (rule 1, merged into the integration branch) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
-| 2.1 | ready (RL-app is on `main`); **owns every file with a `Message` literal** (a new field breaks all of them): chat-core `client.rs`, `model.rs`, `fixtures.rs`; desktop `store.rs` (test literal), `search_results.rs`, `yandex_backend.rs`, `tests.rs`. The `store.rs` literal is a test hunk; REV 1.1 already released `store.rs` (merged into `integ/reveal-downloaded-file`), `tests.rs` is held by PIN 2.1 until it merges into `integ/pins-and-importance-view` | 1.1 | the files listed in the note |
-| 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
+| 2.1 | **done**, merged into `integ/pins-and-importance-view` (`06f58ba`); holds no file any more (rule 1): chat-core `client.rs`, `model.rs`, `fixtures.rs`; desktop `store.rs`, `tests.rs`, `yandex_backend.rs` are released | 1.1 | `model.rs`, `fixtures.rs`, chat-core `client.rs`, `store.rs`, `tests.rs`, `yandex_backend.rs` |
+| 2.2 | ready (2.1 is in integ) | 2.1 (done) | `model.rs`, `backend.rs`, `cache.rs` (test) |
 | 2.3 | blocked-by 2.2 (1.2 is done in integ) | 2.2 | chat-core `client.rs` |
 | 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
-| 3.1 | blocked-by 2.1 | 1.1, 2.1 | `yandex_backend.rs` |
-| 3.2 | blocked-by 2.2, 3.1 (1.2 is done in integ) | 1.2, 2.2, 3.1 | `yandex_backend.rs` |
+| 3.1 | ready; only adapter tests remain (the implementation is in 2.1): flag mapping true/false, unchanged `preview_text` output in summary, search hits and the reply-original fallback | 1.1, 2.1 (done) | `yandex_backend.rs` (test hunks) |
+| 3.2 | blocked-by 2.2, 3.1 (same `yandex_backend.rs`; 1.2 is done in integ) | 1.2, 2.2, 3.1 | `yandex_backend.rs` (replaces the interim `PinChanged` arm) |
 | 3.3 | blocked-by 3.2 (5.2 is done in integ); closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
 | 4.1 | blocked-by 2.2 | 2.2 | `store.rs` |
-| 4.2 | blocked-by 2.1 only (REV 2.2 is merged into `integ/reveal-downloaded-file`, `timeline.rs` is released) | 2.1 | `timeline.rs`, `theme.rs` |
+| 4.2 | ready (2.1 is in integ; REV 2.2 is merged into `integ/reveal-downloaded-file`, `timeline.rs` is released) | 2.1 (done) | `timeline.rs`, `theme.rs` |
 | 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
 | 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
 | 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
@@ -85,16 +85,16 @@ Proposed 2026-11-27. Local action only: no protocol, core or server change (deci
 | 2.1 | **done**, merged into `integ/reveal-downloaded-file` (`764a891`); holds no file any more (rule 1: `viewer.rs` is released) | 1.1 (done) | `viewer.rs` |
 | 2.2 | **done**, merged into `integ/reveal-downloaded-file` (`df3ce5c`); holds no file any more (rule 1: `timeline.rs` is released) | 1.1, 2.1 (done) | `timeline.rs` |
 | 3.1 | **done**, merged into `integ/reveal-downloaded-file` (`72bf5fa`); holds no file any more (rule 1: `main.rs` is released) | 1.1 | `main.rs` |
-| 4.1 | blocked-by PIN 2.1: wait for it to merge into `integ/pins-and-importance-view` (PIN 2.1 owns every file with a `Message` literal, `tests.rs` included) and then PIN 4.4 (same `tests.rs`); 1.1, 2.1, 2.2 are done; RL-app's 6.7 is on `main` | PIN 2.1, PIN 4.4 | `tests.rs` |
+| 4.1 | ready (PIN 2.1 is merged into `integ/pins-and-importance-view`; the `Message` literal in `tests.rs` is updated there, so REV merges after PIN's integ or rebases on it). PIN 4.4 is not started and locks nothing (rule 6); REV does not wait for it, PIN 4.4 waits for the REV unit if REV 4.1 has started | PIN 2.1 (done) | `tests.rs` |
 | 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
 | 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
 | 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
 
-Unit **REV** shares files with: PIN-app (`tests.rs` 4.4; `store.rs` 4.1 and `timeline.rs` 4.2 are free for PIN now, REV released both) and CM-G (`tests.rs`; not started, locks nothing, rule 6). RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`.
+Unit **REV** shares files with: PIN-app (`tests.rs`: PIN 4.4, not started, locks nothing; `store.rs` 4.1 and `timeline.rs` 4.2 are free for PIN now, REV released both) and CM-G (`tests.rs`; not started, locks nothing, rule 6). RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`.
 
 ## Ready now
 
-- Startable without the user, no unmet dependency and no file overlap (rule 1): **PIN 2.1** (every file with a `Message` literal, see its row); it unlocks PIN 2.2, 4.2 and REV 4.1's `tests.rs`. REV 4.1 is the only REV task left before 5.1.
+- Startable without the user, no unmet dependency, pairwise disjoint files (rule 1): **PIN 2.2** (`model.rs`, `backend.rs`, `cache.rs`); **PIN 3.1** (`yandex_backend.rs`, adapter tests only); **PIN 4.2** (`timeline.rs`, `theme.rs`); **REV 4.1** (`tests.rs`; the only REV task left before 5.1). No overlap among the four. After them: PIN 2.3 and 4.1 (after 2.2), 3.2 (after 2.2 and 3.1).
 - RL 3.1 and 8.2 stay blocked on the VM network; RL 8.3 (archive) waits for 8.2.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
