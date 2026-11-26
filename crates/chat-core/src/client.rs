@@ -46,6 +46,12 @@ const STORE_FAILED_REASON: &str = "Не удалось сохранить соо
 const SEARCH_LIMIT: usize = 10;
 /// Shown when a member list is asked for a chat the cache does not know.
 const UNKNOWN_CHAT_REASON: &str = "Чат не найден";
+/// Why a reactors list was refused: the message is unknown, unconfirmed or deleted (nothing was sent).
+const REACTORS_REFUSED_REASON: &str = "Список недоступен";
+/// Entries asked of the backend per page of reactors, the first page and every later one. The
+/// store reads it too (the end-of-list rule compares a page's `raw` with it), so the page it
+/// reasons about is the page that was asked for; the backend passes it on unchanged.
+pub const REACTORS_PAGE: usize = 30;
 /// Shown when a creation was sent and its outcome is not known: the chat may exist.
 const CREATION_UNKNOWN_REASON: &str = "Результат неизвестен: чат мог быть создан";
 /// Shown when a creation was sent, its outcome is not known and the list that would show the chat could
@@ -208,6 +214,13 @@ enum Input {
     Members {
         chat: ChatId,
         result: Result<ChatMembers, BackendError>,
+    },
+    /// The answer to a `LoadReactors`; `request` is the command's token, echoed unchanged.
+    Reactors {
+        chat: ChatId,
+        timestamp: MessageTs,
+        request: u64,
+        result: Result<ReactorsPage, BackendError>,
     },
     /// The answer to a `LoadProfile`.
     Profile(Result<Profile, BackendError>),
@@ -740,6 +753,12 @@ impl<B: Backend> Engine<B> {
             } => self.handle_action(chat, action, result),
             Input::Search { id, result } => self.handle_search(id, result),
             Input::Members { chat, result } => self.handle_members(chat, result),
+            Input::Reactors {
+                chat,
+                timestamp,
+                request,
+                result,
+            } => self.handle_reactors(chat, timestamp, request, result),
             Input::Profile(result) => self.handle_profile(result),
             Input::Created {
                 user,
@@ -821,6 +840,12 @@ impl<B: Backend> Engine<B> {
             Command::Search { id, query } => self.search(id, query),
             Command::CancelSearch => self.search_latest = None,
             Command::LoadMembers(chat) => self.load_members(chat),
+            Command::LoadReactors {
+                chat,
+                timestamp,
+                before,
+                request,
+            } => self.load_reactors(chat, timestamp, before, request),
             Command::LoadProfile => self.load_profile(),
             Command::CreatePrivateChat { user } => self.create_private_chat(user),
         }
@@ -1821,6 +1846,91 @@ impl<B: Backend> Engine<B> {
         }
     }
 
+    /// Reads one page of the people who reacted to `(chat, timestamp)`. A plain read: never
+    /// queued, never cached, never deduplicated (the store tells answers apart by `request`,
+    /// which is echoed on every outcome, refusals included, and never interpreted). Only a
+    /// cached, server-confirmed, non-deleted message has a list; offline answers at once with
+    /// nothing sent. The message and its `reactions` are not touched.
+    fn load_reactors(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        before: Option<MessageTs>,
+        request: u64,
+    ) {
+        let listable = self
+            .db(self.cache.message(&chat, timestamp))
+            .flatten()
+            .is_some_and(|m| m.delivery == Delivery::Sent && m.body != MessageBody::Deleted);
+        if !listable {
+            return self.emit(ClientEvent::ReactorsFailed {
+                chat,
+                timestamp,
+                request,
+                reason: REACTORS_REFUSED_REASON.into(),
+                offline: false,
+            });
+        }
+        if !self.is_online() {
+            return self.emit(ClientEvent::ReactorsFailed {
+                chat,
+                timestamp,
+                request,
+                reason: OFFLINE_REASON.into(),
+                offline: true,
+            });
+        }
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
+        tokio::spawn(async move {
+            let result = backend
+                .reactors(&chat, timestamp, before, REACTORS_PAGE)
+                .await;
+            post(
+                &inputs,
+                Input::Reactors {
+                    chat,
+                    timestamp,
+                    request,
+                    result,
+                },
+            );
+        });
+    }
+
+    /// A network failure of a sent request is `offline` (the view offers the connection retry);
+    /// a rejection carries the server's reason.
+    fn handle_reactors(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        request: u64,
+        result: Result<ReactorsPage, BackendError>,
+    ) {
+        match result {
+            Ok(page) => {
+                tracing::debug!(
+                    reactors = page.reactors.len(),
+                    raw = page.raw,
+                    skipped = page.skipped,
+                    "reactors loaded"
+                );
+                self.emit(ClientEvent::Reactors(ReactorsPage { request, ..page }));
+            }
+            Err(BackendError::SessionExpired) => self.expire(),
+            Err(error) => {
+                tracing::warn!(kind = error_kind(&error), "reactors load failed");
+                let offline = matches!(error, BackendError::Network(_));
+                self.emit(ClientEvent::ReactorsFailed {
+                    chat,
+                    timestamp,
+                    request,
+                    reason: read_failure_reason(error),
+                    offline,
+                });
+            }
+        }
+    }
+
     /// Reads the signed-in account's own profile, with the same rules as `load_members`.
     fn load_profile(&mut self) {
         if self.profile_inflight {
@@ -2588,7 +2698,7 @@ impl<B: Backend> Engine<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::{chat, id, msg};
+    use crate::fixtures::{chat, id, msg, reactor};
     use crate::reactions::ReactionCount;
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -2661,6 +2771,10 @@ mod tests {
         members_calls: Vec<ChatSummary>,
         /// When set, `members` records its call, then waits here before answering.
         members_gate: Option<Arc<tokio::sync::Notify>>,
+        /// Answers of `reactors`, one per call, then an empty page.
+        reactors_results: VecDeque<Result<ReactorsPage, BackendError>>,
+        /// Every `reactors` call: chat, message, cursor and limit.
+        reactors_calls: Vec<(ChatId, MessageTs, Option<MessageTs>, usize)>,
         /// Answer of `profile`; the account with no name or status when unset.
         profile_result: Option<Result<Profile, BackendError>>,
         /// `profile` calls so far.
@@ -2925,6 +3039,28 @@ mod tests {
                 gate.notified().await;
             }
             result
+        }
+        async fn reactors(
+            &self,
+            chat: &ChatId,
+            timestamp: MessageTs,
+            before: Option<MessageTs>,
+            limit: usize,
+        ) -> Result<ReactorsPage, BackendError> {
+            let mut s = self.state();
+            s.reactors_calls
+                .push((chat.clone(), timestamp, before, limit));
+            s.reactors_results.pop_front().unwrap_or_else(|| {
+                Ok(ReactorsPage {
+                    chat: chat.clone(),
+                    timestamp,
+                    request: 0,
+                    reactors: Vec::new(),
+                    skipped: 0,
+                    raw: 0,
+                    oldest: None,
+                })
+            })
         }
         async fn profile(&self) -> Result<Profile, BackendError> {
             let (result, gate) = {
@@ -7328,6 +7464,209 @@ mod tests {
             members_events(&events).is_empty(),
             "expiry is not a member failure: {events:?}"
         );
+    }
+
+    // -- reactors -------------------------------------------------------------------------
+
+    fn reactors_of(timestamp: MessageTs, before: Option<MessageTs>, request: u64) -> Command {
+        Command::LoadReactors {
+            chat: id("a"),
+            timestamp,
+            before,
+            request,
+        }
+    }
+
+    /// A page of message `timestamp` of chat "a" as a backend answers it: `request` is 0.
+    fn reactors_page(timestamp: MessageTs, guids: &[&str]) -> ReactorsPage {
+        ReactorsPage {
+            chat: id("a"),
+            timestamp,
+            request: 0,
+            reactors: guids
+                .iter()
+                .enumerate()
+                .map(|(i, guid)| reactor(guid, 1, Some(100 - i as MessageTs)))
+                .collect(),
+            skipped: 1,
+            raw: guids.len() + 1,
+            oldest: Some(100 - guids.len() as MessageTs),
+        }
+    }
+
+    fn reactors_failed(
+        timestamp: MessageTs,
+        request: u64,
+        reason: &str,
+        offline: bool,
+    ) -> ClientEvent {
+        ClientEvent::ReactorsFailed {
+            chat: id("a"),
+            timestamp,
+            request,
+            reason: reason.into(),
+            offline,
+        }
+    }
+
+    fn next_reactors_failure(h: &Harness) -> ClientEvent {
+        h.next("failure", |e| {
+            matches!(e, ClientEvent::ReactorsFailed { .. })
+        })
+    }
+
+    #[test]
+    fn a_reactors_page_is_passed_through_with_the_commands_token() {
+        let page = reactors_page(3, &["g1", "g2"]);
+        let expected = page.clone();
+        let h = start_reacting_online(reacted(), move |s| {
+            s.reactors_results = VecDeque::from([Ok(page)]);
+        });
+        h.client.send(reactors_of(3, Some(90), 41));
+        let event = h.next("page", |e| matches!(e, ClientEvent::Reactors(_)));
+        assert_eq!(
+            event,
+            ClientEvent::Reactors(ReactorsPage {
+                request: 41,
+                ..expected
+            })
+        );
+        assert_eq!(
+            h.fake.state().reactors_calls,
+            [(id("a"), 3, Some(90), REACTORS_PAGE)],
+            "one read with the cursor and the page size"
+        );
+        assert!(h.fake.calls().is_empty(), "a read, not a write");
+    }
+
+    fn assert_reactors_refused(h: &Harness, timestamp: MessageTs, request: u64) {
+        h.client.send(reactors_of(timestamp, None, request));
+        assert_eq!(
+            next_reactors_failure(h),
+            reactors_failed(timestamp, request, REACTORS_REFUSED_REASON, false)
+        );
+        h.quiet();
+        assert!(h.fake.state().reactors_calls.is_empty(), "nothing was sent");
+        assert!(h.fake.calls().is_empty());
+    }
+
+    #[test]
+    fn a_pending_failed_deleted_or_unknown_message_has_no_list_and_sends_nothing() {
+        let mut pending = reacted();
+        pending.delivery = Delivery::Pending(PayloadId("p".into()));
+        let mut failed = reacted();
+        failed.delivery = Delivery::Failed {
+            payload: PayloadId("p".into()),
+            reason: "no".into(),
+        };
+        let mut deleted = reacted();
+        deleted.body = MessageBody::Deleted;
+        for (n, message) in [pending, failed, deleted].into_iter().enumerate() {
+            assert_reactors_refused(&start_reacting_online(message, |_| {}), 3, 10 + n as u64);
+        }
+        assert_reactors_refused(&start_reacting_online(reacted(), |_| {}), 99, 7);
+    }
+
+    #[test]
+    fn offline_the_list_is_refused_at_once_with_the_token_and_sends_nothing() {
+        let h = start(
+            |s, dir| {
+                seed_cache(dir, &[chat("a", Some(3), None)], "a", &[reacted()], true);
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
+        h.client.send(reactors_of(3, None, 5));
+        assert_eq!(
+            next_reactors_failure(&h),
+            reactors_failed(3, 5, OFFLINE_REASON, true)
+        );
+        h.quiet();
+        assert!(h.fake.state().reactors_calls.is_empty());
+    }
+
+    #[test]
+    fn a_rejected_reactors_read_carries_the_servers_reason() {
+        let reason = "список недоступен для этого сообщения";
+        let h = start_reacting_online(reacted(), |s| {
+            s.reactors_results = VecDeque::from([Err(rejected(reason, true))]);
+        });
+        h.client.send(reactors_of(3, None, 8));
+        assert_eq!(
+            next_reactors_failure(&h),
+            reactors_failed(3, 8, reason, false)
+        );
+    }
+
+    #[test]
+    fn a_network_failure_of_a_reactors_read_is_offline() {
+        let h = start_reacting_online(reacted(), |s| {
+            s.reactors_results = VecDeque::from([Err(BackendError::Network("reset".into()))]);
+        });
+        h.client.send(reactors_of(3, Some(50), 9));
+        assert_eq!(
+            next_reactors_failure(&h),
+            reactors_failed(3, 9, OFFLINE_REASON, true)
+        );
+    }
+
+    #[test]
+    fn session_expiry_during_a_reactors_read_ends_the_session() {
+        let h = start_reacting_online(reacted(), |s| {
+            s.reactors_results = VecDeque::from([Err(BackendError::SessionExpired)]);
+        });
+        h.client.send(reactors_of(3, None, 1));
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.quiet();
+        let events = h.drain();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ClientEvent::ReactorsFailed { .. })),
+            "expiry is not a list failure: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_loaded_list_changes_neither_the_cache_nor_the_messages_reactions() {
+        let h = start_reacting_online(reacted(), |s| {
+            s.reactors_results = VecDeque::from([Ok(reactors_page(3, &["g1", "g2", "g3"]))]);
+        });
+        let before = h.cache().message(&id("a"), 3).unwrap();
+        h.client.send(reactors_of(3, None, 2));
+        h.next("page", |e| matches!(e, ClientEvent::Reactors(_)));
+        h.quiet();
+        let events = h.drain();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e,
+                ClientEvent::ReactionsChanged { .. } | ClientEvent::MessageUpserted(_)
+            )),
+            "no message event: {events:?}"
+        );
+        assert_eq!(h.cache().message(&id("a"), 3).unwrap(), before);
+        assert_eq!(cached_reactions(&h), reactions(&[(LIKE, 2)], None, 5));
+    }
+
+    #[test]
+    fn two_commands_for_one_message_are_each_answered_with_their_own_token() {
+        let h = start_reacting_online(reacted(), |_| {});
+        h.client.send(reactors_of(3, None, 7));
+        h.client.send(reactors_of(3, None, 8));
+        let mut tokens = Vec::new();
+        for _ in 0..2 {
+            match h.next("page", |e| matches!(e, ClientEvent::Reactors(_))) {
+                ClientEvent::Reactors(page) => tokens.push(page.request),
+                _ => unreachable!(),
+            }
+        }
+        tokens.sort_unstable();
+        assert_eq!(tokens, [7, 8]);
+        assert_eq!(h.fake.state().reactors_calls.len(), 2, "never deduplicated");
     }
 
     #[test]
