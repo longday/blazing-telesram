@@ -38,7 +38,7 @@ Ordering and file ownership (`DEPENDENCIES.md` rule 1: one owner per file per ta
 ## 5. Probe (`bt-probe`)
 
 - [x] 5.1 `bin/bt-probe.rs`: `history` marks rows with `important` (output only). Depends on 1.1; a pure printing test if the file has any, none otherwise.
-- [ ] 5.2 `chats` prints the pinned timestamp of a chat that has one. Depends on 1.2.
+- [x] 5.2 `chats` prints the pinned timestamp of a chat that has one. Depends on 1.2.
 
 ## 6. Verification and closing
 
