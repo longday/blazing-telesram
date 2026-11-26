@@ -94,7 +94,7 @@ Unit **REV** shares files with: PIN-app (`store.rs` 4.1, `timeline.rs` 4.2, `tes
 
 ## Ready now
 
-- Startable without the user, no unmet dependency and no file overlap (rule 1): **REV 2.2** (`timeline.rs`, after PIN 4.2 has merged; in flight on `rev/2.2`) and **PIN 2.1** (every file with a `Message` literal, see its row); the two sets are disjoint, so they run in parallel. Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency and no file overlap (rule 1): **PIN 2.1** (every file with a `Message` literal, see its row). **REV 2.2** is not startable: it waits for PIN 4.2 (same `timeline.rs`), which is blocked-by PIN 2.1; the existing `rev/2.2` worktree must not edit `timeline.rs` before then. Each chain then unlocks the rest of its column above.
 - RL 3.1 and 8.2 stay blocked on the VM network; RL 8.3 (archive) waits for 8.2.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
