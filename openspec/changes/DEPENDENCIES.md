@@ -85,7 +85,7 @@ Proposed 2026-11-27. Local action only: no protocol, core or server change (deci
 | 2.1 | **done**, merged into `integ/reveal-downloaded-file` (`764a891`); holds no file any more (rule 1: `viewer.rs` is released) | 1.1 (done) | `viewer.rs` |
 | 2.2 | **done**, merged into `integ/reveal-downloaded-file` (`df3ce5c`); holds no file any more (rule 1: `timeline.rs` is released) | 1.1, 2.1 (done) | `timeline.rs` |
 | 3.1 | **done**, merged into `integ/reveal-downloaded-file` (`72bf5fa`); holds no file any more (rule 1: `main.rs` is released) | 1.1 | `main.rs` |
-| 4.1 | ready (PIN 2.1 is merged into `integ/pins-and-importance-view`; the `Message` literal in `tests.rs` is updated there, so REV merges after PIN's integ or rebases on it). PIN 4.4 is not started and locks nothing (rule 6); REV does not wait for it, PIN 4.4 waits for the REV unit if REV 4.1 has started | PIN 2.1 (done) | `tests.rs` |
+| 4.1 | ready; starts from `main` or from the integ branch, no ordering against PIN's unit: PIN 2.1's only `tests.rs` change is `important: false` in a helper literal, which whoever merges second resolves. PIN 4.4 is not started and locks nothing (rule 6); REV does not wait for it, PIN 4.4 waits for the REV unit if REV 4.1 has started | PIN 2.1 (done) | `tests.rs` |
 | 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
 | 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
 | 5.3 | blocked-by 5.1 (and 5.2 or its "blocked by environment" report) | | this file, archive |
