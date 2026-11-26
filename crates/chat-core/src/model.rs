@@ -451,9 +451,10 @@ pub enum ClientEvent {
     /// `request` is the command's token. Never cached; the message's `reactions` are untouched.
     Reactors(ReactorsPage),
     /// `LoadReactors` for `(chat, timestamp)` produced no page; `request` is the command's token.
-    /// `offline` is set when the client could not ask at all (nothing was sent); otherwise
-    /// `reason` is the server's or the network's, or the constant refusal text when the message
-    /// cannot have a list, to show with a retry.
+    /// `offline` is set when the client could not reach the server: it was not online and sent
+    /// nothing, or the request was sent and failed with a network error; the view then offers a
+    /// retry for the connection. Otherwise `reason` is the server's rejection, or the constant
+    /// refusal text when the message cannot have a list (nothing was sent), to show with a retry.
     ReactorsFailed {
         chat: ChatId,
         timestamp: MessageTs,
