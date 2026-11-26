@@ -325,7 +325,10 @@ impl Backend for YandexBackend {
                             timestamp,
                         }]
                     }
-                    XivaEvent::Push(PushEvent::ChatChanged { chat }) => {
+                    // Interim until PIN 3.2: a pin change refetches the row like any chat change.
+                    XivaEvent::Push(
+                        PushEvent::ChatChanged { chat } | PushEvent::PinChanged { chat, .. },
+                    ) => {
                         match client.chat_list().await {
                             Ok(chats) => {
                                 let users = users.lock().unwrap();
@@ -1909,6 +1912,8 @@ mod tests {
             unread: 2,
             muted: true,
             last_message: Some(wire(WireBody::Text("hey".into()), Relation::None, "me")),
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let s = summary(&chat, "me", &users);
@@ -2107,6 +2112,8 @@ mod tests {
             unread: 0,
             muted: false,
             last_message: None,
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let users = HashMap::from([user("u1", "Ann")]);
@@ -2702,6 +2709,8 @@ mod tests {
             unread: 0,
             muted: false,
             last_message: None,
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let users = HashMap::new();
