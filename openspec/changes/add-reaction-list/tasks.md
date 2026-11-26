@@ -84,7 +84,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 6. Desktop UI
 
-- [ ] 6.1 Store: the open list (D5)
+- [x] 6.1 Store: the open list (D5)
   - Owns: `crates/desktop/src/store.rs` (including its tests).
   - Depends on: 4.1. Lands together with 6.3 (rule 3).
   - Do: `ReactorsView` (with `generation` and `kind`) and `ReactorsState` (with `loading_more`, `more_failed`), D5; the monotonic `next_request` counter; open and close; the first `Command::LoadReactors` (`kind = First`); `Reactors` and `ReactorsFailed` handling: `First` replaces the rows, `More` appends in server order with de-duplication by guid, applied only when `(chat, timestamp)` is the open list and `request == generation`; the end-of-list rule of D5 (`exhausted` from the page and strict cursor progress, never from counts); reads, never persisted. The `More` and refresh triggers are 6.4 and 6.5.

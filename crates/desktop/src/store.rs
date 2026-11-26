@@ -1,10 +1,12 @@
 //! UI-side state: the single place where `ClientEvent`s land and `Command`s leave.
 
 use async_channel::{Receiver, Sender};
+use bt_chat_core::client::REACTORS_PAGE;
 use bt_chat_core::model::{
     ChatId, ChatKind, ChatMembers, ChatSummary, ClientEvent, Command, ConnectionState, Delivery,
     DownloadFailure, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs,
-    PayloadId, Profile, ReplyTarget, SearchFailure, SearchHits, SearchId, UserId,
+    PayloadId, Profile, Reactor, ReactorsPage, ReplyTarget, SearchFailure, SearchHits, SearchId,
+    UserId,
 };
 use bt_chat_core::reactions::{ReactionCode, Reactions};
 use gpui::{Context, EventEmitter};
@@ -125,6 +127,51 @@ pub enum LoadState<T> {
 pub type MembersState = LoadState<ChatMembers>;
 pub type ProfileState = LoadState<Profile>;
 
+/// Which request the open reactor list's outstanding `LoadReactors` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    /// The first page: its answer replaces the rows (open, retry, refresh).
+    First,
+    /// The page after the loaded rows: its answer is appended.
+    More,
+}
+
+/// The one open list of the people who reacted to a message, held in memory only and dropped on close.
+/// `generation` is the token of the request the list last sent; an answer is applied only when it
+/// carries it, so an answer to a closed list, an earlier opening of the same message or a superseded
+/// page is dropped. `base_version` is the message's reaction version when the list was last read
+/// from the first page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReactorsView {
+    pub chat: ChatId,
+    pub timestamp: MessageTs,
+    pub base_version: Option<i64>,
+    pub generation: u64,
+    pub kind: RequestKind,
+    pub state: ReactorsState,
+}
+
+/// Where the open reactor list stands. `exhausted` comes from the server's pages (see
+/// `page_exhausted`), never from the message's known counts.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReactorsState {
+    Loading,
+    Ready {
+        rows: Vec<Reactor>,
+        /// Entries without an identity, summed over the loaded pages.
+        skipped: usize,
+        /// The smallest timestamp seen; the next page is asked with it as `before`.
+        oldest: Option<MessageTs>,
+        exhausted: bool,
+        loading_more: bool,
+        more_failed: Option<String>,
+    },
+    Failed {
+        reason: String,
+        offline: bool,
+    },
+}
+
 /// Where the one chat creation the store lets run stands. There is no state while none was started or
 /// the last one ended in a chat; the dialog that started it keeps its own data, so a failure leaves
 /// everything for another attempt.
@@ -180,6 +227,8 @@ pub enum StoreEvent {
     Members(ChatId),
     /// The profile state changed (requested, loaded or failed).
     Profile,
+    /// The open reactor list changed (opened, answered, failed, requested again or closed).
+    Reactors,
     /// The creation state changed (started, failed, ended or dismissed).
     Creation,
     /// A creation ended in a chat: `existing` when none had to be created, `chat` is `None` when it
@@ -215,6 +264,11 @@ pub struct ChatStore {
     creating: Option<UserId>,
     /// A created chat to select once the list holds it.
     pending_open: Option<PendingOpen>,
+    /// The open reactor list.
+    reactors: Option<ReactorsView>,
+    /// The last `LoadReactors` token handed out; only grows, so it is never reset by close, reopen
+    /// or sign-out.
+    next_request: u64,
 }
 
 impl EventEmitter<StoreEvent> for ChatStore {}
@@ -254,6 +308,8 @@ impl ChatStore {
             creation: None,
             creating: None,
             pending_open: None,
+            reactors: None,
+            next_request: 0,
         }
     }
 
@@ -319,6 +375,7 @@ impl ChatStore {
                 self.search = None;
                 self.members.clear();
                 self.profile = None;
+                self.reactors = None;
                 self.creation = None;
                 self.creating = None;
                 self.pending_open = None;
@@ -378,6 +435,14 @@ impl ChatStore {
             ClientEvent::ProfileFailed { reason, offline } => {
                 self.finish_profile(ProfileState::Failed { reason, offline }, cx);
             }
+            ClientEvent::Reactors(page) => self.finish_reactors(page, cx),
+            ClientEvent::ReactorsFailed {
+                chat,
+                timestamp,
+                request,
+                reason,
+                offline,
+            } => self.fail_reactors(&chat, timestamp, request, reason, offline, cx),
             ClientEvent::ChatCreated { chat, existing } => self.chat_created(chat, existing, cx),
             ClientEvent::CreationFailed { reason, unknown } => {
                 self.creation_failed(CreationState::Failed { reason, unknown }, cx);
@@ -784,6 +849,199 @@ impl ChatStore {
         cx.notify();
     }
 
+    /// Opens the list of the people who reacted to `(chat, timestamp)` and asks for its first page.
+    /// It replaces any list already open; a request still out for that one, or for an earlier opening
+    /// of this message, is superseded by the new token.
+    pub fn open_reactors(&mut self, chat: ChatId, timestamp: MessageTs, cx: &mut Context<Self>) {
+        let base_version = self.timelines.get(&chat).and_then(|t| {
+            let i = t
+                .messages
+                .binary_search_by_key(&timestamp, |m| m.timestamp)
+                .ok()?;
+            t.messages[i].reactions.version
+        });
+        self.reactors = Some(ReactorsView {
+            chat,
+            timestamp,
+            base_version,
+            generation: 0,
+            kind: RequestKind::First,
+            state: ReactorsState::Loading,
+        });
+        self.request_reactors(RequestKind::First, cx);
+    }
+
+    /// Closes the list and forgets it; answers still on the way are dropped when they arrive.
+    pub fn close_reactors(&mut self, cx: &mut Context<Self>) {
+        if self.reactors.take().is_some() {
+            cx.emit(StoreEvent::Reactors);
+            cx.notify();
+        }
+    }
+
+    pub fn reactors(&self) -> Option<&ReactorsView> {
+        self.reactors.as_ref()
+    }
+
+    /// Tries again after a failure: a failed list goes back to `Loading` and asks for the first page;
+    /// a list whose next page failed asks for that page; a list that is shown (the offline retry)
+    /// asks for the first page again and keeps its rows until the answer. A list that is loading
+    /// already has a request out and sends nothing.
+    pub fn retry_reactors(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.reactors.as_mut() else {
+            return;
+        };
+        let kind = match &view.state {
+            ReactorsState::Loading => return,
+            ReactorsState::Failed { .. } => RequestKind::First,
+            ReactorsState::Ready {
+                more_failed: Some(_),
+                ..
+            } => RequestKind::More,
+            ReactorsState::Ready { .. } => RequestKind::First,
+        };
+        if matches!(view.state, ReactorsState::Failed { .. }) {
+            view.state = ReactorsState::Loading;
+        }
+        self.request_reactors(kind, cx);
+    }
+
+    /// Sends a `LoadReactors` for the open list with a fresh token, which supersedes any request
+    /// still out. `First` leaves the state as it is (the caller sets `Loading` when the rows must
+    /// go); `More` is sent only for a shown list that is not exhausted and has no page out, and
+    /// marks it `loading_more`.
+    fn request_reactors(&mut self, kind: RequestKind, cx: &mut Context<Self>) {
+        let Some(view) = self.reactors.as_mut() else {
+            return;
+        };
+        let before = match kind {
+            RequestKind::First => None,
+            RequestKind::More => match &mut view.state {
+                ReactorsState::Ready {
+                    oldest: Some(oldest),
+                    exhausted: false,
+                    loading_more,
+                    more_failed,
+                    ..
+                } if !*loading_more => {
+                    *loading_more = true;
+                    *more_failed = None;
+                    Some(*oldest)
+                }
+                _ => return,
+            },
+        };
+        self.next_request += 1;
+        view.generation = self.next_request;
+        view.kind = kind;
+        let command = Command::LoadReactors {
+            chat: view.chat.clone(),
+            timestamp: view.timestamp,
+            before,
+            request: view.generation,
+        };
+        self.send(command);
+        cx.emit(StoreEvent::Reactors);
+        cx.notify();
+    }
+
+    /// The open list, if `(chat, timestamp, request)` names the request it is waiting for.
+    fn awaited_reactors(
+        &mut self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        request: u64,
+    ) -> Option<&mut ReactorsView> {
+        self.reactors
+            .as_mut()
+            .filter(|v| v.chat == *chat && v.timestamp == timestamp && v.generation == request)
+    }
+
+    /// Applies a page: `First` replaces the rows, `More` appends them, both in server order and
+    /// without a guid twice. An answer to anything but the awaited request is dropped.
+    fn finish_reactors(&mut self, page: ReactorsPage, cx: &mut Context<Self>) {
+        let Some(view) = self.awaited_reactors(&page.chat, page.timestamp, page.request) else {
+            return;
+        };
+        let avatars: Vec<MediaRef> = page
+            .reactors
+            .iter()
+            .filter_map(|r| r.avatar.clone())
+            .collect();
+        match (view.kind, &mut view.state) {
+            (
+                RequestKind::More,
+                ReactorsState::Ready {
+                    rows,
+                    skipped,
+                    oldest,
+                    exhausted,
+                    loading_more,
+                    more_failed,
+                },
+            ) => {
+                *exhausted = page_exhausted(*oldest, page.raw, page.oldest, REACTORS_PAGE);
+                append_new(rows, page.reactors);
+                *skipped = skipped.saturating_add(page.skipped);
+                *oldest = match (page.oldest, *oldest) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
+                *loading_more = false;
+                *more_failed = None;
+            }
+            // A next page can only be asked of a shown list; nothing else awaits one.
+            (RequestKind::More, _) => return,
+            (RequestKind::First, state) => {
+                let mut rows = Vec::with_capacity(page.reactors.len());
+                append_new(&mut rows, page.reactors);
+                *state = ReactorsState::Ready {
+                    rows,
+                    skipped: page.skipped,
+                    oldest: page.oldest,
+                    exhausted: page_exhausted(None, page.raw, page.oldest, REACTORS_PAGE),
+                    loading_more: false,
+                    more_failed: None,
+                };
+            }
+        }
+        for avatar in &avatars {
+            self.want_media(Some(avatar));
+        }
+        cx.emit(StoreEvent::Reactors);
+    }
+
+    /// Applies a failure of the awaited request: a failed next page keeps the rows and offers a
+    /// retry, anything else leaves a `Failed` list (an earlier list must not look current).
+    fn fail_reactors(
+        &mut self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        request: u64,
+        reason: String,
+        offline: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.awaited_reactors(chat, timestamp, request) else {
+            return;
+        };
+        match (view.kind, &mut view.state) {
+            (
+                RequestKind::More,
+                ReactorsState::Ready {
+                    loading_more,
+                    more_failed,
+                    ..
+                },
+            ) => {
+                *loading_more = false;
+                *more_failed = Some(reason);
+            }
+            (_, state) => *state = ReactorsState::Failed { reason, offline },
+        }
+        cx.emit(StoreEvent::Reactors);
+    }
+
     /// Asks the core to start a private chat with `user`. The state becomes `InFlight` at once; while
     /// one is running nothing is sent again (the core drops it too). The dialog must have shown the
     /// confirmation first: this is the only call that creates a chat.
@@ -1077,6 +1335,28 @@ impl ChatStore {
             },
         });
     }
+}
+
+/// Whether a page ends the list. Decided from the page alone, with strict cursor progress: no
+/// timestamp seen, a page shorter than the `limit` asked, or an `oldest` that did not get below
+/// the `before` cursor (a repeat of the boundary; continuing would loop). The message's known
+/// counts never decide it.
+fn page_exhausted(
+    before: Option<MessageTs>,
+    raw: usize,
+    oldest: Option<MessageTs>,
+    limit: usize,
+) -> bool {
+    match oldest {
+        None => true,
+        Some(oldest) => raw < limit || before.is_some_and(|b| oldest >= b),
+    }
+}
+
+/// Appends `incoming` in order, skipping a person already in `rows` (or earlier in `incoming`).
+fn append_new(rows: &mut Vec<Reactor>, incoming: Vec<Reactor>) {
+    let mut seen: HashSet<UserId> = rows.iter().map(|r| r.user.clone()).collect();
+    rows.extend(incoming.into_iter().filter(|r| seen.insert(r.user.clone())));
 }
 
 /// Sorted by timestamp, duplicates keep the last occurrence.
@@ -2065,6 +2345,622 @@ mod tests {
             rig.apply(cx, ClientEvent::SignedOut);
             assert_eq!(rig.state(cx, &chat("a")), None);
             assert_eq!(rig.profile(cx), None);
+        }
+    }
+
+    mod reactors {
+        use super::*;
+        use bt_chat_core::reactions::ReactionCount;
+        use gpui::{AppContext, Entity, Subscription, TestAppContext};
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        const TS: MessageTs = 500;
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            commands: Receiver<Command>,
+            events: Rc<RefCell<Vec<StoreEvent>>>,
+            _client: Sender<ClientEvent>,
+            _subscription: Subscription,
+        }
+
+        impl Rig {
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let log = events.clone();
+                let subscription = cx.update(|cx| {
+                    cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                        log.borrow_mut().push(event.clone())
+                    })
+                });
+                Self {
+                    store,
+                    commands,
+                    events,
+                    _client: client,
+                    _subscription: subscription,
+                }
+            }
+
+            /// A rig that has opened the list of message `TS` of chat `c`, with the open's
+            /// command and event already taken.
+            fn opened(cx: &mut TestAppContext) -> Self {
+                let rig = Self::new(cx);
+                rig.open(cx);
+                rig.commands();
+                rig.take_events();
+                rig
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn open(&self, cx: &mut TestAppContext) {
+                self.store
+                    .update(cx, |s, cx| s.open_reactors(chat(), TS, cx));
+            }
+
+            fn close(&self, cx: &mut TestAppContext) {
+                self.store.update(cx, |s, cx| s.close_reactors(cx));
+            }
+
+            fn retry(&self, cx: &mut TestAppContext) {
+                self.store.update(cx, |s, cx| s.retry_reactors(cx));
+            }
+
+            fn request(&self, cx: &mut TestAppContext, kind: RequestKind) {
+                self.store.update(cx, |s, cx| s.request_reactors(kind, cx));
+            }
+
+            fn view(&self, cx: &mut TestAppContext) -> Option<ReactorsView> {
+                self.store.read_with(cx, |s, _| s.reactors().cloned())
+            }
+
+            fn commands(&self) -> Vec<Command> {
+                std::iter::from_fn(|| self.commands.try_recv().ok()).collect()
+            }
+
+            fn take_events(&self) -> Vec<StoreEvent> {
+                std::mem::take(&mut *self.events.borrow_mut())
+            }
+        }
+
+        fn chat() -> ChatId {
+            ChatId("c".into())
+        }
+
+        fn reactor(guid: &str) -> Reactor {
+            Reactor {
+                user: UserId(guid.into()),
+                name: Some(format!("name {guid}")),
+                avatar: None,
+                code: ReactionCode(1),
+                at: Some(1),
+                me: false,
+            }
+        }
+
+        /// `n` guids `{prefix}0 ..`.
+        fn guids(prefix: &str, n: usize) -> Vec<String> {
+            (0..n).map(|i| format!("{prefix}{i}")).collect()
+        }
+
+        fn page_for(
+            chat: ChatId,
+            request: u64,
+            who: &[String],
+            raw: usize,
+            oldest: Option<i64>,
+        ) -> ReactorsPage {
+            ReactorsPage {
+                chat,
+                timestamp: TS,
+                request,
+                reactors: who.iter().map(|g| reactor(g)).collect(),
+                skipped: 0,
+                raw,
+                oldest,
+            }
+        }
+
+        fn page(request: u64, who: &[String], raw: usize, oldest: Option<i64>) -> ClientEvent {
+            ClientEvent::Reactors(page_for(chat(), request, who, raw, oldest))
+        }
+
+        /// A full first page (`REACTORS_PAGE` entries `a0 ..`) whose oldest entry is at 200.
+        fn full(request: u64) -> ClientEvent {
+            page(
+                request,
+                &guids("a", REACTORS_PAGE),
+                REACTORS_PAGE,
+                Some(200),
+            )
+        }
+
+        fn failure(request: u64, reason: &str, offline: bool) -> ClientEvent {
+            ClientEvent::ReactorsFailed {
+                chat: chat(),
+                timestamp: TS,
+                request,
+                reason: reason.into(),
+                offline,
+            }
+        }
+
+        fn load(before: Option<i64>, request: u64) -> Command {
+            Command::LoadReactors {
+                chat: chat(),
+                timestamp: TS,
+                before,
+                request,
+            }
+        }
+
+        fn rows(view: &ReactorsView) -> Vec<String> {
+            match &view.state {
+                ReactorsState::Ready { rows, .. } => {
+                    rows.iter().map(|r| r.user.0.clone()).collect()
+                }
+                other => panic!("not ready: {other:?}"),
+            }
+        }
+
+        /// `(exhausted, loading_more, more_failed)` of a ready list.
+        fn flags(view: &ReactorsView) -> (bool, bool, Option<String>) {
+            match &view.state {
+                ReactorsState::Ready {
+                    exhausted,
+                    loading_more,
+                    more_failed,
+                    ..
+                } => (*exhausted, *loading_more, more_failed.clone()),
+                other => panic!("not ready: {other:?}"),
+            }
+        }
+
+        fn with_reactions(cx: &mut TestAppContext, rig: &Rig, count: u32, version: i64) {
+            let mut message = msg(TS, "a");
+            message.reactions = Reactions {
+                counts: vec![ReactionCount {
+                    code: ReactionCode(1),
+                    count,
+                }],
+                mine: None,
+                version: Some(version),
+            };
+            rig.apply(
+                cx,
+                ClientEvent::History(HistoryChunk {
+                    chat: chat(),
+                    messages: vec![message],
+                    reached_start: true,
+                    replaces: None,
+                    payloads: vec![],
+                }),
+            );
+            rig.take_events();
+        }
+
+        #[gpui::test]
+        fn opening_sends_the_first_command_with_a_fresh_token_and_is_loading(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            assert_eq!(rig.view(cx), None);
+
+            rig.open(cx);
+            let view = rig.view(cx).unwrap();
+            assert_eq!(
+                (view.chat, view.timestamp, view.generation, view.kind),
+                (chat(), TS, 1, RequestKind::First)
+            );
+            assert_eq!(view.state, ReactorsState::Loading);
+            assert_eq!(view.base_version, None, "no timeline, no version");
+            assert_eq!(rig.commands(), [load(None, 1)]);
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+        }
+
+        #[gpui::test]
+        fn the_base_version_is_the_messages_current_one(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            with_reactions(cx, &rig, 2, 4);
+            rig.open(cx);
+            assert_eq!(rig.view(cx).unwrap().base_version, Some(4));
+        }
+
+        #[gpui::test]
+        fn a_page_becomes_ready_and_asks_for_the_avatars(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            let mut with_avatar = page_for(chat(), 1, &guids("a", 2), 2, Some(100));
+            with_avatar.reactors[0].avatar = Some(MediaRef {
+                id: "av".into(),
+                kind: MediaKind::Avatar,
+            });
+            with_avatar.skipped = 1;
+            rig.apply(cx, ClientEvent::Reactors(with_avatar));
+
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), ["a0", "a1"]);
+            assert!(matches!(
+                view.state,
+                ReactorsState::Ready {
+                    skipped: 1,
+                    oldest: Some(100),
+                    ..
+                }
+            ));
+            assert_eq!(flags(&view), (true, false, None));
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+            assert_eq!(
+                rig.commands(),
+                [Command::FetchMedia(MediaRef {
+                    id: "av".into(),
+                    kind: MediaKind::Avatar
+                })]
+            );
+        }
+
+        #[gpui::test]
+        fn a_second_page_appends_in_server_order_and_drops_a_repeated_guid(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            assert_eq!(flags(&rig.view(cx).unwrap()), (false, false, None));
+            rig.take_events();
+
+            rig.request(cx, RequestKind::More);
+            let view = rig.view(cx).unwrap();
+            assert_eq!((view.generation, view.kind), (2, RequestKind::More));
+            assert_eq!(flags(&view), (false, true, None));
+            assert_eq!(rig.commands(), [load(Some(200), 2)]);
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            let last = format!("a{}", REACTORS_PAGE - 1);
+            rig.apply(cx, page(2, &[last, "x".into(), "y".into()], 3, Some(150)));
+            let view = rig.view(cx).unwrap();
+            let mut expected = guids("a", REACTORS_PAGE);
+            expected.extend(["x".to_string(), "y".to_string()]);
+            assert_eq!(
+                rows(&view),
+                expected,
+                "the repeated boundary entry is dropped"
+            );
+            assert_eq!(flags(&view), (true, false, None), "a short page is the end");
+            assert!(matches!(
+                view.state,
+                ReactorsState::Ready {
+                    oldest: Some(150),
+                    ..
+                }
+            ));
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+        }
+
+        #[gpui::test]
+        fn a_failure_is_failed_with_its_offline_flag(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, failure(1, "нет прав", false));
+            assert_eq!(
+                rig.view(cx).unwrap().state,
+                ReactorsState::Failed {
+                    reason: "нет прав".into(),
+                    offline: false
+                }
+            );
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            rig.retry(cx);
+            rig.apply(cx, failure(2, "Нет соединения", true));
+            assert_eq!(
+                rig.view(cx).unwrap().state,
+                ReactorsState::Failed {
+                    reason: "Нет соединения".into(),
+                    offline: true
+                }
+            );
+        }
+
+        #[gpui::test]
+        fn an_answer_for_a_closed_or_different_list_is_ignored(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.apply(cx, page(1, &guids("a", 1), 1, Some(1)));
+            rig.apply(cx, failure(1, "x", false));
+            assert_eq!(rig.view(cx), None);
+            assert!(rig.take_events().is_empty());
+
+            rig.open(cx);
+            rig.take_events();
+            let other_chat = page_for(ChatId("d".into()), 1, &guids("a", 1), 1, Some(1));
+            let mut other_message = page_for(chat(), 1, &guids("a", 1), 1, Some(1));
+            other_message.timestamp = TS + 1;
+            rig.apply(cx, ClientEvent::Reactors(other_chat));
+            rig.apply(cx, ClientEvent::Reactors(other_message));
+            rig.apply(
+                cx,
+                ClientEvent::ReactorsFailed {
+                    chat: chat(),
+                    timestamp: TS + 1,
+                    request: 1,
+                    reason: "x".into(),
+                    offline: false,
+                },
+            );
+            rig.apply(cx, page(9, &guids("a", 1), 1, Some(1)));
+            assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+            assert!(rig.take_events().is_empty());
+        }
+
+        #[gpui::test]
+        fn closing_drops_the_state_and_a_late_answer(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.close(cx);
+            assert_eq!(rig.view(cx), None);
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            rig.apply(cx, page(1, &guids("a", 1), 1, Some(1)));
+            assert_eq!(rig.view(cx), None);
+            assert!(rig.take_events().is_empty());
+
+            rig.close(cx);
+            assert!(
+                rig.take_events().is_empty(),
+                "nothing open, nothing announced"
+            );
+            assert!(rig.commands().is_empty(), "closing sends nothing");
+        }
+
+        #[gpui::test]
+        fn reopening_the_same_message_drops_the_first_openings_answers(cx: &mut TestAppContext) {
+            for failing in [false, true] {
+                let rig = Rig::opened(cx);
+                rig.close(cx);
+                rig.open(cx);
+                assert_eq!(rig.commands(), [load(None, 2)]);
+                rig.take_events();
+
+                if failing {
+                    rig.apply(cx, failure(1, "старый", false));
+                } else {
+                    rig.apply(cx, page(1, &guids("old", 3), 3, Some(1)));
+                }
+                assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+                assert!(rig.take_events().is_empty());
+
+                rig.apply(cx, page(2, &guids("new", 2), 2, Some(2)));
+                assert_eq!(rows(&rig.view(cx).unwrap()), ["new0", "new1"]);
+            }
+        }
+
+        #[gpui::test]
+        fn a_refresh_supersedes_a_page_in_flight_and_the_late_page_changes_nothing(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.request(cx, RequestKind::More);
+            rig.commands();
+            rig.take_events();
+
+            rig.request(cx, RequestKind::First);
+            assert_eq!(rig.commands(), [load(None, 3)]);
+            let view = rig.view(cx).unwrap();
+            assert_eq!((view.generation, view.kind), (3, RequestKind::First));
+            assert_eq!(
+                rows(&view),
+                guids("a", REACTORS_PAGE),
+                "rows stay until the answer"
+            );
+            rig.take_events();
+
+            let late_page = page(2, &guids("late", 3), 3, Some(100));
+            rig.apply(cx, late_page.clone());
+            rig.apply(cx, failure(2, "x", false));
+            assert_eq!(rows(&rig.view(cx).unwrap()), guids("a", REACTORS_PAGE));
+            assert!(rig.take_events().is_empty());
+
+            rig.apply(cx, page(3, &guids("n", 2), 2, Some(900)));
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), ["n0", "n1"], "the answer replaces the rows");
+            assert_eq!(flags(&view), (true, false, None), "exhausted is recomputed");
+
+            rig.apply(cx, late_page);
+            rig.apply(cx, failure(2, "x", false));
+            assert_eq!(
+                rows(&rig.view(cx).unwrap()),
+                ["n0", "n1"],
+                "also after the refresh's answer"
+            );
+        }
+
+        #[gpui::test]
+        fn a_failed_refresh_is_failed_and_not_the_old_list(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.request(cx, RequestKind::First);
+            rig.apply(cx, failure(2, "x", true));
+            assert_eq!(
+                rig.view(cx).unwrap().state,
+                ReactorsState::Failed {
+                    reason: "x".into(),
+                    offline: true
+                }
+            );
+        }
+
+        #[gpui::test]
+        fn a_retry_takes_a_fresh_token_and_the_failed_requests_answer_is_dropped(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, failure(1, "x", false));
+            rig.take_events();
+
+            rig.retry(cx);
+            assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            rig.apply(cx, page(1, &guids("old", 1), 1, Some(1)));
+            rig.apply(cx, failure(1, "again", false));
+            assert_eq!(rig.view(cx).unwrap().state, ReactorsState::Loading);
+            assert!(rig.take_events().is_empty());
+
+            rig.retry(cx);
+            assert!(
+                rig.commands().is_empty(),
+                "a loading list has its request out"
+            );
+        }
+
+        #[gpui::test]
+        fn a_retry_of_a_shown_list_asks_for_the_first_page_and_keeps_the_rows(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.retry(cx);
+            assert_eq!(rig.commands(), [load(None, 2)]);
+            assert_eq!(rows(&rig.view(cx).unwrap()), guids("a", REACTORS_PAGE));
+        }
+
+        #[gpui::test]
+        fn the_token_counter_does_not_restart_on_close(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.open(cx);
+            rig.close(cx);
+            rig.open(cx);
+            rig.apply(cx, ClientEvent::SignedOut);
+            rig.open(cx);
+            assert_eq!(
+                rig.commands(),
+                [load(None, 1), load(None, 2), load(None, 3)]
+            );
+        }
+
+        #[test]
+        fn the_end_of_the_list_follows_the_page_and_the_cursor() {
+            let l = REACTORS_PAGE;
+            assert!(page_exhausted(None, l - 1, Some(10), l), "a short page");
+            assert!(page_exhausted(None, 0, None, l), "an empty page");
+            assert!(
+                page_exhausted(None, l, None, l),
+                "no timestamp to continue from"
+            );
+            assert!(
+                !page_exhausted(None, l, Some(10), l),
+                "a full page that progresses"
+            );
+            assert!(
+                !page_exhausted(Some(100), l, Some(99), l),
+                "the cursor moved"
+            );
+            assert!(
+                page_exhausted(Some(100), l, Some(100), l),
+                "a repeated boundary"
+            );
+            assert!(
+                page_exhausted(Some(100), l, Some(120), l),
+                "a page newer than the cursor"
+            );
+        }
+
+        #[gpui::test]
+        fn a_page_that_does_not_pass_the_cursor_ends_the_list(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.request(cx, RequestKind::More);
+            rig.apply(
+                cx,
+                page(2, &guids("a", REACTORS_PAGE), REACTORS_PAGE, Some(200)),
+            );
+            let view = rig.view(cx).unwrap();
+            assert_eq!(flags(&view), (true, false, None));
+            assert_eq!(
+                rows(&view).len(),
+                REACTORS_PAGE,
+                "all repeated, nothing appended"
+            );
+
+            rig.commands();
+            rig.request(cx, RequestKind::More);
+            assert!(rig.commands().is_empty(), "no further page is asked");
+        }
+
+        #[gpui::test]
+        fn known_counts_neither_stop_nor_extend_paging(cx: &mut TestAppContext) {
+            // A count below the loaded rows does not stop paging.
+            let rig = Rig::new(cx);
+            with_reactions(cx, &rig, 1, 1);
+            rig.open(cx);
+            rig.apply(cx, full(1));
+            assert_eq!(flags(&rig.view(cx).unwrap()), (false, false, None));
+            rig.commands();
+            rig.request(cx, RequestKind::More);
+            assert_eq!(rig.commands(), [load(Some(200), 2)]);
+
+            // A count above all the rows does not keep it going after the end.
+            let rig = Rig::new(cx);
+            with_reactions(cx, &rig, 100, 1);
+            rig.open(cx);
+            rig.apply(cx, page(1, &guids("a", 3), 3, Some(10)));
+            assert_eq!(flags(&rig.view(cx).unwrap()), (true, false, None));
+            rig.commands();
+            rig.request(cx, RequestKind::More);
+            assert!(rig.commands().is_empty());
+        }
+
+        #[gpui::test]
+        fn a_failed_next_page_keeps_the_rows_and_a_retry_asks_for_it_again(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.request(cx, RequestKind::More);
+            rig.commands();
+            rig.take_events();
+
+            rig.apply(cx, failure(2, "сбой", false));
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), guids("a", REACTORS_PAGE));
+            assert_eq!(flags(&view), (false, false, Some("сбой".into())));
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            rig.retry(cx);
+            let view = rig.view(cx).unwrap();
+            assert_eq!((view.generation, view.kind), (3, RequestKind::More));
+            assert_eq!(flags(&view), (false, true, None));
+            assert_eq!(rig.commands(), [load(Some(200), 3)]);
+
+            rig.apply(cx, failure(2, "старый", false));
+            assert_eq!(flags(&rig.view(cx).unwrap()), (false, true, None));
+
+            rig.apply(cx, page(3, &guids("b", 2), 2, Some(100)));
+            assert_eq!(rows(&rig.view(cx).unwrap()).len(), REACTORS_PAGE + 2);
+        }
+
+        #[gpui::test]
+        fn only_one_next_page_is_out_at_a_time(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.request(cx, RequestKind::More);
+            rig.commands();
+            rig.request(cx, RequestKind::More);
+            assert!(rig.commands().is_empty());
+            assert_eq!(rig.view(cx).unwrap().generation, 2);
+        }
+
+        #[gpui::test]
+        fn signing_out_closes_the_list(cx: &mut TestAppContext) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.apply(cx, ClientEvent::SignedOut);
+            assert_eq!(rig.view(cx), None);
         }
     }
 
