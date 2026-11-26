@@ -909,6 +909,14 @@ impl ChatStore {
         self.request_reactors(kind, cx);
     }
 
+    /// Asks for the page after the loaded rows («Показать ещё»): `LoadReactors { before: oldest }`
+    /// with a fresh token, and the list shows `loading_more` until the answer. Only a shown list that
+    /// is not exhausted and has no page out sends it; for anything else, including a second choice
+    /// while the page is out, nothing happens, so one choice is one request.
+    pub fn load_more_reactors(&mut self, cx: &mut Context<Self>) {
+        self.request_reactors(RequestKind::More, cx);
+    }
+
     /// Sends a `LoadReactors` for the open list with a fresh token, which supersedes any request
     /// still out. `First` leaves the state as it is (the caller sets `Loading` when the rows must
     /// go); `More` is sent only for a shown list that is not exhausted and has no page out, and
@@ -2416,6 +2424,10 @@ mod tests {
                 self.store.update(cx, |s, cx| s.retry_reactors(cx));
             }
 
+            fn more(&self, cx: &mut TestAppContext) {
+                self.store.update(cx, |s, cx| s.load_more_reactors(cx));
+            }
+
             fn request(&self, cx: &mut TestAppContext, kind: RequestKind) {
                 self.store.update(cx, |s, cx| s.request_reactors(kind, cx));
             }
@@ -2617,7 +2629,7 @@ mod tests {
             assert_eq!(flags(&rig.view(cx).unwrap()), (false, false, None));
             rig.take_events();
 
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             let view = rig.view(cx).unwrap();
             assert_eq!((view.generation, view.kind), (2, RequestKind::More));
             assert_eq!(flags(&view), (false, true, None));
@@ -2746,7 +2758,7 @@ mod tests {
         ) {
             let rig = Rig::opened(cx);
             rig.apply(cx, full(1));
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             rig.commands();
             rig.take_events();
 
@@ -2877,7 +2889,7 @@ mod tests {
         fn a_page_that_does_not_pass_the_cursor_ends_the_list(cx: &mut TestAppContext) {
             let rig = Rig::opened(cx);
             rig.apply(cx, full(1));
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             rig.apply(
                 cx,
                 page(2, &guids("a", REACTORS_PAGE), REACTORS_PAGE, Some(200)),
@@ -2891,7 +2903,7 @@ mod tests {
             );
 
             rig.commands();
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             assert!(rig.commands().is_empty(), "no further page is asked");
         }
 
@@ -2904,7 +2916,7 @@ mod tests {
             rig.apply(cx, full(1));
             assert_eq!(flags(&rig.view(cx).unwrap()), (false, false, None));
             rig.commands();
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             assert_eq!(rig.commands(), [load(Some(200), 2)]);
 
             // A count above all the rows does not keep it going after the end.
@@ -2914,7 +2926,7 @@ mod tests {
             rig.apply(cx, page(1, &guids("a", 3), 3, Some(10)));
             assert_eq!(flags(&rig.view(cx).unwrap()), (true, false, None));
             rig.commands();
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             assert!(rig.commands().is_empty());
         }
 
@@ -2925,7 +2937,7 @@ mod tests {
             let rig = Rig::opened(cx);
             rig.apply(cx, ClientEvent::Connection(ConnectionState::Online));
             rig.apply(cx, full(1));
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             rig.commands();
             rig.take_events();
 
@@ -2955,7 +2967,7 @@ mod tests {
             for state in [ConnectionState::Offline, ConnectionState::Connecting] {
                 let rig = Rig::opened(cx);
                 rig.apply(cx, full(1));
-                rig.request(cx, RequestKind::More);
+                rig.more(cx);
                 rig.apply(cx, failure(2, "сбой", false));
                 rig.apply(cx, ClientEvent::Connection(state));
                 rig.commands();
@@ -2982,11 +2994,97 @@ mod tests {
         fn only_one_next_page_is_out_at_a_time(cx: &mut TestAppContext) {
             let rig = Rig::opened(cx);
             rig.apply(cx, full(1));
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             rig.commands();
-            rig.request(cx, RequestKind::More);
+            rig.more(cx);
             assert!(rig.commands().is_empty());
             assert_eq!(rig.view(cx).unwrap().generation, 2);
+        }
+
+        #[gpui::test]
+        fn choosing_more_asks_for_the_page_after_the_oldest_and_appends_it(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.take_events();
+
+            rig.more(cx);
+            assert_eq!(rig.commands(), [load(Some(200), 2)]);
+            let view = rig.view(cx).unwrap();
+            assert_eq!((view.generation, view.kind), (2, RequestKind::More));
+            assert_eq!(flags(&view), (false, true, None), "loading the next page");
+            assert_eq!(rig.take_events(), [StoreEvent::Reactors]);
+
+            rig.apply(cx, page(2, &guids("b", 2), 2, Some(100)));
+            let view = rig.view(cx).unwrap();
+            let mut expected = guids("a", REACTORS_PAGE);
+            expected.extend(guids("b", 2));
+            assert_eq!(rows(&view), expected);
+            assert_eq!(flags(&view), (true, false, None));
+
+            // A full second page that progresses keeps the row, and the next choice asks again
+            // from the new oldest entry with a fresh token.
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.more(cx);
+            rig.apply(
+                cx,
+                page(2, &guids("b", REACTORS_PAGE), REACTORS_PAGE, Some(100)),
+            );
+            assert_eq!(flags(&rig.view(cx).unwrap()), (false, false, None));
+            rig.commands();
+            rig.more(cx);
+            assert_eq!(rig.commands(), [load(Some(100), 3)]);
+        }
+
+        #[gpui::test]
+        fn choosing_more_sends_nothing_unless_a_next_page_can_be_asked(cx: &mut TestAppContext) {
+            // No list open.
+            let rig = Rig::new(cx);
+            rig.more(cx);
+            assert!(rig.commands().is_empty());
+            assert!(rig.take_events().is_empty());
+
+            // Loading, and failed.
+            let rig = Rig::opened(cx);
+            rig.more(cx);
+            assert!(rig.commands().is_empty(), "the first page is still out");
+            rig.apply(cx, failure(1, "x", false));
+            rig.take_events();
+            rig.more(cx);
+            assert!(rig.commands().is_empty());
+            assert!(rig.take_events().is_empty());
+            assert_eq!(rig.view(cx).unwrap().generation, 1);
+
+            // A short page is the end.
+            let rig = Rig::opened(cx);
+            rig.apply(cx, page(1, &guids("a", 3), 3, Some(10)));
+            rig.take_events();
+            rig.more(cx);
+            assert!(rig.commands().is_empty());
+            assert!(rig.take_events().is_empty());
+        }
+
+        #[gpui::test]
+        fn a_failed_next_page_does_not_change_the_loaded_rows_or_the_end_of_the_list(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::opened(cx);
+            rig.apply(cx, full(1));
+            rig.more(cx);
+            rig.apply(cx, failure(2, "сбой", true));
+            let view = rig.view(cx).unwrap();
+            assert_eq!(rows(&view), guids("a", REACTORS_PAGE));
+            assert!(matches!(
+                view.state,
+                ReactorsState::Ready {
+                    oldest: Some(200),
+                    exhausted: false,
+                    ..
+                }
+            ));
+            assert_eq!(flags(&view), (false, false, Some("сбой".into())));
         }
 
         #[gpui::test]
