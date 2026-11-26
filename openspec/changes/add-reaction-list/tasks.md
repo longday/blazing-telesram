@@ -75,7 +75,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 5. Desktop adapter
 
-- [ ] 5.1 `Backend::reactors` over the wire (D3)
+- [x] 5.1 `Backend::reactors` over the wire (D3)
   - Owns: `crates/desktop/src/yandex_backend.rs` (including its tests).
   - Depends on: 1.3, 4.1.
   - Do: build the page from `Client::reactors`; names from the entry, then the users cache (`Users::load` for the anonymous guids), then `None`; avatar and `me`; `raw` and `oldest` and `skipped` passed through from the wire.
