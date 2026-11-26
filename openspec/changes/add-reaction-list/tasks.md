@@ -59,14 +59,14 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 4. Core (`chat-core`)
 
-- [ ] 4.1 Domain types, seam, command and events (D2, D4)
+- [x] 4.1 Domain types, seam, command and events (D2, D4)
   - Owns: `crates/chat-core/src/model.rs`, `crates/chat-core/src/backend.rs`, `crates/chat-core/src/lib.rs`, `crates/chat-core/src/fixtures.rs`.
   - Depends on: nothing.
   - Do: `Reactor`, `ReactorsPage` (with `request`, `raw`, `oldest`), `Backend::reactors`, `Command::LoadReactors` (with `request`), `ClientEvent::Reactors`, `ClientEvent::ReactorsFailed` (with `request`); module and doc comments that list the reads.
   - Tests: serde-free; a `Reactor` literal helper in `fixtures.rs` if the test harness needs one. Compiles only inside RL-app.
   - Done when: the types match D2 exactly (other tasks code against them).
 
-- [ ] 4.2 Engine: `LoadReactors` (D4)
+- [x] 4.2 Engine: `LoadReactors` (D4)
   - Owns: `crates/chat-core/src/client.rs` (engine and its tests; the fake backend gains `reactors`).
   - Depends on: 4.1.
   - Do: D4 steps 1-5: the cached-message guard, the offline refusal without a request, the read, the failure mapping, no cache write and no change to `Message.reactions`; the `request` token is copied into every `Reactors` and `ReactorsFailed`, refusals included.
@@ -75,7 +75,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 5. Desktop adapter
 
-- [ ] 5.1 `Backend::reactors` over the wire (D3)
+- [x] 5.1 `Backend::reactors` over the wire (D3)
   - Owns: `crates/desktop/src/yandex_backend.rs` (including its tests).
   - Depends on: 1.3, 4.1.
   - Do: build the page from `Client::reactors`; names from the entry, then the users cache (`Users::load` for the anonymous guids), then `None`; avatar and `me`; `raw` and `oldest` and `skipped` passed through from the wire.
@@ -84,35 +84,35 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 6. Desktop UI
 
-- [ ] 6.1 Store: the open list (D5)
+- [x] 6.1 Store: the open list (D5)
   - Owns: `crates/desktop/src/store.rs` (including its tests).
   - Depends on: 4.1. Lands together with 6.3 (rule 3).
   - Do: `ReactorsView` (with `generation` and `kind`) and `ReactorsState` (with `loading_more`, `more_failed`), D5; the monotonic `next_request` counter; open and close; the first `Command::LoadReactors` (`kind = First`); `Reactors` and `ReactorsFailed` handling: `First` replaces the rows, `More` appends in server order with de-duplication by guid, applied only when `(chat, timestamp)` is the open list and `request == generation`; the end-of-list rule of D5 (`exhausted` from the page and strict cursor progress, never from counts); reads, never persisted. The `More` and refresh triggers are 6.4 and 6.5.
   - Tests: opening sends the first command with a fresh token and is `Loading`; a page becomes `Ready`; a second page appends and de-duplicates a repeated guid; a failure is `Failed` with its `offline` flag; a reply for a closed or different list is ignored; closing drops the state; **same-message reopen**: close and reopen the list of one message while the first request is out, then the first answer (page and failure variants) arrives: it is dropped and the second request's answer is applied; **refresh while an older page is in flight**: with a load-more request out, a refresh (new first-page request) supersedes it and the late page of the old generation changes nothing, including after the refresh's answer; a retry after `Failed` takes a fresh token and a late answer of the failed request is dropped; the token counter does not restart on close; `exhausted` is true for a short page (`raw < limit`), for an empty page, and for a page whose `oldest` is not below the cursor (a repeated boundary does not loop), false for a full page that progresses; a known count lower than the loaded rows does not stop paging, a known count higher than all rows does not keep it going after the end.
   - Done when: these tests exist.
 
-- [ ] 6.2 List view (D6)
+- [x] 6.2 List view (D6)
   - Owns: new `crates/desktop/src/reactors.rs`, `crates/desktop/src/theme.rs` (colours only if needed), `crates/desktop/src/main.rs` (module line).
   - Depends on: 4.1, 6.1. Lands together with 6.3 (rule 3).
   - Do: the pure `body(state, connection, total)` and the list view (one flat list): rows, own marker, placeholder "Неизвестный", emoji or `NEUTRAL_GLYPH`, time, header "N из M" and "K без данных" rules, loading, failed with retry, «Нет соединения» with retry; the `More` model (`Hidden | Offer | Loading | Retry`) derived from `exhausted`, `loading_more`, `more_failed`; selectors `reactor-{guid}`, `reactors-more`, `reactors-retry`.
   - Tests: `body` for every state; a `Ready` state with a non-online connection and a `Failed { offline }` are `Offline`; the header rules; row content; `More` follows `exhausted`, `loading_more` and `more_failed` and not `total` (total below the rows and total above them).
   - Done when: these tests exist.
 
-- [ ] 6.3 Entry point: «Кто отреагировал» in the message menu (Q1 = A; spec "Opening the list", `message-editing` delta)
+- [x] 6.3 Entry point: «Кто отреагировал» in the message menu (Q1 = A; spec "Opening the list", `message-editing` delta)
   - Owns: `crates/desktop/src/desktop/composer.rs`, `crates/desktop/src/desktop.rs`.
   - Depends on: 6.1, 6.2. Lands in RL-app.
   - Do: a menu entry «Кто отреагировал» (selector `menu-reactors`) for a sent, non-deleted message with at least one reaction; `open_menu` opens the menu when this entry is its only content; choosing it closes the menu and opens the list popover anchored where the menu was (`desktop.rs` hosts it); Escape or a click outside closes the popover; chip gestures are untouched.
   - Tests: menu content for a sent message with reactions, without reactions, pending, failed, deleted, own and other's (the existing menu tests' style); the popover opens at the menu's anchor and closes with Escape and an outside click; a left click on a chip still toggles the own reaction and opens no list.
   - Done when: these tests exist.
 
-- [ ] 6.4 Loading more (Q2 = A; spec "Loading more")
+- [x] 6.4 Loading more (Q2 = A; spec "Loading more")
   - Owns: `crates/desktop/src/store.rs`, `crates/desktop/src/reactors.rs`.
   - Depends on: 6.1, 6.2. The cursor and short-page rules are adjustable by 3.1's findings (`REACTORS_PAGE`), not a gate for the code.
   - Do: the «Показать ещё» row (selector `reactors-more`) when not `exhausted`, `Loading` while a page is out, `Retry(reason)` (selector `reactors-retry`) after a failed page that keeps the rows; choosing it sends `LoadReactors { before: oldest }`, `kind = More`, fresh token (D5 "Load more").
   - Tests: the row is offered after a full page and absent after a short one; choosing it sends the command with `before = oldest` and a fresh token and shows `Loading`; the next page appends and de-duplicates; a failure keeps the rows and offers a retry; the retry takes a fresh token; a late answer of a superseded request is dropped; a known count below or above the rows does not change the row.
   - Done when: these tests exist.
 
-- [ ] 6.5 List stays current (Q3 = A; spec "List stays current")
+- [x] 6.5 List stays current (Q3 = A; spec "List stays current")
   - Owns: `crates/desktop/src/store.rs`, `crates/desktop/src/reactors.rs`.
   - Depends on: 6.1, 6.2.
   - Do: on `ClientEvent::ReactionsChanged` for the open list's message with a version other than `base_version`, a 1 s debounce (a pure schedule/fire state machine in the store, driven by the app's existing timer mechanism) after which a `First` request with a fresh token is sent, `base_version` is updated and the rows stay shown until the answer replaces them (D5 "Refresh"); a deleted message gives the "message gone" failure and cancels the timer; closing cancels it.
@@ -121,7 +121,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 - [x] 6.6 Type presentation (Q5 = A: one flat list): no work; the flat list is task 6.2 and the spec "Reactor entries".
 
-- [ ] 6.7 UI tests
+- [x] 6.7 UI tests
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 6.1-6.5.
   - Do, in the style of the existing menu and members tests: the entry appears for a sent message with reactions and not for a pending, deleted or reaction-less one; opening sends `Command::LoadReactors`; the list shows rows, the loading, failed and «Нет соединения» states with their retry; «Показать ещё» appends; a reaction change re-reads from the first page; a late reply after closing changes nothing; no `Command::ToggleReaction` or other write is sent by opening, paging, refreshing or closing.
@@ -135,7 +135,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 8. Verification and close-out
 
-- [ ] 8.1 Final full run
+- [x] 8.1 Final full run
   - Owns: nothing; fixes only compile breaks that cross task boundaries.
   - Depends on: 1.1-1.3, 2.1, 4.1, 4.2, 5.1, 6.1-6.7, 7.1, and both merge units on `main`. The per-unit checks of "Merge units" are not replaced by this task: they run before each unit merges.
   - Do: on `main` after both units, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --all --check`, `cargo build --workspace --all-targets --locked` with zero warnings, all inside `bt-vm`; `openspec validate add-reaction-list --strict`.

@@ -69,6 +69,7 @@ pub(super) struct Toast {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuAction {
+    Reactors,
     Reply,
     Copy,
     Edit,
@@ -78,6 +79,7 @@ enum MenuAction {
 impl MenuAction {
     fn selector(self) -> &'static str {
         match self {
+            Self::Reactors => "menu-reactors",
             Self::Reply => "menu-reply",
             Self::Copy => "menu-copy",
             Self::Edit => "menu-edit",
@@ -85,17 +87,20 @@ impl MenuAction {
         }
     }
 
-    fn icon(self) -> Icon {
+    /// The line icon of the entry; «Кто отреагировал» has none (the entry keeps the icon's room).
+    fn icon(self) -> Option<Icon> {
         match self {
-            Self::Reply => Icon::Reply,
-            Self::Copy => Icon::Copy,
-            Self::Edit => Icon::Edit,
-            Self::Delete => Icon::Trash,
+            Self::Reactors => None,
+            Self::Reply => Some(Icon::Reply),
+            Self::Copy => Some(Icon::Copy),
+            Self::Edit => Some(Icon::Edit),
+            Self::Delete => Some(Icon::Trash),
         }
     }
 
     fn label(self) -> &'static str {
         match self {
+            Self::Reactors => "Кто отреагировал",
             Self::Reply => "Ответить",
             Self::Copy => "Скопировать текст",
             Self::Edit => "Редактировать",
@@ -103,7 +108,7 @@ impl MenuAction {
         }
     }
 
-    /// Reply and Copy apply to any message; Edit and Delete only to the user's own.
+    /// Reactors, Reply and Copy apply to any message; Edit and Delete only to the user's own.
     fn is_own_only(self) -> bool {
         matches!(self, Self::Edit | Self::Delete)
     }
@@ -114,6 +119,9 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
     let own = m.outgoing && sent;
     let content = !matches!(m.body, MessageBody::Deleted | MessageBody::Unsupported(_));
     let mut actions = Vec::new();
+    if has_reactors(m) {
+        actions.push(MenuAction::Reactors);
+    }
     if sent && content {
         actions.push(MenuAction::Reply);
     }
@@ -138,6 +146,14 @@ fn copy_text(m: &Message) -> Option<&str> {
         MessageBody::File { name, .. } => Some(name),
         MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
+}
+
+/// «Кто отреагировал» is offered for a sent, non-deleted message with at least one reaction
+/// (`counts` never holds a zero count); a pending or failed one has none to list.
+fn has_reactors(m: &Message) -> bool {
+    m.delivery == Delivery::Sent
+        && !matches!(m.body, MessageBody::Deleted)
+        && !m.reactions.counts.is_empty()
 }
 
 /// The menu offers the reaction row on any sent, non-deleted message, as the chips do; the row
@@ -198,6 +214,7 @@ impl Desktop {
         });
         self.leave_chat(cx);
         self.message_menu = None;
+        self.close_reactors(cx);
         self.delete_pending = None;
         self.open = selected.zip(list).map(|(chat, list)| OpenTimeline {
             chat,
@@ -520,6 +537,8 @@ impl Desktop {
             self.close_new_chat(cx);
         } else if self.blocked(cx) {
             // The session dialogs offer only sign-out.
+        } else if self.reactors_popover.is_some() {
+            self.close_reactors(cx);
         } else if self.message_menu.take().is_some() {
             cx.notify();
         } else if self.info.is_some() {
@@ -585,6 +604,9 @@ impl Desktop {
             return;
         }
         match action {
+            MenuAction::Reactors => {
+                self.open_reactors(menu.chat, menu.timestamp, menu.position, cx)
+            }
             MenuAction::Reply => self.start_reply(menu.timestamp, window, cx),
             MenuAction::Copy => {
                 if let Some(message) = self.find_message(menu.timestamp, cx) {
@@ -877,7 +899,10 @@ impl Desktop {
                         INK
                     }))
                     .hover(|s| s.bg(rgb(MENU_HOVER)))
-                    .child(icon(action.icon(), 16., MENU_ICON))
+                    .child(match action.icon() {
+                        Some(kind) => icon(kind, 16., MENU_ICON).into_any_element(),
+                        None => div().size(px(16.)).flex_none().into_any_element(),
+                    })
                     .child(action.label())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.run_menu_action(action, window, cx)

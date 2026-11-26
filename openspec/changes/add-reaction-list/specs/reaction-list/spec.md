@@ -102,7 +102,7 @@ The list SHALL load the first page of 30 entries and, when the server has more, 
 - **THEN** the shown entries stay and the row offers to try again
 
 ### Requirement: List stays current
-While the list is open, a change of the message's reactions SHALL make the list read again from its first page after a short delay (about one second, so that a burst of changes causes one read). The entries already shown SHALL stay on screen until the new first page replaces them; paging then starts over from that page. If the message is deleted meanwhile, the list SHALL say that the message is gone. If the re-read fails, the list SHALL show the failure with a way to try again.
+While the list is open, a change of the message's reactions SHALL make it read again from the first page after about one second (a burst causes one read), whatever it showed meanwhile, including a failure of an earlier read. Shown entries SHALL stay until the new first page replaces them; paging then starts over. A failed re-read SHALL show the failure with a way to try again. A deleted message is the exception (see "Deleted message").
 
 #### Scenario: Someone reacts while the list is open
 - **GIVEN** the list is open
@@ -150,7 +150,7 @@ Opening the list, and anything it does to show more entries, SHALL only read fro
 - **THEN** no reactor list is available until the user opens one again
 
 ### Requirement: Failed and offline list
-While the list loads, the user SHALL see that it is loading. When the server refuses or the request fails, the list SHALL show the reason and a way to try again. When the client has no connection, the list SHALL say «Нет соединения» and offer to try again, SHALL NOT show entries from an earlier time as current, and SHALL NOT keep the list in the offline cache. A failure SHALL NOT change the message's chips.
+While the list loads, the user SHALL see that it is loading. When the server refuses or the request fails, the list SHALL show the reason and a way to try again (the one exception is a deleted message, see "Deleted message"). When the client has no connection, the list SHALL say «Нет соединения» and offer to try again, SHALL NOT show entries from an earlier time as current, and SHALL NOT keep the list in the offline cache. A failure SHALL NOT change the message's chips.
 
 #### Scenario: Loading
 - **WHEN** the user opens the list and the answer has not arrived
@@ -165,10 +165,13 @@ While the list loads, the user SHALL see that it is loading. When the server ref
 - **WHEN** the user opens the list
 - **THEN** it says «Нет соединения» with a retry and shows no entries, and no request is sent
 
+### Requirement: Deleted message
+While the list is open or loading and its message is deleted, the list SHALL say that the message is gone («Сообщение удалено») with no entries, SHALL offer no retry (none could succeed) and SHALL NOT read again when reactions change.
+
 #### Scenario: Message deleted meanwhile
-- **GIVEN** the list is loading
+- **GIVEN** the list is loading or shown
 - **WHEN** the message is deleted
-- **THEN** the list shows that the message is gone and no entries
+- **THEN** the list shows «Сообщение удалено» and no entries, and no retry
 
 ### Requirement: Answers match the list shown
 The list SHALL show only answers to the request that belongs to the list currently open. An answer to a list the user closed, to an earlier opening of the same message, or to a page requested before a refresh SHALL be discarded, whether it carries entries or a failure.
