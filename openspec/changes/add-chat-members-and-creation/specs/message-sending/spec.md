@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Writes only from user actions
-The client SHALL change server state only as a direct result of the user's actions defined by the sending, editing, read-marker, typing and chat-creation capabilities. It SHALL NOT send reactions, presence heartbeats or status changes.
+The client SHALL change server state only as a direct result of the user's actions defined by the sending, editing, read-marker, typing, message-reactions and chat-creation capabilities. It SHALL NOT send presence heartbeats or status changes.
 
 #### Scenario: Idle client
 - **WHEN** the client runs without user input
@@ -12,3 +12,7 @@ The client SHALL change server state only as a direct result of the user's actio
 #### Scenario: Server rejects writes to a chat
 - **WHEN** the server refuses a message because the user may not write to that chat
 - **THEN** the message is shown as failed with the reason, and no further automatic retries happen
+
+#### Scenario: Reactions come from the user only
+- **WHEN** the client receives reaction updates, reloads history or reconnects
+- **THEN** it sends no reaction of its own
