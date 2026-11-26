@@ -56,7 +56,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 5. Verification and close-out
 
-- [ ] 5.1 Final full run
+- [x] 5.1 Final full run
   - Owns: nothing; fixes only compile breaks that cross task boundaries.
   - Depends on: 1.1, 2.1, 2.2, 3.1, 4.1 and the REV unit on `main`. The per-unit checks of "Merge unit" are not replaced by this task: they run before the unit merges.
   - Do: on `main`, in `bt-vm`: `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --all --check`, `cargo build --workspace --all-targets --locked` with zero warnings; `openspec validate add-reveal-downloaded-file --strict`.
