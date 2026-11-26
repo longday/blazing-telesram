@@ -7,7 +7,8 @@ use crate::format::{Clock, fit_thumbnail};
 use crate::logging::{LogBuffer, LogLine};
 use crate::search_results::StatusLine;
 use crate::store::{
-    ChatFilter, ChatStore, DownloadState, SEARCH_DEBOUNCE, SearchStatus, SessionState,
+    ChatFilter, ChatStore, DownloadState, MESSAGE_GONE, REACTORS_REFRESH_DELAY, ReactorsState,
+    SEARCH_DEBOUNCE, SearchStatus, SessionState,
 };
 use crate::timeline::gallery_columns;
 use async_channel::{Receiver, Sender};
@@ -6831,4 +6832,585 @@ fn the_more_button_asks_for_the_next_page_from_the_oldest_entry(cx: &mut TestApp
     click(cx, "reactors-more");
     assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
     assert!(reactors_popover_open(&h, cx));
+}
+
+// ---- add-reaction-list 6.7: the list end to end ----
+//
+// 6.3's tests above cover the entry and the popover's place; these drive the list through the real
+// store and window: rows, the loading, failed and «Нет соединения» states with their retry, «Показать
+// ещё», the refresh after a reaction change (the fake clock stands in for the delay), late replies,
+// and that nothing but `LoadReactors` is ever sent. Bounds are never removed once painted, so what
+// went away is checked in the store and what appeared on screen.
+
+/// A full first page (as far as the store can tell, there is a next one).
+const FULL_PAGE: usize = bt_chat_core::client::REACTORS_PAGE;
+
+fn who(guid: &str, name: Option<&str>, code: i64, at: Option<i64>, me: bool) -> Reactor {
+    Reactor {
+        user: UserId(guid.into()),
+        name: name.map(Into::into),
+        avatar: None,
+        code: ReactionCode(code),
+        at,
+        me,
+    }
+}
+
+fn page(request: u64, reactors: Vec<Reactor>, raw: usize, oldest: Option<i64>) -> ClientEvent {
+    ClientEvent::Reactors(ReactorsPage {
+        chat: chat_g(),
+        timestamp: ts(1),
+        request,
+        reactors,
+        skipped: 0,
+        raw,
+        oldest,
+    })
+}
+
+fn page_failed(request: u64, reason: &str, offline: bool) -> ClientEvent {
+    ClientEvent::ReactorsFailed {
+        chat: chat_g(),
+        timestamp: ts(1),
+        request,
+        reason: reason.into(),
+        offline,
+    }
+}
+
+fn two_people() -> Vec<Reactor> {
+    vec![
+        who("u1", Some("Анна"), LIKE, Some(1_700_000_000_000_000), false),
+        who("u2", Some("Борис"), FIRE, Some(1_700_000_100_000_000), true),
+    ]
+}
+
+fn reactors_state(h: &Harness, cx: &mut VisualTestContext) -> Option<ReactorsState> {
+    h.store
+        .read_with(cx, |s, _| s.reactors().map(|v| v.state.clone()))
+}
+
+/// The guids of the shown rows, in order; empty for a list that is not `Ready` or not open.
+fn reactor_rows(h: &Harness, cx: &mut VisualTestContext) -> Vec<String> {
+    match reactors_state(h, cx) {
+        Some(ReactorsState::Ready { rows, .. }) => rows.into_iter().map(|r| r.user.0).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the popover or the store's list is still there.
+fn reactors_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    reactors_popover_open(h, cx) || reactors_list_in_store(h, cx)
+}
+
+/// The group chat with messages 1 (three reactions, version 1) and 2 (one), the client online and the
+/// list of message 1 opened through the menu. The first command is checked and consumed.
+fn open_reactors_online(h: &Harness, cx: &mut VisualTestContext) {
+    open_with(
+        h,
+        cx,
+        vec![
+            reacted(1, &[(LIKE, 2), (FIRE, 1)], None),
+            reacted(2, &[(HEART, 1)], None),
+        ],
+    );
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    right_click(cx, msg!(1));
+    click(cx, "menu-reactors");
+    assert_eq!(h.commands(), [load_reactors(1, None, 1)]);
+    assert_eq!(reactors_state(h, cx), Some(ReactorsState::Loading));
+}
+
+/// Reactions of message 1 at `version`.
+fn changed(version: i64, counts: &[(i64, u32)]) -> ClientEvent {
+    ClientEvent::ReactionsChanged {
+        chat: chat_g(),
+        timestamp: ts(1),
+        reactions: Reactions {
+            version: Some(version),
+            ..reactions_of(counts, None)
+        },
+    }
+}
+
+const ONE_MS: Duration = Duration::from_millis(1);
+
+#[gpui::test]
+fn the_list_shows_each_person_in_server_order_with_the_own_marker(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(
+        cx,
+        [page(
+            1,
+            vec![
+                who("u1", Some("Анна"), LIKE, Some(1_700_000_000_000_000), false),
+                who("u2", Some("Борис"), FIRE, Some(1_700_000_100_000_000), true),
+                who("u3", None, NOT_IN_TABLE, None, false),
+            ],
+            3,
+            Some(1_700_000_000_000_000),
+        )],
+    );
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2", "u3"]);
+    for row in ["reactor-u1", "reactor-u2", "reactor-u3"] {
+        assert!(shown(cx, row), "{row}");
+    }
+    assert!(y(cx, "reactor-u1") < y(cx, "reactor-u2") && y(cx, "reactor-u2") < y(cx, "reactor-u3"));
+    assert!(shown(cx, "reactor-u2-own") && !shown(cx, "reactor-u1-own"));
+    assert!(shown(cx, "reactor-u3-name"), "a placeholder, not a blank");
+    assert!(shown(cx, "reactor-u1-time") && shown(cx, "reactor-u2-time"));
+    assert!(!shown(cx, "reactor-u3-time"), "no time was told");
+    assert!(shown(cx, "reactor-u1-emoji") && shown(cx, "reactor-u3-emoji"));
+    assert!(!shown(cx, "reactors-more"), "a short page is the end");
+    assert!(!shown(cx, "reactors-header"), "3 of the 3 known are shown");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_short_list_declares_the_entries_it_misses(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+    assert!(shown(cx, "reactors-header"), "2 of the 3 known reactions");
+    assert!(shown(cx, "reactor-u1") && shown(cx, "reactor-u2"));
+    assert!(
+        !shown(cx, "reactors-more"),
+        "the page, not the count, ends the list"
+    );
+}
+
+#[gpui::test]
+fn a_refused_list_shows_the_reason_and_recovers_through_retry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page_failed(1, "нет прав", false)]);
+    assert!(shown(cx, "reactors-error") && shown(cx, "reactors-error-reason"));
+    assert!(shown(cx, "reactors-retry"));
+    assert_eq!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Failed {
+            reason: "нет прав".into(),
+            offline: false
+        })
+    );
+
+    click(cx, "reactors-retry");
+    assert_eq!(h.commands(), [load_reactors(1, None, 2)]);
+    assert_eq!(reactors_state(&h, cx), Some(ReactorsState::Loading));
+    assert!(reactors_popover_open(&h, cx), "retrying does not close it");
+
+    h.feed(cx, [page_failed(1, "поздно", false)]);
+    assert_eq!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Loading),
+        "the first read's failure is superseded"
+    );
+    h.feed(cx, [page(2, two_people(), 2, Some(5))]);
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2"]);
+    assert!(shown(cx, "reactor-u1"));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn an_offline_failure_shows_no_connection_with_a_retry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page_failed(1, "нет сети", true)]);
+    assert!(shown(cx, "reactors-offline") && shown(cx, "reactors-retry"));
+    assert!(!shown(cx, "reactors-error"), "not worded as a refusal");
+    assert_eq!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Failed {
+            reason: "нет сети".into(),
+            offline: true
+        })
+    );
+
+    click(cx, "reactors-retry");
+    assert_eq!(h.commands(), [load_reactors(1, None, 2)]);
+    h.feed(cx, [page(2, two_people(), 2, Some(5))]);
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2"]);
+}
+
+#[gpui::test]
+fn a_shown_list_reads_no_connection_while_the_client_is_offline(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+    assert!(shown(cx, "reactor-u1"));
+    assert!(!shown(cx, "reactors-offline"));
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(
+        shown(cx, "reactors-offline") && shown(cx, "reactors-retry"),
+        "rows from before the outage are not presented as current"
+    );
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u1", "u2"],
+        "kept until the re-read answers"
+    );
+
+    click(cx, "reactors-retry");
+    assert_eq!(h.commands(), [load_reactors(1, None, 2)]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::Connection(ConnectionState::Online),
+            page(2, vec![two_people().remove(1)], 1, Some(6)),
+        ],
+    );
+    assert_eq!(reactor_rows(&h, cx), ["u2"], "the answer replaces the rows");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn show_more_appends_the_next_page_without_a_person_twice(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), FULL_PAGE, Some(5))]);
+    assert!(
+        shown(cx, "reactors-more"),
+        "a full page may have a next one"
+    );
+
+    click(cx, "reactors-more");
+    assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u1", "u2"],
+        "the rows stay meanwhile"
+    );
+
+    h.feed(
+        cx,
+        [page(
+            2,
+            vec![
+                two_people().remove(1),
+                who(
+                    "u3",
+                    Some("Вера"),
+                    HEART,
+                    Some(1_699_999_000_000_000),
+                    false,
+                ),
+            ],
+            2,
+            Some(3),
+        )],
+    );
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u1", "u2", "u3"],
+        "appended, u2 once"
+    );
+    assert!(shown(cx, "reactor-u3"));
+    assert!(matches!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Ready {
+            exhausted: true,
+            loading_more: false,
+            ..
+        })
+    ));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_failed_next_page_keeps_the_rows_and_retries_that_page(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), FULL_PAGE, Some(5))]);
+    click(cx, "reactors-more");
+    assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
+
+    h.feed(cx, [page_failed(2, "сбой", false)]);
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2"]);
+    assert!(shown(cx, "reactors-more-error") && shown(cx, "reactors-retry"));
+    assert!(!shown(cx, "reactors-error"), "the list itself did not fail");
+
+    click(cx, "reactors-retry");
+    assert_eq!(
+        h.commands(),
+        [load_reactors(1, Some(5), 3)],
+        "that page again, fresh token"
+    );
+    h.feed(
+        cx,
+        [page(
+            3,
+            vec![who("u3", Some("Вера"), HEART, None, false)],
+            1,
+            Some(3),
+        )],
+    );
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2", "u3"]);
+}
+
+#[gpui::test]
+fn a_reaction_change_rereads_the_list_from_the_first_page_after_the_delay(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), FULL_PAGE, Some(5))]);
+    click(cx, "reactors-more");
+    assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
+    h.feed(
+        cx,
+        [page(
+            2,
+            vec![who("u3", Some("Вера"), HEART, None, false)],
+            FULL_PAGE,
+            Some(3),
+        )],
+    );
+    assert_eq!(reactor_rows(&h, cx), ["u1", "u2", "u3"], "a deep list");
+
+    h.feed(cx, [changed(2, &[(LIKE, 2), (FIRE, 2)])]);
+    pass(cx, REACTORS_REFRESH_DELAY / 2);
+    h.feed(cx, [changed(3, &[(LIKE, 3), (FIRE, 2)])]);
+    pass(cx, REACTORS_REFRESH_DELAY / 2);
+    pass(cx, REACTORS_REFRESH_DELAY / 2 - ONE_MS);
+    assert!(
+        h.commands().is_empty(),
+        "each change restarts the delay, nothing is read before it ran out"
+    );
+
+    pass(cx, ONE_MS);
+    assert_eq!(
+        h.commands(),
+        [load_reactors(1, None, 3)],
+        "one read of the first page for the whole burst"
+    );
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u1", "u2", "u3"],
+        "the rows stay shown until the answer"
+    );
+
+    h.feed(
+        cx,
+        [page(
+            3,
+            vec![
+                who("u4", Some("Глеб"), FIRE, None, false),
+                two_people().remove(0),
+            ],
+            2,
+            Some(4),
+        )],
+    );
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u4", "u1"],
+        "the answer replaces them"
+    );
+    assert!(matches!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Ready {
+            exhausted: true,
+            ..
+        })
+    ));
+    pass(cx, REACTORS_REFRESH_DELAY * 3);
+    assert!(h.commands().is_empty(), "nothing more is scheduled");
+}
+
+#[gpui::test]
+fn a_refresh_supersedes_a_next_page_still_out(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), FULL_PAGE, Some(5))]);
+    click(cx, "reactors-more");
+    assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
+
+    h.feed(cx, [changed(2, &[(LIKE, 3), (FIRE, 1)])]);
+    pass(cx, REACTORS_REFRESH_DELAY);
+    assert_eq!(h.commands(), [load_reactors(1, None, 3)]);
+
+    let late = page(2, vec![who("u3", None, HEART, None, false)], 1, Some(3));
+    h.feed(cx, [late.clone()]);
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u1", "u2"],
+        "the late page changes nothing"
+    );
+    h.feed(cx, [page(3, vec![two_people().remove(1)], 1, Some(7))]);
+    h.feed(cx, [late]);
+    assert_eq!(
+        reactor_rows(&h, cx),
+        ["u2"],
+        "nor does it after the refresh's answer"
+    );
+}
+
+#[gpui::test]
+fn a_change_that_does_not_concern_the_open_list_reads_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+
+    h.feed(cx, [changed(1, &[(LIKE, 5)])]);
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(2),
+            reactions: Reactions {
+                version: Some(9),
+                ..reactions_of(&[(HEART, 2)], None)
+            },
+        }],
+    );
+    pass(cx, REACTORS_REFRESH_DELAY * 3);
+    assert!(
+        h.commands().is_empty(),
+        "the version the list was read at, and another message"
+    );
+
+    h.feed(cx, [changed(4, &[(LIKE, 5)])]);
+    cx.simulate_keystrokes("escape");
+    assert!(!reactors_open(&h, cx));
+    pass(cx, REACTORS_REFRESH_DELAY * 3);
+    h.feed(cx, [changed(5, &[(LIKE, 6)])]);
+    pass(cx, REACTORS_REFRESH_DELAY * 3);
+    assert!(
+        h.commands().is_empty(),
+        "closing cancels a waiting refresh and a closed list is not refreshed"
+    );
+}
+
+#[gpui::test]
+fn a_deleted_message_turns_the_list_into_message_gone_and_cancels_the_refresh(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+    h.feed(cx, [changed(2, &[(LIKE, 3)])]);
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(1),
+        }],
+    );
+    assert!(shown(cx, "reactors-gone"));
+    assert_eq!(
+        reactors_state(&h, cx),
+        Some(ReactorsState::Failed {
+            reason: MESSAGE_GONE.into(),
+            offline: false
+        })
+    );
+    pass(cx, REACTORS_REFRESH_DELAY * 3);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_reply_after_the_list_closed_changes_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_online(&h, cx);
+    cx.simulate_keystrokes("escape");
+    assert!(!reactors_open(&h, cx));
+
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+    assert!(
+        !reactors_open(&h, cx),
+        "a page for a closed list is dropped"
+    );
+    h.feed(cx, [page_failed(1, "нет прав", false)]);
+    assert!(!reactors_open(&h, cx), "so is a failure");
+    assert!(h.commands().is_empty());
+
+    // Reopened while the first read is still out: only the second one's answer counts.
+    right_click(cx, msg!(1));
+    click(cx, "menu-reactors");
+    assert_eq!(h.commands(), [load_reactors(1, None, 2)]);
+    h.feed(cx, [page(1, two_people(), 2, Some(5))]);
+    assert_eq!(reactors_state(&h, cx), Some(ReactorsState::Loading));
+    h.feed(cx, [page_failed(1, "нет прав", false)]);
+    assert_eq!(reactors_state(&h, cx), Some(ReactorsState::Loading));
+    h.feed(cx, [page(2, vec![two_people().remove(0)], 1, Some(5))]);
+    assert_eq!(reactor_rows(&h, cx), ["u1"]);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn opening_paging_refreshing_and_closing_send_only_reads(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![reacted(1, &[(LIKE, 2), (FIRE, 1)], Some(LIKE))],
+    );
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let mut sent = Vec::new();
+
+    right_click(cx, msg!(1));
+    click(cx, "menu-reactors");
+    sent.extend(h.commands());
+    h.feed(cx, [page(1, two_people(), FULL_PAGE, Some(5))]);
+
+    click(cx, "reactors-more");
+    sent.extend(h.commands());
+    h.feed(
+        cx,
+        [page(
+            2,
+            vec![who("u3", Some("Вера"), HEART, None, false)],
+            FULL_PAGE,
+            Some(3),
+        )],
+    );
+
+    let before = sent.len();
+    click(cx, "reactor-u1");
+    click(cx, "reactor-u2");
+    assert!(
+        reactors_popover_open(&h, cx),
+        "a click on an entry is not a gesture"
+    );
+    sent.extend(h.commands());
+    assert_eq!(sent.len(), before, "a row sends nothing");
+
+    h.feed(
+        cx,
+        [ClientEvent::ReactionsChanged {
+            chat: chat_g(),
+            timestamp: ts(1),
+            reactions: Reactions {
+                version: Some(2),
+                ..reactions_of(&[(LIKE, 3), (FIRE, 1)], Some(LIKE))
+            },
+        }],
+    );
+    pass(cx, REACTORS_REFRESH_DELAY);
+    sent.extend(h.commands());
+    h.feed(cx, [page(3, two_people(), 2, Some(5))]);
+
+    cx.simulate_keystrokes("escape");
+    assert!(!reactors_open(&h, cx));
+    sent.extend(h.commands());
+
+    assert_eq!(
+        sent,
+        [
+            load_reactors(1, None, 1),
+            load_reactors(1, Some(5), 2),
+            load_reactors(1, None, 3)
+        ]
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|c| matches!(c, Command::ToggleReaction { .. })),
+        "the own reaction was never touched"
+    );
+    assert_eq!(
+        reactions_in_store(&h, cx, 1).mine,
+        Some(ReactionCode(LIKE)),
+        "and the message's own reaction is as it was"
+    );
 }

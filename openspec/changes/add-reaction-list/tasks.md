@@ -121,7 +121,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 - [x] 6.6 Type presentation (Q5 = A: one flat list): no work; the flat list is task 6.2 and the spec "Reactor entries".
 
-- [ ] 6.7 UI tests
+- [x] 6.7 UI tests
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 6.1-6.5.
   - Do, in the style of the existing menu and members tests: the entry appears for a sent message with reactions and not for a pending, deleted or reaction-less one; opening sends `Command::LoadReactors`; the list shows rows, the loading, failed and «Нет соединения» states with their retry; «Показать ещё» appends; a reaction change re-reads from the first page; a late reply after closing changes nothing; no `Command::ToggleReaction` or other write is sent by opening, paging, refreshing or closing.
