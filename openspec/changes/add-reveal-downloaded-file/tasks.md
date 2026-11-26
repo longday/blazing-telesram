@@ -48,7 +48,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 4. Tests
 
-- [ ] 4.1 Store and UI tests
+- [x] 4.1 Store and UI tests
   - Owns: `crates/desktop/src/tests.rs` (a new section `// ---- reveal in Finder (REV 4.1) ----` at the end).
   - Depends on: 1.1, 2.1, 2.2. Waits until RL 6.7, PIN 4.4 have merged or are not started (rule 1).
   - Do, in the style of the existing `download_*` tests (store harness; real files in `tempfile::tempdir()` where the file must exist): (a) `reveal_download` on a `Saved` state whose file exists emits `StoreEvent::Reveal(path)` with exactly that path and sends no command (`h.commands()` is empty); (b) on a state whose file was deleted it emits no `Reveal`, clears the state (`download_state` is `None`) and sends no command; (c) with no state, `Running` and `Failed(_)` it emits nothing and changes nothing; (d) while the connection is `Offline` and `Connecting` it still emits `Reveal`; (e) after a second `ClientEvent::Downloaded` for the same original with a new path, the event carries the new path; (f) another original's state is untouched; (g) render: a file card shows `msg-{ts}-reveal` only in the `Saved` state (not before a download, not while running, not after a failure) and clicking it yields the event; the viewer shows `viewer-reveal` for a saved image original and not otherwise, and clicking it yields the event; (h) nothing in the file calls the platform's `reveal_path` (the tests only observe the event).
