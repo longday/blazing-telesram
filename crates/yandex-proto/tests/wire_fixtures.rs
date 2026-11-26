@@ -4,7 +4,7 @@ use yandex_proto::search::parse_search;
 use yandex_proto::wire::{
     DEFAULT_EXCLUDED_NAMESPACES, PushEvent, ReactionAction, Relation, WireBody, WireChatKind,
     WireMemberRole, WireReactionCount, WireReactions, WireReactor, decode_push, parse_chat_list,
-    parse_history, parse_members, parse_profile, parse_users,
+    parse_history, parse_members, parse_profile, parse_reactors, parse_users,
 };
 
 fn fixture(name: &str) -> Value {
@@ -22,6 +22,7 @@ fn fixtures_hold_no_credentials() {
         "push-deleted",
         "push-reaction-removed",
         "history-important",
+        "reactors-page",
     ]
     .map(|n| format!("research-{n}"));
     let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"]
@@ -535,6 +536,56 @@ fn live_members_refusal_fixture() {
     assert!(
         parse_members(&refusal["data"]).is_err(),
         "an error body is not a member page"
+    );
+}
+
+/// Synthetic `list_reactions` page (`research-reactors-page.json`, built from the documented shape
+/// in `research.md`, not a live capture; task 3.1 replaces it with a sanitized live shape): four
+/// reactors newest first, the third without an avatar, the fourth without a name and an avatar.
+#[test]
+fn synthetic_reactors_page() {
+    let page = parse_reactors(&fixture("research-reactors-page.json")).unwrap();
+    assert_eq!((page.skipped, page.raw), (0, 4));
+    assert_eq!(page.oldest, Some(1795171900000000));
+    let rows: Vec<_> = page
+        .entries
+        .iter()
+        .map(|e| {
+            (
+                e.guid.rsplit('-').next().unwrap(),
+                e.display_name.as_deref(),
+                e.avatar_id.is_some(),
+                e.code,
+                e.timestamp,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "000000000001",
+                Some("Test User One"),
+                true,
+                100101,
+                Some(1795172185683559)
+            ),
+            (
+                "000000000002",
+                Some("Test User Two"),
+                true,
+                7,
+                Some(1795172100000000)
+            ),
+            (
+                "000000000003",
+                Some("Test User Three"),
+                false,
+                100101,
+                Some(1795172000000000)
+            ),
+            ("000000000004", None, false, 100102, Some(1795171900000000)),
+        ]
     );
 }
 
