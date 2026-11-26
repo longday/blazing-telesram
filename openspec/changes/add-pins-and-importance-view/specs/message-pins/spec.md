@@ -24,12 +24,17 @@ When the open chat has a pinned message the client SHALL show a bar between the 
 - **THEN** no bar is shown and the timeline starts directly under the header
 
 ### Requirement: Pin source
-The client SHALL show the pin the server reports: the pinned message named by the chat's entry in the chat list, and pin changes received live. The text of the pinned message SHALL come from its loaded or cached copy, otherwise be requested once from the server, for the open chat only. The pinned message SHALL NOT be added to the chat's cached history, so that the cache never shows a gap as if it were history.
+The client SHALL show the pin the server reports, from the chat list and from live changes. The text of the pinned message SHALL come from its loaded or cached copy, otherwise be requested once from the server, for the open chat only. That separate lookup SHALL NOT add the message to the chat's cached history.
 
 #### Scenario: Pinned message is loaded
 - **GIVEN** the pinned message is among the loaded messages
 - **WHEN** the chat is opened
 - **THEN** the bar shows its text without an extra server request
+
+#### Scenario: Message also arrives as history
+- **GIVEN** the pinned message is within a history chunk the server returns
+- **WHEN** the chunk is loaded
+- **THEN** the message is cached as history like any other
 
 #### Scenario: Pinned message is far in the past
 - **GIVEN** the pinned message is older than the loaded history
