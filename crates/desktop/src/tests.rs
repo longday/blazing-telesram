@@ -6560,3 +6560,275 @@ fn the_dialog_notice_follows_the_creation_state() {
         Some(&CreationState::Unverified { reason: "r".into() })
     ));
 }
+
+// ---- add-reaction-list 6.3: «Кто отреагировал» in the message menu ----
+//
+// Bounds are never removed once painted, so every "not offered" case runs in a window that never painted
+// the entry. The list's rows and states are 6.2's view and 6.7's tests; here the entry, the popover's
+// place and closing, and the two buttons the host wires are checked.
+
+fn with_reactions(mut m: Message, counts: &[(i64, u32)]) -> Message {
+    m.reactions = reactions_of(counts, None);
+    m
+}
+
+fn load_reactors(i: i64, before: Option<i64>, request: u64) -> Command {
+    Command::LoadReactors {
+        chat: chat_g(),
+        timestamp: ts(i),
+        before,
+        request,
+    }
+}
+
+fn reactors_popover_open(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, _| d.reactors_popover_is_open())
+}
+
+fn reactors_list_in_store(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.store.read_with(cx, |s, _| s.reactors().is_some())
+}
+
+/// Opens the popover of the incoming message 1 (two reactions) through the menu entry.
+fn open_reactors_popover(h: &Harness, cx: &mut VisualTestContext) {
+    open_with(h, cx, vec![reacted(1, &[(LIKE, 2)], None)]);
+    right_click(cx, msg!(1));
+    click(cx, "menu-reactors");
+}
+
+#[gpui::test]
+fn the_menu_offers_who_reacted_for_a_sent_message_with_reactions(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(1, &[(LIKE, 2), (FIRE, 1)], None)]);
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-reactors"), "another user's message");
+    assert!(shown(cx, "menu-reply") && shown(cx, "menu-copy"));
+    assert!(!shown(cx, "menu-edit") && !shown(cx, "menu-delete"));
+    assert!(
+        y(cx, "menu-reactions") < y(cx, "menu-reactors")
+            && y(cx, "menu-reactors") < y(cx, "menu-reply"),
+        "between the reaction row and the other entries"
+    );
+    assert!(h.commands().is_empty(), "offering the entry sends nothing");
+}
+
+#[gpui::test]
+fn the_menu_of_an_own_message_with_reactions_offers_who_reacted_too(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![with_reactions(own("g", 2, "мой"), &[(HEART, 1)])],
+    );
+    right_click(cx, msg!(2));
+    for entry in ["menu-reactors", "menu-reply", "menu-edit", "menu-delete"] {
+        assert!(shown(cx, entry), "own message: {entry}");
+    }
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_message_without_reactions_has_no_who_reacted_entry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), own("g", 2, "мой")]);
+    for i in [msg!(1), msg!(2)] {
+        right_click(cx, i);
+        assert!(menu_is_open(&h, cx));
+        cx.simulate_keystrokes("escape");
+    }
+    assert!(!shown(cx, "menu-reactors"));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn pending_failed_and_deleted_messages_have_no_who_reacted_entry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let counts = [(LIKE, 1)];
+    let mut deleted = own("g", 6, "x");
+    deleted.body = MessageBody::Deleted;
+    open_with(
+        &h,
+        cx,
+        vec![
+            with_reactions(pending("g", 1, "p1", "жду"), &counts),
+            with_reactions(failed("g", 3, "p2", "не вышло", "нет прав"), &counts),
+            with_reactions(deleted, &counts),
+        ],
+    );
+    for i in [msg!(1), msg!(3)] {
+        right_click(cx, i);
+        assert!(menu_is_open(&h, cx), "copy is still offered");
+        cx.simulate_keystrokes("escape");
+    }
+    right_click(cx, msg!(6));
+    assert!(!menu_is_open(&h, cx), "a deleted message has no menu");
+    assert!(!shown(cx, "menu-reactors"));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn the_entry_alone_still_opens_the_menu(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let sticker = message(
+        "g",
+        1,
+        "bob",
+        false,
+        MessageBody::Unsupported("sticker".into()),
+    );
+    open_with(&h, cx, vec![with_reactions(sticker, &[(LIKE, 1)])]);
+    right_click(cx, msg!(1));
+    assert!(menu_is_open(&h, cx));
+    assert!(shown(cx, "menu-reactors"));
+    for entry in ["menu-reply", "menu-copy", "menu-edit", "menu-delete"] {
+        assert!(!shown(cx, entry), "{entry}: nothing else applies to it");
+    }
+}
+
+#[gpui::test]
+fn choosing_the_entry_closes_the_menu_and_opens_the_list_where_the_menu_was(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(1, &[(LIKE, 2)], None)]);
+    let anchor = bounds(cx, msg!(1))
+        .expect("the message is on screen")
+        .center();
+    right_click(cx, msg!(1));
+    let menu = bounds(cx, "message-menu").expect("the menu is on screen");
+    assert!(!reactors_popover_open(&h, cx));
+    click(cx, "menu-reactors");
+
+    assert!(!menu_is_open(&h, cx));
+    assert!(reactors_popover_open(&h, cx));
+    assert!(shown(cx, "reactors-list") && shown(cx, "reactors-loading"));
+    assert_eq!(h.commands(), [load_reactors(1, None, 1)]);
+    let at = bounds(cx, "reactors-popover").expect("the popover is on screen");
+    assert_eq!(
+        at.origin.x, menu.origin.x,
+        "at the menu's horizontal anchor"
+    );
+    assert!(
+        at.origin.y <= anchor.y && anchor.y <= at.origin.y + at.size.height,
+        "the popover covers the point the menu opened at"
+    );
+}
+
+#[gpui::test]
+fn the_list_is_drawn_exactly_at_the_given_anchor(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![reacted(1, &[(LIKE, 2)], None)]);
+    h.desktop.update(cx, |d, cx| {
+        d.open_reactors(chat_g(), ts(1), point(px(300.), px(200.)), cx)
+    });
+    cx.run_until_parked();
+    let at = bounds(cx, "reactors-popover").expect("the popover is on screen");
+    assert_eq!((at.origin.x, at.origin.y), (px(300.), px(200.)));
+    assert_eq!(h.commands(), [load_reactors(1, None, 1)]);
+}
+
+#[gpui::test]
+fn escape_and_an_outside_click_close_the_list_without_a_write(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_popover(&h, cx);
+    h.commands();
+    assert!(reactors_popover_open(&h, cx) && reactors_list_in_store(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!reactors_popover_open(&h, cx));
+    assert!(!reactors_list_in_store(&h, cx), "the store drops the list");
+
+    right_click(cx, msg!(1));
+    click(cx, "menu-reactors");
+    assert!(reactors_popover_open(&h, cx));
+    click(cx, "chat-header");
+    assert!(!reactors_popover_open(&h, cx));
+    assert!(!reactors_list_in_store(&h, cx));
+    assert_eq!(
+        h.commands(),
+        [load_reactors(1, None, 2)],
+        "only the second opening's read; closing and the outside click send nothing"
+    );
+}
+
+#[gpui::test]
+fn a_click_inside_the_list_keeps_it_open(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_popover(&h, cx);
+    click(cx, "reactors-list");
+    assert!(reactors_popover_open(&h, cx));
+}
+
+#[gpui::test]
+fn a_chip_click_still_toggles_and_opens_no_list(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![reacted(2, &[(LIKE, 3), (FIRE, 1)], Some(FIRE))],
+    );
+    click(cx, msg!(2, "reaction-100102"));
+    assert_eq!(h.commands(), [toggle_command(2, LIKE)]);
+    assert!(!reactors_popover_open(&h, cx) && !reactors_list_in_store(&h, cx));
+    assert!(!menu_is_open(&h, cx));
+}
+
+#[gpui::test]
+fn an_expired_session_closes_the_list(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_popover(&h, cx);
+    h.feed(cx, [ClientEvent::SessionExpired]);
+    assert!(!reactors_popover_open(&h, cx));
+    assert!(!reactors_list_in_store(&h, cx));
+}
+
+#[gpui::test]
+fn the_retry_button_asks_for_the_first_page_again(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_popover(&h, cx);
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::ReactorsFailed {
+            chat: chat_g(),
+            timestamp: ts(1),
+            request: 1,
+            reason: "нет прав".into(),
+            offline: false,
+        }],
+    );
+    assert!(shown(cx, "reactors-error"));
+    click(cx, "reactors-retry");
+    assert_eq!(h.commands(), [load_reactors(1, None, 2)]);
+    assert!(reactors_popover_open(&h, cx), "retrying does not close it");
+}
+
+#[gpui::test]
+fn the_more_button_asks_for_the_next_page_from_the_oldest_entry(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_reactors_popover(&h, cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::Reactors(ReactorsPage {
+            chat: chat_g(),
+            timestamp: ts(1),
+            request: 1,
+            reactors: vec![Reactor {
+                user: UserId("u1".into()),
+                name: Some("Анна".into()),
+                avatar: None,
+                code: ReactionCode(LIKE),
+                at: Some(ts(7)),
+                me: false,
+            }],
+            skipped: 0,
+            raw: bt_chat_core::client::REACTORS_PAGE,
+            oldest: Some(ts(5)),
+        })],
+    );
+    assert!(shown(cx, "reactors-more"));
+    click(cx, "reactors-more");
+    assert_eq!(h.commands(), [load_reactors(1, Some(5), 2)]);
+    assert!(reactors_popover_open(&h, cx));
+}
