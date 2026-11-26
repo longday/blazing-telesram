@@ -884,10 +884,13 @@ impl ChatStore {
     }
 
     /// Tries again after a failure: a failed list goes back to `Loading` and asks for the first page;
-    /// a list whose next page failed asks for that page; a list that is shown (the offline retry)
-    /// asks for the first page again and keeps its rows until the answer. A list that is loading
-    /// already has a request out and sends nothing.
+    /// a shown list whose next page failed asks for that page while the connection is online; a
+    /// shown list otherwise (the offline retry, which the view offers for a list it shows as
+    /// «Нет соединения») asks for the first page again, so rows from before the outage are re-read,
+    /// and keeps them until the answer. A list that is loading already has a request out and sends
+    /// nothing.
     pub fn retry_reactors(&mut self, cx: &mut Context<Self>) {
+        let online = self.connection == ConnectionState::Online;
         let Some(view) = self.reactors.as_mut() else {
             return;
         };
@@ -897,7 +900,7 @@ impl ChatStore {
             ReactorsState::Ready {
                 more_failed: Some(_),
                 ..
-            } => RequestKind::More,
+            } if online => RequestKind::More,
             ReactorsState::Ready { .. } => RequestKind::First,
         };
         if matches!(view.state, ReactorsState::Failed { .. }) {
@@ -2920,6 +2923,7 @@ mod tests {
             cx: &mut TestAppContext,
         ) {
             let rig = Rig::opened(cx);
+            rig.apply(cx, ClientEvent::Connection(ConnectionState::Online));
             rig.apply(cx, full(1));
             rig.request(cx, RequestKind::More);
             rig.commands();
@@ -2942,6 +2946,36 @@ mod tests {
 
             rig.apply(cx, page(3, &guids("b", 2), 2, Some(100)));
             assert_eq!(rows(&rig.view(cx).unwrap()).len(), REACTORS_PAGE + 2);
+        }
+
+        #[gpui::test]
+        fn an_offline_retry_of_a_list_with_a_failed_page_asks_for_the_first_page(
+            cx: &mut TestAppContext,
+        ) {
+            for state in [ConnectionState::Offline, ConnectionState::Connecting] {
+                let rig = Rig::opened(cx);
+                rig.apply(cx, full(1));
+                rig.request(cx, RequestKind::More);
+                rig.apply(cx, failure(2, "сбой", false));
+                rig.apply(cx, ClientEvent::Connection(state));
+                rig.commands();
+                rig.take_events();
+
+                rig.retry(cx);
+                let view = rig.view(cx).unwrap();
+                assert_eq!((view.generation, view.kind), (3, RequestKind::First));
+                assert_eq!(rig.commands(), [load(None, 3)]);
+                assert_eq!(
+                    rows(&view),
+                    guids("a", REACTORS_PAGE),
+                    "rows stay until the answer"
+                );
+
+                rig.apply(cx, page(3, &guids("n", 2), 2, Some(900)));
+                let view = rig.view(cx).unwrap();
+                assert_eq!(rows(&view), ["n0", "n1"]);
+                assert_eq!(flags(&view), (true, false, None));
+            }
         }
 
         #[gpui::test]
