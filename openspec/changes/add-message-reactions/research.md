@@ -117,5 +117,35 @@ Order is the server's `default` / `private` list from C, `[100109, 100108, 10010
 ### Other facts found in the bundle (not for the table)
 
 - Picker contents are server config, not constants: `reactions_enabled` (`false` hides reactions entirely) and per-namespace lists. Task 3.3 transcribes the private/default list; a later change could read the config instead.
-- Wire form of the web client (both builds): `sendReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 2 }` and `removeReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 1 }`: **the web client's `Remove` carries `Type`** (its method takes the type as a parameter; the callers are not recoverable from the minified bundle, so what they pass is inferred to be the user's current reaction). D2 sends `Remove` without `Type` (the notes say the server demands `Type` only for add and replace); this is unverified, and task 7.2 must test the bare form first and fall back to `Type: <current code>` if refused, as D2 already says.
+- Wire form of the web client (both builds): `sendReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 2 }` and `removeReaction(chat, timestamp, type)` pushes `Reaction { ChatId, Timestamp, Type, Action: 1 }`: **the web client's `Remove` carries `Type`** (its method takes the type as a parameter; the callers are not recoverable from the minified bundle, so what they pass is inferred to be the user's current reaction). D2 sends `Remove` without `Type` (the notes say the server demands `Type` only for add and replace); this was unverified when written. Task 7.2 tested the bare form and the server accepted it (see "Live verification"), so no fallback is needed.
 - Chip order in the web client's old build (3.21.0, `reactions` selector): count descending, ties by type descending. D3 keeps server order and appends a new type last; if the server's order turns out to differ from the web client's, that is a display difference, not a data one.
+
+## Live verification
+
+Task 7.2, 2026-11-26, self chat `c9a71201-70b5-992e-61f2-b27e2d3fc8fb_c9a71201-70b5-992e-61f2-b27e2d3fc8fb` only (`BT_WRITE_ONLY_CHAT` set), only the disposable message `bt reaction check 1795680407` (timestamp `1795680408562056`, approved by the user). The user asked that the message is **not** deleted: it stays in the chat and carries `100101` (✅) x1, version 7. The bt-probe part ran on the host before the "VM only" rule (log `/tmp/reactions-listen.log`, `listen --watch`); the history and the app parts ran inside the Tart VM `bt-vm` with a release build of the merged `main` (including `fa69f42`).
+
+### Probe (`send-self`, `react-self`, `listen --watch`)
+
+- `react-self <ts> 100101` (`REPLACE`, no prior reaction): accepted, status 1. **The sender gets its own push**: `Reaction { actor: <own guid>, action: Replace, code: 100101, reactions: counts [100101 x1], version 1, recent [{own guid, 100101, ts}] }`. REPLACE with no prior reaction is the add; `ADD` is not needed.
+- `react-self <ts> 100102` (another type): one push, `action Replace`, `code 100102`, counts **`[100102 x1]`** only (the old `100101` is gone), version 2, one `recent` entry of the own user with `100102`. So the server keeps **one own reaction per message** and REPLACE moves it (P3 confirmed; `Replace` was the only action used, multi-reaction `ADD` was not tried).
+- `react-self <ts> remove` (`REMOVE`, **no `Type`**): accepted. Push: `action Remove`, **`code None`**, counts `[]`, version 3, `recent []`. D2's bare `Remove` is confirmed; no fallback to `Type: <current code>` is needed.
+- `react-self <ts> 100101` again: counts `[100101 x1]`, version 4. The version grows by 1 on every change, including the removal (the empty state is a version of its own, not a missing key).
+- Every push carried the full state (`Reactions`, `ReactionsVersion`, `RecentUserReactions`) next to the `Reaction` body; none was a delta (P4 confirmed for pushes).
+
+### History row shape (`bt-probe history <chat>`, inside the VM)
+
+The row of the message carries `Reactions`, `ReactionsVersion` and `RecentUserReactions`: `reactions [100101x1], version 4, recent [<own guid>:100101]` (state after the probe part). Rows of messages that never had a reaction print no reaction state (the siblings are absent), so "missing key = no reactions" (D3) holds. P4 confirmed for history rows. After the app part the same row read `version 7` (see below).
+
+### App (VM, release build, `BT_WRITE_ONLY_CHAT` = self chat), screenshots in `.runtime/vm/` (gitignored, not committed)
+
+- `rx-a2.png`: the disposable message shows a chip ✅ `1` highlighted as own (the state loaded from the history row).
+- `rx-b1.png`: the context menu of that message has the reaction row ❤️ 🔥 👍 👎 😲 😭 👀 ✅ in the 3.3 `KNOWN` order, with ✅ marked (circled) as the own reaction, above Reply, Copy, Edit, Delete. `100108` is not in the row, as designed. No observation of `100108` or any other glyph was made, so it stays unresolved (`NEUTRAL_GLYPH`).
+- `rx-c1.png`: choosing 👍 replaced ✅ with 👍 `1` (own); log `write kind=reaction` then `push kind=Reaction`, ~0.3 s round trip. `rx-d1.png`: the menu now marks 👍 as own.
+- `rx-d2.png`: choosing 👍 again removed the reaction (no chip left); the write is a `Remove` and the server accepts it.
+- `rx-e1.png`, `rx-f1.png`: choosing ✅ restored `100101` ✅ `1` (own). The menu clamps to the window bottom for the last message, which does not change the picker.
+- Final server state after the app part: `reactions [100101x1], version 7, recent [own:100101]` (4 → 7: move, remove, add).
+- Rollback on a refused write (network off with `networksetup -setnetworkserviceenabled Ethernet off`, restored right after in the same shell command by a trap, and again by hand): `rx-g1.png`/`rx-g2.png`/`rx-g3.png`/`rx-g4.png` show the optimistic overlay (🔥 `1` own instead of ✅) for the whole offline time (the write is held, no answer); `rx-g5.png` shows ✅ `1` again after the network returned. A second run with a screenshot sequence: `rx-i8.png` (overlay 🔥), `rx-i10.png` (✅ `1` restored, the toast "Нет соединения" and the banner "Подключение…" visible). Log of both runs: `write kind=reaction` (no `push` line, the socket is dead), 20-26 s later `disconnected: no server ping in time` and `WARN edit, deletion or reaction failed ... network error: connection lost: no server ping in time` from `bt_chat_core::client`; the overlay is rolled back at that moment. The offline write never reached the server (history afterwards: ✅, version 7; no 🔥 push). Note for the spec: with an unannounced network loss the rollback comes only when the connection is declared dead (about 20-26 s, the ping timeout), not immediately; that is the engine's existing failure path (D5), not a reaction-specific delay.
+
+### Verdict
+
+No finding contradicts D2, D3, P3 or P4; the design, proposal and specs keep their decisions. Two statements that were "unverified" are now observed: `Remove` without `Type` is accepted (design D2 wording updated) and the sender receives its own `Reaction` push with the full state. Not observed: several own reactions (only `REPLACE` was sent), `100108`, namespaces other than the private self chat, group chats.
