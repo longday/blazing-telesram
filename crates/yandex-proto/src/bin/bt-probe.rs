@@ -4,7 +4,8 @@
 //! `listen` prints reaction pushes through `Debug` like every other push and `history` lists the
 //! reactions of a message after its text. `download` saves one file or image
 //! of any chat into a local directory (never overwriting) and prints host and path of the
-//! request, never its query. `create-private` and `create-chat` are the commands that change the
+//! request, never its query. `reactors` lists who reacted to one message (a read, covered by no
+//! write guard). `create-private` and `create-chat` are the commands that change the
 //! account outside the self chat, and they send nothing without `--confirm-create`.
 //! Every command that sends a write (`send-self`, `edit-self`, `delete-self`, `react-self`,
 //! `typing-self`, `seen`, `typing`, `create-private`, `create-chat`) obeys `BT_WRITE_ONLY_CHAT` like
@@ -24,7 +25,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
 use yandex_proto::media::{MediaConfig, MediaTarget};
-use yandex_proto::request::{MEMBERS_PAGE, SEARCH_LIMIT, SearchEntity};
+use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
@@ -42,6 +43,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe download <chat> <micros> [--item N] [--to <dir>]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
+       bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]
        bt-probe create-private <guid> --confirm-create
        bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
@@ -51,7 +53,8 @@ into <dir> (default: the current directory) and refuses to overwrite an existing
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
-whoami and members are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
+whoami, members and reactors are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
+reactors is read-only (a socket list_reactions, so BT_WRITE_ONLY_CHAT does not apply): it prints one page of the users who reacted to the message with that timestamp in <chat>, in server order; --before <micros> asks for the page older than that cursor, --limit <n> (at least 1, default 30) sets the page size. It always sends Mode 0; there is no --mode
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -146,6 +149,10 @@ fn main() -> ExitCode {
         },
         ["whoami"] => block_on(whoami()),
         ["members", chat] => block_on(members(chat)),
+        ["reactors", rest @ ..] => match reactors_args(rest) {
+            Some(args) => block_on(reactors(args)),
+            None => return usage(),
+        },
         ["create-private", guid, flags @ ..] => match create_private_args(guid, flags) {
             Some(CreatePrivate::Send(guid)) => block_on(create_private(guid)),
             Some(CreatePrivate::Refuse(guid)) => {
@@ -640,6 +647,62 @@ async fn members(chat: &str) -> Result<(), Failure> {
         "{:#?}",
         client
             .members(chat, MEMBERS_PAGE, None)
+            .await
+            .map_err(fail)?
+    );
+    Ok(())
+}
+
+/// What `reactors <chat> <micros> [flags]` asks for.
+#[derive(Debug, PartialEq, Eq)]
+struct ReactorsArgs {
+    chat: String,
+    timestamp: i64,
+    before: Option<i64>,
+    limit: u32,
+}
+
+/// The arguments after `reactors`: `<chat> <micros> [--before <micros>] [--limit <n>]`, the flags
+/// in any order and each at most once; a limit is at least 1. A missing timestamp, a malformed
+/// number or any other flag (there is no `--mode`: the request form is fixed) is `None`, a usage
+/// error.
+fn reactors_args(args: &[&str]) -> Option<ReactorsArgs> {
+    let [chat, timestamp, flags @ ..] = args else {
+        return None;
+    };
+    let timestamp = timestamp.parse::<i64>().ok()?;
+    let (mut before, mut limit) = (None, None);
+    let mut flags = flags;
+    while let [name, value, rest @ ..] = flags {
+        match *name {
+            "--before" if before.is_none() => before = Some(value.parse::<i64>().ok()?),
+            "--limit" if limit.is_none() => {
+                limit = Some(value.parse::<u32>().ok().filter(|n| *n > 0)?)
+            }
+            _ => return None,
+        }
+        flags = rest;
+    }
+    flags.is_empty().then(|| ReactorsArgs {
+        chat: (*chat).to_owned(),
+        timestamp,
+        before,
+        limit: limit.unwrap_or(REACTORS_PAGE),
+    })
+}
+
+/// One page of the users who reacted to a message (socket `list_reactions`, `Mode` 0), parsed.
+/// A read: nothing is written, so `BT_WRITE_ONLY_CHAT` does not apply.
+async fn reactors(args: ReactorsArgs) -> Result<(), Failure> {
+    let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
+    eprintln!(
+        "reactors of {} at {} (before {:?}, limit {}) via list_reactions",
+        args.chat, args.timestamp, args.before, args.limit
+    );
+    println!(
+        "{:#?}",
+        client
+            .reactors(&args.chat, args.timestamp, args.before, args.limit)
             .await
             .map_err(fail)?
     );
@@ -1679,5 +1742,93 @@ mod search_tests {
         ] {
             assert_eq!(search_flags(bad), None, "{bad:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod reactors_tests {
+    use super::*;
+
+    fn parsed(args: &[&str]) -> Option<ReactorsArgs> {
+        reactors_args(args)
+    }
+
+    #[test]
+    fn reactors_takes_a_chat_and_a_timestamp_and_defaults_to_the_first_page() {
+        assert_eq!(
+            parsed(&["chat-1", "1700000000000000"]),
+            Some(ReactorsArgs {
+                chat: "chat-1".to_owned(),
+                timestamp: 1_700_000_000_000_000,
+                before: None,
+                limit: REACTORS_PAGE,
+            })
+        );
+    }
+
+    #[test]
+    fn reactors_flags_parse_in_any_order() {
+        let expected = Some(ReactorsArgs {
+            chat: "c".to_owned(),
+            timestamp: 5,
+            before: Some(3),
+            limit: 7,
+        });
+        assert_eq!(
+            parsed(&["c", "5", "--before", "3", "--limit", "7"]),
+            expected
+        );
+        assert_eq!(
+            parsed(&["c", "5", "--limit", "7", "--before", "3"]),
+            expected
+        );
+        assert_eq!(
+            parsed(&["c", "5", "--limit", "7"]),
+            Some(ReactorsArgs {
+                chat: "c".to_owned(),
+                timestamp: 5,
+                before: None,
+                limit: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_timestamp_is_a_usage_error() {
+        assert_eq!(parsed(&[]), None);
+        assert_eq!(parsed(&["c"]), None);
+        assert_eq!(parsed(&["c", "--limit", "7"]), None);
+    }
+
+    #[test]
+    fn bad_numbers_and_unknown_or_repeated_flags_are_usage_errors() {
+        for bad in [
+            &["c", "x"][..],
+            &["c", ""],
+            &["c", "1.5"],
+            &["c", "5", "--before"],
+            &["c", "5", "--before", "x"],
+            &["c", "5", "--before", "1", "--before", "2"],
+            &["c", "5", "--limit"],
+            &["c", "5", "--limit", "0"],
+            &["c", "5", "--limit", "-1"],
+            &["c", "5", "--limit", "x"],
+            &["c", "5", "--limit", "1", "--limit", "2"],
+            &["c", "5", "--mode", "0"],
+            &["c", "5", "--page", "2"],
+            &["c", "5", "stray"],
+            &["c", "5", "--limit", "1", "stray"],
+        ] {
+            assert_eq!(parsed(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_usage_text_lists_reactors_as_a_read() {
+        assert!(
+            USAGE.contains("bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]")
+        );
+        assert!(USAGE.contains("reactors is read-only"));
+        assert!(USAGE.contains("BT_WRITE_ONLY_CHAT does not apply"));
     }
 }
