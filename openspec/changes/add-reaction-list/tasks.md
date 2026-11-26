@@ -42,7 +42,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 2. bt-probe
 
-- [ ] 2.1 `bt-probe reactors`
+- [x] 2.1 `bt-probe reactors`
   - Owns: `crates/yandex-proto/src/bin/bt-probe.rs`.
   - Depends on: 1.3 (`add-chat-members-and-creation` 2.2/6.1, which also edit this file, are already merged).
   - Do: `reactors <chat> <micros> [--before <micros>] [--limit <n>]`, read-only, prints the parsed reply with `{:#?}` on stdout and a header on stderr, like `members`; `USAGE` and the module docs say it is a read and not covered by `BT_WRITE_ONLY_CHAT`. It sends only `Mode: 0` (the one request form of D1); there is no `--mode`.
