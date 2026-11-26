@@ -39,7 +39,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 3. Wiring
 
-- [ ] 3.1 The platform call (D7)
+- [x] 3.1 The platform call (D7)
   - Owns: `crates/desktop/src/main.rs`.
   - Depends on: 1.1. Waits until RL 6.2 has merged or is not started (rule 1).
   - Do: in the app-level `cx.subscribe(&store, ...)` of `open_chat_window`, handle `StoreEvent::Reveal(path)` with `cx.reveal_path(path)` (the existing `StoreEvent::Session` branch keeps its behaviour); no logging of the path (D8). If the closure's shape forces a `match`, keep the session arm byte-for-byte.
