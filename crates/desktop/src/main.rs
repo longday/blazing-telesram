@@ -210,6 +210,8 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
         if *event == StoreEvent::Session && store.read(cx).session() != SessionState::Active {
             open_sign_in(runtime.clone(), cx);
             let _ = handle.update(cx, |_, window, _| window.remove_window());
+        } else if let StoreEvent::Reveal(path) = event {
+            cx.reveal_path(path);
         }
     })
     .detach();

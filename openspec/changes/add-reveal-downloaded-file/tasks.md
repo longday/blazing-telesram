@@ -14,7 +14,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 1. Store
 
-- [ ] 1.1 `StoreEvent::Reveal` and `ChatStore::reveal_download` (D3)
+- [x] 1.1 `StoreEvent::Reveal` and `ChatStore::reveal_download` (D3)
   - Owns: `crates/desktop/src/store.rs`.
   - Depends on: nothing. Waits until RL 6.1/6.4/6.5 and PIN 4.1 have merged or are not started (rule 1).
   - Do: add `StoreEvent::Reveal(PathBuf)` with a doc comment; add `pub fn reveal_download(&mut self, original: &MediaRef, cx: &mut Context<Self>)` per D3: nothing unless `Saved(path)`; `path.try_exists()` is `Ok(false)` -> `set_download(original.clone(), None, cx)` and no event, otherwise `cx.emit(StoreEvent::Reveal(path))`. No command is sent, no log line, the connection is not consulted (D4, D8). Update the doc comments of `DownloadState::Saved` only if they claim something this contradicts.
@@ -23,14 +23,14 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 2. Views
 
-- [ ] 2.1 `ActionLine.reveal`, the label and the viewer button (D5, D6)
+- [x] 2.1 `ActionLine.reveal`, the label and the viewer button (D5, D6)
   - Owns: `crates/desktop/src/viewer.rs` (including its unit tests).
   - Depends on: 1.1 for `reveal_download` (code against D3).
   - Do: `ActionLine` gains `pub reveal: bool`, true exactly for `Some(DownloadState::Saved(_))`; `pub const REVEAL_LABEL: &str = "Показать в Finder"`; the viewer's bottom bar shows a `viewer-reveal` button before the download button when `line.reveal`, in `ACCENT`, whose click calls `this.store.update(cx, |store, cx| store.reveal_download(&original, cx))` for `item.media.original()`; it is enabled in every connection state (D4); the existing download button, status text and selectors are unchanged; update the `ActionLine` literals of the existing tests in the file.
   - Tests: `action_line` gives `reveal: true` for `Saved` and `false` for no state, `Running` and every `Failed(_)`, with `online` true and false; the existing assertions still hold with the new field.
   - Done when: these tests exist.
 
-- [ ] 2.2 The file card link (D5)
+- [x] 2.2 The file card link (D5)
   - Owns: `crates/desktop/src/timeline.rs`.
   - Depends on: 1.1, 2.1. Waits until PIN 4.2 has merged or is not started (rule 1).
   - Do: `action_row` destructures the new `reveal` field and, when true, renders a «Показать в Finder» (`REVEAL_LABEL`) link between the status text and the download button: selector `msg-{ts}-reveal`, element id `file-reveal-{ts}`, `ACCENT`, `cursor_pointer`, click `store.update(cx, |s, cx| s.reveal_download(&original, cx))`; always enabled; the row keeps its 18 px height and `flex_1 min_w_0 truncate` status, the card its 300 px width; the doc comment of `file_card` lists the new selector.
@@ -39,7 +39,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 3. Wiring
 
-- [ ] 3.1 The platform call (D7)
+- [x] 3.1 The platform call (D7)
   - Owns: `crates/desktop/src/main.rs`.
   - Depends on: 1.1. Waits until RL 6.2 has merged or is not started (rule 1).
   - Do: in the app-level `cx.subscribe(&store, ...)` of `open_chat_window`, handle `StoreEvent::Reveal(path)` with `cx.reveal_path(path)` (the existing `StoreEvent::Session` branch keeps its behaviour); no logging of the path (D8). If the closure's shape forces a `match`, keep the session arm byte-for-byte.
@@ -48,7 +48,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 4. Tests
 
-- [ ] 4.1 Store and UI tests
+- [x] 4.1 Store and UI tests
   - Owns: `crates/desktop/src/tests.rs` (a new section `// ---- reveal in Finder (REV 4.1) ----` at the end).
   - Depends on: 1.1, 2.1, 2.2. Waits until RL 6.7, PIN 4.4 have merged or are not started (rule 1).
   - Do, in the style of the existing `download_*` tests (store harness; real files in `tempfile::tempdir()` where the file must exist): (a) `reveal_download` on a `Saved` state whose file exists emits `StoreEvent::Reveal(path)` with exactly that path and sends no command (`h.commands()` is empty); (b) on a state whose file was deleted it emits no `Reveal`, clears the state (`download_state` is `None`) and sends no command; (c) with no state, `Running` and `Failed(_)` it emits nothing and changes nothing; (d) while the connection is `Offline` and `Connecting` it still emits `Reveal`; (e) after a second `ClientEvent::Downloaded` for the same original with a new path, the event carries the new path; (f) another original's state is untouched; (g) render: a file card shows `msg-{ts}-reveal` only in the `Saved` state (not before a download, not while running, not after a failure) and clicking it yields the event; the viewer shows `viewer-reveal` for a saved image original and not otherwise, and clicking it yields the event; (h) nothing in the file calls the platform's `reveal_path` (the tests only observe the event).

@@ -7414,3 +7414,361 @@ fn opening_paging_refreshing_and_closing_send_only_reads(cx: &mut TestAppContext
         "and the message's own reaction is as it was"
     );
 }
+
+// ---- reveal in Finder (REV 4.1) ----
+//
+// The tests observe the `StoreEvent::Reveal` the store emits; the platform call lives in `main.rs`, which
+// the harness never runs, and the test platform cannot make it.
+
+use crate::store::StoreEvent;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// Every event the store emits from now on, in order.
+fn record_store_events(h: &Harness, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<StoreEvent>>> {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    cx.update(|_, app| {
+        app.subscribe(&h.store, move |_, event: &StoreEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach()
+    });
+    cx.run_until_parked();
+    log
+}
+
+fn take_events(log: &Rc<RefCell<Vec<StoreEvent>>>) -> Vec<StoreEvent> {
+    std::mem::take(&mut *log.borrow_mut())
+}
+
+/// A real file in `dir`.
+fn saved_file(dir: &tempfile::TempDir, name: &str) -> PathBuf {
+    let path = dir.path().join(name);
+    std::fs::write(&path, b"saved").unwrap();
+    path
+}
+
+fn saved(h: &Harness, cx: &mut VisualTestContext, file: &MediaRef, path: &std::path::Path) {
+    h.feed(
+        cx,
+        [ClientEvent::Downloaded {
+            media: file.clone(),
+            path: path.to_path_buf(),
+        }],
+    );
+}
+
+fn reveal(h: &Harness, cx: &mut VisualTestContext, file: &MediaRef) {
+    h.store.update(cx, |s, cx| s.reveal_download(file, cx));
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn reveal_emits_the_saved_path_and_sends_no_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let dir = tempfile::tempdir().unwrap();
+    let (file, other) = (original("disk/1"), original("disk/2"));
+    let (path, other_path) = (saved_file(&dir, "a.pdf"), saved_file(&dir, "b.pdf"));
+    saved(&h, cx, &file, &path);
+    saved(&h, cx, &other, &other_path);
+    h.commands();
+    let log = record_store_events(&h, cx);
+
+    reveal(&h, cx, &file);
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path.clone())]);
+    assert!(h.commands().is_empty(), "revealing is local: no command");
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Saved(path)),
+        "the state is kept"
+    );
+    assert_eq!(
+        download_state(&h, cx, &other),
+        Some(DownloadState::Saved(other_path)),
+        "another file is untouched"
+    );
+}
+
+#[gpui::test]
+fn reveal_of_a_deleted_file_clears_the_state_and_emits_no_reveal(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let dir = tempfile::tempdir().unwrap();
+    let (file, other) = (original("disk/1"), original("disk/2"));
+    let (path, other_path) = (saved_file(&dir, "a.pdf"), saved_file(&dir, "b.pdf"));
+    saved(&h, cx, &file, &path);
+    saved(&h, cx, &other, &other_path);
+    std::fs::remove_file(&path).unwrap();
+    h.commands();
+    let log = record_store_events(&h, cx);
+
+    reveal(&h, cx, &file);
+    assert_eq!(
+        take_events(&log),
+        [StoreEvent::Download(file.clone())],
+        "only the card's state changes"
+    );
+    assert_eq!(download_state(&h, cx, &file), None);
+    assert!(h.commands().is_empty());
+    assert_eq!(
+        download_state(&h, cx, &other),
+        Some(DownloadState::Saved(other_path)),
+        "another file is untouched"
+    );
+
+    reveal(&h, cx, &file);
+    assert!(take_events(&log).is_empty(), "nothing is left to reveal");
+}
+
+#[gpui::test]
+fn reveal_without_a_saved_state_emits_nothing_and_changes_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let file = original("disk/1");
+    let log = record_store_events(&h, cx);
+    let failures = [
+        DownloadFailure::Offline,
+        DownloadFailure::NotFound,
+        DownloadFailure::Destination,
+        DownloadFailure::Disk,
+        DownloadFailure::Network,
+        DownloadFailure::Other,
+    ];
+    let mut states = vec![
+        None,
+        Some(DownloadState::Running {
+            received: 10,
+            total: Some(40),
+        }),
+    ];
+    states.extend(failures.map(|f| Some(DownloadState::Failed(f))));
+
+    for state in states {
+        match &state {
+            None => {}
+            Some(DownloadState::Running { received, total }) => h.feed(
+                cx,
+                [ClientEvent::DownloadProgress {
+                    media: file.clone(),
+                    received: *received,
+                    total: *total,
+                }],
+            ),
+            Some(DownloadState::Failed(reason)) => h.feed(
+                cx,
+                [ClientEvent::DownloadFailed {
+                    media: file.clone(),
+                    reason: *reason,
+                }],
+            ),
+            Some(DownloadState::Saved(_)) => unreachable!(),
+        }
+        h.commands();
+        take_events(&log);
+
+        reveal(&h, cx, &file);
+        assert!(take_events(&log).is_empty(), "{state:?}: no event");
+        assert!(h.commands().is_empty(), "{state:?}: no command");
+        assert_eq!(download_state(&h, cx, &file), state, "{state:?}: unchanged");
+    }
+}
+
+#[gpui::test]
+fn reveal_works_without_a_connection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = original("disk/1");
+    let path = saved_file(&dir, "a.pdf");
+    saved(&h, cx, &file, &path);
+    let log = record_store_events(&h, cx);
+
+    for state in [ConnectionState::Offline, ConnectionState::Connecting] {
+        h.feed(cx, [ClientEvent::Connection(state)]);
+        h.commands();
+        take_events(&log);
+
+        reveal(&h, cx, &file);
+        assert_eq!(
+            take_events(&log),
+            [StoreEvent::Reveal(path.clone())],
+            "{state:?}"
+        );
+        assert!(h.commands().is_empty(), "{state:?}: no command");
+    }
+}
+
+#[gpui::test]
+fn reveal_follows_the_latest_download_of_the_same_file(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = original("disk/1");
+    let (first, second) = (saved_file(&dir, "a.pdf"), saved_file(&dir, "a (1).pdf"));
+    saved(&h, cx, &file, &first);
+    saved(&h, cx, &file, &second);
+    let log = record_store_events(&h, cx);
+
+    reveal(&h, cx, &file);
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(second)]);
+}
+
+#[gpui::test]
+fn reveal_leaves_the_choice_to_the_platform_when_the_file_cannot_be_checked(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = original("disk/1");
+    // A path below a regular file: the stat fails with "not a directory", which is not "does not exist".
+    let path = saved_file(&dir, "a.pdf").join("b.pdf");
+    assert!(path.try_exists().is_err());
+    saved(&h, cx, &file, &path);
+    let log = record_store_events(&h, cx);
+
+    reveal(&h, cx, &file);
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path.clone())]);
+    assert_eq!(
+        download_state(&h, cx, &file),
+        Some(DownloadState::Saved(path))
+    );
+}
+
+/// Whether the file card of `doc` (message 5) shows the reveal link once `state` is applied before the
+/// first frame (`debug_bounds` entries of earlier frames would never disappear).
+fn card_shows_reveal(cx: &mut TestAppContext, state: Option<ClientEvent>) -> bool {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    h.feed(cx, state);
+    open_with(&h, cx, vec![file_message(5)]);
+    assert!(shown(cx, msg!(5, "file")), "the card is on screen");
+    shown(cx, msg!(5, "reveal"))
+}
+
+#[gpui::test]
+fn the_file_card_has_no_reveal_link_before_a_download(cx: &mut TestAppContext) {
+    assert!(!card_shows_reveal(cx, None));
+}
+
+#[gpui::test]
+fn the_file_card_has_no_reveal_link_while_running(cx: &mut TestAppContext) {
+    let running = ClientEvent::DownloadProgress {
+        media: original("doc"),
+        received: 10,
+        total: Some(40),
+    };
+    assert!(!card_shows_reveal(cx, Some(running)));
+}
+
+#[gpui::test]
+fn the_file_card_has_no_reveal_link_after_a_failure(cx: &mut TestAppContext) {
+    let failed = ClientEvent::DownloadFailed {
+        media: original("doc"),
+        reason: DownloadFailure::Network,
+    };
+    assert!(!card_shows_reveal(cx, Some(failed)));
+}
+
+#[gpui::test]
+fn the_file_cards_reveal_link_yields_the_event_in_every_connection_state(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = original("doc");
+    let path = saved_file(&dir, "отчёт.pdf");
+    saved(&h, cx, &file, &path);
+    open_with(&h, cx, vec![file_message(5)]);
+    assert!(shown(cx, msg!(5, "saved")));
+    assert!(shown(cx, msg!(5, "reveal")));
+    let log = record_store_events(&h, cx);
+
+    click(cx, msg!(5, "reveal"));
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path.clone())]);
+    assert!(h.commands().is_empty(), "revealing is local: no command");
+
+    for state in [ConnectionState::Offline, ConnectionState::Connecting] {
+        h.feed(cx, [ClientEvent::Connection(state)]);
+        h.commands();
+        take_events(&log);
+        assert!(shown(cx, msg!(5, "reveal")), "{state:?}: still offered");
+        click(cx, msg!(5, "reveal"));
+        assert_eq!(
+            take_events(&log),
+            [StoreEvent::Reveal(path.clone())],
+            "{state:?}"
+        );
+        assert!(h.commands().is_empty(), "{state:?}: no command");
+    }
+
+    std::fs::remove_file(&path).unwrap();
+    click(cx, msg!(5, "reveal"));
+    assert_eq!(
+        take_events(&log),
+        [StoreEvent::Download(file.clone())],
+        "a deleted file is not revealed"
+    );
+    assert_eq!(download_state(&h, cx, &file), None);
+}
+
+/// Whether the viewer of picture `v/1` shows the reveal button once `state` is applied before the first frame.
+fn viewer_shows_reveal(cx: &mut TestAppContext, state: Option<ClientEvent>) -> bool {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    h.feed(cx, state);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    assert!(shown(cx, "viewer-image"), "the viewer is on screen");
+    shown(cx, "viewer-reveal")
+}
+
+#[gpui::test]
+fn the_viewer_has_no_reveal_button_before_a_download(cx: &mut TestAppContext) {
+    assert!(!viewer_shows_reveal(cx, None));
+}
+
+#[gpui::test]
+fn the_viewer_has_no_reveal_button_while_running(cx: &mut TestAppContext) {
+    let running = ClientEvent::DownloadProgress {
+        media: original("v/1"),
+        received: 10,
+        total: Some(40),
+    };
+    assert!(!viewer_shows_reveal(cx, Some(running)));
+}
+
+#[gpui::test]
+fn the_viewer_has_no_reveal_button_after_a_failure(cx: &mut TestAppContext) {
+    let failed = ClientEvent::DownloadFailed {
+        media: original("v/1"),
+        reason: DownloadFailure::Network,
+    };
+    assert!(!viewer_shows_reveal(cx, Some(failed)));
+}
+
+#[gpui::test]
+fn the_viewers_reveal_button_yields_the_event_of_the_saved_original(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let dir = tempfile::tempdir().unwrap();
+    let file = original("v/1");
+    let path = saved_file(&dir, "v (1).jpg");
+    saved(&h, cx, &file, &path);
+    open_with(&h, cx, vec![four_pictures()]);
+    open_viewer(&h, cx, ts(2), 0);
+    assert!(shown(cx, "viewer-saved"));
+    assert!(shown(cx, "viewer-reveal"));
+    h.commands();
+    let log = record_store_events(&h, cx);
+
+    click(cx, "viewer-reveal");
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path.clone())]);
+    assert!(h.commands().is_empty(), "revealing is local: no command");
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    h.commands();
+    take_events(&log);
+    assert!(shown(cx, "viewer-reveal"), "still offered offline");
+    click(cx, "viewer-reveal");
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path)]);
+    assert!(h.commands().is_empty());
+}
