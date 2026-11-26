@@ -14,7 +14,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 1. Store
 
-- [ ] 1.1 `StoreEvent::Reveal` and `ChatStore::reveal_download` (D3)
+- [x] 1.1 `StoreEvent::Reveal` and `ChatStore::reveal_download` (D3)
   - Owns: `crates/desktop/src/store.rs`.
   - Depends on: nothing. Waits until RL 6.1/6.4/6.5 and PIN 4.1 have merged or are not started (rule 1).
   - Do: add `StoreEvent::Reveal(PathBuf)` with a doc comment; add `pub fn reveal_download(&mut self, original: &MediaRef, cx: &mut Context<Self>)` per D3: nothing unless `Saved(path)`; `path.try_exists()` is `Ok(false)` -> `set_download(original.clone(), None, cx)` and no event, otherwise `cx.emit(StoreEvent::Reveal(path))`. No command is sent, no log line, the connection is not consulted (D4, D8). Update the doc comments of `DownloadState::Saved` only if they claim something this contradicts.
