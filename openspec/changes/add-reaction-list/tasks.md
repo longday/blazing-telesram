@@ -59,7 +59,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 4. Core (`chat-core`)
 
-- [ ] 4.1 Domain types, seam, command and events (D2, D4)
+- [x] 4.1 Domain types, seam, command and events (D2, D4)
   - Owns: `crates/chat-core/src/model.rs`, `crates/chat-core/src/backend.rs`, `crates/chat-core/src/lib.rs`, `crates/chat-core/src/fixtures.rs`.
   - Depends on: nothing.
   - Do: `Reactor`, `ReactorsPage` (with `request`, `raw`, `oldest`), `Backend::reactors`, `Command::LoadReactors` (with `request`), `ClientEvent::Reactors`, `ClientEvent::ReactorsFailed` (with `request`); module and doc comments that list the reads.
