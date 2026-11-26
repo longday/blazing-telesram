@@ -98,7 +98,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: `body` for every state; a `Ready` state with a non-online connection and a `Failed { offline }` are `Offline`; the header rules; row content; `More` follows `exhausted`, `loading_more` and `more_failed` and not `total` (total below the rows and total above them).
   - Done when: these tests exist.
 
-- [ ] 6.3 Entry point: «Кто отреагировал» in the message menu (Q1 = A; spec "Opening the list", `message-editing` delta)
+- [x] 6.3 Entry point: «Кто отреагировал» in the message menu (Q1 = A; spec "Opening the list", `message-editing` delta)
   - Owns: `crates/desktop/src/desktop/composer.rs`, `crates/desktop/src/desktop.rs`.
   - Depends on: 6.1, 6.2. Lands in RL-app.
   - Do: a menu entry «Кто отреагировал» (selector `menu-reactors`) for a sent, non-deleted message with at least one reaction; `open_menu` opens the menu when this entry is its only content; choosing it closes the menu and opens the list popover anchored where the menu was (`desktop.rs` hosts it); Escape or a click outside closes the popover; chip gestures are untouched.
