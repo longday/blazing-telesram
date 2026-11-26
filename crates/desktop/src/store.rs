@@ -245,6 +245,9 @@ pub enum StoreEvent {
     Media(MediaRef),
     /// The download state of this original changed (or was cleared).
     Download(MediaRef),
+    /// Select this saved file in the platform file manager (emitted by `reveal_download`; the
+    /// app-level subscription in `main.rs` makes the platform call).
+    Reveal(PathBuf),
     Connection,
     Session,
     /// The persisted drafts arrived.
@@ -769,6 +772,23 @@ impl ChatStore {
 
     pub fn download_state(&self, original: &MediaRef) -> Option<&DownloadState> {
         self.downloads.get(original)
+    }
+
+    /// Asks to show the file saved for `original` in the file manager. Does nothing unless the state is
+    /// `Saved(path)`. A file that definitely no longer exists (`Ok(false)`) clears the state, so the card
+    /// returns to "download", and emits no `Reveal`; otherwise (`Ok(true)` or a stat error) it emits
+    /// `StoreEvent::Reveal(path)` and the file manager decides. No command is sent, nothing is logged,
+    /// and the connection is not consulted: the action is local.
+    pub fn reveal_download(&mut self, original: &MediaRef, cx: &mut Context<Self>) {
+        let Some(DownloadState::Saved(path)) = self.downloads.get(original) else {
+            return;
+        };
+        if matches!(path.try_exists(), Ok(false)) {
+            self.set_download(original.clone(), None, cx);
+            cx.notify();
+            return;
+        }
+        cx.emit(StoreEvent::Reveal(path.clone()));
     }
 
     /// Asks the server for `query`: the previous hits stay while the state is `Loading`. The UI applies the
