@@ -13,8 +13,8 @@ use crate::request::{HISTORY_CHUNK, ReadRequest, SEARCH_LIMIT, SearchEntity};
 use crate::search::SearchReply;
 use crate::session::Session;
 use crate::wire::{
-    DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireMembers, WireProfile, WireUser,
-    parse_members, parse_profile,
+    DEFAULT_EXCLUDED_NAMESPACES, WireChat, WireHistory, WireMembers, WireProfile, WireReactors,
+    WireUser, parse_members, parse_profile, parse_reactors,
 };
 use crate::write::{Committed, WriteRequest};
 use crate::ws::TungsteniteConnector;
@@ -164,6 +164,27 @@ impl Client {
         parse_members(&self.registry.execute(&request).await?)
     }
 
+    /// One page of up to `limit` users who reacted to the message `timestamp` of `chat`
+    /// (socket `list_reactions`, `Mode` 0), in server order. `before` is the cursor for an older
+    /// page (sent as `MaxTimestamp`); `None` asks for the first page. The reply carries no total
+    /// and no paging marker, see [`WireReactors`]. A refused read (deleted message, unreadable
+    /// chat) is the usual `ProtoError`.
+    pub async fn reactors(
+        &self,
+        chat: &str,
+        timestamp: i64,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<WireReactors, ProtoError> {
+        let request = ReadRequest::ListReactions {
+            chat: chat.to_owned(),
+            timestamp,
+            before,
+            limit,
+        };
+        parse_reactors(&self.xiva.request(request).await?)
+    }
+
     /// Opens (creating it when missing) the private chat with the user `guid`: one CSRF-guarded
     /// registry mutation, sent at most once and never retried. `Ok` is the server's `ok` answer;
     /// its value is the id of the chat when the reply names one and `None` otherwise (a success
@@ -222,6 +243,14 @@ impl Client {
 mod tests {
     use super::*;
     use crate::session::Identity;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{Value as Json, json};
+    use tokio::sync::mpsc;
+
+    use crate::frame::{IncomingFrame, RequestFrame};
+    use crate::xiva::{ConnectError, Socket, SocketEvent, Target, XivaEvent};
 
     #[tokio::test]
     async fn start_builds_a_client_offline() {
@@ -242,6 +271,7 @@ mod tests {
         assert_eq!(client.history_limit, 50);
         assert_eq!(client.guid, "g");
         assert!(client.whoami().await.is_err());
+        assert!(client.reactors("0/0/c", 1, None, 30).await.is_err());
     }
 
     async fn client_with_registry(base: &str) -> Client {
@@ -414,5 +444,157 @@ mod tests {
             client.create_chat("T", &users).await,
             Err(ManageError::Unknown(_))
         ));
+    }
+
+    /// A socket that answers each request with the next scripted body (echoing its `RequestId`)
+    /// and records the method and body it was asked for.
+    struct ScriptedSocket {
+        incoming: mpsc::UnboundedReceiver<SocketEvent>,
+        echo: mpsc::UnboundedSender<SocketEvent>,
+        sent: Arc<Mutex<Vec<(String, Json)>>>,
+        replies: VecDeque<Json>,
+    }
+
+    impl Socket for ScriptedSocket {
+        async fn send(&mut self, frame: Vec<u8>) -> Result<(), String> {
+            let IncomingFrame::Reply {
+                req_id,
+                method,
+                body,
+                ..
+            } = IncomingFrame::decode(&frame).map_err(|e| e.to_string())?
+            else {
+                return Err("not a request frame".into());
+            };
+            let mut reply = self.replies.pop_front().ok_or("no reply scripted")?;
+            reply["RequestId"] = body["RequestId"].clone();
+            self.sent.lock().unwrap().push((method.clone(), body));
+            let bytes = RequestFrame {
+                service_index: 0,
+                req_id,
+                method,
+                body: reply,
+            }
+            .encode();
+            self.echo
+                .send(SocketEvent::Binary(bytes))
+                .map_err(|e| e.to_string())
+        }
+        async fn recv(&mut self) -> SocketEvent {
+            self.incoming.recv().await.unwrap_or(SocketEvent::Closed {
+                code: None,
+                reason: "eof".into(),
+            })
+        }
+        async fn close(&mut self) {}
+    }
+
+    struct ScriptedConnector(Mutex<Option<ScriptedSocket>>);
+
+    impl Connector for ScriptedConnector {
+        type Socket = ScriptedSocket;
+        async fn connect(&self, _: &Target) -> Result<ScriptedSocket, ConnectError> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| ConnectError::Failed("one connection only".into()))
+        }
+    }
+
+    /// A connected client whose socket answers with `replies` in order.
+    async fn client_with_replies(replies: Vec<Json>) -> (Client, Arc<Mutex<Vec<(String, Json)>>>) {
+        let (echo, incoming) = mpsc::unbounded_channel();
+        echo.send(SocketEvent::Text(
+            json!({ "operation": "subscribed", "subscription-id": "s1" }).to_string(),
+        ))
+        .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let socket = ScriptedSocket {
+            incoming,
+            echo,
+            sent: sent.clone(),
+            replies: replies.into(),
+        };
+        let session = Session {
+            cookies: vec![],
+            identity: Identity {
+                uid: None,
+                guid: "g".into(),
+                display_name: None,
+            },
+        };
+        let (client, mut events) = Client::start_with(
+            ScriptedConnector(Mutex::new(Some(socket))),
+            &session,
+            ClientConfig::production(),
+        )
+        .unwrap();
+        while !matches!(events.recv().await, Some(XivaEvent::Connected { .. })) {}
+        (client, sent)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reactors_sends_the_list_reactions_request_and_parses_the_page() {
+        let page: Json = serde_json::from_str(include_str!(
+            "../tests/fixtures/research-reactors-page.json"
+        ))
+        .unwrap();
+        let (client, sent) = client_with_replies(vec![page.clone(), page]).await;
+
+        let first = client.reactors("0/0/c", 111, None, 30).await.unwrap();
+        assert_eq!(first.entries.len(), 4);
+        assert_eq!((first.raw, first.skipped), (4, 0));
+        assert_eq!(first.oldest, Some(1795171900000000));
+        assert_eq!(
+            first.entries[0].guid,
+            "00000007-0000-4000-8000-000000000001"
+        );
+
+        let older = client.reactors("0/0/c", 111, Some(99), 15).await.unwrap();
+        assert_eq!(older, first);
+
+        let sent = sent.lock().unwrap();
+        let (method, body) = &sent[0];
+        assert_eq!(method, "list_reactions");
+        assert_eq!(body["ChatId"], "0/0/c");
+        assert_eq!(body["Timestamp"], 111);
+        assert_eq!(body["Limit"], 30);
+        assert_eq!(body["Mode"], 0);
+        assert!(body.get("MaxTimestamp").is_none(), "{body}");
+        let (method, body) = &sent[1];
+        assert_eq!(method, "list_reactions");
+        assert_eq!(
+            (body["Limit"].as_u64(), body["MaxTimestamp"].as_i64()),
+            (Some(15), Some(99))
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_reactors_read_is_the_usual_proto_error() {
+        let (client, _) = client_with_replies(vec![
+            json!({ "Status": 4, "Details": "no such message" }),
+            json!({ "Status": 5 }),
+            json!({ "UserReactions": 7 }),
+            json!({ "Status": 6 }),
+        ])
+        .await;
+        let err = client.reactors("0/0/c", 1, None, 30).await.unwrap_err();
+        assert!(
+            matches!(&err, ProtoError::Protocol(m) if m.contains("ENTITY_NOT_FOUND") && m.contains("no such message")),
+            "{err:?}"
+        );
+        assert!(matches!(
+            client.reactors("0/0/c", 1, None, 30).await,
+            Err(ProtoError::Network(_))
+        ));
+        assert!(matches!(
+            client.reactors("0/0/c", 1, None, 30).await,
+            Err(ProtoError::Protocol(m)) if m.contains("not an array")
+        ));
+        assert_eq!(
+            client.reactors("0/0/c", 1, None, 30).await,
+            Err(ProtoError::SessionExpired)
+        );
     }
 }
