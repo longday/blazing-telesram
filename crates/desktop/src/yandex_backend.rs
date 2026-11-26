@@ -651,10 +651,10 @@ impl Backend for YandexBackend {
         timestamp: MessageTs,
     ) -> Result<Option<MessagePreview>, BackendError> {
         let (client, me) = self.client()?;
-        // The page that ends at `timestamp` (the bound is exclusive, hence + 1): its newest row
-        // is the message when the server still has it.
+        // One row: the newest at or below `timestamp` (the bound is exclusive, hence + 1) is the
+        // message when the server still has it.
         let page = client
-            .history(&chat.0, Some(timestamp.saturating_add(1)))
+            .history_page(&chat.0, Some(timestamp.saturating_add(1)), 1)
             .await
             .map_err(backend_error)?;
         let Some(found) = page.messages.into_iter().find(|m| m.timestamp == timestamp) else {
@@ -3492,13 +3492,9 @@ mod tests {
             serde_json::json!({ "Image": { "FileInfo": { "Id2": "f1" }, "Width": 4, "Height": 3 } }),
         );
         let deleted = server_row(chat, 300, "u1", true, serde_json::json!({}));
-        // Each request is answered with the page that ends at the asked timestamp; the
-        // neighbours above are what a page of several messages would carry besides it.
+        // The server answers a limit-1 read with the one row at or below the bound.
         let replies = vec![
-            history_reply(
-                chat,
-                vec![text(90, "u1", "older"), text(100, "u1", "привет")],
-            ),
+            history_reply(chat, vec![text(100, "u1", "привет")]),
             history_reply(chat, vec![photo]),
             history_reply(chat, vec![deleted]),
             history_reply(chat, vec![text(400, "me", "мой текст")]),
@@ -3541,16 +3537,17 @@ mod tests {
                     method.as_str(),
                     body["ChatId"].as_str(),
                     body["MaxTimestamp"].as_i64(),
+                    body["Limit"].as_u64(),
                 )
             })
             .collect();
         assert_eq!(
             asked,
             [
-                ("history", Some("0/0/c"), Some(101)),
-                ("history", Some("0/0/c"), Some(201)),
-                ("history", Some("0/0/c"), Some(301)),
-                ("history", Some("0/0/c"), Some(401)),
+                ("history", Some("0/0/c"), Some(101), Some(1)),
+                ("history", Some("0/0/c"), Some(201), Some(1)),
+                ("history", Some("0/0/c"), Some(301), Some(1)),
+                ("history", Some("0/0/c"), Some(401), Some(1)),
             ]
         );
     }
