@@ -462,6 +462,112 @@ fn a_reconnect_reads_the_open_chats_preview_again() {
     assert_eq!(h.fake.state().preview_calls, [(id("a"), 7)]);
 }
 
+/// An open chat whose pin 7 is being read: the read of message 7 waits at `gate`.
+fn with_gated_read(
+    gate: &Arc<tokio::sync::Notify>,
+    answer: Result<Option<MessagePreview>, BackendError>,
+) -> Harness {
+    let h = start(
+        |s, _| {
+            s.chats = vec![pinned_chat("a", Some(7), Some(10))];
+            s.preview_gate = Some((7, gate.clone()));
+            s.preview_results.insert((id("a"), 7), answer);
+        },
+        50,
+    );
+    h.online();
+    h.client.send(Command::OpenChat(id("a")));
+    h.wait_for("the read of 7", |s| s.preview_calls.len() == 1);
+    h
+}
+
+#[test]
+fn a_late_answer_does_not_overwrite_an_edit_that_arrived_while_the_read_was_out() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let h = with_gated_read(&gate, Ok(Some(text_preview(7, "old text"))));
+    h.fake
+        .push(LiveEvent::MessageUpserted(msg("a", 7, "edited")));
+    let fresh = MessagePreview {
+        author: None,
+        text: "edited".into(),
+        timestamp: 7,
+    };
+    assert_eq!(resolved(&h), pinned(7, Some(fresh.clone())));
+    gate.notify_one();
+    h.quiet();
+    let events = settle(&h);
+    assert!(events.iter().all(|e| !is_pin_event(e)), "{events:?}");
+    assert_eq!(cached(&h, "a").pinned_message, pinned(7, Some(fresh)));
+}
+
+#[test]
+fn a_late_answer_does_not_overwrite_a_deletion_that_arrived_while_the_read_was_out() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let h = with_gated_read(&gate, Ok(Some(text_preview(7, "old text"))));
+    h.fake.push(LiveEvent::MessageDeleted {
+        chat: id("a"),
+        timestamp: 7,
+    });
+    let deleted = MessagePreview {
+        author: None,
+        text: DELETED_PREVIEW.into(),
+        timestamp: 7,
+    };
+    assert_eq!(resolved(&h), pinned(7, Some(deleted.clone())));
+    gate.notify_one();
+    h.quiet();
+    let events = settle(&h);
+    assert!(events.iter().all(|e| !is_pin_event(e)), "{events:?}");
+    assert_eq!(cached(&h, "a").pinned_message, pinned(7, Some(deleted)));
+}
+
+#[test]
+fn a_reconnect_during_a_read_issues_exactly_one_more_read_after_it_completes() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let h = with_gated_read(&gate, Ok(Some(text_preview(7, "answer"))));
+    h.fake.push(LiveEvent::Reconnected);
+    h.next("the refreshed list", |e| {
+        matches!(e, ClientEvent::ChatsReplaced(_))
+    });
+    settle(&h);
+    // Still one read: the re-resolve waits for the one that is out.
+    assert_eq!(h.fake.state().preview_calls.len(), 1);
+    gate.notify_one();
+    assert_eq!(resolved(&h), pinned(7, Some(text_preview(7, "answer"))));
+    h.wait_for("the second read", |s| s.preview_calls.len() == 2);
+    gate.notify_one();
+    h.quiet();
+    settle(&h);
+    assert_eq!(
+        h.fake.state().preview_calls,
+        [(id("a"), 7), (id("a"), 7)],
+        "exactly one read after the first completed"
+    );
+}
+
+#[test]
+fn a_reconnect_during_a_read_that_then_fails_still_gets_its_read() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let h = with_gated_read(&gate, Err(BackendError::Network("down".into())));
+    h.fake.push(LiveEvent::Reconnected);
+    h.next("the refreshed list", |e| {
+        matches!(e, ClientEvent::ChatsReplaced(_))
+    });
+    settle(&h);
+    assert_eq!(h.fake.state().preview_calls.len(), 1);
+    gate.notify_one();
+    h.wait_for("the second read", |s| s.preview_calls.len() == 2);
+    // The second read answers fine.
+    h.fake
+        .state()
+        .preview_results
+        .insert((id("a"), 7), Ok(Some(text_preview(7, "recovered"))));
+    gate.notify_one();
+    assert_eq!(resolved(&h), pinned(7, Some(text_preview(7, "recovered"))));
+    h.quiet();
+    assert_eq!(h.fake.state().preview_calls.len(), 2);
+}
+
 // -- follow-through (rule 4) and storage (rule 5) ----------------------------------------------
 
 #[test]

@@ -271,6 +271,17 @@ enum Phase {
     Expired,
 }
 
+/// An unanswered pinned-message preview read.
+#[derive(Default)]
+struct PinRead {
+    /// A live change or history chunk gave the message's newer state meanwhile: the answer is
+    /// dropped instead of overwriting it.
+    superseded: bool,
+    /// A resolution was asked for while the read was out (`Some(true)` when one of them wanted
+    /// a forced read): exactly one new read follows its answer.
+    pending: Option<bool>,
+}
+
 struct Engine<B> {
     backend: Arc<B>,
     config: ClientConfig,
@@ -340,7 +351,7 @@ struct Engine<B> {
     /// The next creation reads the list first and is not sent unless that succeeds.
     creation_unverified: bool,
     /// Pinned-message preview reads not yet answered: at most one per `(chat, timestamp)`.
-    pin_inflight: HashSet<(ChatId, MessageTs)>,
+    pin_inflight: HashMap<(ChatId, MessageTs), PinRead>,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -691,7 +702,7 @@ impl<B: Backend> Engine<B> {
             profile_inflight: false,
             creation_inflight: false,
             creation_unverified: false,
-            pin_inflight: HashSet::new(),
+            pin_inflight: HashMap::new(),
         }
     }
 
@@ -1413,9 +1424,15 @@ impl<B: Backend> Engine<B> {
                 return self.set_pin_preview(chat, timestamp, message_preview_of(&message));
             }
         }
-        if !self.is_online() || !self.pin_inflight.insert((chat.clone(), timestamp)) {
+        if !self.is_online() {
             return;
         }
+        let key = (chat.clone(), timestamp);
+        if let Some(read) = self.pin_inflight.get_mut(&key) {
+            read.pending = Some(read.pending.unwrap_or(false) || refresh);
+            return;
+        }
+        self.pin_inflight.insert(key, PinRead::default());
         let (backend, inputs, chat) = (self.backend.clone(), self.inputs.clone(), chat.clone());
         tokio::spawn(async move {
             let result = backend.message_preview(&chat, timestamp).await;
@@ -1436,14 +1453,21 @@ impl<B: Backend> Engine<B> {
         timestamp: MessageTs,
         result: Result<Option<MessagePreview>, BackendError>,
     ) {
-        self.pin_inflight.remove(&(chat.clone(), timestamp));
+        let read = self
+            .pin_inflight
+            .remove(&(chat.clone(), timestamp))
+            .unwrap_or_default();
         match result {
+            Ok(Some(_)) if read.superseded => {}
             Ok(Some(preview)) => self.set_pin_preview(&chat, timestamp, preview),
             Ok(None) => {}
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
                 tracing::debug!(kind = error_kind(&error), "pinned message preview failed")
             }
+        }
+        if let Some(refresh) = read.pending {
+            self.resolve_pin_preview(&chat, refresh);
         }
     }
 
@@ -1469,8 +1493,17 @@ impl<B: Backend> Engine<B> {
         });
     }
 
+    /// A newer state of the pinned message than an unanswered read can bring: the read's answer
+    /// is dropped when it arrives.
+    fn supersede_pin_read(&mut self, chat: &ChatId, timestamp: MessageTs) {
+        if let Some(read) = self.pin_inflight.get_mut(&(chat.clone(), timestamp)) {
+            read.superseded = true;
+        }
+    }
+
     /// D5.4: the pinned message was upserted: its preview follows the new copy.
     fn follow_pin(&mut self, message: &Message) {
+        self.supersede_pin_read(&message.chat, message.timestamp);
         self.set_pin_preview(
             &message.chat,
             message.timestamp,
@@ -1480,6 +1513,7 @@ impl<B: Backend> Engine<B> {
 
     /// D5.4: the pinned message was deleted: its preview becomes the deleted placeholder.
     fn follow_pin_deleted(&mut self, chat: &ChatId, timestamp: MessageTs) {
+        self.supersede_pin_read(chat, timestamp);
         let Some(pin) = self
             .db(self.cache.chat(chat))
             .flatten()
@@ -1510,6 +1544,7 @@ impl<B: Backend> Engine<B> {
             return;
         };
         if let Some(message) = chunk.messages.iter().find(|m| m.timestamp == pin.timestamp) {
+            self.supersede_pin_read(&chunk.chat, pin.timestamp);
             self.set_pin_preview(&chunk.chat, pin.timestamp, message_preview_of(message));
         }
     }
@@ -3327,24 +3362,23 @@ mod tests {
             chat: &ChatId,
             timestamp: MessageTs,
         ) -> Result<Option<MessagePreview>, BackendError> {
-            let (result, gate) = {
+            let gate = {
                 let mut s = self.state();
                 s.preview_calls.push((chat.clone(), timestamp));
-                (
-                    s.preview_results
-                        .get(&(chat.clone(), timestamp))
-                        .cloned()
-                        .unwrap_or(Ok(None)),
-                    s.preview_gate
-                        .as_ref()
-                        .filter(|(gated, _)| *gated == timestamp)
-                        .map(|(_, gate)| gate.clone()),
-                )
+                s.preview_gate
+                    .as_ref()
+                    .filter(|(gated, _)| *gated == timestamp)
+                    .map(|(_, gate)| gate.clone())
             };
             if let Some(gate) = gate {
                 gate.notified().await;
             }
-            result
+            // Looked up after the gate: a test may change the answer while the call waits.
+            self.state()
+                .preview_results
+                .get(&(chat.clone(), timestamp))
+                .cloned()
+                .unwrap_or(Ok(None))
         }
     }
 
