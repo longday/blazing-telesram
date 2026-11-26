@@ -50,41 +50,41 @@ Done: 1.1, 1.2, 1.3, 2.1 (RL-proto, on `main`), 4.1, 4.2, 5.1, 6.1-6.5 (merged i
 
 ## add-pins-and-importance-view (PIN)
 
-Done: 1.1. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 may merge alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
+Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `integ/pins-and-importance-view` as `b48b666`; reaches `main` with PIN-app, rule 3: 3.2 is its first consumer) and 5.2 (in the same integ branch, `ce2d7ab`, head). Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Units: **PIN-app** = 1.2, (1.3), 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2 (1.2 adds a `PushEvent` variant matched exhaustively by the adapter; 3.2 is its first consumer); 5.1 merged alone; 3.3 (edit flag, Q6) is its own unit after PIN-app and closes with the live check 6.2. PIN's tasks on files shared with RL start after the matching RL unit has merged (RL first: all its answers are in).
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | blocked: VM network; **[live]** reads only | | `research.md` |
 | 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
-| 1.2 | ready; start after RL 1.2 merges (same `wire.rs`) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
+| 1.2 | **done**, in `integ/pins-and-importance-view` (`b48b666`); its files (`wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs`) stay with PIN-app until that unit merges to `main` (rule 1) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
 | 2.1 | ready; start after RL-app merges | 1.1 | `model.rs`, `fixtures.rs` |
 | 2.2 | blocked-by 2.1 | 2.1 | `model.rs`, `backend.rs`, `cache.rs` (test) |
-| 2.3 | blocked-by 2.2 (and 1.2 for the unit) | 2.2 | chat-core `client.rs` |
+| 2.3 | blocked-by 2.2 (1.2 is done in integ) | 2.2 | chat-core `client.rs` |
 | 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
 | 3.1 | blocked-by 2.1 | 1.1, 2.1 | `yandex_backend.rs` |
-| 3.2 | blocked-by 1.2, 2.2, 3.1 | | `yandex_backend.rs` |
-| 3.3 | blocked-by 3.2, 5.2; closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
+| 3.2 | blocked-by 2.2, 3.1 (1.2 is done in integ) | 1.2, 2.2, 3.1 | `yandex_backend.rs` |
+| 3.3 | blocked-by 3.2 (5.2 is done in integ); closes with live 6.2 | | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
 | 4.1 | blocked-by 2.2 | 2.2 | `store.rs` |
 | 4.2 | blocked-by 2.1 | 2.1 | `timeline.rs`, `theme.rs` |
 | 4.3 | blocked-by 4.1 | 4.1 | `desktop.rs` |
 | 4.4 | blocked-by 4.1-4.3 | | `tests.rs` |
-| 5.1 | ready; start after RL 2.1 merges (same `bt-probe.rs`) | 1.1 | `bt-probe.rs` |
-| 5.2 | blocked-by 1.2 (and RL 2.1) | 1.2 | `bt-probe.rs` |
+| 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
+| 5.2 | **done**, in `integ/pins-and-importance-view` (`537f7eb`, merged `ce2d7ab`); `bt-probe.rs` stays with PIN-app until it merges | 1.2 | `bt-probe.rs` |
 | 6.1 | after the units | | build/test/lint matrix |
 | 6.2 | blocked: network and the user's approval of the target; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
 | 6.3 | after the units | | this file, archive |
 
 ## add-reveal-downloaded-file (REV)
 
-Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
+Proposed 2026-11-27, no task started, no question open (decisions in its `design.md`). Local action only: no protocol, core or server change. One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`; 1.1, 2.1 and 3.1 cannot compile apart, so they start together once RL-app is on `main`); 5.1 final run, 5.2 hand check in the VM (**[live]**, not a gate), 5.3 archive. REV has no urgency over RL, PIN and CM: each of its tasks starts when its file is free (rule 1), so it queues behind the units below.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 1.1 | ready after RL-app (6.1/6.4/6.5 hold `store.rs` on `integ/reaction-list-app` until it merges to `main`) and PIN 4.1 have merged | | `store.rs` |
-| 2.1 | ready now (`viewer.rs` is in no other change) | 1.1 contract (D3) | `viewer.rs` |
+| 1.1 | ready once RL-app is on `main` (6.1/6.4/6.5 hold `store.rs` on `integ/reaction-list-app` until then); start together with 2.1 and 3.1. PIN 4.1 (`store.rs`) is not started and locks nothing (rule 6) | | `store.rs` |
+| 2.1 | ready once RL-app is on `main`, together with 1.1 and 3.1 (it cannot compile apart from them; `viewer.rs` itself is in no other change) | 1.1 contract (D3) | `viewer.rs` |
 | 2.2 | blocked-by 2.1; after PIN 4.2 has merged (same `timeline.rs`) | 1.1, 2.1 | `timeline.rs` |
-| 3.1 | ready after RL-app has merged (6.2 holds `main.rs` until then) | 1.1 contract | `main.rs` |
+| 3.1 | ready once RL-app is on `main` (6.2 holds `main.rs` until then), together with 1.1 and 2.1 | 1.1 contract | `main.rs` |
 | 4.1 | blocked-by 1.1, 2.1, 2.2; after RL-app (6.7) and PIN 4.4 have merged (same `tests.rs`) | 1.1, 2.1, 2.2 | `tests.rs` |
 | 5.1 | blocked-by the REV unit on `main` | | build/test/lint matrix |
 | 5.2 | blocked-by 5.1, the VM network and a session; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 | none (result in the task report) |
@@ -94,10 +94,9 @@ Unit **REV** shares files with: RL-app (`store.rs` 6.1/6.4/6.5, `main.rs` 6.2, `
 
 ## Ready now
 
-- Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`); **PIN 1.2** (RL 1.2 is on `main`), **PIN 5.2** needs PIN 1.2.
-- Queued behind RL-app on shared files (rule 1): **PIN 2.1** (after RL-app merges to `main`). Each chain then unlocks the rest of its column above.
+- Startable without the user, no unmet dependency: **RL 6.7** (`tests.rs`, on `integ/reaction-list-app`). PIN has nothing startable: 1.1, 1.2, 5.1 and 5.2 are done; 2.1 waits for RL-app and the rest of its column for 2.1 or 2.2.
+- Queued behind RL-app on shared files (rule 1): **PIN 2.1** and **REV 1.1 + 2.1 + 3.1** (start together once RL-app merges to `main`; they cannot compile apart). Each chain then unlocks the rest of its column above.
 - CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
-- Free of every open task's files, startable now but only as part of the REV unit: **REV 2.1** (`viewer.rs`); the rest of REV queues behind RL and PIN (above).
 
 ## Needs the user
 
