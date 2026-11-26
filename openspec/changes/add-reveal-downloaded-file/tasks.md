@@ -23,7 +23,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
 
 ## 2. Views
 
-- [ ] 2.1 `ActionLine.reveal`, the label and the viewer button (D5, D6)
+- [x] 2.1 `ActionLine.reveal`, the label and the viewer button (D5, D6)
   - Owns: `crates/desktop/src/viewer.rs` (including its unit tests).
   - Depends on: 1.1 for `reveal_download` (code against D3).
   - Do: `ActionLine` gains `pub reveal: bool`, true exactly for `Some(DownloadState::Saved(_))`; `pub const REVEAL_LABEL: &str = "Показать в Finder"`; the viewer's bottom bar shows a `viewer-reveal` button before the download button when `line.reveal`, in `ACCENT`, whose click calls `this.store.update(cx, |store, cx| store.reveal_download(&original, cx))` for `item.media.original()`; it is enabled in every connection state (D4); the existing download button, status text and selectors are unchanged; update the `ActionLine` literals of the existing tests in the file.

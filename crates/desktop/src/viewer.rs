@@ -101,6 +101,9 @@ impl Action {
     }
 }
 
+/// The label of the local "show the saved file in Finder" action, on the viewer and the file card.
+pub const REVEAL_LABEL: &str = "Показать в Finder";
+
 /// What the download line under the picture says and offers for a download state.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActionLine {
@@ -108,6 +111,9 @@ pub struct ActionLine {
     pub action: Action,
     /// Starting a transfer needs the connection; cancelling does not.
     pub enabled: bool,
+    /// The file was saved in this session, so it can be shown in Finder. A local action: offered
+    /// whatever the connection, and independent of `enabled`.
+    pub reveal: bool,
 }
 
 pub fn action_line(state: Option<&DownloadState>, online: bool) -> ActionLine {
@@ -134,6 +140,7 @@ pub fn action_line(state: Option<&DownloadState>, online: bool) -> ActionLine {
     };
     ActionLine {
         enabled: online || action == Action::Cancel,
+        reveal: matches!(state, Some(DownloadState::Saved(_))),
         status,
         action,
     }
@@ -203,6 +210,8 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
     let original = item.media.original();
     let name = item.name.clone();
     let action = line.action;
+    let reveal = line.reveal;
+    let reveal_original = original.clone();
     let mut act =
         button(action.selector(), action.label()).debug_selector(move || action.selector().into());
     act = if line.enabled {
@@ -285,6 +294,18 @@ pub fn render(frame: Frame, cx: &mut Context<Desktop>) -> Div {
                         .text_color(rgb(MUTED))
                         .child(text)
                 }))
+                .when(reveal, |d| {
+                    d.child(
+                        button("viewer-reveal", REVEAL_LABEL)
+                            .debug_selector(|| "viewer-reveal".into())
+                            .text_color(rgb(ACCENT))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.store.update(cx, |store, cx| {
+                                    store.reveal_download(&reveal_original, cx)
+                                });
+                            })),
+                    )
+                })
                 .child(act),
         )
 }
@@ -314,7 +335,7 @@ fn arrow(
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, ActionLine, action_line, picture_box, position_label, step};
+    use super::{Action, ActionLine, REVEAL_LABEL, action_line, picture_box, position_label, step};
     use crate::store::DownloadState;
     use bt_chat_core::model::DownloadFailure;
     use std::path::Path;
@@ -345,7 +366,8 @@ mod tests {
             ActionLine {
                 status: None,
                 action: Action::Download,
-                enabled: true
+                enabled: true,
+                reveal: false
             }
         );
         assert_eq!(
@@ -353,7 +375,8 @@ mod tests {
             ActionLine {
                 status: Some("Нет соединения".into()),
                 action: Action::Download,
-                enabled: false
+                enabled: false,
+                reveal: false
             }
         );
         let running = Some(DownloadState::Running {
@@ -365,7 +388,8 @@ mod tests {
             ActionLine {
                 status: Some("1,5 КБ из 10 МБ".into()),
                 action: Action::Cancel,
-                enabled: true
+                enabled: true,
+                reveal: false
             }
         );
         let unknown = Some(DownloadState::Running {
@@ -388,7 +412,8 @@ mod tests {
             ActionLine {
                 status: Some("Сохранено: a (1).jpg".into()),
                 action: Action::DownloadAgain,
-                enabled: true
+                enabled: true,
+                reveal: true
             }
         );
         let failed = Some(DownloadState::Failed(DownloadFailure::Disk));
@@ -397,10 +422,52 @@ mod tests {
             ActionLine {
                 status: Some("Не удалось записать на диск".into()),
                 action: Action::Retry,
-                enabled: true
+                enabled: true,
+                reveal: false
             }
         );
         assert!(!line(failed, false).enabled);
+    }
+
+    const ALL_FAILURES: [DownloadFailure; 6] = [
+        DownloadFailure::Offline,
+        DownloadFailure::NotFound,
+        DownloadFailure::Destination,
+        DownloadFailure::Disk,
+        DownloadFailure::Network,
+        DownloadFailure::Other,
+    ];
+
+    #[test]
+    fn reveal_is_offered_exactly_for_a_saved_file_online_or_not() {
+        let reveal =
+            |state: Option<DownloadState>, online| action_line(state.as_ref(), online).reveal;
+        let saved = || {
+            Some(DownloadState::Saved(
+                Path::new("/Users/x/Downloads/a.jpg").to_path_buf(),
+            ))
+        };
+        for online in [true, false] {
+            assert!(reveal(saved(), online), "saved, online={online}");
+            assert!(!reveal(None, online), "no state, online={online}");
+            for total in [Some(2), None] {
+                let running = Some(DownloadState::Running { received: 1, total });
+                assert!(
+                    !reveal(running, online),
+                    "running {total:?}, online={online}"
+                );
+            }
+            for reason in ALL_FAILURES {
+                assert!(
+                    !reveal(Some(DownloadState::Failed(reason)), online),
+                    "failed {reason:?}, online={online}"
+                );
+            }
+        }
+        // Offline, the download button is off but the reveal stays on.
+        let line = action_line(saved().as_ref(), false);
+        assert!(line.reveal && !line.enabled);
+        assert_eq!(REVEAL_LABEL, "Показать в Finder");
     }
 
     fn near(actual: (f32, f32), expected: (f32, f32)) {
