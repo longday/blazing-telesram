@@ -22,6 +22,9 @@ fn fixtures_hold_no_credentials() {
         "push-deleted",
         "push-reaction-removed",
         "history-important",
+        "chat-pinned",
+        "push-pin",
+        "push-pin-removed",
         "reactors-page",
     ]
     .map(|n| format!("research-{n}"));
@@ -77,6 +80,47 @@ fn chat_list_fixture() {
     assert!(
         channel.raw.get("Messages").is_none(),
         "raw chat keeps no message rows"
+    );
+}
+
+/// Synthetic list (`research-chat-pinned.json`, built from the documented `PinnedMessageInfo` /
+/// `PinnedMessageTimestamps` shapes, not a live capture).
+#[test]
+fn synthetic_chat_list_carries_the_pin() {
+    let chats = parse_chat_list(
+        &fixture("research-chat-pinned.json"),
+        &DEFAULT_EXCLUDED_NAMESPACES,
+    )
+    .unwrap();
+    let pins: Vec<_> = chats
+        .iter()
+        .map(|c| (c.title.as_deref().unwrap(), c.pinned, c.pin_action_ts))
+        .collect();
+    assert_eq!(
+        pins,
+        [
+            (
+                "Pinned by info",
+                Some(1_784_000_000_003_333),
+                Some(1_784_000_000_004_444)
+            ),
+            ("Pinned by array", Some(1_784_000_000_005_555), None),
+            ("Unpinned snapshot", None, Some(1_784_000_000_007_777)),
+            ("No pin keys", None, None),
+        ],
+        "info wins over the array; the array's first positive entry; an unpin keeps its action time"
+    );
+    assert!(chats[0].raw.get("PinnedMessageInfo").is_some());
+
+    // Entries that predate the pin keys carry no pin.
+    let old = parse_chat_list(
+        &fixture("research-chat-list.json"),
+        &DEFAULT_EXCLUDED_NAMESPACES,
+    )
+    .unwrap();
+    assert!(
+        old.iter()
+            .all(|c| c.pinned.is_none() && c.pin_action_ts.is_none())
     );
 }
 
@@ -217,6 +261,29 @@ fn push_fixtures() {
         Ok(PushEvent::MessageDeleted {
             chat: "0/0/33333333-3333-4333-8333-333333333333".into(),
             timestamp: 1_784_000_000_001_002
+        })
+    );
+}
+
+/// Synthetic pushes (`research-push-pin*.json`, built from the documented `Pin` shape, not live
+/// captures): a timestamp pins, its absence unpins; the action time is the server timestamp.
+#[test]
+fn synthetic_pin_push_fixtures() {
+    let chat = "0/0/00000003-0000-4000-8000-000000000003";
+    assert_eq!(
+        decode_push(&fixture("research-push-pin.json")),
+        Ok(PushEvent::PinChanged {
+            chat: chat.into(),
+            pinned: Some(1_795_070_677_887_127),
+            at: Some(1_795_172_185_683_559)
+        })
+    );
+    assert_eq!(
+        decode_push(&fixture("research-push-pin-removed.json")),
+        Ok(PushEvent::PinChanged {
+            chat: chat.into(),
+            pinned: None,
+            at: Some(1_795_172_999_000_001)
         })
     );
 }

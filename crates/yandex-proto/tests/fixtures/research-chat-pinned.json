@@ -1,0 +1,39 @@
+{
+  "_synthetic": "SYNTHETIC fixture built from the documented shape (PinnedMessageInfo { PinnedMessageTs, LastActionTsMcs }, ChatInfo.PinnedMessageTimestamps; web bundle eW/e$, research.md Pins); not a live capture. Replace with a sanitised capture once task 0.1/0.2 observes a real entry. Placeholders only.",
+  "Chats": [
+    {
+      "ChatId": "0/0/55555555-5555-4555-8555-555555555551",
+      "ChatInfo": { "Name": "Pinned by info", "PinnedMessageTimestamps": [1784000000001111, 1784000000002222] },
+      "PinnedMessageInfo": { "PinnedMessageTs": 1784000000003333, "LastActionTsMcs": 1784000000004444 },
+      "LastSeqNo": 4,
+      "LastSeenByMeSeqNo": 4,
+      "LastTsMcs": 1784000000004444,
+      "Messages": []
+    },
+    {
+      "ChatId": "0/0/55555555-5555-4555-8555-555555555552",
+      "ChatInfo": { "Name": "Pinned by array", "PinnedMessageTimestamps": [0, 1784000000005555, 1784000000006666] },
+      "LastSeqNo": 2,
+      "LastSeenByMeSeqNo": 2,
+      "LastTsMcs": 1784000000006666,
+      "Messages": []
+    },
+    {
+      "ChatId": "0/0/55555555-5555-4555-8555-555555555553",
+      "ChatInfo": { "Name": "Unpinned snapshot" },
+      "PinnedMessageInfo": { "LastActionTsMcs": 1784000000007777 },
+      "LastSeqNo": 3,
+      "LastSeenByMeSeqNo": 3,
+      "LastTsMcs": 1784000000007777,
+      "Messages": []
+    },
+    {
+      "ChatId": "0/0/55555555-5555-4555-8555-555555555554",
+      "ChatInfo": { "Name": "No pin keys" },
+      "LastSeqNo": 1,
+      "LastSeenByMeSeqNo": 1,
+      "LastTsMcs": 1784000000008888,
+      "Messages": []
+    }
+  ]
+}
