@@ -238,6 +238,19 @@ impl MessageBody {
             _ => Vec::new(),
         }
     }
+
+    /// The one-line text of the body, as the chat row, search hits and reply quotes show it.
+    pub fn preview_text(&self) -> String {
+        match self {
+            MessageBody::Text(text) => text.clone(),
+            MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+                caption.clone().unwrap_or_else(|| "Фото".into())
+            }
+            MessageBody::File { name, .. } => name.clone(),
+            MessageBody::Deleted => "Сообщение удалено".into(),
+            MessageBody::Unsupported(kind) => format!("[{kind}]"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +270,9 @@ pub struct Message {
     /// Server-confirmed reactions; rows cached before reactions existed have none.
     #[serde(default)]
     pub reactions: Reactions,
+    /// The server's importance flag; rows cached before it existed are not important.
+    #[serde(default)]
+    pub important: bool,
 }
 
 impl Message {
@@ -727,6 +743,61 @@ mod tests {
         let message: Message = serde_json::from_value(json).unwrap();
         assert_eq!(message.reactions, Reactions::default());
         assert_eq!(message.body, MessageBody::Text("hi".into()));
+    }
+
+    #[test]
+    fn a_message_cached_without_the_importance_flag_is_not_important() {
+        let mut json = serde_json::to_value(crate::fixtures::msg("0/0/c", 1, "hi")).unwrap();
+        assert!(json.as_object_mut().unwrap().remove("important").is_some());
+        let message: Message = serde_json::from_value(json).unwrap();
+        assert!(!message.important);
+        assert_eq!(message.body, MessageBody::Text("hi".into()));
+
+        let mut important = crate::fixtures::msg("0/0/c", 1, "hi");
+        important.important = true;
+        let json = serde_json::to_string(&important).unwrap();
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), important);
+    }
+
+    #[test]
+    fn preview_text_strings() {
+        let media = || MediaRef {
+            id: "b/1".into(),
+            kind: MediaKind::Thumbnail,
+        };
+        let item = GalleryItem {
+            media: media(),
+            width: 4,
+            height: 3,
+            name: None,
+        };
+        let image = |caption: Option<&str>| MessageBody::Image {
+            media: media(),
+            width: 4,
+            height: 3,
+            caption: caption.map(Into::into),
+            name: None,
+        };
+        let gallery = |caption: Option<&str>| MessageBody::Gallery {
+            items: vec![item.clone()],
+            caption: caption.map(Into::into),
+        };
+        assert_eq!(MessageBody::Text("привет".into()).preview_text(), "привет");
+        assert_eq!(image(None).preview_text(), "Фото");
+        assert_eq!(image(Some("отпуск")).preview_text(), "отпуск");
+        assert_eq!(gallery(None).preview_text(), "Фото");
+        assert_eq!(gallery(Some("отпуск")).preview_text(), "отпуск");
+        let file = MessageBody::File {
+            media: media(),
+            name: "a.pdf".into(),
+            size: 3,
+        };
+        assert_eq!(file.preview_text(), "a.pdf");
+        assert_eq!(MessageBody::Deleted.preview_text(), "Сообщение удалено");
+        assert_eq!(
+            MessageBody::Unsupported("Poll".into()).preview_text(),
+            "[Poll]"
+        );
     }
 
     #[test]

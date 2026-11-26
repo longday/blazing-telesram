@@ -88,6 +88,7 @@ fn message(chat: &str, i: i64, author: &str, outgoing: bool, body: MessageBody) 
         forwarded_from: None,
         delivery: bt_chat_core::model::Delivery::Sent,
         reactions: Default::default(),
+        important: false,
     }
 }
 

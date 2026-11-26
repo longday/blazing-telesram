@@ -1009,7 +1009,7 @@ fn search_hits(
                     } else {
                         sender_name(m.from.as_ref(), users)
                     },
-                    text: preview(&body(&m.body)),
+                    text: body(&m.body).preview_text(),
                 }
             })
             .collect(),
@@ -1065,7 +1065,7 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
             } else {
                 message.author_name.clone()
             },
-            text: preview(&message.body),
+            text: message.body.preview_text(),
             timestamp: m.timestamp,
         }
     });
@@ -1083,18 +1083,6 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
         muted: chat.muted,
         pinned_rank: None,
         partner: chat.partner_guid.clone().map(UserId),
-    }
-}
-
-fn preview(body: &MessageBody) -> String {
-    match body {
-        MessageBody::Text(text) => text.clone(),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            caption.clone().unwrap_or_else(|| "Фото".into())
-        }
-        MessageBody::File { name, .. } => name.clone(),
-        MessageBody::Deleted => "Сообщение удалено".into(),
-        MessageBody::Unsupported(kind) => format!("[{kind}]"),
     }
 }
 
@@ -1251,6 +1239,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
             .as_ref()
             .map(|r| message_reactions(r, me))
             .unwrap_or_default(),
+        important: wire.important,
     };
     match &wire.relation {
         Relation::None => {}
@@ -1259,7 +1248,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
             reference,
             original,
         } => {
-            let original_text = original.as_ref().map(|o| preview(&body(&o.body)));
+            let original_text = original.as_ref().map(|o| body(&o.body).preview_text());
             // A forward with a comment parses as a reply to its original, which lives in another
             // chat. An edit would rebuild the reference with this chat's id, so such a quote gets
             // no target timestamp: it stays visible, and core refuses to edit the message.
