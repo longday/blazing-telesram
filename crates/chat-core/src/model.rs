@@ -100,6 +100,37 @@ pub struct ChatMembers {
     pub partial: bool,
 }
 
+/// One person who reacted to a message, as the server lists them. `name` is `None` when neither
+/// the entry nor the users cache has one (the view shows a placeholder); `at` is `None` when the
+/// entry carries no time. `me` is set by the backend, which knows the account's own guid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reactor {
+    pub user: UserId,
+    pub name: Option<String>,
+    pub avatar: Option<MediaRef>,
+    pub code: ReactionCode,
+    pub at: Option<MessageTs>,
+    pub me: bool,
+}
+
+/// One page of the people who reacted to the message `(chat, timestamp)`, in server order.
+/// `request` is the caller's token of the `LoadReactors` that asked, copied in by the engine
+/// (the backend leaves it 0); the store matches answers to lists with it. `skipped` counts
+/// entries without identity, `raw` the entries the server sent (skipped ones included) and
+/// `oldest` is the smallest timestamp among them (`None` when none carried one); the next page
+/// is asked with it as `before`. Whether another page exists is the store's decision, never
+/// the backend's. Held in memory only, never cached.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReactorsPage {
+    pub chat: ChatId,
+    pub timestamp: MessageTs,
+    pub request: u64,
+    pub reactors: Vec<Reactor>,
+    pub skipped: usize,
+    pub raw: usize,
+    pub oldest: Option<MessageTs>,
+}
+
 /// The signed-in account as `whoami` reports it. `status_text` is set only when the account has
 /// a non-blank status text; no availability is inferred.
 #[derive(Clone, Debug, PartialEq)]
@@ -416,6 +447,20 @@ pub enum ClientEvent {
         reason: String,
         offline: bool,
     },
+    /// One page of the people who reacted to a message, as loaded for a `LoadReactors`; its
+    /// `request` is the command's token. Never cached; the message's `reactions` are untouched.
+    Reactors(ReactorsPage),
+    /// `LoadReactors` for `(chat, timestamp)` produced no page; `request` is the command's token.
+    /// `offline` is set when the client could not ask at all (nothing was sent); otherwise
+    /// `reason` is the server's or the network's, or the constant refusal text when the message
+    /// cannot have a list, to show with a retry.
+    ReactorsFailed {
+        chat: ChatId,
+        timestamp: MessageTs,
+        request: u64,
+        reason: String,
+        offline: bool,
+    },
     /// The signed-in account's own profile, as loaded for a `LoadProfile`. Never cached.
     Profile(Profile),
     /// `LoadProfile` produced no profile; `offline` as for `MembersFailed`.
@@ -508,6 +553,16 @@ pub enum Command {
     /// Read the people of `chat` (read-only). The reply is `Members` or `MembersFailed`; a
     /// second request for a chat whose load is still running is dropped.
     LoadMembers(ChatId),
+    /// Read one page of the people who reacted to the message `(chat, timestamp)` (read-only),
+    /// those older than `before` when set, the newest first page when `None`. `request` is a
+    /// token chosen by the store: the reply, `Reactors` or `ReactorsFailed`, carries it back
+    /// unchanged and the core never interprets it. Not deduplicated: every command is answered.
+    LoadReactors {
+        chat: ChatId,
+        timestamp: MessageTs,
+        before: Option<MessageTs>,
+        request: u64,
+    },
     /// Read the signed-in account's own profile (read-only). The reply is `Profile` or
     /// `ProfileFailed`; a request while a load is running is dropped.
     LoadProfile,
@@ -547,6 +602,22 @@ mod tests {
             caption: Some("c".into()),
             name: Some("a.jpg".into()),
         }
+    }
+
+    #[test]
+    fn a_reactors_page_is_told_apart_by_its_request_token() {
+        let page = |request| ReactorsPage {
+            chat: ChatId("c".into()),
+            timestamp: 7,
+            request,
+            reactors: vec![crate::fixtures::reactor("g1", 1, Some(5))],
+            skipped: 0,
+            raw: 1,
+            oldest: Some(5),
+        };
+        assert_eq!(page(1), page(1));
+        assert_ne!(page(1), page(2));
+        assert_eq!(page(1).reactors[0].name.as_deref(), Some("name g1"));
     }
 
     #[test]
