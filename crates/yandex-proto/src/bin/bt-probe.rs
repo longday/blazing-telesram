@@ -1051,7 +1051,15 @@ fn describe(message: &WireMessage) -> String {
         WireBody::Text(text) => text.clone(),
         other => format!("[{other:?}]"),
     };
-    let flags = if message.edited { " (edited)" } else { "" };
+    let flags = format!(
+        "{}{}",
+        if message.edited { " (edited)" } else { "" },
+        if message.important {
+            " (important)"
+        } else {
+            ""
+        }
+    );
     let reply = match &message.relation {
         Relation::Reply {
             quote, original, ..
@@ -1340,6 +1348,16 @@ mod tests {
             describe(&row),
             "20\t?\tmine (reactions [], version 4, recent [])"
         );
+    }
+
+    #[test]
+    fn a_history_row_is_marked_important_only_when_the_flag_is_set() {
+        let mut row = message(Relation::None);
+        assert_eq!(describe(&row), "20\t?\tmine");
+        row.important = true;
+        assert_eq!(describe(&row), "20\t?\tmine (important)");
+        row.edited = true;
+        assert_eq!(describe(&row), "20\t?\tmine (edited) (important)");
     }
 
     #[test]
