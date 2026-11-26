@@ -6,6 +6,7 @@ mod logging;
 mod login;
 mod new_chat;
 mod profile;
+mod reactors;
 mod search_results;
 mod store;
 #[cfg(test)]

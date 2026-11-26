@@ -40,3 +40,14 @@ pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
 pub fn id(chat: &str) -> ChatId {
     ChatId(chat.into())
 }
+
+pub fn reactor(guid: &str, code: i64, at: Option<MessageTs>) -> Reactor {
+    Reactor {
+        user: UserId(guid.into()),
+        name: Some(format!("name {guid}")),
+        avatar: None,
+        code: crate::reactions::ReactionCode(code),
+        at,
+        me: false,
+    }
+}

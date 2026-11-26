@@ -5,7 +5,7 @@
 
 use crate::model::{
     ChatId, ChatMembers, ChatSummary, HistoryChunk, MediaRef, Message, MessageTs, PayloadId,
-    Profile, ReplyTarget, SearchHits, UserId,
+    Profile, ReactorsPage, ReplyTarget, SearchHits, UserId,
 };
 use crate::reactions::{ReactionCode, ReactionsUpdate};
 use std::io::Write;
@@ -191,6 +191,20 @@ pub trait Backend: Send + Sync + 'static {
 
     /// The signed-in account's own profile. Read-only.
     fn profile(&self) -> impl Future<Output = Result<Profile, BackendError>> + Send;
+
+    /// One page of the people who reacted to the message `(chat, timestamp)`: up to `limit`
+    /// entries, those older than `before` when set, otherwise the first page, in server order.
+    /// One call is one request; the backend never loops. `raw`, `oldest` and `skipped` pass
+    /// through from the server's reply and the backend does not decide whether another page
+    /// exists. `request` of the page is left 0: the engine copies the caller's token in.
+    /// Read-only; nothing is persisted.
+    fn reactors(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        before: Option<MessageTs>,
+        limit: usize,
+    ) -> impl Future<Output = Result<ReactorsPage, BackendError>> + Send;
 
     /// Opens the private chat with `user`, creating it when missing: one request, never
     /// retried. Returns the chat id when the reply names one. A guard refusal (developer

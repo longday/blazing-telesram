@@ -16,7 +16,8 @@ use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{
     PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember,
-    WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireSender, WireUser,
+    WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireReactorEntry,
+    WireReactors, WireSender, WireUser,
 };
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
@@ -577,6 +578,44 @@ impl Backend for YandexBackend {
         Ok(profile_of(wire, &me))
     }
 
+    async fn reactors(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+        before: Option<MessageTs>,
+        limit: usize,
+    ) -> Result<ReactorsPage, BackendError> {
+        let (client, me) = self.client()?;
+        // The page size is the caller's: it goes to the server as received (saturating at the
+        // wire's u32), not replaced by a protocol constant.
+        let limit = u32::try_from(limit).unwrap_or(u32::MAX);
+        let wire = client
+            .reactors(&chat.0, timestamp, before, limit)
+            .await
+            .map_err(backend_error)?;
+        // The entries name almost everyone; the user cache fills only the rows they left blank.
+        let nameless = wire
+            .entries
+            .iter()
+            .filter(|e| blank(e.display_name.as_deref()))
+            .map(|e| e.guid.clone());
+        Users {
+            client: &client,
+            cache: &self.users,
+        }
+        .load(nameless.collect())
+        .await?;
+        let page = reactors_page(chat, timestamp, wire, &me, &self.users.lock().unwrap());
+        // Counts only: no name, guid or chat id reaches the log.
+        tracing::debug!(
+            shown = page.reactors.len(),
+            raw = page.raw,
+            skipped = page.skipped,
+            "reactors mapped"
+        );
+        Ok(page)
+    }
+
     async fn create_private_chat(&self, user: &UserId) -> Result<Option<ChatId>, CreateError> {
         const KIND: &str = "create_private_chat";
         if let Err(error) = creation_guard(self.write_only.as_ref()) {
@@ -703,6 +742,53 @@ fn member(wire: &WireMember, me: &str, users: &HashMap<String, WireUser>) -> Mem
     }
 }
 
+/// The domain page of one `list_reactions` reply. `raw`, `skipped` and `oldest` pass through
+/// from the wire untouched (the cursor must not depend on which entries could be shown);
+/// `request` stays 0, the engine copies the caller's token in.
+fn reactors_page(
+    chat: &ChatId,
+    timestamp: MessageTs,
+    wire: WireReactors,
+    me: &str,
+    users: &HashMap<String, WireUser>,
+) -> ReactorsPage {
+    ReactorsPage {
+        chat: chat.clone(),
+        timestamp,
+        request: 0,
+        reactors: wire
+            .entries
+            .iter()
+            .map(|e| reactor_row(e, me, users))
+            .collect(),
+        skipped: wire.skipped,
+        raw: wire.raw,
+        oldest: wire.oldest,
+    }
+}
+
+/// The entry's own name (non-blank), else the cached user's, else none; the avatar the same way.
+fn reactor_row(wire: &WireReactorEntry, me: &str, users: &HashMap<String, WireUser>) -> Reactor {
+    let cached = users.get(&wire.guid);
+    let name = wire
+        .display_name
+        .clone()
+        .filter(|n| !blank(Some(n)))
+        .or_else(|| cached?.display_name.clone().filter(|n| !blank(Some(n))));
+    let avatar = wire.avatar_id.clone().or_else(|| cached?.avatar_id.clone());
+    Reactor {
+        user: UserId(wire.guid.clone()),
+        name,
+        avatar: avatar.map(|id| MediaRef {
+            id,
+            kind: MediaKind::Avatar,
+        }),
+        code: ReactionCode(wire.code),
+        at: wire.timestamp,
+        me: wire.guid == me,
+    }
+}
+
 /// A private chat has no member list on the server: the partner is the chat row itself, with
 /// the name and avatar the row carries. A row without a partner has nobody to show.
 fn private_members(chat: &ChatSummary, me: &str) -> ChatMembers {
@@ -783,25 +869,41 @@ struct Users<'a> {
 impl Users<'_> {
     /// Names are cosmetic: a failed lookup leaves the fallbacks in place. Only session
     /// rejection is an error, because then nothing else will work either.
-    async fn load(&self, mut guids: Vec<String>) -> Result<(), BackendError> {
-        {
-            let cache = self.cache.lock().unwrap();
-            guids.retain(|g| !cache.contains_key(g));
-        }
-        guids.sort();
-        guids.dedup();
+    async fn load(&self, guids: Vec<String>) -> Result<(), BackendError> {
+        let guids = uncached_users(self.cache, guids);
         if guids.is_empty() {
             return Ok(());
         }
-        match self.client.users(&guids).await {
-            Ok(found) => {
-                let mut cache = self.cache.lock().unwrap();
-                cache.extend(found.into_iter().map(|u| (u.guid.clone(), u)));
-                Ok(())
-            }
-            Err(ProtoError::SessionExpired) => Err(BackendError::SessionExpired),
-            Err(_) => Ok(()),
+        absorb_users(self.cache, self.client.users(&guids).await)
+    }
+}
+
+/// The guids of `guids` the cache does not know yet, sorted and without repeats.
+fn uncached_users(cache: &Mutex<HashMap<String, WireUser>>, mut guids: Vec<String>) -> Vec<String> {
+    {
+        let cache = cache.lock().unwrap();
+        guids.retain(|g| !cache.contains_key(g));
+    }
+    guids.sort();
+    guids.dedup();
+    guids
+}
+
+/// Files a lookup answer into the cache. Any failure but a rejected session leaves it as it was.
+fn absorb_users(
+    cache: &Mutex<HashMap<String, WireUser>>,
+    found: Result<Vec<WireUser>, ProtoError>,
+) -> Result<(), BackendError> {
+    match found {
+        Ok(found) => {
+            cache
+                .lock()
+                .unwrap()
+                .extend(found.into_iter().map(|u| (u.guid.clone(), u)));
+            Ok(())
         }
+        Err(ProtoError::SessionExpired) => Err(BackendError::SessionExpired),
+        Err(_) => Ok(()),
     }
 }
 
@@ -1233,8 +1335,10 @@ fn typing_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yandex_proto::frame::{IncomingFrame, RequestFrame};
     use yandex_proto::search::{WireSearchChat, WireSearchMessage, WireSearchUser};
     use yandex_proto::wire::{WireFile, WireForwarded, WireReactionCount, WireReactor, WireRef};
+    use yandex_proto::xiva::{ConnectError, Connector, Socket, SocketEvent, Target};
 
     fn wire(body: WireBody, relation: Relation, from: &str) -> WireMessage {
         WireMessage {
@@ -2729,6 +2833,331 @@ mod tests {
         ));
         assert!(matches!(
             backend.profile().await,
+            Err(BackendError::Protocol(_))
+        ));
+    }
+
+    fn wire_entry(guid: &str, name: Option<&str>, code: i64, at: Option<i64>) -> WireReactorEntry {
+        WireReactorEntry {
+            guid: guid.into(),
+            display_name: name.map(Into::into),
+            avatar_id: None,
+            code,
+            timestamp: at,
+        }
+    }
+
+    fn wire_page(
+        entries: Vec<WireReactorEntry>,
+        skipped: usize,
+        oldest: Option<i64>,
+    ) -> WireReactors {
+        WireReactors {
+            raw: entries.len() + skipped,
+            entries,
+            skipped,
+            oldest,
+        }
+    }
+
+    fn page_of(wire: WireReactors, users: &HashMap<String, WireUser>) -> ReactorsPage {
+        reactors_page(&ChatId("0/0/c".into()), 111, wire, "me", users)
+    }
+
+    #[test]
+    fn a_reactor_takes_its_name_from_the_entry_then_the_cache_then_none() {
+        let users = HashMap::from([user("u2", "Cached"), user("u3", "  ")]);
+        let page = page_of(
+            wire_page(
+                vec![
+                    wire_entry("u1", Some("Own"), 1, Some(30)),
+                    wire_entry("u2", None, 2, Some(20)),
+                    wire_entry("u2", Some("   "), 2, Some(20)),
+                    wire_entry("u9", None, 3, None),
+                    // A blank name in the cache is no name either.
+                    wire_entry("u3", None, 4, Some(10)),
+                ],
+                0,
+                Some(10),
+            ),
+            &users,
+        );
+        let names: Vec<_> = page.reactors.iter().map(|r| r.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            [Some("Own"), Some("Cached"), Some("Cached"), None, None]
+        );
+    }
+
+    #[test]
+    fn a_reactor_takes_its_avatar_from_the_entry_then_the_cache() {
+        let users = HashMap::from([user("u2", "Cached")]);
+        let mut with_avatar = wire_entry("u2", Some("Own"), 1, None);
+        with_avatar.avatar_id = Some("entry-av".into());
+        let page = page_of(
+            wire_page(
+                vec![
+                    with_avatar,
+                    wire_entry("u2", None, 1, None),
+                    wire_entry("u9", None, 1, None),
+                ],
+                0,
+                None,
+            ),
+            &users,
+        );
+        let ids: Vec<_> = page
+            .reactors
+            .iter()
+            .map(|r| r.avatar.as_ref().map(|a| a.id.as_str()))
+            .collect();
+        assert_eq!(ids, [Some("entry-av"), Some("av-u2"), None]);
+        assert!(
+            page.reactors
+                .iter()
+                .flat_map(|r| &r.avatar)
+                .all(|a| a.kind == MediaKind::Avatar)
+        );
+    }
+
+    #[test]
+    fn a_reactor_carries_the_code_the_time_and_the_me_flag() {
+        let page = page_of(
+            wire_page(
+                vec![
+                    wire_entry("me", Some("Me"), 100101, Some(77)),
+                    wire_entry("u1", Some("Ann"), 7, None),
+                ],
+                0,
+                Some(77),
+            ),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            page.reactors,
+            [
+                Reactor {
+                    user: UserId("me".into()),
+                    name: Some("Me".into()),
+                    avatar: None,
+                    code: ReactionCode(100101),
+                    at: Some(77),
+                    me: true,
+                },
+                Reactor {
+                    user: UserId("u1".into()),
+                    name: Some("Ann".into()),
+                    avatar: None,
+                    code: ReactionCode(7),
+                    at: None,
+                    me: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_skipped_and_oldest_pass_through_from_the_wire() {
+        // The oldest raw entry was dropped as malformed: its timestamp is still the page's oldest,
+        // so the cursor does not move back to a newer entry.
+        let wire = WireReactors {
+            entries: vec![wire_entry("u1", Some("Ann"), 1, Some(50))],
+            skipped: 2,
+            raw: 3,
+            oldest: Some(20),
+        };
+        let page = page_of(wire, &HashMap::new());
+        assert_eq!(
+            (page.reactors.len(), page.skipped, page.raw, page.oldest),
+            (1, 2, 3, Some(20))
+        );
+        assert_eq!(page.chat, ChatId("0/0/c".into()));
+        assert_eq!((page.timestamp, page.request), (111, 0));
+
+        let empty = page_of(wire_page(Vec::new(), 0, None), &HashMap::new());
+        assert_eq!(
+            (empty.reactors.len(), empty.skipped, empty.raw, empty.oldest),
+            (0, 0, 0, None)
+        );
+    }
+
+    #[test]
+    fn a_failed_user_lookup_keeps_the_fallbacks_and_an_expired_session_is_an_error() {
+        let cache = Mutex::new(HashMap::from([user("known", "K")]));
+        assert_eq!(
+            uncached_users(
+                &cache,
+                vec!["b".into(), "known".into(), "a".into(), "b".into()]
+            ),
+            ["a", "b"]
+        );
+        for failure in [
+            ProtoError::Network("no route".into()),
+            ProtoError::Protocol("bad reply".into()),
+            ProtoError::NotFound,
+        ] {
+            assert_eq!(absorb_users(&cache, Err(failure)), Ok(()));
+        }
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        assert_eq!(
+            absorb_users(&cache, Err(ProtoError::SessionExpired)),
+            Err(BackendError::SessionExpired)
+        );
+        assert_eq!(cache.lock().unwrap().len(), 1);
+        let found = vec![user("a", "A").1];
+        assert_eq!(absorb_users(&cache, Ok(found)), Ok(()));
+        assert!(cache.lock().unwrap().contains_key("a"));
+    }
+
+    /// A socket that answers each request with the next scripted body (echoing its `RequestId`)
+    /// and records the method and body it was asked for.
+    struct ScriptedSocket {
+        incoming: tokio::sync::mpsc::UnboundedReceiver<SocketEvent>,
+        echo: tokio::sync::mpsc::UnboundedSender<SocketEvent>,
+        sent: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        replies: std::collections::VecDeque<serde_json::Value>,
+    }
+
+    impl Socket for ScriptedSocket {
+        async fn send(&mut self, frame: Vec<u8>) -> Result<(), String> {
+            let IncomingFrame::Reply {
+                req_id,
+                method,
+                body,
+                ..
+            } = IncomingFrame::decode(&frame).map_err(|e| e.to_string())?
+            else {
+                return Err("not a request frame".into());
+            };
+            let mut reply = self.replies.pop_front().ok_or("no reply scripted")?;
+            reply["RequestId"] = body["RequestId"].clone();
+            self.sent.lock().unwrap().push((method.clone(), body));
+            let bytes = RequestFrame {
+                service_index: 0,
+                req_id,
+                method,
+                body: reply,
+            }
+            .encode();
+            self.echo
+                .send(SocketEvent::Binary(bytes))
+                .map_err(|e| e.to_string())
+        }
+        async fn recv(&mut self) -> SocketEvent {
+            self.incoming.recv().await.unwrap_or(SocketEvent::Closed {
+                code: None,
+                reason: "eof".into(),
+            })
+        }
+        async fn close(&mut self) {}
+    }
+
+    struct ScriptedConnector(Mutex<Option<ScriptedSocket>>);
+
+    impl Connector for ScriptedConnector {
+        type Socket = ScriptedSocket;
+        async fn connect(&self, _: &Target) -> Result<ScriptedSocket, ConnectError> {
+            self.0
+                .lock()
+                .unwrap()
+                .take()
+                .ok_or_else(|| ConnectError::Failed("one connection only".into()))
+        }
+    }
+
+    /// A backend wired to a socket that answers with `replies` in order; `cache` pre-fills the
+    /// users cache so no name lookup leaves the process.
+    async fn backend_with_replies(
+        write_only: Option<ChatId>,
+        replies: Vec<serde_json::Value>,
+        cache: HashMap<String, WireUser>,
+    ) -> (YandexBackend, Arc<Mutex<Vec<(String, serde_json::Value)>>>) {
+        let (echo, incoming) = tokio::sync::mpsc::unbounded_channel();
+        echo.send(SocketEvent::Text(
+            serde_json::json!({ "operation": "subscribed", "subscription-id": "s1" }).to_string(),
+        ))
+        .unwrap();
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let socket = ScriptedSocket {
+            incoming,
+            echo,
+            sent: sent.clone(),
+            replies: replies.into(),
+        };
+        let backend = YandexBackend::new(test_session(), write_only);
+        *backend.users.lock().unwrap() = cache;
+        let (client, mut events) = Client::start_with(
+            ScriptedConnector(Mutex::new(Some(socket))),
+            &test_session(),
+            ClientConfig::production(),
+        )
+        .unwrap();
+        while !matches!(events.recv().await, Some(XivaEvent::Connected { .. })) {}
+        *backend.inner.lock().unwrap() = Some(Connection {
+            client,
+            events: Some(events),
+            me: "me".into(),
+        });
+        (backend, sent)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reactors_pass_the_received_limit_and_cursor_to_the_server_and_map_the_page() {
+        let reply = serde_json::json!({ "UserReactions": [
+            { "Timestamp": 300, "Type": 100101,
+              "UserInfo": { "Guid": "me", "DisplayName": "Me", "AvatarId": "av-me" } },
+            { "Timestamp": 200, "Type": 7, "UserInfo": { "Guid": "u2" } },
+            { "Timestamp": 100, "UserInfo": { "Guid": "u3", "DisplayName": "No type" } },
+        ] });
+        // BT_WRITE_ONLY_CHAT names another chat: a read is not a write and is not guarded.
+        let (backend, sent) = backend_with_replies(
+            Some(ChatId("self".into())),
+            vec![reply.clone(), reply],
+            HashMap::from([user("u2", "Cached")]),
+        )
+        .await;
+        let chat = ChatId("0/0/other".into());
+
+        let page = backend.reactors(&chat, 111, Some(500), 17).await.unwrap();
+        assert_eq!(page.chat, chat);
+        assert_eq!((page.timestamp, page.request), (111, 0));
+        assert_eq!((page.raw, page.skipped, page.oldest), (3, 1, Some(100)));
+        let who: Vec<_> = page
+            .reactors
+            .iter()
+            .map(|r| (r.user.0.as_str(), r.name.as_deref(), r.me))
+            .collect();
+        assert_eq!(
+            who,
+            [("me", Some("Me"), true), ("u2", Some("Cached"), false)]
+        );
+
+        backend.reactors(&chat, 111, None, 5).await.unwrap();
+        let sent = sent.lock().unwrap();
+        let (method, body) = &sent[0];
+        assert_eq!(method, "list_reactions");
+        assert_eq!(
+            (
+                body["ChatId"].as_str(),
+                body["Timestamp"].as_i64(),
+                body["Limit"].as_u64(),
+                body["MaxTimestamp"].as_i64()
+            ),
+            (Some("0/0/other"), Some(111), Some(17), Some(500))
+        );
+        let (_, body) = &sent[1];
+        assert_eq!(body["Limit"].as_u64(), Some(5));
+        assert!(body.get("MaxTimestamp").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn reactors_need_a_connection_and_the_write_guard_does_not_apply() {
+        let guarded = YandexBackend::new(test_session(), Some(ChatId("self".into())));
+        // Unbootstrapped: a guard refusal would be `Rejected`; a read reaches the connection check.
+        assert!(matches!(
+            guarded
+                .reactors(&ChatId("0/0/other".into()), 1, None, 30)
+                .await,
             Err(BackendError::Protocol(_))
         ));
     }

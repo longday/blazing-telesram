@@ -8,6 +8,7 @@ use crate::input::{InputEvent, TextInput};
 use crate::logging::{LogBuffer, LogLine};
 use crate::new_chat::{self, Candidate, NewChat};
 use crate::profile;
+use crate::reactors;
 use crate::search_results::{self, SearchView, StatusLine};
 use crate::store::{
     ChatFilter, ChatStore, CreationState, MembersState, ProfileState, SEARCH_DEBOUNCE,
@@ -57,6 +58,14 @@ struct OpenTimeline {
     rows: RowBounds,
 }
 
+/// Where the reactor list is drawn. Which list is open and what it holds is the store's
+/// (`ChatStore::reactors`); this is only the place the entry that opened it was chosen.
+struct ReactorsPopover {
+    chat: ChatId,
+    timestamp: MessageTs,
+    position: Point<Pixels>,
+}
+
 struct LogView {
     lines: Vec<LogLine>,
     generation: u64,
@@ -97,6 +106,7 @@ pub struct Desktop {
     pub(crate) menu: AccountMenu,
     compose: Compose,
     message_menu: Option<MessageMenu>,
+    reactors_popover: Option<ReactorsPopover>,
     delete_pending: Option<(ChatId, MessageTs)>,
     toast: Option<Toast>,
     viewer: Option<Viewer>,
@@ -134,6 +144,7 @@ impl Desktop {
                 this.sync_info();
                 this.sync_profile(cx);
                 this.sync_new_chat(cx);
+                this.sync_reactors(cx);
                 cx.notify();
             }),
             cx.subscribe_in(
@@ -182,6 +193,7 @@ impl Desktop {
             menu: AccountMenu::Closed,
             compose,
             message_menu: None,
+            reactors_popover: None,
             delete_pending: None,
             toast: None,
             viewer: None,
@@ -272,6 +284,98 @@ impl Desktop {
         self.info.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn reactors_popover_is_open(&self) -> bool {
+        self.reactors_popover.is_some()
+    }
+
+    /// Opens the list of the people who reacted to `(chat, timestamp)` as a popover at `position`
+    /// (where the message menu was) and asks the store for its first page. Ignored for a chat that
+    /// is not the open one and while something covers the chat. Closes the message menu.
+    pub(crate) fn open_reactors(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
+            return;
+        }
+        self.message_menu = None;
+        self.reactors_popover = Some(ReactorsPopover {
+            chat: chat.clone(),
+            timestamp,
+            position,
+        });
+        self.store
+            .update(cx, |store, cx| store.open_reactors(chat, timestamp, cx));
+        cx.notify();
+    }
+
+    /// Closes the popover and drops the store's list; an answer still on the way is dropped there.
+    pub(crate) fn close_reactors(&mut self, cx: &mut Context<Self>) {
+        if self.reactors_popover.take().is_some() {
+            self.store.update(cx, |store, cx| store.close_reactors(cx));
+            cx.notify();
+        }
+    }
+
+    /// The popover shows the store's open list of the open chat and nothing else: it closes when the
+    /// list is gone (sign-out), is another one, the chat changed, or something covers the chat.
+    fn sync_reactors(&mut self, cx: &mut Context<Self>) {
+        let Some(popover) = self.reactors_popover.as_ref() else {
+            return;
+        };
+        let live = self
+            .store
+            .read(cx)
+            .reactors()
+            .is_some_and(|v| v.chat == popover.chat && v.timestamp == popover.timestamp)
+            && self.open.as_ref().map(|o| &o.chat) == Some(&popover.chat)
+            && !self.blocked(cx);
+        if !live {
+            self.close_reactors(cx);
+        }
+    }
+
+    /// The list surface at the popover's anchor; a click outside it closes it. «Показать ещё» and
+    /// every «Повторить» go to the store, which decides what (if anything) to send.
+    fn reactors_view(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let popover = self.reactors_popover.as_ref()?;
+        let close = cx.listener(|this, _: &MouseDownEvent, _, cx| this.close_reactors(cx));
+        let store = self.store.read(cx);
+        let view = store
+            .reactors()
+            .filter(|v| v.chat == popover.chat && v.timestamp == popover.timestamp)?;
+        let (more, retry) = (self.store.clone(), self.store.clone());
+        let list = reactors::render(
+            view,
+            store,
+            self.clock,
+            move |cx| more.update(cx, |store, cx| store.load_more_reactors(cx)),
+            move |cx| retry.update(cx, |store, cx| store.retry_reactors(cx)),
+        );
+        Some(
+            div()
+                .absolute()
+                .size_full()
+                .occlude()
+                .on_any_mouse_down(close)
+                .child(
+                    anchored()
+                        .position(popover.position)
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .debug_selector(|| "reactors-popover".into())
+                                .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
+                                .child(list),
+                        ),
+                ),
+        )
+    }
+
     /// Opens the profile modal from the account menu; it always asks for the profile again, so nothing
     /// from an earlier open is shown as current. Ignored while something else covers the chat.
     pub(crate) fn open_profile(&mut self, cx: &mut Context<Self>) {
@@ -282,6 +386,7 @@ impl Desktop {
         }
         // The message menu is drawn above the modal; it must not outlive the cover's start.
         self.message_menu = None;
+        self.close_reactors(cx);
         self.profile = true;
         self.store.update(cx, |store, cx| store.load_profile(cx));
         cx.notify();
@@ -331,6 +436,7 @@ impl Desktop {
         }
         // The message menu is drawn above the dialog; it must not outlive the cover's start.
         self.message_menu = None;
+        self.close_reactors(cx);
         self.store.update(cx, |store, cx| {
             store.dismiss_creation(cx);
             if !matches!(store.profile_state(), Some(ProfileState::Ready(_))) {
@@ -597,6 +703,7 @@ impl Desktop {
             return;
         }
         self.message_menu = None;
+        self.close_reactors(cx);
         self.viewer = Some(Viewer { chat, ts, index });
         cx.notify();
     }
@@ -682,6 +789,7 @@ impl Desktop {
             None => {
                 // The message menu is drawn above the log; it must not outlive the cover's start.
                 self.message_menu = None;
+                self.close_reactors(cx);
                 let poll = cx.spawn(async move |this, cx| {
                     loop {
                         cx.background_executor().timer(LOG_POLL).await;
@@ -1440,6 +1548,7 @@ impl Render for Desktop {
         let log = self.log.as_ref().map(|view| self.log_panel(view, cx));
         let toast = self.toast_view();
         let menu = self.message_menu_view(cx);
+        let reactors = self.reactors_view(cx);
         let viewer = self.viewer_view(window, cx);
         let delete = self.delete_dialog(cx);
 
@@ -1470,6 +1579,7 @@ impl Render for Desktop {
             .children(log)
             .children(toast)
             .children(menu)
+            .children(reactors)
             .children(delete)
             .when(
                 self.menu == AccountMenu::ConfirmSignOut && session == SessionState::Active,
