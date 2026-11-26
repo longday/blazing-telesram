@@ -135,7 +135,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 8. Verification and close-out
 
-- [ ] 8.1 Final full run
+- [x] 8.1 Final full run
   - Owns: nothing; fixes only compile breaks that cross task boundaries.
   - Depends on: 1.1-1.3, 2.1, 4.1, 4.2, 5.1, 6.1-6.7, 7.1, and both merge units on `main`. The per-unit checks of "Merge units" are not replaced by this task: they run before each unit merges.
   - Do: on `main` after both units, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --all --check`, `cargo build --workspace --all-targets --locked` with zero warnings, all inside `bt-vm`; `openspec validate add-reaction-list --strict`.
