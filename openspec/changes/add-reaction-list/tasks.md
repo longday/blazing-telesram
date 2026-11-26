@@ -112,7 +112,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: the row is offered after a full page and absent after a short one; choosing it sends the command with `before = oldest` and a fresh token and shows `Loading`; the next page appends and de-duplicates; a failure keeps the rows and offers a retry; the retry takes a fresh token; a late answer of a superseded request is dropped; a known count below or above the rows does not change the row.
   - Done when: these tests exist.
 
-- [ ] 6.5 List stays current (Q3 = A; spec "List stays current")
+- [x] 6.5 List stays current (Q3 = A; spec "List stays current")
   - Owns: `crates/desktop/src/store.rs`, `crates/desktop/src/reactors.rs`.
   - Depends on: 6.1, 6.2.
   - Do: on `ClientEvent::ReactionsChanged` for the open list's message with a version other than `base_version`, a 1 s debounce (a pure schedule/fire state machine in the store, driven by the app's existing timer mechanism) after which a `First` request with a fresh token is sent, `base_version` is updated and the rows stay shown until the answer replaces them (D5 "Refresh"); a deleted message gives the "message gone" failure and cancels the timer; closing cancels it.
