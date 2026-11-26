@@ -26,7 +26,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: frame body of a first page has no `MaxTimestamp`, of a later page has it; `Mode` is the integer 0; no registry body (`registry_body()` is `None`); the exact allowlist assertions list eight names; `the_read_allowlist_does_not_gain_the_write_method` still passes unchanged.
   - Done when: these tests exist and no write variant or generic method appears.
 
-- [ ] 1.2 Parse the reply (D1)
+- [x] 1.2 Parse the reply (D1)
   - Owns: `crates/yandex-proto/src/wire.rs`, `crates/yandex-proto/tests/wire_fixtures.rs`, new `crates/yandex-proto/tests/fixtures/research-reactors-page.json` (synthetic, shape from `research.md`; add it to the credentials-check list in `wire_fixtures.rs`; replaced by a sanitized live shape in 3.1).
   - Depends on: nothing.
   - Do: `WireReactorEntry`, `WireReactors` (with `raw` and `oldest`, D1), `parse_reactors`.

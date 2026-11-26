@@ -1,0 +1,42 @@
+{
+  "UserReactions": [
+    {
+      "Timestamp": 1795172185683559,
+      "Type": 100101,
+      "UserInfo": {
+        "AvatarId": "user_avatar/yapic/1000/fake-1",
+        "DisplayName": "Test User One",
+        "Guid": "00000007-0000-4000-8000-000000000001",
+        "Nickname": "test-user-1",
+        "Uid": 4001,
+        "Version": 1793302709442679
+      }
+    },
+    {
+      "Timestamp": 1795172100000000,
+      "Type": 7,
+      "UserInfo": {
+        "AvatarId": "user_avatar/yapic/1000/fake-2",
+        "DisplayName": "Test User Two",
+        "Guid": "00000007-0000-4000-8000-000000000002",
+        "Version": 1793302709442679
+      }
+    },
+    {
+      "Timestamp": 1795172000000000,
+      "Type": 100101,
+      "UserInfo": {
+        "DisplayName": "Test User Three",
+        "Guid": "00000007-0000-4000-8000-000000000003",
+        "Version": 1793302709442679
+      }
+    },
+    {
+      "Timestamp": 1795171900000000,
+      "Type": 100102,
+      "UserInfo": {
+        "Guid": "00000007-0000-4000-8000-000000000004"
+      }
+    }
+  ]
+}

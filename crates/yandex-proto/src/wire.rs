@@ -76,6 +76,32 @@ pub struct WireMembers {
     pub skipped: usize,
 }
 
+/// One entry of `list_reactions`: who reacted, with what, and when. The identity comes from the
+/// entry's own `UserInfo`, so a name usually needs no second request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireReactorEntry {
+    pub guid: String,
+    pub display_name: Option<String>,
+    pub avatar_id: Option<String>,
+    pub code: i64,
+    /// When the user reacted; `None` when the entry carries no timestamp.
+    pub timestamp: Option<Micros>,
+}
+
+/// One page of `list_reactions`, in server order. The reply carries no total and no paging
+/// marker; `raw` and `oldest` describe the page as the server sent it, so the caller's cursor and
+/// end-of-list test do not depend on which entries could be shown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireReactors {
+    pub entries: Vec<WireReactorEntry>,
+    /// Entries without a `Type` or without `UserInfo.Guid`, dropped from `entries`.
+    pub skipped: usize,
+    /// Entries on the wire page before any was dropped: `entries.len() + skipped`.
+    pub raw: usize,
+    /// Smallest `Timestamp` over all raw entries, malformed ones included.
+    pub oldest: Option<Micros>,
+}
+
 /// What `whoami` says about the signed-in account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WireProfile {
@@ -842,6 +868,54 @@ pub fn parse_members(data: &Json) -> Result<WireMembers, ProtoError> {
     Ok(WireMembers {
         users: members,
         skipped,
+    })
+}
+
+/// One page from the reply to [`ReadRequest::ListReactions`](crate::request::ReadRequest::ListReactions):
+/// `{UserReactions: [{Type, Timestamp, UserInfo{Guid, DisplayName, AvatarId, ...}}]}`. The key is
+/// absent when the list is empty (an empty page). Server order is kept. An entry without `Type`
+/// or without `UserInfo.Guid` has no identity or glyph to show: it is counted in `skipped` and
+/// not returned, but it still counts in `raw` and its `Timestamp` still counts in `oldest`.
+pub fn parse_reactors(body: &Json) -> Result<WireReactors, ProtoError> {
+    if !body.is_object() {
+        return Err(ProtoError::Protocol(
+            "list_reactions reply is not an object".into(),
+        ));
+    }
+    check_status(body)?;
+    let rows = match present(body, "UserReactions") {
+        None => &[],
+        Some(rows) => rows
+            .as_array()
+            .map(Vec::as_slice)
+            .ok_or_else(|| ProtoError::Protocol("UserReactions is not an array".into()))?,
+    };
+    let mut entries = Vec::with_capacity(rows.len());
+    let mut oldest: Option<Micros> = None;
+    for row in rows {
+        let timestamp = int_field(row, "Timestamp");
+        if let Some(at) = timestamp {
+            oldest = Some(oldest.map_or(at, |o| o.min(at)));
+        }
+        let info = present(row, "UserInfo");
+        let (Some(code), Some(guid)) =
+            (int_field(row, "Type"), info.and_then(|u| string(u, "Guid")))
+        else {
+            continue;
+        };
+        entries.push(WireReactorEntry {
+            guid,
+            display_name: info.and_then(display_name),
+            avatar_id: info.and_then(|u| string(u, "AvatarId")),
+            code,
+            timestamp,
+        });
+    }
+    Ok(WireReactors {
+        skipped: rows.len() - entries.len(),
+        raw: rows.len(),
+        entries,
+        oldest,
     })
 }
 
@@ -1689,6 +1763,135 @@ mod tests {
         assert_eq!(
             decode_push(&json!({ "ClientMessage": { "Reaction": {} } })),
             ignored()
+        );
+    }
+
+    fn reactor_entry(guid: &str, code: i64, at: i64) -> Json {
+        json!({
+            "Type": code,
+            "Timestamp": at,
+            "UserInfo": { "Guid": guid, "DisplayName": format!("name-{guid}"), "AvatarId": format!("av/{guid}") },
+        })
+    }
+
+    #[test]
+    fn reactors_page_keeps_server_order_and_every_field() {
+        let body = json!({ "UserReactions": [
+            reactor_entry("g2", 100101, 30),
+            reactor_entry("g1", 7, 20),
+            { "Type": 9, "Timestamp": 10, "UserInfo": { "Guid": "g3", "PublicName": "pub" } },
+        ] });
+        let page = parse_reactors(&body).unwrap();
+        assert_eq!(
+            page,
+            WireReactors {
+                entries: vec![
+                    WireReactorEntry {
+                        guid: "g2".into(),
+                        display_name: Some("name-g2".into()),
+                        avatar_id: Some("av/g2".into()),
+                        code: 100101,
+                        timestamp: Some(30),
+                    },
+                    WireReactorEntry {
+                        guid: "g1".into(),
+                        display_name: Some("name-g1".into()),
+                        avatar_id: Some("av/g1".into()),
+                        code: 7,
+                        timestamp: Some(20),
+                    },
+                    WireReactorEntry {
+                        guid: "g3".into(),
+                        display_name: Some("pub".into()),
+                        avatar_id: None,
+                        code: 9,
+                        timestamp: Some(10),
+                    },
+                ],
+                skipped: 0,
+                raw: 3,
+                oldest: Some(10),
+            }
+        );
+    }
+
+    #[test]
+    fn reactors_page_without_the_key_is_empty() {
+        for body in [
+            json!({}),
+            json!({ "UserReactions": null }),
+            json!({ "UserReactions": [] }),
+        ] {
+            assert_eq!(
+                parse_reactors(&body).unwrap(),
+                WireReactors {
+                    entries: vec![],
+                    skipped: 0,
+                    raw: 0,
+                    oldest: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn reactors_without_identity_are_skipped_but_still_bound_the_page() {
+        // The oldest entry is the malformed one: the cursor must still move to its timestamp.
+        let body = json!({ "UserReactions": [
+            reactor_entry("g1", 1, 30),
+            { "Timestamp": 20, "UserInfo": { "Guid": "g2" } },
+            { "Type": 1, "Timestamp": 10, "UserInfo": { "DisplayName": "x" } },
+            { "Type": 1, "Timestamp": 15 },
+            "garbage",
+        ] });
+        let page = parse_reactors(&body).unwrap();
+        assert_eq!(
+            page.entries
+                .iter()
+                .map(|e| e.guid.as_str())
+                .collect::<Vec<_>>(),
+            ["g1"]
+        );
+        assert_eq!((page.skipped, page.raw, page.oldest), (4, 5, Some(10)));
+        assert_eq!(page.raw, page.entries.len() + page.skipped);
+    }
+
+    #[test]
+    fn reactor_without_a_timestamp_keeps_none_and_does_not_bound_the_page() {
+        let body = json!({ "UserReactions": [
+            reactor_entry("g1", 1, 30),
+            { "Type": 1, "UserInfo": { "Guid": "g2" } },
+        ] });
+        let page = parse_reactors(&body).unwrap();
+        assert_eq!(page.entries[1].timestamp, None);
+        assert_eq!((page.skipped, page.raw, page.oldest), (0, 2, Some(30)));
+
+        let none = parse_reactors(&json!({ "UserReactions": [
+            { "Type": 1, "UserInfo": { "Guid": "g" } },
+        ] }))
+        .unwrap();
+        assert_eq!((none.raw, none.oldest), (1, None));
+    }
+
+    #[test]
+    fn reactors_reply_that_is_not_a_page_is_a_protocol_error() {
+        for body in [json!([]), json!("x"), json!(null), json!(5)] {
+            assert!(
+                matches!(parse_reactors(&body), Err(ProtoError::Protocol(_))),
+                "{body}"
+            );
+        }
+        assert!(matches!(
+            parse_reactors(&json!({ "UserReactions": {} })),
+            Err(ProtoError::Protocol(_))
+        ));
+        assert!(matches!(
+            parse_reactors(&json!({ "Status": 4, "Details": "no message" })),
+            Err(ProtoError::Protocol(m)) if m.contains("ENTITY_NOT_FOUND")
+        ));
+        assert_eq!(
+            parse_reactors(&json!({ "Status": 6 })),
+            Err(ProtoError::SessionExpired)
         );
     }
 }
