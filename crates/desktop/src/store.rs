@@ -5,8 +5,8 @@ use bt_chat_core::client::REACTORS_PAGE;
 use bt_chat_core::model::{
     ChatId, ChatKind, ChatMembers, ChatSummary, ClientEvent, Command, ConnectionState, Delivery,
     DownloadFailure, Draft, HistoryChunk, MediaKind, MediaRef, Message, MessageBody, MessageTs,
-    PayloadId, Profile, Reactor, ReactorsPage, ReplyTarget, SearchFailure, SearchHits, SearchId,
-    UserId,
+    PayloadId, PinnedMessage, Profile, Reactor, ReactorsPage, ReplyTarget, SearchFailure,
+    SearchHits, SearchId, UserId,
 };
 use bt_chat_core::reactions::{ReactionCode, Reactions};
 use gpui::{Context, EventEmitter, Task};
@@ -382,6 +382,12 @@ impl ChatStore {
                 self.open_pending(cx);
             }
             ClientEvent::History(chunk) => self.apply_history(chunk, cx),
+            ClientEvent::PinChanged { chat, pinned } => {
+                // An equal value, or a chat that is not shown, is no UI update.
+                if !self.set_pinned(&chat, pinned) {
+                    return;
+                }
+            }
             ClientEvent::MessageUpserted(message) => self.upsert(message, cx),
             ClientEvent::ReactionsChanged {
                 chat,
@@ -504,6 +510,20 @@ impl ChatStore {
             }
         }
         cx.notify();
+    }
+
+    /// Stores the pin of a listed chat. Returns whether the open chat's bar has to be drawn
+    /// again: the value differs and the chat is the open one. Touches nothing but the summary's
+    /// `pinned_message`: no timeline, row preview or order, unread counter or typing state.
+    fn set_pinned(&mut self, chat: &ChatId, pinned: Option<PinnedMessage>) -> bool {
+        let Some(summary) = self.chats.get_mut(chat) else {
+            return false;
+        };
+        if summary.pinned_message == pinned {
+            return false;
+        }
+        summary.pinned_message = pinned;
+        self.selected.as_ref() == Some(chat)
     }
 
     /// Opens a chat: the core answers with its newest chunk. Never marks anything as read.
@@ -3712,6 +3732,8 @@ mod tests {
                 muted: false,
                 pinned_rank: None,
                 partner: Some(UserId(format!("u-{tag}"))),
+                pinned_message: None,
+                pin_action_ts: None,
             }
         }
 
@@ -4046,6 +4068,266 @@ mod tests {
                 rig.selected(cx),
                 None,
                 "a chat awaited before the sign out is not opened"
+            );
+        }
+    }
+
+    mod pins {
+        use super::*;
+        use bt_chat_core::model::{ChatKind, MessagePreview};
+        use gpui::{AppContext, Entity, Subscription, TestAppContext};
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            events: Rc<RefCell<Vec<StoreEvent>>>,
+            redraws: Rc<Cell<usize>>,
+            _client: Sender<ClientEvent>,
+            _commands: Receiver<Command>,
+            _subscriptions: [Subscription; 2],
+        }
+
+        impl Rig {
+            /// Chats `c` (open, history loaded) and `d` (listed only).
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let redraws = Rc::new(Cell::new(0));
+                let log = events.clone();
+                let count = redraws.clone();
+                let subscriptions = cx.update(|cx| {
+                    [
+                        cx.subscribe(&store, move |_, event: &StoreEvent, _| {
+                            log.borrow_mut().push(event.clone())
+                        }),
+                        cx.observe(&store, move |_, _| count.set(count.get() + 1)),
+                    ]
+                });
+                let rig = Self {
+                    store,
+                    events,
+                    redraws,
+                    _client: client,
+                    _commands: commands,
+                    _subscriptions: subscriptions,
+                };
+                rig.apply(
+                    cx,
+                    ClientEvent::ChatsReplaced(vec![summary("c", None), summary("d", None)]),
+                );
+                rig.store.update(cx, |s, cx| s.select(chat("c"), cx));
+                rig.apply(
+                    cx,
+                    ClientEvent::History(HistoryChunk {
+                        chat: chat("c"),
+                        messages: vec![msg(1, "a"), msg(2, "b")],
+                        reached_start: true,
+                        replaces: None,
+                        payloads: vec![],
+                    }),
+                );
+                rig.settle();
+                rig
+            }
+
+            fn settle(&self) {
+                self.events.borrow_mut().clear();
+                self.redraws.set(0);
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn pin(&self, cx: &mut TestAppContext, tag: &str, pinned: Option<PinnedMessage>) {
+                self.apply(
+                    cx,
+                    ClientEvent::PinChanged {
+                        chat: chat(tag),
+                        pinned,
+                    },
+                );
+            }
+
+            fn pinned(&self, cx: &mut TestAppContext, tag: &str) -> Option<PinnedMessage> {
+                self.store.read_with(cx, |s, _| {
+                    s.chat(&chat(tag)).and_then(|c| c.pinned_message.clone())
+                })
+            }
+
+            fn row(&self, cx: &mut TestAppContext, tag: &str) -> ChatSummary {
+                self.store
+                    .read_with(cx, |s, _| s.chat(&chat(tag)).cloned().unwrap())
+            }
+
+            fn messages(&self, cx: &mut TestAppContext) -> Vec<Message> {
+                self.store
+                    .read_with(cx, |s, _| s.timeline(&chat("c")).unwrap().messages.clone())
+            }
+
+            fn events(&self) -> Vec<StoreEvent> {
+                std::mem::take(&mut *self.events.borrow_mut())
+            }
+        }
+
+        fn chat(tag: &str) -> ChatId {
+            ChatId(tag.into())
+        }
+
+        fn msg(ts: i64, text: &str) -> Message {
+            Message {
+                chat: chat("c"),
+                timestamp: ts,
+                author: UserId("u".into()),
+                author_name: None,
+                author_avatar: None,
+                outgoing: false,
+                body: MessageBody::Text(text.into()),
+                edited: false,
+                reply_to: None,
+                forwarded_from: None,
+                delivery: Delivery::Sent,
+                reactions: Default::default(),
+                important: false,
+            }
+        }
+
+        fn summary(tag: &str, pinned: Option<PinnedMessage>) -> ChatSummary {
+            ChatSummary {
+                id: chat(tag),
+                kind: ChatKind::Group,
+                title: format!("chat {tag}"),
+                avatar: None,
+                last_message: Some(MessagePreview {
+                    author: Some("u".into()),
+                    text: "b".into(),
+                    timestamp: 2,
+                }),
+                unread: 3,
+                muted: false,
+                pinned_rank: Some(1),
+                partner: None,
+                pinned_message: pinned,
+                pin_action_ts: Some(7),
+            }
+        }
+
+        fn pin(ts: i64, text: Option<&str>) -> PinnedMessage {
+            PinnedMessage {
+                timestamp: ts,
+                preview: text.map(|t| MessagePreview {
+                    author: Some("u".into()),
+                    text: t.into(),
+                    timestamp: ts,
+                }),
+            }
+        }
+
+        #[gpui::test]
+        fn a_pin_change_of_the_open_chat_redraws_once_and_touches_only_the_pin(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            let before = rig.row(cx, "c");
+            let messages = rig.messages(cx);
+
+            rig.pin(cx, "c", Some(pin(1, None)));
+            assert_eq!(rig.pinned(cx, "c"), Some(pin(1, None)));
+            assert_eq!(rig.redraws.get(), 1);
+            assert!(rig.events().is_empty(), "no timeline, row or typing event");
+
+            let after = rig.row(cx, "c");
+            assert_eq!(after.pinned_message, Some(pin(1, None)));
+            assert_eq!(
+                ChatSummary {
+                    pinned_message: None,
+                    ..after
+                },
+                before,
+                "title, preview, unread, rank and clock are untouched"
+            );
+            assert_eq!(rig.messages(cx), messages);
+        }
+
+        #[gpui::test]
+        fn a_resolved_preview_replacement_and_removal_each_redraw_once(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.pin(cx, "c", Some(pin(1, None)));
+            rig.settle();
+
+            rig.pin(cx, "c", Some(pin(1, Some("a"))));
+            assert_eq!(rig.pinned(cx, "c"), Some(pin(1, Some("a"))));
+            assert_eq!(rig.redraws.get(), 1);
+
+            rig.pin(cx, "c", Some(pin(2, None)));
+            assert_eq!(rig.pinned(cx, "c"), Some(pin(2, None)));
+            assert_eq!(rig.redraws.get(), 2);
+
+            rig.pin(cx, "c", None);
+            assert_eq!(rig.pinned(cx, "c"), None);
+            assert_eq!(rig.redraws.get(), 3);
+            assert!(rig.events().is_empty());
+        }
+
+        #[gpui::test]
+        fn an_equal_value_emits_nothing(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.pin(cx, "c", None);
+            assert_eq!(rig.redraws.get(), 0, "no pin and still no pin");
+
+            rig.pin(cx, "c", Some(pin(1, Some("a"))));
+            rig.settle();
+            rig.pin(cx, "c", Some(pin(1, Some("a"))));
+            assert_eq!(rig.redraws.get(), 0);
+            assert!(rig.events().is_empty());
+        }
+
+        #[gpui::test]
+        fn a_pin_of_a_chat_that_is_not_open_is_kept_without_a_redraw(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.pin(cx, "d", Some(pin(1, None)));
+            assert_eq!(rig.pinned(cx, "d"), Some(pin(1, None)));
+            assert_eq!(rig.redraws.get(), 0);
+            assert!(rig.events().is_empty());
+
+            // Opening it later shows what was kept.
+            rig.store.update(cx, |s, cx| s.select(chat("d"), cx));
+            assert_eq!(rig.pinned(cx, "d"), Some(pin(1, None)));
+        }
+
+        #[gpui::test]
+        fn a_pin_of_an_unknown_chat_is_ignored(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.pin(cx, "zzz", Some(pin(1, None)));
+            assert!(
+                rig.store
+                    .read_with(cx, |s, _| s.chat(&chat("zzz")).is_none())
+            );
+            assert_eq!(rig.store.read_with(cx, |s, _| s.chat_count()), 2);
+            assert_eq!(rig.redraws.get(), 0);
+            assert!(rig.events().is_empty());
+        }
+
+        #[gpui::test]
+        fn the_pin_of_a_summary_is_the_open_chats_pin(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.apply(
+                cx,
+                ClientEvent::ChatUpdated(summary("c", Some(pin(2, Some("b"))))),
+            );
+            assert_eq!(rig.pinned(cx, "c"), Some(pin(2, Some("b"))));
+
+            rig.apply(
+                cx,
+                ClientEvent::ChatsReplaced(vec![summary("c", None), summary("d", None)]),
+            );
+            assert_eq!(
+                rig.pinned(cx, "c"),
+                None,
+                "a list without the pin removes it"
             );
         }
     }
