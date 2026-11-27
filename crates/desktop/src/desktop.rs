@@ -6,7 +6,7 @@ use crate::format::{Clock, chat_time, log_time, one_line};
 use crate::info_panel;
 use crate::input::{InputEvent, TextInput};
 use crate::logging::{LogBuffer, LogLine};
-use crate::new_chat::{self, Candidate, NewChat};
+use crate::new_chat::{self, Mode, NewChat};
 use crate::profile;
 use crate::reactors;
 use crate::search_results::{self, SearchView, StatusLine};
@@ -479,13 +479,16 @@ impl Desktop {
         cx.notify();
     }
 
-    /// The user picked a person. Someone who has a private chat with the account opens that chat; anyone
-    /// else becomes the chosen participant (a failure from the earlier choice is forgotten).
+    /// The user picked a person. In a private chat someone who has a private chat with the account opens
+    /// that chat, anyone else becomes the chosen participant (a failure from the earlier choice is
+    /// forgotten). In a group the person is added to the participants or, when already in, taken out; no
+    /// chat is opened.
     pub(crate) fn choose_person(&mut self, user: UserId, cx: &mut Context<Self>) {
         if self.new_chat.is_none() || self.creation_in_flight(cx) {
             return;
         }
-        if let Some(chat) = new_chat::existing_chat(self.store.read(cx), &user) {
+        let group = self.new_chat_is_group();
+        if !group && let Some(chat) = new_chat::existing_chat(self.store.read(cx), &user) {
             self.open_existing_chat(chat, cx);
             return;
         }
@@ -494,27 +497,80 @@ impl Desktop {
             return;
         };
         if let Some(dialog) = self.new_chat.as_mut() {
-            dialog.chosen = Some(person);
+            if group {
+                dialog.toggle_member(person);
+            } else {
+                dialog.chosen = Some(person);
+            }
         }
         self.store
             .update(cx, |store, cx| store.dismiss_creation(cx));
         cx.notify();
     }
 
-    /// "Создать": the only call that creates a chat. A chat with the person that appeared meanwhile is
-    /// opened instead; while a creation is in flight nothing is sent again.
-    pub(crate) fn confirm_new_chat(&mut self, cx: &mut Context<Self>) {
-        let Some(user) = self
-            .new_chat
-            .as_ref()
-            .and_then(|d| d.chosen.as_ref())
-            .map(|c| c.user.clone())
-        else {
-            return;
-        };
+    /// "✕" on a participant of the group. Locked while a creation is in flight, like every choice.
+    pub(crate) fn remove_member(&mut self, user: UserId, cx: &mut Context<Self>) {
         if self.creation_in_flight(cx) {
             return;
         }
+        let Some(dialog) = self.new_chat.as_mut().filter(|d| d.mode == Mode::Group) else {
+            return;
+        };
+        dialog.members.retain(|m| m.user != user);
+        self.store
+            .update(cx, |store, cx| store.dismiss_creation(cx));
+        cx.notify();
+    }
+
+    /// Switches between the private and the group variant, keeping what was chosen in each. Locked while a
+    /// creation is in flight. The field of the variant gets the focus.
+    pub(crate) fn set_new_chat_mode(
+        &mut self,
+        mode: Mode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.creation_in_flight(cx) {
+            return;
+        }
+        let Some(dialog) = self.new_chat.as_mut().filter(|d| d.mode != mode) else {
+            return;
+        };
+        dialog.mode = mode;
+        let field = match mode {
+            Mode::Private => &dialog.search,
+            Mode::Group => &dialog.title,
+        };
+        window.focus(&field.focus_handle(cx));
+        self.store
+            .update(cx, |store, cx| store.dismiss_creation(cx));
+        cx.notify();
+    }
+
+    /// "Создать": the only call that creates a chat. A private chat with the person that appeared meanwhile
+    /// is opened instead; a group is always created, with the trimmed title and the participants in the order
+    /// they were picked. While a creation is in flight nothing is sent again.
+    pub(crate) fn confirm_new_chat(&mut self, cx: &mut Context<Self>) {
+        if self.creation_in_flight(cx) {
+            return;
+        }
+        let Some(dialog) = self.new_chat.as_ref() else {
+            return;
+        };
+        if dialog.mode == Mode::Group {
+            let title = dialog.title.read(cx).content.to_string();
+            if !new_chat::title_ok(&title) || dialog.members.is_empty() {
+                return;
+            }
+            let users: Vec<UserId> = dialog.members.iter().map(|m| m.user.clone()).collect();
+            self.store.update(cx, |store, cx| {
+                store.create_group_chat(title.trim().to_owned(), users, cx)
+            });
+            return;
+        }
+        let Some(user) = dialog.chosen.as_ref().map(|c| c.user.clone()) else {
+            return;
+        };
         if let Some(chat) = new_chat::existing_chat(self.store.read(cx), &user) {
             self.open_existing_chat(chat, cx);
             return;
@@ -542,9 +598,42 @@ impl Desktop {
         }
     }
 
-    /// The person chosen in the open dialog.
-    pub(crate) fn new_chat_choice(&self) -> Option<&Candidate> {
+    /// The person chosen in the open private dialog.
+    #[cfg(test)]
+    pub(crate) fn new_chat_choice(&self) -> Option<&new_chat::Candidate> {
         self.new_chat.as_ref()?.chosen.as_ref()
+    }
+
+    /// Whether the open dialog is the group variant.
+    pub(crate) fn new_chat_is_group(&self) -> bool {
+        self.new_chat
+            .as_ref()
+            .is_some_and(|d| d.mode == Mode::Group)
+    }
+
+    /// Whether `user` is selected in the open dialog's current variant.
+    pub(crate) fn new_chat_selected(&self, user: &UserId) -> bool {
+        self.new_chat.as_ref().is_some_and(|d| d.is_selected(user))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_chat_members(&self) -> Vec<String> {
+        self.new_chat
+            .as_ref()
+            .map(|d| d.members.iter().map(|m| m.user.0.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_chat_title(&self, cx: &App) -> Option<String> {
+        Some(self.new_chat.as_ref()?.title.read(cx).content.to_string())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_chat_set_title(&self, text: &str, cx: &mut App) {
+        if let Some(dialog) = &self.new_chat {
+            dialog.title.update(cx, |t, cx| t.set_text(text, cx));
+        }
     }
 
     #[cfg(test)]

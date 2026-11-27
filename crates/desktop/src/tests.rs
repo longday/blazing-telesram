@@ -6424,6 +6424,400 @@ fn a_creation_in_flight_keeps_the_dialog_until_its_outcome_is_shown(cx: &mut Tes
     assert!(!dialog_open(&h, cx));
 }
 
+fn create_group(title: &str, users: &[&str]) -> Command {
+    Command::CreateGroupChat {
+        title: title.into(),
+        users: users.iter().map(|u| UserId((*u).into())).collect(),
+    }
+}
+
+fn group_creations(commands: &[Command]) -> usize {
+    commands
+        .iter()
+        .filter(|c| matches!(c, Command::CreateGroupChat { .. }))
+        .count()
+}
+
+fn members_chosen(h: &Harness, cx: &mut VisualTestContext) -> Vec<String> {
+    h.desktop.read_with(cx, |d, _| d.new_chat_members())
+}
+
+fn group_title(h: &Harness, cx: &mut VisualTestContext) -> String {
+    h.desktop
+        .read_with(cx, |d, cx| d.new_chat_title(cx))
+        .unwrap_or_default()
+}
+
+/// The dialog in its group variant over the panel of "g" (Алиса, Борис, Анна offered); the title field has
+/// the focus. Nothing was sent.
+fn open_group_dialog(h: &Harness, cx: &mut VisualTestContext) {
+    open_people_panel(h, cx);
+    open_dialog(h, cx);
+    click(cx, "new-chat-mode-group");
+    assert!(
+        h.commands().is_empty(),
+        "switching the variant sends nothing"
+    );
+}
+
+/// The group dialog with a title and Алиса and Борис picked, ready to confirm.
+fn fill_group(h: &Harness, cx: &mut VisualTestContext) {
+    open_group_dialog(h, cx);
+    cx.simulate_input("Дружба");
+    click(cx, "candidate-alice");
+    click(cx, "candidate-boris");
+    assert_eq!(group_title(h, cx), "Дружба");
+    assert_eq!(members_chosen(h, cx), ["alice", "boris"]);
+}
+
+#[gpui::test]
+fn the_group_variant_shows_the_title_field_and_leaves_the_private_one_intact(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    assert!(shown(cx, "new-chat-mode-private") && shown(cx, "new-chat-mode-group"));
+    assert!(!shown(cx, "new-chat-title"), "a private chat has no title");
+    assert!(!shown(cx, "new-chat-members-empty"));
+
+    click(cx, "candidate-alice");
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    click(cx, "new-chat-mode-group");
+    assert!(shown(cx, "new-chat-title") && shown(cx, "new-chat-search"));
+    assert!(shown(cx, "new-chat-members-empty"), "nobody is in yet");
+    assert!(members_chosen(&h, cx).is_empty());
+    cx.simulate_input("Команда 2");
+    assert_eq!(group_title(&h, cx), "Команда 2", "the title has the focus");
+    assert_eq!(composer_text(&h, cx), "");
+
+    // Back: the private choice and its row are as they were left.
+    click(cx, "new-chat-mode-private");
+    assert_eq!(chosen_person(&h, cx).as_deref(), Some("alice"));
+    click(cx, "new-chat-mode-group");
+    assert_eq!(group_title(&h, cx), "Команда 2", "the title is kept too");
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_click_selects_and_deselects_and_a_cross_removes_a_participant(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group_dialog(&h, cx);
+    for row in ["candidate-alice", "candidate-boris", "candidate-anna"] {
+        assert!(shown(cx, row), "{row}");
+    }
+    assert!(!shown(cx, "candidate-alice-check"));
+
+    click(cx, "candidate-alice");
+    assert_eq!(members_chosen(&h, cx), ["alice"]);
+    assert!(shown(cx, "candidate-alice-check"), "the row is marked");
+    assert!(shown(cx, "new-chat-member-alice"), "and listed");
+    assert!(shown(cx, "new-chat-member-alice-avatar"));
+    assert!(dialog_open(&h, cx), "choosing never closes the dialog");
+
+    click(cx, "candidate-alice");
+    assert!(
+        members_chosen(&h, cx).is_empty(),
+        "a second click takes them out"
+    );
+    assert!(shown(cx, "new-chat-members-empty"));
+
+    click(cx, "candidate-boris");
+    click(cx, "candidate-alice");
+    click(cx, "candidate-anna");
+    assert_eq!(
+        members_chosen(&h, cx),
+        ["boris", "alice", "anna"],
+        "in the order they were picked"
+    );
+    click(cx, "new-chat-remove-alice");
+    assert_eq!(members_chosen(&h, cx), ["boris", "anna"]);
+    assert!(shown(cx, "candidate-boris-check") && shown(cx, "candidate-anna-check"));
+    assert_eq!(
+        chosen_person(&h, cx),
+        None,
+        "the private choice is separate"
+    );
+    assert!(
+        h.commands().is_empty(),
+        "selecting and removing send nothing"
+    );
+}
+
+#[gpui::test]
+fn a_known_private_chat_is_not_opened_from_the_group_variant(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group_dialog(&h, cx);
+    click(cx, "candidate-anna");
+    assert!(
+        dialog_open(&h, cx),
+        "a person with a private chat is just a participant"
+    );
+    assert_eq!(members_chosen(&h, cx), ["anna"]);
+    assert_eq!(selected_chat(&h, cx), Some(chat_g()));
+    assert!(h.commands().is_empty(), "no chat is opened");
+
+    cx.simulate_input("Свои");
+    click(cx, "new-chat-create");
+    assert_eq!(
+        h.commands(),
+        [create_group("Свои", &["anna"])],
+        "a group is created even with someone a private chat exists with"
+    );
+}
+
+#[gpui::test]
+fn create_is_disabled_without_a_usable_title_or_a_participant(cx: &mut TestAppContext) {
+    use crate::new_chat::{can_create_group, title_ok};
+    let (h, cx) = harness(cx);
+    open_group_dialog(&h, cx);
+    assert!(shown(cx, "new-chat-create"));
+
+    // Nothing at all.
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty());
+
+    // A participant, no title.
+    click(cx, "candidate-alice");
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty(), "no title");
+
+    // A blank title is no title.
+    cx.simulate_input("   ");
+    assert_eq!(group_title(&h, cx), "   ");
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty(), "a title of spaces");
+    assert_eq!(creation(&h, cx), None);
+
+    // A title, no participant.
+    cx.simulate_input("Дружба");
+    click(cx, "new-chat-remove-alice");
+    assert!(members_chosen(&h, cx).is_empty());
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty(), "nobody else in the group");
+
+    // Too long a title.
+    click(cx, "candidate-alice");
+    let long = "я".repeat(251);
+    h.desktop.update(cx, |d, cx| {
+        d.new_chat_set_title(&long, cx);
+    });
+    assert!(shown(cx, "new-chat-title-long"), "the dialog says why");
+    click(cx, "new-chat-create");
+    assert!(h.commands().is_empty(), "over the limit");
+    h.desktop
+        .update(cx, |d, cx| d.new_chat_set_title(&"я".repeat(250), cx));
+    click(cx, "new-chat-create");
+    assert_eq!(group_creations(&h.commands()), 1, "250 characters are fine");
+
+    // The pure rule behind the button.
+    let idle = None;
+    assert!(can_create_group("Дружба", 1, idle));
+    assert!(!can_create_group("Дружба", 0, idle));
+    assert!(!can_create_group("", 1, idle));
+    assert!(!can_create_group(" \t ", 1, idle));
+    assert!(!can_create_group(
+        "Дружба",
+        1,
+        Some(&crate::store::CreationState::InFlight)
+    ));
+    assert!(title_ok(&"я".repeat(250)) && !title_ok(&"я".repeat(251)));
+}
+
+#[gpui::test]
+fn enter_in_the_title_or_search_field_never_creates_a_group(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "Enter in the title sends nothing");
+    assert_eq!(
+        group_title(&h, cx).trim(),
+        "Дружба",
+        "at most the platform's line break text is added, which the title rule trims"
+    );
+    assert_eq!(creation(&h, cx), None);
+
+    click(cx, "new-chat-search");
+    cx.simulate_input("бор");
+    assert_eq!(
+        h.desktop
+            .read_with(cx, |d, cx| d.new_chat_query(cx))
+            .as_deref(),
+        Some("бор"),
+        "the search field has the focus now"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        h.commands().is_empty(),
+        "Enter in the search field sends nothing"
+    );
+    assert!(dialog_open(&h, cx));
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris"]);
+    assert_eq!(creation(&h, cx), None);
+
+    // Only the button creates, and the title goes out trimmed.
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_group("Дружба", &["alice", "boris"])]);
+}
+
+#[gpui::test]
+fn one_confirm_sends_one_group_command_with_the_trimmed_title_and_the_participants_in_order(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_group_dialog(&h, cx);
+    cx.simulate_input("  Дружба  ");
+    click(cx, "candidate-boris");
+    click(cx, "candidate-alice");
+    assert!(h.commands().is_empty());
+
+    click(cx, "new-chat-create");
+    click(cx, "new-chat-create");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        h.commands(),
+        [create_group("Дружба", &["boris", "alice"])],
+        "one command per confirm, also on a double click"
+    );
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::InFlight)
+    );
+    assert!(shown(cx, "new-chat-sending"));
+
+    // Everything is locked until the outcome is shown.
+    click(cx, "candidate-anna");
+    click(cx, "new-chat-remove-alice");
+    click(cx, "new-chat-mode-private");
+    assert_eq!(members_chosen(&h, cx), ["boris", "alice"]);
+    assert!(h.desktop.read_with(cx, |d, _| d.new_chat_is_group()));
+    click(cx, "new-chat-cancel");
+    cx.simulate_keystrokes("escape");
+    assert!(dialog_open(&h, cx));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_created_group_closes_the_dialog_and_is_opened(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_group("Дружба", &["alice", "boris"])]);
+    let mut chats = people_chats();
+    chats.push(chat("n", ChatKind::Group, "Дружба", Some(1)));
+    h.feed(
+        cx,
+        [
+            ClientEvent::ChatsReplaced(chats),
+            ClientEvent::ChatCreated {
+                chat: Some(ChatId("n".into())),
+                existing: false,
+            },
+        ],
+    );
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(creation(&h, cx), None);
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("n".into())));
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("n".into()))]);
+    assert!(shown(cx, row!("n")));
+}
+
+#[gpui::test]
+fn a_failed_group_keeps_the_title_and_participants_and_only_the_user_retries(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "сервер отказал".into(),
+            unknown: false,
+        }],
+    );
+    assert!(shown(cx, "new-chat-error"));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(group_title(&h, cx), "Дружба");
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris"]);
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "nothing is sent by itself");
+
+    // Changing the group forgets the failure; the next press is a new attempt.
+    click(cx, "new-chat-remove-boris");
+    assert_eq!(creation(&h, cx), None);
+    click(cx, "new-chat-create");
+    assert_eq!(h.commands(), [create_group("Дружба", &["alice"])]);
+}
+
+#[gpui::test]
+fn an_unknown_or_unverified_group_result_is_said_honestly_and_not_retried(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "Результат неизвестен: группа могла быть создана".into(),
+            unknown: true,
+        }],
+    );
+    assert!(shown(cx, "new-chat-unknown") && !shown(cx, "new-chat-error"));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(group_title(&h, cx), "Дружба");
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris"]);
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "no second request by itself");
+
+    click(cx, "new-chat-create");
+    assert_eq!(group_creations(&h.commands()), 1, "the press is the user's");
+    h.feed(
+        cx,
+        [ClientEvent::CreationUnverified {
+            reason: "Результат неизвестен: список не обновлён".into(),
+        }],
+    );
+    assert!(shown(cx, "new-chat-unverified"));
+    assert!(!shown(cx, "new-chat-error"));
+    assert!(matches!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::Unverified { .. })
+    ));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris"]);
+    cx.run_until_parked();
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_group_created_but_not_named_by_the_list_closes_the_dialog_with_a_toast(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    click(cx, "new-chat-create");
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::ChatCreated {
+            chat: None,
+            existing: false,
+        }],
+    );
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(chat_g()), "nothing to open yet");
+    assert!(
+        shown(cx, "toast"),
+        "the user is told it will show up in the list"
+    );
+    assert!(h.commands().is_empty());
+}
+
 #[gpui::test]
 fn the_dialog_blocks_the_chat_and_yields_to_nothing_under_it(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
