@@ -103,7 +103,7 @@ While the audio is fetched, the play control SHALL show that it is loading and c
 - **THEN** the client handles it as an expired session and nothing is left on disk
 
 ### Requirement: Video card
-A message with a video attachment SHALL show a video card: a play control, the file name, the duration, the size and the Download action. A file counts as a video only when the server describes it as one and its name has a recognised video extension; any other file keeps the ordinary file card. The card SHALL NOT fetch the video, a still frame or anything else by itself.
+A message with a video attachment SHALL show a video card: a play control, the file name, the duration when the server states it, the size and the Download action. A file counts as a video when its name has a recognised video extension (`mp4`, `mov`); the server's description of the file as a video is optional and only supplies the duration; any other file keeps the ordinary file card. The card SHALL NOT fetch the video, a still frame or anything else by itself.
 
 #### Scenario: Video message
 - **WHEN** a message holds a video of 42 seconds and 12 MB named `clip.mp4`
@@ -111,10 +111,10 @@ A message with a video attachment SHALL show a video card: a play control, the f
 
 #### Scenario: Not described as a video
 - **WHEN** a message holds a file named `clip.mp4` that the server does not describe as a video
-- **THEN** it shows the ordinary file card
+- **THEN** a video card with a play control, `clip.mp4`, the size and Download is shown, without a duration
 
 #### Scenario: Unrecognised extension
-- **WHEN** a message holds a file described as a video whose name has no recognised video extension
+- **WHEN** a message holds a file whose name has no recognised video extension, whether or not the server describes it as a video
 - **THEN** it shows the ordinary file card and no play control
 
 #### Scenario: Nothing without a click

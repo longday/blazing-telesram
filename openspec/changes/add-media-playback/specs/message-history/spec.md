@@ -27,7 +27,7 @@ Image attachments SHALL show a thumbnail; a message with several images (a galle
 
 #### Scenario: Video message
 - **WHEN** a message contains a video attachment
-- **THEN** a video card with a play control, the name, the duration, the size and a Download action is shown, and nothing is fetched for it
+- **THEN** a video card with a play control, the name, the size and a Download action is shown, with the duration when the server states it, and nothing is fetched for it
 
 #### Scenario: Voice message cached by an earlier version
 - **GIVEN** the cache holds a voice message stored as an unsupported type
