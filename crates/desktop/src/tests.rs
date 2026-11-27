@@ -5107,6 +5107,157 @@ fn coming_back_online_asks_for_the_list_again(cx: &mut TestAppContext) {
     assert!(shown(cx, "info-count"));
 }
 
+fn members_now(h: &Harness, cx: &mut VisualTestContext) -> Option<crate::store::MembersState> {
+    h.store
+        .read_with(cx, |s, _| s.members_state(&chat_g()).cloned())
+}
+
+fn alice_list(name: &str) -> ClientEvent {
+    members_of(
+        "g",
+        vec![member("a", name, MemberRole::Member, false)],
+        false,
+    )
+}
+
+fn flap(h: &Harness, cx: &mut VisualTestContext) {
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+}
+
+#[gpui::test]
+fn a_list_requested_before_the_reconnect_is_not_shown_and_is_read_once_more(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    flap(&h, cx);
+    assert!(
+        h.commands().is_empty(),
+        "the request is still out: no second one beside it"
+    );
+    assert_eq!(
+        members_now(&h, cx),
+        Some(crate::store::MembersState::Loading)
+    );
+
+    h.feed(cx, [alice_list("Старая")]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "the answer predates the reconnect: exactly one read after it"
+    );
+    assert_eq!(
+        members_now(&h, cx),
+        Some(crate::store::MembersState::Loading)
+    );
+    assert!(shown(cx, "info-loading"));
+    assert!(!shown(cx, "member-a"), "the old answer is not shown");
+
+    h.feed(cx, [alice_list("Новая")]);
+    assert!(h.commands().is_empty());
+    assert!(shown(cx, "member-a"));
+    h.store
+        .read_with(cx, |s, _| match s.members_state(&chat_g()) {
+            Some(crate::store::MembersState::Ready(m)) => {
+                assert_eq!(m.users[0].name.as_deref(), Some("Новая"))
+            }
+            other => panic!("{other:?}"),
+        });
+}
+
+#[gpui::test]
+fn a_failure_of_a_request_from_before_the_reconnect_is_read_again_too(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    flap(&h, cx);
+    h.feed(cx, [members_failed("g", "Нет соединения", true)]);
+    assert_eq!(h.commands(), [Command::LoadMembers(chat_g())]);
+    assert_eq!(
+        members_now(&h, cx),
+        Some(crate::store::MembersState::Loading)
+    );
+    h.feed(cx, [alice_list("Алиса")]);
+    assert!(shown(cx, "member-a"));
+}
+
+#[gpui::test]
+fn a_second_drop_during_the_re_read_reads_again_after_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [alice_list("Первая")]);
+    flap(&h, cx);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "the re-read"
+    );
+
+    flap(&h, cx);
+    assert!(
+        h.commands().is_empty(),
+        "the re-read is still out: nothing is sent beside it"
+    );
+    h.feed(cx, [alice_list("Вторая")]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "the answer predates the second reconnect"
+    );
+    assert!(!shown(cx, "member-a"));
+
+    h.feed(cx, [alice_list("Третья")]);
+    assert!(h.commands().is_empty());
+    h.store
+        .read_with(cx, |s, _| match s.members_state(&chat_g()) {
+            Some(crate::store::MembersState::Ready(m)) => {
+                assert_eq!(m.users[0].name.as_deref(), Some("Третья"))
+            }
+            other => panic!("{other:?}"),
+        });
+}
+
+#[gpui::test]
+fn a_drop_during_the_re_read_whose_answer_comes_while_offline_reads_again_on_return(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    h.feed(cx, [alice_list("Первая")]);
+    flap(&h, cx);
+    h.commands();
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    h.feed(cx, [alice_list("Вторая")]);
+    assert!(shown(cx, "info-offline"), "not shown while offline");
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "a list that arrived before the return is read again"
+    );
+}
+
+#[gpui::test]
+fn repeated_reconnects_and_retries_never_run_two_member_loads_at_once(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_info(&h, cx);
+    flap(&h, cx);
+    flap(&h, cx);
+    h.desktop.update(cx, |d, cx| d.reload_info(cx));
+    h.store.update(cx, |s, cx| s.load_members(chat_g(), cx));
+    assert!(h.commands().is_empty(), "one request is out, no more");
+
+    h.feed(cx, [alice_list("Старая")]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadMembers(chat_g())],
+        "one re-read, however many reconnects"
+    );
+    h.feed(cx, [alice_list("Новая")]);
+    assert!(h.commands().is_empty());
+    assert!(shown(cx, "member-a"));
+}
+
 #[test]
 fn the_panel_body_follows_the_state_and_the_connection() {
     use crate::info_panel::{Body, body};
@@ -5521,6 +5672,64 @@ fn a_profile_that_arrives_after_the_connection_dropped_is_not_shown(cx: &mut Tes
     );
     assert!(!shown(cx, "profile-name"));
     assert!(!shown(cx, "profile-status"));
+}
+
+#[gpui::test]
+fn a_profile_requested_before_the_reconnect_is_not_shown_and_is_read_once_more(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    flap(&h, cx);
+    assert!(
+        h.commands().is_empty(),
+        "the request is still out: no second one beside it"
+    );
+    h.store.update(cx, |s, cx| s.load_profile(cx));
+    assert!(h.commands().is_empty(), "no duplicate while loading");
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Старое"), None))]);
+    assert_eq!(
+        h.commands(),
+        [Command::LoadProfile],
+        "the answer predates the reconnect: exactly one read after it"
+    );
+    assert_eq!(
+        profile_state(&h, cx),
+        Some(crate::store::ProfileState::Loading)
+    );
+    assert!(shown(cx, "profile-loading"));
+    assert!(!shown(cx, "profile-name"));
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Новое"), None))]);
+    assert!(h.commands().is_empty());
+    match profile_state(&h, cx) {
+        Some(crate::store::ProfileState::Ready(p)) => assert_eq!(p.name.as_deref(), Some("Новое")),
+        other => panic!("{other:?}"),
+    }
+    assert!(shown(cx, "profile-name"));
+}
+
+#[gpui::test]
+fn a_second_drop_during_the_profile_re_read_reads_again_after_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_profile(&h, cx);
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Первое"), None))]);
+    flap(&h, cx);
+    assert_eq!(h.commands(), [Command::LoadProfile], "the re-read");
+
+    flap(&h, cx);
+    assert!(h.commands().is_empty());
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Второе"), None))]);
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+    assert!(!shown(cx, "profile-name"));
+
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Третье"), None))]);
+    assert!(h.commands().is_empty());
+    match profile_state(&h, cx) {
+        Some(crate::store::ProfileState::Ready(p)) => assert_eq!(p.name.as_deref(), Some("Третье")),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[gpui::test]

@@ -74,6 +74,7 @@ Two gates, in order. Static gate: 6.1 starts only when "D4 outcome" in `design.m
 ## 7. Integration
 
 - [ ] 7.1 Workspace build with 0 warnings, all tests pass, code review by the `reviewer` agent with findings fixed. Files: any file named above (fixes only). Depends: 4.3, and 6.4 unless 6.F ran. Verify: `cargo build --workspace --all-targets` 0 warnings, `cargo test --workspace` passes, review findings resolved.
+  - Review finding fixed (ReviewCmWhole, P2): a members (or profile) load that was still `Loading` when the connection came back was skipped by `resume_reads`, and its late reply, from a request sent before the reconnect (the HTTP request is not cancelled by the XIVA drop), was shown as current. Fix in `store.rs`: on the change to `Online` every read still `Loading` is marked stale (`members_stale`, `profile_stale`); its answer, success or failure, is dropped and exactly one new read is sent, the state staying `Loading` until the answer to that read. `load_members` / `load_profile` still send nothing while a read is out, so no two loads run at once; a second drop and return during the re-read marks it stale again. The profile panel had the same pattern and is fixed the same way. Tests in `tests.rs`: reply after reconnect, failure after reconnect, second drop during the re-read, answer arriving offline then reconnect, repeated reconnects/retries without duplicate loads (members), reply after reconnect and second drop (profile). 7.1 stays unticked: the final run happens after the merge.
 
 ## Workflow follow-up
 
