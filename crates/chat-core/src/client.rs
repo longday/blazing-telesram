@@ -8,7 +8,7 @@ use crate::backend::{Backend, BackendError, CreateError, LiveEvent};
 use crate::cache::{self, Cache, CacheError, OutboxEntry};
 use crate::model::*;
 use crate::paths::{
-    commit_partial, create_partial, escape_component, media_dir, sanitize_file_name,
+    commit_partial, create_partial_with_mode, escape_component, media_dir, sanitize_file_name,
 };
 use crate::reactions::{ReactionCode, Reactions, ReactionsUpdate};
 use async_channel::{Receiver, Sender};
@@ -551,6 +551,49 @@ fn playback_dir(runtime_dir: &Path, account: &UserId) -> PathBuf {
     media_dir(runtime_dir, account).join(PLAYBACK_DIR)
 }
 
+/// Refuses a path that is a symlink or not a folder: a playback folder is only ever one the app made.
+fn require_plain_dir(path: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(path)?.file_type().is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "not a plain folder",
+        ))
+    }
+}
+
+/// [`require_plain_dir`] for the account's media folder and the playback folder inside it.
+fn require_plain_playback_path(dir: &Path) -> io::Result<()> {
+    if let Some(account_dir) = dir.parent() {
+        require_plain_dir(account_dir)?;
+    }
+    require_plain_dir(dir)
+}
+
+/// The playback folder, created `0700` when missing; refused, before anything is created, when it
+/// or the account folder is a symlink or not a folder, and brought to `0700` when it exists with
+/// another mode.
+fn prepare_playback_dir(runtime_dir: &Path, account: &UserId) -> io::Result<PathBuf> {
+    let dir = playback_dir(runtime_dir, account);
+    if let Some(account_dir) = dir.parent() {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(account_dir)?;
+        require_plain_dir(account_dir)?;
+    }
+    match DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+        _ => {}
+    }
+    require_plain_dir(&dir)?;
+    if fs::symlink_metadata(&dir)?.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
+}
+
 /// Name of a playback copy: the path-safe `media_file_name` plus the extension of `supplied`
 /// only when it is `.` and 1 to 8 ASCII letters or digits after a non-empty stem; the supplied
 /// name itself never becomes part of a path.
@@ -571,9 +614,15 @@ fn playback_file_name(media: &MediaRef, supplied: Option<&str>) -> String {
     }
 }
 
-/// Removes an account's playback copies; a missing folder is fine.
+/// Removes an account's playback copies; a missing folder is fine. A symlink or a non-folder in
+/// the path (the account folder or the playback folder) is never followed: the cleanup is skipped.
 fn remove_playback_dir(runtime_dir: &Path, account: &UserId) {
-    remove_ignoring_missing(fs::remove_dir_all(playback_dir(runtime_dir, account)));
+    let dir = playback_dir(runtime_dir, account);
+    match require_plain_playback_path(&dir) {
+        Ok(()) => remove_ignoring_missing(fs::remove_dir_all(&dir)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(kind = ?e.kind(), "playback cleanup skipped: unusable path"),
+    }
 }
 
 fn remove_ignoring_missing(result: io::Result<()>) {
@@ -675,8 +724,20 @@ impl Throttle {
 struct Landing {
     dir: PathBuf,
     slots: Arc<Semaphore>,
-    /// A playback copy: the file is `0600` (its folder is `0700`).
+    /// A playback copy: the file is created `0600` in a folder that is `0700` and never a symlink.
     private: bool,
+}
+
+impl Landing {
+    /// A playback folder is looked at again before the file is created and before it is named:
+    /// the transfer may have waited a long time for a slot.
+    fn check(&self) -> io::Result<()> {
+        if self.private {
+            require_plain_playback_path(&self.dir)
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// One transfer: wait for a slot, stream into `<name>.part` in the landing folder, then give the
@@ -697,11 +758,10 @@ async fn run_download<B: Backend>(
     };
     let name = sanitize_file_name(name);
     let dir = landing.dir.as_path();
-    let (mut file, partial) = create_partial(dir, &name).map_err(DownloadError::Destination)?;
-    if landing.private {
-        file.set_permissions(fs::Permissions::from_mode(0o600))
-            .map_err(DownloadError::Destination)?;
-    }
+    landing.check().map_err(DownloadError::Destination)?;
+    let mode = if landing.private { 0o600 } else { 0o666 };
+    let (mut file, partial) =
+        create_partial_with_mode(dir, &name, mode).map_err(DownloadError::Destination)?;
     let throttle = Throttle::default();
     let report = |received: u64, total: Option<u64>| {
         if throttle.admit(Instant::now(), received, total) {
@@ -733,6 +793,7 @@ async fn run_download<B: Backend>(
             },
         );
     }
+    landing.check().map_err(DownloadError::Destination)?;
     let path = commit_partial(partial, dir, &name).map_err(DownloadError::Disk)?;
     Ok((path, bytes))
 }
@@ -3000,14 +3061,16 @@ impl<B: Backend> Engine<B> {
         }
         let playback = media.kind == MediaKind::Playback;
         let (landing, name) = if playback {
-            let dir = playback_dir(&self.config.runtime_dir, &self.account);
-            if let Err(error) = DirBuilder::new().recursive(true).mode(0o700).create(&dir) {
-                tracing::warn!(%error, "playback folder could not be created");
-                return self.emit(ClientEvent::DownloadFailed {
-                    media,
-                    reason: DownloadFailure::Destination,
-                });
-            }
+            let dir = match prepare_playback_dir(&self.config.runtime_dir, &self.account) {
+                Ok(dir) => dir,
+                Err(error) => {
+                    tracing::warn!(kind = ?error.kind(), "playback folder unusable");
+                    return self.emit(ClientEvent::DownloadFailed {
+                        media,
+                        reason: DownloadFailure::Destination,
+                    });
+                }
+            };
             let landing = Landing {
                 dir,
                 slots: self.playback_slots.clone(),
@@ -8115,6 +8178,139 @@ mod tests {
             )),
             "{seen:?}"
         );
+    }
+
+    #[test]
+    fn the_cleanup_never_follows_a_symlink_in_the_playback_path() {
+        let outside_account = tempfile::tempdir().unwrap();
+        let outside_folder = tempfile::tempdir().unwrap();
+        fs::create_dir(outside_account.path().join("playback")).unwrap();
+        fs::write(outside_account.path().join("playback/keep.mp4"), "mine").unwrap();
+        fs::write(outside_folder.path().join("keep.mp4"), "mine").unwrap();
+        // The stored account's folder is a symlink; the account the server names has a real
+        // folder whose playback folder is a symlink: the start wipe and the switch both skip.
+        let h = start(
+            |s, dir| {
+                fs::create_dir_all(dir.join("media/other")).unwrap();
+                std::os::unix::fs::symlink(outside_account.path(), dir.join("media").join(UID))
+                    .unwrap();
+                std::os::unix::fs::symlink(
+                    outside_folder.path(),
+                    dir.join("media/other").join(PLAYBACK_DIR),
+                )
+                .unwrap();
+                s.account = "other".into();
+            },
+            50,
+        );
+        h.online();
+        assert_eq!(
+            fs::read(outside_account.path().join("playback/keep.mp4")).unwrap(),
+            b"mine"
+        );
+        assert_eq!(
+            fs::read(outside_folder.path().join("keep.mp4")).unwrap(),
+            b"mine"
+        );
+        let link = |path: PathBuf| fs::symlink_metadata(path).unwrap().file_type().is_symlink();
+        assert!(link(h.dir.path().join("media").join(UID)));
+        assert!(link(h.dir.path().join("media/other").join(PLAYBACK_DIR)));
+    }
+
+    #[test]
+    fn a_symlinked_playback_or_account_folder_is_refused_and_nothing_lands_outside() {
+        for account_link in [false, true] {
+            let outside = tempfile::tempdir().unwrap();
+            let h = start(
+                |s, _| {
+                    s.files.insert("b/1".into(), b"voice".to_vec());
+                },
+                50,
+            );
+            h.online();
+            let account_dir = media_dir(h.dir.path(), &account());
+            if account_link {
+                fs::create_dir_all(account_dir.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &account_dir).unwrap();
+            } else {
+                fs::create_dir_all(&account_dir).unwrap();
+                std::os::unix::fs::symlink(outside.path(), h.playback_dir()).unwrap();
+            }
+            h.download(&playback("b/1"), "a.mp4");
+            h.next("refusal", |e| {
+                *e == ClientEvent::DownloadFailed {
+                    media: playback("b/1"),
+                    reason: DownloadFailure::Destination,
+                }
+            });
+            h.quiet();
+            assert!(h.fake.state().download_calls.is_empty());
+            assert_eq!(
+                fs::read_dir(outside.path()).unwrap().count(),
+                0,
+                "account_link={account_link}: nothing may be created outside"
+            );
+        }
+    }
+
+    #[test]
+    fn an_existing_playback_folder_with_a_wider_mode_is_brought_to_0700() {
+        let h = start(
+            |s, _| {
+                s.files.insert("b/1".into(), b"voice".to_vec());
+            },
+            50,
+        );
+        h.online();
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(h.playback_dir())
+            .unwrap();
+        fs::set_permissions(h.playback_dir(), fs::Permissions::from_mode(0o755)).unwrap();
+        h.download(&playback("b/1"), "a.mp4");
+        h.downloaded();
+        assert_eq!(mode_of(&h.playback_dir()), 0o700);
+    }
+
+    #[test]
+    fn a_playback_partial_is_private_while_it_is_still_a_partial() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        assert_eq!(h.playback_listing(), ["playback-b%2F1.mp4.part"]);
+        assert_eq!(
+            mode_of(&h.playback_dir().join("playback-b%2F1.mp4.part")),
+            0o600
+        );
+    }
+
+    #[test]
+    fn a_playback_folder_swapped_for_a_symlink_during_the_transfer_is_not_finalised_into() {
+        let outside = tempfile::tempdir().unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        let moved = h.dir.path().join("moved");
+        fs::rename(h.playback_dir(), &moved).unwrap();
+        std::os::unix::fs::symlink(outside.path(), h.playback_dir()).unwrap();
+        gate.notify_one();
+        h.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: playback("b/1"),
+                reason: DownloadFailure::Destination,
+            }
+        });
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert!(!moved.join("playback-b%2F1.mp4").exists());
     }
 
     fn hits(title: &str) -> SearchHits {
