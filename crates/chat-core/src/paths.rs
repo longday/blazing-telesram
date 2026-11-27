@@ -3,6 +3,7 @@
 use crate::model::UserId;
 use std::fs::{self, File, OpenOptions};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 /// Makes `raw` safe as a single path component: everything outside `[A-Za-z0-9_-]`
@@ -132,10 +133,21 @@ fn no_free_name() -> io::Error {
 /// partial becomes `<stem> (1).<ext>.part`, and so on. `name` is sanitized again here, so
 /// no input can leave `dir`.
 pub fn create_partial(dir: &Path, name: &str) -> io::Result<(File, Partial)> {
+    create_partial_with_mode(dir, name, 0o666)
+}
+
+/// [`create_partial`] whose file is created with `mode` (before the umask), so a private file
+/// is never readable for a moment with a wider mode.
+pub fn create_partial_with_mode(dir: &Path, name: &str, mode: u32) -> io::Result<(File, Partial)> {
     let name = sanitize_file_name(Some(name));
     for n in 0..MAX_ATTEMPTS {
         let path = dir.join(format!("{}.part", unique_name(&name, n)));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&path)
+        {
             Ok(file) => {
                 return Ok((
                     file,
@@ -317,6 +329,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (_file, partial) = create_partial(dir.path(), "../../.ssh/x").unwrap();
         assert_eq!(partial.path(), dir.path().join("x.part"));
+    }
+
+    #[test]
+    fn a_private_partial_has_its_mode_from_the_moment_it_exists() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let (file, partial) = create_partial_with_mode(dir.path(), "a.bin", 0o600).unwrap();
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(partial.path()), 0o600);
+        drop(file);
+        let path = commit_partial(partial, dir.path(), "a.bin").unwrap();
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]
