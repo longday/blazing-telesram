@@ -15,7 +15,7 @@ use async_channel::{Receiver, Sender};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, DirBuilder, OpenOptions};
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,6 +26,12 @@ use tokio::task::JoinHandle;
 const MEDIA_SLOTS: usize = 4;
 /// Concurrent original downloads; separate from `MEDIA_SLOTS` so a large file never starves previews.
 const DOWNLOAD_SLOTS: usize = 3;
+/// Concurrent playback copies; apart from `DOWNLOAD_SLOTS` so a short voice message never waits behind large saves.
+const PLAYBACK_SLOTS: usize = 2;
+/// Folder of an account's playback copies inside its media folder.
+const PLAYBACK_DIR: &str = "playback";
+/// Longest extension of a supplied name that a playback copy keeps, dot excluded.
+const PLAYBACK_EXT_MAX: usize = 8;
 /// Minimum gap between progress events of one download, so the event channel does not fill with one event per chunk.
 const DOWNLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// Live changes remembered per chat to replay over history snapshots that raced them.
@@ -350,6 +356,8 @@ struct Engine<B> {
     /// Generation of the next `Transfer`; lets a late result tell its own transfer from a newer one.
     download_seq: u64,
     download_slots: Arc<Semaphore>,
+    /// Running or waiting playback copies use their own slots, so they never queue behind saved originals.
+    playback_slots: Arc<Semaphore>,
     /// Unconfirmed sends in queue order, mirrored in the cache.
     outbox: Vec<OutboxEntry>,
     outbox_inflight: Option<PayloadId>,
@@ -538,11 +546,41 @@ fn media_file_name(media: &MediaRef) -> String {
     }
 }
 
+/// Where an account's playback copies live: private temporaries, never the Downloads folder.
+fn playback_dir(runtime_dir: &Path, account: &UserId) -> PathBuf {
+    media_dir(runtime_dir, account).join(PLAYBACK_DIR)
+}
+
+/// Name of a playback copy: the path-safe `media_file_name` plus the extension of `supplied`
+/// only when it is `.` and 1 to 8 ASCII letters or digits after a non-empty stem; the supplied
+/// name itself never becomes part of a path.
+fn playback_file_name(media: &MediaRef, supplied: Option<&str>) -> String {
+    let extension = supplied
+        .and_then(|name| name.rsplit_once('.'))
+        .filter(|(stem, ext)| {
+            !stem.is_empty()
+                && (1..=PLAYBACK_EXT_MAX).contains(&ext.len())
+                && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        })
+        .map_or("", |(_, ext)| ext);
+    let name = media_file_name(media);
+    if extension.is_empty() {
+        name
+    } else {
+        format!("{name}.{extension}")
+    }
+}
+
+/// Removes an account's playback copies; a missing folder is fine.
+fn remove_playback_dir(runtime_dir: &Path, account: &UserId) {
+    remove_ignoring_missing(fs::remove_dir_all(playback_dir(runtime_dir, account)));
+}
+
 fn remove_ignoring_missing(result: io::Result<()>) {
     if let Err(e) = result
         && e.kind() != io::ErrorKind::NotFound
     {
-        tracing::warn!(error = %e, "sign-out cleanup failed");
+        tracing::warn!(error = %e, "media cleanup failed");
     }
 }
 
@@ -633,25 +671,37 @@ impl Throttle {
     }
 }
 
-/// One transfer: wait for a slot, stream into `<name>.part` in `dir`, then give the file its final
-/// name. Every early return drops the `Partial`, which removes the unfinished file; so does aborting
-/// the task.
+/// Where a transfer lands and which slots it waits for.
+struct Landing {
+    dir: PathBuf,
+    slots: Arc<Semaphore>,
+    /// A playback copy: the file is `0600` (its folder is `0700`).
+    private: bool,
+}
+
+/// One transfer: wait for a slot, stream into `<name>.part` in the landing folder, then give the
+/// file its final name. Every early return drops the `Partial`, which removes the unfinished
+/// file; so does aborting the task.
 async fn run_download<B: Backend>(
     backend: &B,
-    slots: &Semaphore,
-    dir: &Path,
+    landing: &Landing,
     media: &MediaRef,
     name: Option<&str>,
     inputs: &Sender<Input>,
     seq: u64,
 ) -> Result<(PathBuf, u64), DownloadError> {
-    let Ok(_slot) = slots.acquire().await else {
+    let Ok(_slot) = landing.slots.acquire().await else {
         return Err(DownloadError::Backend(BackendError::Protocol(
             "download slots closed".into(),
         )));
     };
     let name = sanitize_file_name(name);
+    let dir = landing.dir.as_path();
     let (mut file, partial) = create_partial(dir, &name).map_err(DownloadError::Destination)?;
+    if landing.private {
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(DownloadError::Destination)?;
+    }
     let throttle = Throttle::default();
     let report = |received: u64, total: Option<u64>| {
         if throttle.admit(Instant::now(), received, total) {
@@ -720,6 +770,7 @@ impl<B: Backend> Engine<B> {
             downloads: HashMap::new(),
             download_seq: 0,
             download_slots: Arc::new(Semaphore::new(DOWNLOAD_SLOTS)),
+            playback_slots: Arc::new(Semaphore::new(PLAYBACK_SLOTS)),
             outbox: Vec::new(),
             outbox_inflight: None,
             outbox_failures: 0,
@@ -748,6 +799,8 @@ impl<B: Backend> Engine<B> {
         let (inputs, input_rx) = async_channel::unbounded();
         let cache = open_cache(&config.runtime_dir, &config.account);
         let mut engine = Engine::new(backend, config, events, inputs.clone(), cache);
+        // Copies of an earlier run are not reused: nothing remembers them, so they only cost disk.
+        remove_playback_dir(&engine.config.runtime_dir, &engine.account);
         tokio::spawn(pump_commands(commands, inputs));
 
         let cached = engine.db(engine.cache.chats()).unwrap_or_default();
@@ -1064,6 +1117,8 @@ impl<B: Backend> Engine<B> {
 
     /// The server reports another account than the stored session claimed: never mix caches.
     fn switch_account(&mut self, account: UserId) {
+        remove_playback_dir(&self.config.runtime_dir, &self.account);
+        remove_playback_dir(&self.config.runtime_dir, &account);
         self.cache = open_cache(&self.config.runtime_dir, &account);
         self.account = account;
         self.open_chat = None;
@@ -2838,9 +2893,9 @@ impl<B: Backend> Engine<B> {
     // -- media ----------------------------------------------------------------------------
 
     fn fetch_media(&mut self, media: MediaRef) {
-        // Originals go through `Command::Download`; this path is for previews only.
-        if media.kind == MediaKind::File {
-            tracing::warn!("fetch_media ignores originals");
+        // Originals and playback copies go through `Command::Download`; this path is for previews only.
+        if matches!(media.kind, MediaKind::File | MediaKind::Playback) {
+            tracing::warn!("fetch_media ignores originals and playback copies");
             return;
         }
         if let Some((file, _)) = self.db(self.cache.media(&media)).flatten() {
@@ -2928,8 +2983,8 @@ impl<B: Backend> Engine<B> {
     // -- downloads ------------------------------------------------------------------------
 
     fn start_download(&mut self, media: MediaRef, name: Option<String>) {
-        if media.kind != MediaKind::File {
-            tracing::warn!("download ignored: not an original");
+        if !matches!(media.kind, MediaKind::File | MediaKind::Playback) {
+            tracing::warn!("download ignored: neither an original nor a playback copy");
             return;
         }
         // One transfer per file id, however many messages show it.
@@ -2943,25 +2998,44 @@ impl<B: Backend> Engine<B> {
                 reason: DownloadFailure::Offline,
             });
         }
-        let Some(dir) = self.config.downloads_dir.clone().filter(|dir| dir.is_dir()) else {
-            return self.emit(ClientEvent::DownloadFailed {
-                media,
-                reason: DownloadFailure::Destination,
-            });
+        let playback = media.kind == MediaKind::Playback;
+        let (landing, name) = if playback {
+            let dir = playback_dir(&self.config.runtime_dir, &self.account);
+            if let Err(error) = DirBuilder::new().recursive(true).mode(0o700).create(&dir) {
+                tracing::warn!(%error, "playback folder could not be created");
+                return self.emit(ClientEvent::DownloadFailed {
+                    media,
+                    reason: DownloadFailure::Destination,
+                });
+            }
+            let landing = Landing {
+                dir,
+                slots: self.playback_slots.clone(),
+                private: true,
+            };
+            (landing, Some(playback_file_name(&media, name.as_deref())))
+        } else {
+            let Some(dir) = self.config.downloads_dir.clone().filter(|dir| dir.is_dir()) else {
+                return self.emit(ClientEvent::DownloadFailed {
+                    media,
+                    reason: DownloadFailure::Destination,
+                });
+            };
+            let landing = Landing {
+                dir,
+                slots: self.download_slots.clone(),
+                private: false,
+            };
+            (landing, name)
         };
         self.download_seq += 1;
         let seq = self.download_seq;
-        let (backend, inputs, slots) = (
-            self.backend.clone(),
-            self.inputs.clone(),
-            self.download_slots.clone(),
-        );
+        let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         let task_media = media.clone();
         let handle = tokio::spawn(async move {
             let result = run_download(
                 &*backend,
-                &slots,
-                &dir,
+                &landing,
                 &task_media,
                 name.as_deref(),
                 &inputs,
@@ -7682,6 +7756,365 @@ mod tests {
             "{seen:?}"
         );
         assert!(h.listing().is_empty());
+    }
+
+    // -- playback copies ------------------------------------------------------------------
+
+    fn playback(id: &str) -> MediaRef {
+        original(id).playback()
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    impl Harness {
+        fn playback_dir(&self) -> PathBuf {
+            playback_dir(self.dir.path(), &account())
+        }
+
+        /// Names in the playback folder, sorted; empty when it does not exist.
+        fn playback_listing(&self) -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(self.playback_dir())
+                .map(|entries| {
+                    entries
+                        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            names.sort();
+            names
+        }
+    }
+
+    #[test]
+    fn a_playback_copy_lands_in_the_private_playback_folder_and_not_in_downloads() {
+        let h = start_downloads(&[("b/1", b"voice bytes")], |_| {});
+        h.online();
+        h.download(&playback("b/1"), "Голосовое.mp4");
+        let events = h.until("saved", |e| matches!(e, ClientEvent::Downloaded { .. }));
+        let Some(ClientEvent::Downloaded { media, path }) = events.last() else {
+            unreachable!()
+        };
+        assert_eq!(*media, playback("b/1"));
+        assert_eq!(*path, h.playback_dir().join("playback-b%2F1.mp4"));
+        assert_eq!(fs::read(path).unwrap(), b"voice bytes");
+        assert_eq!(mode_of(&h.playback_dir()), 0o700);
+        assert_eq!(mode_of(path), 0o600);
+        assert!(h.listing().is_empty(), "nothing reaches Downloads");
+        assert_eq!(
+            h.playback_listing(),
+            ["playback-b%2F1.mp4"],
+            "no partial file is left behind"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ClientEvent::DownloadProgress { media, .. } if *media == playback("b/1")
+        )));
+        assert_eq!(h.fake.state().download_calls, [playback("b/1")]);
+    }
+
+    #[test]
+    fn a_playback_copy_needs_no_downloads_folder() {
+        let h = start(
+            |s, _| {
+                s.files.insert("b/1".into(), b"x".to_vec());
+            },
+            50,
+        );
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        assert_eq!(h.downloaded(), h.playback_dir().join("playback-b%2F1.mp4"));
+        assert!(!h.downloads().exists());
+    }
+
+    #[test]
+    fn a_playback_copy_keeps_only_a_safe_extension_of_the_supplied_name() {
+        let media = playback("b/1");
+        let name = |supplied: Option<&str>| playback_file_name(&media, supplied);
+        assert_eq!(name(Some("x.mp4")), "playback-b%2F1.mp4");
+        assert_eq!(name(Some("Voice.OGG")), "playback-b%2F1.OGG");
+        assert_eq!(name(Some("x.12345678")), "playback-b%2F1.12345678");
+        // The player judges the extension; the copy only keeps it when it is path-safe.
+        assert_eq!(name(Some("a.mp4.command")), "playback-b%2F1.command");
+        for unusable in [
+            "a.b c",
+            "../x",
+            "../../.ssh/key.p/ub",
+            "x.",
+            "x.é",
+            ".mp4",
+            "..",
+            "name",
+            "",
+            "a.abcdefghijklmnopqrst",
+            "a.123456789",
+        ] {
+            assert_eq!(
+                name(Some(unusable)),
+                "playback-b%2F1",
+                "{unusable:?} must give no extension"
+            );
+        }
+        assert_eq!(name(None), "playback-b%2F1");
+    }
+
+    #[test]
+    fn a_hostile_name_never_decides_where_a_playback_copy_lands() {
+        let h = start_downloads(&[("b/1", b"one"), ("b/2", b"two"), ("b/3", b"3")], |_| {});
+        h.online();
+        h.download(&playback("b/1"), "../../.ssh/authorized_keys");
+        assert_eq!(h.downloaded(), h.playback_dir().join("playback-b%2F1"));
+        h.download(&playback("b/2"), "../x.mp4");
+        assert_eq!(h.downloaded(), h.playback_dir().join("playback-b%2F2.mp4"));
+        h.download(&playback("b/3"), "a.abcdefghijklmnopqrst");
+        assert_eq!(h.downloaded(), h.playback_dir().join("playback-b%2F3"));
+        assert!(!h.dir.path().join(".ssh").exists());
+        assert_eq!(h.playback_listing().len(), 3);
+        assert!(h.listing().is_empty());
+    }
+
+    #[test]
+    fn playback_cancel_and_failures_carry_the_playback_ref() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        assert_eq!(h.playback_listing(), ["playback-b%2F1.mp4.part"]);
+        h.client.send(Command::CancelDownload(playback("b/1")));
+        h.next("cancelled", |e| {
+            *e == ClientEvent::DownloadCancelled(playback("b/1"))
+        });
+        h.eventually("the partial to go", || h.playback_listing().is_empty());
+        gate.notify_one();
+        h.quiet();
+        let seen = h.drain();
+        assert!(
+            !seen.iter().any(|e| matches!(
+                e,
+                ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. }
+            )),
+            "{seen:?}"
+        );
+
+        let failing = start_downloads(&[], |s| {
+            s.download_errors = VecDeque::from([
+                BackendError::NotFound,
+                BackendError::Storage("StorageFull".into()),
+                BackendError::Network("reset".into()),
+                BackendError::Protocol("odd".into()),
+            ]);
+        });
+        failing.online();
+        let media = playback("b/1");
+        for expected in [
+            DownloadFailure::NotFound,
+            DownloadFailure::Disk,
+            DownloadFailure::Network,
+            DownloadFailure::Other,
+        ] {
+            failing.download(&media, "a.mp4");
+            failing.next("failure", |e| {
+                *e == ClientEvent::DownloadFailed {
+                    media: media.clone(),
+                    reason: expected,
+                }
+            });
+            assert!(
+                failing.playback_listing().is_empty(),
+                "{expected:?} left a file"
+            );
+        }
+    }
+
+    #[test]
+    fn playback_offline_and_unusable_folder_fail_fast_without_asking_the_backend() {
+        let offline = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect();
+            },
+            50,
+        );
+        offline.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
+        offline.download(&playback("b/1"), "a.mp4");
+        offline.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: playback("b/1"),
+                reason: DownloadFailure::Offline,
+            }
+        });
+        offline.quiet();
+        assert!(offline.fake.state().download_calls.is_empty());
+        assert!(!offline.playback_dir().exists());
+
+        // A file where the media folder should be: the playback folder cannot be created.
+        let blocked = start(
+            |s, dir| {
+                fs::write(dir.join("media"), "a file, not a folder").unwrap();
+                s.files.insert("b/1".into(), b"x".to_vec());
+            },
+            50,
+        );
+        blocked.online();
+        blocked.download(&playback("b/1"), "a.mp4");
+        blocked.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: playback("b/1"),
+                reason: DownloadFailure::Destination,
+            }
+        });
+        blocked.quiet();
+        assert!(blocked.fake.state().download_calls.is_empty());
+    }
+
+    #[test]
+    fn a_playback_transfer_is_not_blocked_by_running_downloads() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let files: Vec<(String, Vec<u8>)> = (1..=4)
+            .map(|i| (format!("f/{i}"), vec![i as u8; 8]))
+            .chain([("v/1".to_string(), vec![9; 8])])
+            .collect();
+        let listed: Vec<(&str, &[u8])> = files
+            .iter()
+            .map(|(id, bytes)| (id.as_str(), bytes.as_slice()))
+            .collect();
+        let h = start_downloads(&listed, |s| s.download_gate = Some(gate.clone()));
+        h.online();
+        for i in 1..=4 {
+            h.download(&original(&format!("f/{i}")), &format!("f{i}.bin"));
+        }
+        h.wait_for("three transfers", |s| s.download_calls.len() == 3);
+        h.download(&playback("v/1"), "v.ogg");
+        h.wait_for("the playback transfer", |s| {
+            s.download_calls.contains(&playback("v/1"))
+        });
+        h.quiet();
+        let calls = h.fake.state().download_calls.clone();
+        assert_eq!(calls.len(), 4, "the fourth original still waits: {calls:?}");
+        assert_eq!(
+            calls.iter().filter(|m| m.kind == MediaKind::File).count(),
+            3
+        );
+        h.open_gate(&gate, "the playback copy", || {
+            h.playback_listing() == ["playback-v%2F1.ogg"]
+        });
+        h.next(
+            "playback saved",
+            |e| matches!(e, ClientEvent::Downloaded { media, .. } if *media == playback("v/1")),
+        );
+    }
+
+    #[test]
+    fn playback_copies_have_their_own_two_slots() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("v/1", b"1"), ("v/2", b"2"), ("v/3", b"3")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        for i in 1..=3 {
+            h.download(&playback(&format!("v/{i}")), "v.ogg");
+        }
+        h.wait_for("two transfers", |s| s.download_calls.len() == 2);
+        h.quiet();
+        assert_eq!(h.fake.state().download_calls.len(), 2, "the third waits");
+        gate.notify_one();
+        h.wait_for("the third transfer", |s| s.download_calls.len() == 3);
+    }
+
+    #[test]
+    fn the_playback_folder_is_wiped_when_the_engine_starts_and_previews_stay() {
+        let h = start(
+            |_, dir| {
+                let folder = playback_dir(dir, &account());
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(folder.join("playback-old.mp4"), "old").unwrap();
+                fs::write(media_dir(dir, &account()).join("image-keep"), "preview").unwrap();
+            },
+            50,
+        );
+        h.online();
+        assert!(!h.playback_dir().exists());
+        assert!(
+            media_dir(h.dir.path(), &account())
+                .join("image-keep")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn switching_account_wipes_the_playback_folders_of_both_accounts() {
+        let other = UserId("other".into());
+        let h = start(
+            |s, dir| {
+                for who in [account(), UserId("other".into())] {
+                    let folder = playback_dir(dir, &who);
+                    fs::create_dir_all(&folder).unwrap();
+                    fs::write(folder.join("playback-old.mp4"), "old").unwrap();
+                    fs::write(media_dir(dir, &who).join("image-keep"), "preview").unwrap();
+                }
+                s.account = "other".into();
+            },
+            50,
+        );
+        h.online();
+        assert!(!playback_dir(h.dir.path(), &account()).exists());
+        assert!(!playback_dir(h.dir.path(), &other).exists());
+        assert!(media_dir(h.dir.path(), &other).join("image-keep").is_file());
+    }
+
+    #[test]
+    fn sign_out_removes_a_playback_copy_with_the_media_folder() {
+        let h = start_downloads(&[("b/1", b"voice")], |_| {});
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        let path = h.downloaded();
+        assert!(path.is_file());
+        h.client.send(Command::SignOut);
+        h.next("signed out", |e| *e == ClientEvent::SignedOut);
+        assert!(!path.exists());
+        assert!(!h.dir.path().join("media").join(UID).exists());
+    }
+
+    #[test]
+    fn an_original_download_is_unchanged_by_the_playback_kind() {
+        let h = start_downloads(&[("b/1", b"voice")], |_| {});
+        h.online();
+        h.download(&original("b/1"), "x.mp4");
+        assert_eq!(h.downloaded(), h.downloads().join("x.mp4"));
+        assert!(!h.playback_dir().exists(), "a save never makes the folder");
+        // The same file id as a playback copy is a separate transfer.
+        h.download(&playback("b/1"), "x.mp4");
+        assert_eq!(h.downloaded(), h.playback_dir().join("playback-b%2F1.mp4"));
+        assert_eq!(h.listing(), ["x.mp4"]);
+        assert_eq!(
+            h.fake.state().download_calls,
+            [original("b/1"), playback("b/1")]
+        );
+    }
+
+    #[test]
+    fn a_playback_ref_never_goes_through_the_preview_path() {
+        let h = start_downloads(&[], |s| {
+            s.media.insert("b/1".into(), b"preview".to_vec());
+        });
+        h.online();
+        h.client.send(Command::FetchMedia(playback("b/1")));
+        h.quiet();
+        assert_eq!(h.fake.state().media_calls, 0);
+        let seen = h.drain();
+        assert!(
+            !seen.iter().any(|e| matches!(
+                e,
+                ClientEvent::MediaReady { .. } | ClientEvent::MediaUnavailable(_)
+            )),
+            "{seen:?}"
+        );
     }
 
     fn hits(title: &str) -> SearchHits {
