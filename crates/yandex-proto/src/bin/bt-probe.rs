@@ -2,7 +2,7 @@
 //! account's self chat only (send, edit, delete, typing, and `react-self`, which sets, replaces or
 //! removes the account's own reaction on a self-chat message); never prints cookie values.
 //! `listen` prints reaction pushes through `Debug` like every other push and `history` lists the
-//! reactions of a message after its text. `download` saves one file or image
+//! reactions of a message after its text. `download` saves one file, image or voice message
 //! of any chat into a local directory (never overwriting) and prints host and path of the
 //! request, never its query. `reactors` lists who reacted to one message (a read, covered by no
 //! write guard). `create-private` and `create-chat` are the commands that change the
@@ -13,7 +13,7 @@
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, IsTerminal};
+use std::io::{ErrorKind, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Mutex;
@@ -24,7 +24,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
-use yandex_proto::media::{MediaConfig, MediaTarget};
+use yandex_proto::media::{MediaClient, MediaConfig, MediaTarget};
 use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
@@ -42,7 +42,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe react-self <micros> <code|remove> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
-       bt-probe download <chat> <micros> [--item N] [--to <dir>]
+       bt-probe download <chat> <micros> [--item N] [--to <dir>] [--url original|plain|stream]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
        bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]
@@ -50,8 +50,9 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
 BT_WRITE_ONLY_CHAT limits every write command to the chat it names: a write to another chat, a set but empty value, and create-private / create-chat (a new chat is never the named one) are refused with exit code 2 before any connection or request
-download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
+download takes the file, voice message or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
+download --url is the playback research request: it asks for one URL variant (original: file_shortterm/{id}?attach=true, plain: file_shortterm/{id}, stream: video_streams/{id}), needs --to <dir> that already exists with mode 0700 (the sample directory: the bytes are message content, nothing else is saved under a name that shows them) and prints only status, landed host, content-type, content-length, accept-ranges, whether content-disposition is present, bytes received and sha256; a non-2xx answer reads no body, prints the same lines and exits 1
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
@@ -903,11 +904,49 @@ async fn create_chat(plan: GroupPlan<'_>) -> Result<(), Failure> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UrlVariant {
+    /// `MediaTarget::Original`: what the app's Download sends.
+    Original,
+    /// `MediaTarget::Playback`: the web client's `voicePlayUrl`.
+    Plain,
+    /// `MediaTarget::VideoStream`: the web client's `videoStreamsUrl`.
+    Stream,
+}
+
+impl UrlVariant {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "original" => Some(Self::Original),
+            "plain" => Some(Self::Plain),
+            "stream" => Some(Self::Stream),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Plain => "plain",
+            Self::Stream => "stream",
+        }
+    }
+
+    fn target(self, file_id: String) -> MediaTarget {
+        match self {
+            Self::Original => MediaTarget::Original { file_id },
+            Self::Plain => MediaTarget::Playback { file_id },
+            Self::Stream => MediaTarget::VideoStream { file_id },
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DownloadFlags<'a> {
     /// 1-based position inside a gallery.
     item: Option<usize>,
     to: Option<&'a str>,
+    url: Option<UrlVariant>,
 }
 
 fn download_flags<'a>(mut flags: &[&'a str]) -> Option<DownloadFlags<'a>> {
@@ -916,6 +955,7 @@ fn download_flags<'a>(mut flags: &[&'a str]) -> Option<DownloadFlags<'a>> {
         match *name {
             "--item" => parsed.item = Some(value.parse().ok().filter(|n| *n >= 1)?),
             "--to" => parsed.to = Some(value),
+            "--url" => parsed.url = Some(UrlVariant::parse(value)?),
             _ => return None,
         }
         flags = rest;
@@ -941,7 +981,7 @@ fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, Strin
         Some(n) => Err(format!("--item {n}: the message holds one file")),
     };
     match body {
-        WireBody::File(file) => single(file),
+        WireBody::File(file) | WireBody::Voice { file, .. } => single(file),
         WireBody::Image(image) => single(&image.file),
         WireBody::Gallery { items, .. } => {
             let position = item.unwrap_or(1);
@@ -1026,6 +1066,9 @@ fn or_dash(value: Option<u64>) -> String {
 }
 
 async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Result<(), Failure> {
+    if let Some(variant) = flags.url {
+        return sample_download(chat, timestamp, &flags, variant).await;
+    }
     let dir = Path::new(flags.to.unwrap_or("."));
     if !dir.is_dir() {
         return Err((2, format!("--to {}: not a directory", dir.display())));
@@ -1073,6 +1116,223 @@ async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Resul
     println!("status: 2xx");
     println!("target: {}", host_and_path(&url));
     Ok(())
+}
+
+/// The sample directory of the research: it holds message content, so it must exist already
+/// and be reachable by its owner only.
+fn check_sample_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta =
+        fs::metadata(dir).map_err(|e| format!("--to: cannot read the directory: {}", e.kind()))?;
+    if !meta.is_dir() {
+        return Err("--to: not a directory".to_owned());
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err("--to: the sample directory must have mode 0700".to_owned());
+    }
+    Ok(())
+}
+
+/// The file name of a sample: timestamp, position, URL variant and, when the server's name has
+/// a short alphanumeric extension, that extension (a player may look at it). Nothing else of the
+/// server's name is kept.
+fn sample_name(timestamp: i64, chosen: &Chosen<'_>, variant: UrlVariant) -> String {
+    let name = local_name(chosen.file);
+    let extension = Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| (1..=8).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let stem = format!("{timestamp}-{}-{}", chosen.position, variant.label());
+    match extension {
+        Some(extension) => format!("{stem}.{extension}"),
+        None => stem,
+    }
+}
+
+/// SHA-256 (FIPS 180-4), kept here so the probe needs no new dependency.
+struct Sha256 {
+    state: [u32; 8],
+    block: [u8; 64],
+    filled: usize,
+    length: u64,
+}
+
+impl Sha256 {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    fn new() -> Self {
+        Self {
+            state: [
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
+            ],
+            block: [0; 64],
+            filled: 0,
+            length: 0,
+        }
+    }
+
+    fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*bytes);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+        for (k, word) in Self::K.iter().zip(w) {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ (!e & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(choose)
+                .wrapping_add(*k)
+                .wrapping_add(word);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(majority);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (word, add) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *word = word.wrapping_add(add);
+        }
+    }
+
+    fn update(&mut self, mut data: &[u8]) {
+        self.length += data.len() as u64;
+        while !data.is_empty() {
+            let take = data.len().min(64 - self.filled);
+            self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
+            self.filled += take;
+            data = &data[take..];
+            if self.filled == 64 {
+                Self::compress(&mut self.state, &self.block);
+                self.filled = 0;
+            }
+        }
+    }
+
+    /// The digest as 64 lower-case hex digits.
+    fn finish(mut self) -> String {
+        let bits = self.length * 8;
+        self.update(&[0x80]);
+        while self.filled != 56 {
+            self.update(&[0]);
+        }
+        self.update(&bits.to_be_bytes());
+        self.state
+            .iter()
+            .map(|word| format!("{word:08x}"))
+            .collect()
+    }
+}
+
+/// Writes through to `inner` and hashes exactly what `inner` accepted.
+struct Hashing<W> {
+    inner: W,
+    hash: Sha256,
+}
+
+impl<W: Write> Write for Hashing<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hash.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// `download --url`: one request for the chosen URL variant into the sample directory,
+/// reported as the research needs it and nothing more (no path, no name, no query, no body).
+async fn sample_download(
+    chat: &str,
+    timestamp: i64,
+    flags: &DownloadFlags<'_>,
+    variant: UrlVariant,
+) -> Result<(), Failure> {
+    let dir = Path::new(flags.to.ok_or_else(|| {
+        (
+            2,
+            "--url needs --to <sample directory> (existing, mode 0700)".to_owned(),
+        )
+    })?);
+    check_sample_dir(dir).map_err(|e| (2, e))?;
+    let session = load_session()?;
+    let config = ClientConfig::production();
+    let media = MediaClient::new(config.media.clone(), &config.http, session.cookies.clone())
+        .map_err(fail)?;
+    let (client, _events) = connect(&session, config).await?;
+    let message = find_message(&client, chat, timestamp).await?;
+    let chosen = select_file(&message.body, flags.item)
+        .map_err(|e| (1, format!("message {timestamp}: {e}")))?;
+    let target = variant.target(chosen.file.id.clone());
+    let name = sample_name(timestamp, &chosen, variant);
+    let mut out = Hashing {
+        inner: create_destination(dir, &name).map_err(|e| (1, e))?,
+        hash: Sha256::new(),
+    };
+    let result = media.download_exchange(&target, &mut out).await;
+    let Hashing { inner, hash } = out;
+    drop(inner);
+    let exchange = result.map_err(|e| {
+        // A partial file under the final name would look like a finished download.
+        let _ = fs::remove_file(dir.join(&name));
+        let class = error_class(&e);
+        (1, format!("download failed ({class}): {}", fail(e).1))
+    })?;
+    let show = |value: Option<String>| value.unwrap_or_else(|| "-".to_owned());
+    println!("status: {}", exchange.status);
+    println!("landed: {}", exchange.landed_host);
+    println!("content-type: {}", show(exchange.content_type));
+    println!("content-length: {}", or_dash(exchange.content_length));
+    println!("accept-ranges: {}", show(exchange.accept_ranges));
+    println!(
+        "content-disposition: {}",
+        if exchange.has_content_disposition {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    println!("received: {} bytes", exchange.received);
+    if (200..300).contains(&exchange.status) {
+        println!("sha256: {}", hash.finish());
+        return Ok(());
+    }
+    println!("sha256: -");
+    let _ = fs::remove_file(dir.join(&name));
+    Err(match exchange.status {
+        401 => fail(ProtoError::SessionExpired),
+        status => (1, format!("status {status}: no body was read")),
+    })
 }
 
 async fn listen(watch: Option<&str>) -> Result<(), Failure> {
@@ -1669,14 +1929,16 @@ mod download_tests {
             download_flags(&["--to", "/tmp/x", "--item", "3"]),
             Some(DownloadFlags {
                 item: Some(3),
-                to: Some("/tmp/x")
+                to: Some("/tmp/x"),
+                url: None
             })
         );
         assert_eq!(
             download_flags(&["--item", "1"]),
             Some(DownloadFlags {
                 item: Some(1),
-                to: None
+                to: None,
+                url: None
             })
         );
         for bad in [
@@ -1834,6 +2096,188 @@ mod download_tests {
             fail(ProtoError::Protocol("search: no data".into())).1,
             "unexpected server response: search: no data"
         );
+    }
+
+    #[test]
+    fn the_url_flag_names_one_of_three_variants() {
+        for (name, variant) in [
+            ("original", UrlVariant::Original),
+            ("plain", UrlVariant::Plain),
+            ("stream", UrlVariant::Stream),
+        ] {
+            assert_eq!(
+                download_flags(&["--url", name]),
+                Some(DownloadFlags {
+                    url: Some(variant),
+                    ..DownloadFlags::default()
+                })
+            );
+            assert_eq!(variant.label(), name);
+        }
+        assert_eq!(
+            download_flags(&["--to", "/s", "--url", "plain", "--item", "2"]),
+            Some(DownloadFlags {
+                item: Some(2),
+                to: Some("/s"),
+                url: Some(UrlVariant::Plain)
+            })
+        );
+        for bad in [
+            &["--url", "Plain"][..],
+            &["--url", ""],
+            &["--url", "attach"],
+            &["--url"],
+            &["--url", "plain", "stray"],
+        ] {
+            assert_eq!(download_flags(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn each_variant_asks_for_its_own_target() {
+        let id = || "disk/0a1b-2c".to_owned();
+        let url = |variant: UrlVariant| {
+            variant
+                .target(id())
+                .url(&MediaConfig::production())
+                .unwrap()
+        };
+        assert!(url(UrlVariant::Original).ends_with("/file_shortterm/disk/0a1b-2c?attach=true"));
+        assert!(url(UrlVariant::Plain).ends_with("/file_shortterm/disk/0a1b-2c"));
+        assert!(url(UrlVariant::Stream).ends_with("/video_streams/disk/0a1b-2c"));
+    }
+
+    #[test]
+    fn select_file_accepts_a_voice_message() {
+        let voice = file("disk/v", Some("voice.ogg"));
+        let body = WireBody::Voice {
+            file: voice.clone(),
+            duration: Some(12),
+        };
+        assert_eq!(
+            select_file(&body, None),
+            Ok(Chosen {
+                file: &voice,
+                position: 1,
+                count: 1
+            })
+        );
+        assert!(select_file(&body, Some(1)).is_ok());
+        assert!(
+            select_file(&body, Some(2))
+                .unwrap_err()
+                .contains("one file")
+        );
+    }
+
+    #[test]
+    fn sha256_matches_the_published_vectors() {
+        let digest = |chunks: &[&[u8]]| {
+            let mut hash = Sha256::new();
+            for chunk in chunks {
+                hash.update(chunk);
+            }
+            hash.finish()
+        };
+        assert_eq!(
+            digest(&[]),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            digest(&[b"abc"]),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // 56 bytes: the length field does not fit in the first block.
+        assert_eq!(
+            digest(&[b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"]),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        // The same message split at odd places, across a block boundary.
+        assert_eq!(
+            digest(&[
+                b"abcdbcdecdefdefgefghfghighijh",
+                b"ijkijkljklmklmnlmnomnopnopq"
+            ]),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        let chunk = [b'a'; 1000];
+        let million: Vec<&[u8]> = (0..1000).map(|_| chunk.as_slice()).collect();
+        assert_eq!(
+            digest(&million),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn the_hashing_writer_hashes_what_it_wrote() {
+        let mut out = Hashing {
+            inner: Vec::new(),
+            hash: Sha256::new(),
+        };
+        out.write_all(b"a").unwrap();
+        out.write_all(b"bc").unwrap();
+        assert_eq!(out.inner, b"abc");
+        assert_eq!(
+            out.hash.finish(),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn only_a_private_existing_directory_is_a_sample_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let set = |mode| std::fs::set_permissions(dir.path(), PermissionsExt::from_mode(mode));
+        set(0o700).unwrap();
+        assert_eq!(check_sample_dir(dir.path()), Ok(()));
+        for mode in [0o750, 0o705, 0o755, 0o777] {
+            set(mode).unwrap();
+            assert!(
+                check_sample_dir(dir.path()).unwrap_err().contains("0700"),
+                "{mode:o}"
+            );
+        }
+        assert!(check_sample_dir(&dir.path().join("missing")).is_err());
+        let plain = dir.path().join("file");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(check_sample_dir(&plain).is_err());
+    }
+
+    #[test]
+    fn a_sample_name_shows_no_server_name_but_a_short_extension() {
+        let name = |raw: Option<&str>, position, variant| {
+            let one = file("disk/0a1b-2c", raw);
+            let chosen = Chosen {
+                file: &one,
+                position,
+                count: 3,
+            };
+            sample_name(1700000000123456, &chosen, variant)
+        };
+        assert_eq!(
+            name(Some("My secret voice.ogg"), 1, UrlVariant::Plain),
+            "1700000000123456-1-plain.ogg"
+        );
+        assert_eq!(
+            name(Some("clip.MP4"), 2, UrlVariant::Stream),
+            "1700000000123456-2-stream.MP4"
+        );
+        for unusable in [
+            Some("noextension"),
+            Some("a.toolongextension"),
+            Some("a.o g"),
+            Some("a.ö"),
+            Some("a."),
+            Some(".hidden"),
+            None,
+        ] {
+            assert_eq!(
+                name(unusable, 1, UrlVariant::Original),
+                "1700000000123456-1-original",
+                "{unusable:?}"
+            );
+        }
     }
 }
 
