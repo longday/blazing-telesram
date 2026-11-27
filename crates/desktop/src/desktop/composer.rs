@@ -144,7 +144,7 @@ fn copy_text(m: &Message) -> Option<&str> {
         MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
             caption.as_deref()
         }
-        MessageBody::File { name, .. } => Some(name),
+        MessageBody::File { name, .. } | MessageBody::Video { name, .. } => Some(name),
         MessageBody::Voice { .. } | MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
 }
@@ -170,7 +170,7 @@ fn quote_text(m: &Message) -> String {
             Cow::Borrowed(caption.as_deref().unwrap_or("Фото"))
         }
         MessageBody::File { name, .. } => Cow::Borrowed(name.as_str()),
-        MessageBody::Voice { .. } => Cow::Owned(m.body.preview_text()),
+        MessageBody::Voice { .. } | MessageBody::Video { .. } => Cow::Owned(m.body.preview_text()),
         MessageBody::Deleted | MessageBody::Unsupported(_) => Cow::Borrowed(""),
     };
     text.chars().take(QUOTE_CHARS).collect()
@@ -1088,6 +1088,26 @@ mod tests {
         let m = voice();
         assert_eq!(copy_text(&m), None);
         assert!(!menu_actions(&m).contains(&MenuAction::Copy));
+        assert!(!editable(&m));
+    }
+
+    #[test]
+    fn a_video_can_be_replied_to_quotes_its_preview_text_and_copies_its_name() {
+        let mut m = voice();
+        m.body = MessageBody::Video {
+            media: MediaRef {
+                id: "b/2".into(),
+                kind: MediaKind::File,
+            },
+            name: "clip.mp4".into(),
+            size: 1,
+            width: 4,
+            height: 3,
+            duration_ms: None,
+        };
+        assert_eq!(quote_text(&m), "Видео");
+        assert_eq!(copy_text(&m), Some("clip.mp4"));
+        assert!(menu_actions(&m).contains(&MenuAction::Reply));
         assert!(!editable(&m));
     }
 }
