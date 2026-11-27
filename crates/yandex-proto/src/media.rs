@@ -1,10 +1,11 @@
-//! Media transfer: avatars and image thumbnails (`fetch`, buffered) and original files
-//! (`download`, streamed to a writer).
+//! Media transfer: avatars and image thumbnails (`fetch`, buffered), original files
+//! (`download`, streamed to a writer) and the research probe's view of one download
+//! (`download_exchange`: status, landing host and the headers that decide streaming).
 
 use std::io::{self, Write};
 use std::time::Instant;
 
-use reqwest::header::COOKIE;
+use reqwest::header::{ACCEPT_RANGES, CONTENT_DISPOSITION, CONTENT_TYPE, COOKIE};
 use tracing::debug;
 
 use crate::error::ProtoError;
@@ -47,6 +48,9 @@ pub enum MediaTarget {
     Thumbnail { file_id: String },
     /// `FileInfo.Id2` of a file or image message: the original, streamed by `download`.
     Original { file_id: String },
+    /// `FileInfo.Id2` of a voice or video message: `file_shortterm/{id}` with no query, the
+    /// web client's `voicePlayUrl`; the same bytes as `Original`.
+    Playback { file_id: String },
 }
 
 /// One path segment of an id: refuses anything that could change the URL structure.
@@ -82,6 +86,11 @@ impl MediaTarget {
                 config.files_base,
                 safe_path(file_id)?
             )),
+            Self::Playback { file_id } => Ok(format!(
+                "{}/file_shortterm/{}",
+                config.files_base,
+                safe_path(file_id)?
+            )),
             Self::Avatar { id, size } => {
                 let (mds, files) = match size {
                     AvatarSize::Small => ("islands-34", "SMALL"),
@@ -98,6 +107,23 @@ impl MediaTarget {
             }
         }
     }
+}
+
+/// What the server answered to one request, without the body, the query or any name: the
+/// research probe prints exactly these fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exchange {
+    /// The status after redirects were followed; any status is reported, none is an error.
+    pub status: u16,
+    /// Host (no port, no path) the redirects ended on.
+    pub landed_host: String,
+    pub content_type: Option<String>,
+    pub content_length: Option<u64>,
+    pub accept_ranges: Option<String>,
+    /// Only whether the header is present: its value carries the file name.
+    pub has_content_disposition: bool,
+    /// Bytes written to `out`; zero unless the status is 2xx.
+    pub received: u64,
 }
 
 #[derive(Clone)]
@@ -123,9 +149,9 @@ impl MediaClient {
         })
     }
 
-    /// Sends the GET shared by `fetch` and `download` and maps the status line: 2xx passes,
-    /// 401 is an expired session, 404 is `NotFound`. Returns the response with the start time.
-    async fn get(
+    /// Sends the GET shared by every request and logs the exchange. No status is mapped.
+    /// Returns the response with the start time.
+    async fn send(
         &self,
         http: &reqwest::Client,
         url: &str,
@@ -142,18 +168,28 @@ impl MediaClient {
             .send()
             .await
             .map_err(failed("media", "GET", url, started))?;
-        let status = response.status().as_u16();
         // `elapsed_ms` is the time to the response headers; the body streams after it.
         // `landed` is where redirects ended up; like the request, host and path only.
         debug!(
             method = "GET",
             url = %redact_url(url),
             landed = %redact_url(response.url().as_str()),
-            status,
+            status = response.status().as_u16(),
             elapsed_ms = millis(started.elapsed()),
             "media exchange"
         );
-        match status {
+        Ok((response, started))
+    }
+
+    /// `send` plus the status line of `fetch` and `download`: 2xx passes, 401 is an expired
+    /// session, 404 is `NotFound`.
+    async fn get(
+        &self,
+        http: &reqwest::Client,
+        url: &str,
+    ) -> Result<(reqwest::Response, Instant), ProtoError> {
+        let (response, started) = self.send(http, url).await?;
+        match response.status().as_u16() {
             200..=299 => Ok((response, started)),
             401 => Err(ProtoError::SessionExpired),
             404 => Err(ProtoError::NotFound),
@@ -189,24 +225,67 @@ impl MediaClient {
         progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
     ) -> Result<u64, ProtoError> {
         let url = target.url(&self.config)?;
-        let (mut response, started) = self.get(&self.streaming, &url).await?;
-        let total = response.content_length();
-        let mut received = 0u64;
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(failed("media", "GET", &url, started))?
-        {
-            out.write_all(&chunk).map_err(storage_error)?;
-            received += chunk.len() as u64;
-            progress(received, total);
-        }
-        out.flush().map_err(storage_error)?;
-        if total.is_some_and(|total| total != received) {
-            return Err(ProtoError::Network("response ended early".into()));
-        }
-        Ok(received)
+        let (response, started) = self.get(&self.streaming, &url).await?;
+        copy_body(response, started, &url, out, progress).await
     }
+
+    /// One streamed request for the research probe: the body goes into `out` only for a 2xx
+    /// answer, every status (a refusal included) comes back as data, and only a failed
+    /// transfer is an error. The same truncation and `Storage` rules as [`Self::download`].
+    pub async fn download_exchange(
+        &self,
+        target: &MediaTarget,
+        out: &mut (dyn Write + Send),
+    ) -> Result<Exchange, ProtoError> {
+        let url = target.url(&self.config)?;
+        let (response, started) = self.send(&self.streaming, &url).await?;
+        let header = |name| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let mut exchange = Exchange {
+            status: response.status().as_u16(),
+            landed_host: response.url().host_str().unwrap_or("?").to_owned(),
+            content_type: header(CONTENT_TYPE),
+            content_length: response.content_length(),
+            accept_ranges: header(ACCEPT_RANGES),
+            has_content_disposition: response.headers().contains_key(CONTENT_DISPOSITION),
+            received: 0,
+        };
+        if response.status().is_success() {
+            exchange.received = copy_body(response, started, &url, out, &|_, _| {}).await?;
+        }
+        Ok(exchange)
+    }
+}
+
+/// Copies the body of a 2xx response into `out` and returns the byte count.
+async fn copy_body(
+    mut response: reqwest::Response,
+    started: Instant,
+    url: &str,
+    out: &mut (dyn Write + Send),
+    progress: &(dyn Fn(u64, Option<u64>) + Send + Sync),
+) -> Result<u64, ProtoError> {
+    let total = response.content_length();
+    let mut received = 0u64;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(failed("media", "GET", url, started))?
+    {
+        out.write_all(&chunk).map_err(storage_error)?;
+        received += chunk.len() as u64;
+        progress(received, total);
+    }
+    out.flush().map_err(storage_error)?;
+    if total.is_some_and(|total| total != received) {
+        return Err(ProtoError::Network("response ended early".into()));
+    }
+    Ok(received)
 }
 
 /// Only the error kind is kept: an `io::Error` message can carry the destination path.
@@ -742,5 +821,161 @@ mod tests {
             ProtoError::Storage(io::ErrorKind::StorageFull.to_string())
         );
         assert!(!err.to_string().contains("secret-name"), "{err}");
+    }
+
+    // ---- the playback target, the research exchange ----
+
+    #[test]
+    fn playback_is_the_plain_url_with_no_query() {
+        let playback = MediaTarget::Playback {
+            file_id: "bucket/0a1b-2c".into(),
+        };
+        assert_eq!(
+            playback.url(&prod()).unwrap(),
+            "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c"
+        );
+    }
+
+    #[test]
+    fn every_id_segment_is_checked_for_playback() {
+        for id in [
+            "",
+            "a//b",
+            "../etc",
+            "a/../b",
+            "a/./b",
+            "a/b/",
+            "a?attach=true",
+            "a#f",
+            "a b",
+            "a\\b",
+            "a%2fb",
+            "a/%2e%2e/b",
+            "/abs",
+            "a\0b",
+            "a\nb",
+            "é/b",
+        ] {
+            let target = MediaTarget::Playback { file_id: id.into() };
+            assert!(target.url(&prod()).is_err(), "{target:?}");
+        }
+    }
+
+    fn full_head(extra: &str, length: usize) -> String {
+        format!("HTTP/1.1 200 OK\r\n{extra}content-length: {length}\r\nconnection: close\r\n\r\n")
+    }
+
+    #[tokio::test]
+    async fn the_exchange_reports_status_headers_host_and_byte_count() {
+        let head = full_head(
+            "content-type: audio/ogg\r\naccept-ranges: bytes\r\ncontent-disposition: attachment; filename=\"secret-name.ogg\"\r\n",
+            6,
+        );
+        let (base, seen) = serve_script(
+            &head,
+            vec![(Duration::ZERO, b"abcdef".to_vec())],
+            Duration::ZERO,
+        );
+        let target = MediaTarget::Playback {
+            file_id: "b/u".into(),
+        };
+        let mut out = Vec::new();
+        let exchange = client_with(&base, Duration::from_secs(5), vec![])
+            .download_exchange(&target, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(
+            exchange,
+            Exchange {
+                status: 200,
+                landed_host: "127.0.0.1".into(),
+                content_type: Some("audio/ogg".into()),
+                content_length: Some(6),
+                accept_ranges: Some("bytes".into()),
+                has_content_disposition: true,
+                received: 6,
+            }
+        );
+        assert!(!format!("{exchange:?}").contains("secret-name"));
+        assert_eq!(out, b"abcdef");
+        assert!(seen.lock().unwrap()[0].starts_with("GET /file_shortterm/b/u HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn absent_headers_are_none_and_a_refusal_is_data_without_a_body() {
+        let (base, _) = serve(vec![
+            bytes_response("403 Forbidden", b"denied-BODY"),
+            Some("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n".into()),
+        ]);
+        let c = client_with(&base, Duration::from_secs(5), vec![]);
+        let target = MediaTarget::Playback {
+            file_id: "b/u".into(),
+        };
+        let mut out = Vec::new();
+        let refused = c.download_exchange(&target, &mut out).await.unwrap();
+        assert_eq!(
+            (
+                refused.status,
+                refused.received,
+                refused.has_content_disposition
+            ),
+            (403, 0, false)
+        );
+        assert!(out.is_empty());
+        let open = c.download_exchange(&target, &mut out).await.unwrap();
+        assert_eq!(
+            (
+                open.status,
+                open.content_type,
+                open.content_length,
+                open.accept_ranges,
+                open.received
+            ),
+            (200, None, None, None, 3)
+        );
+        assert_eq!(out, b"abc");
+    }
+
+    #[tokio::test]
+    async fn the_exchange_names_the_host_a_redirect_landed_on() {
+        let (target_base, _) = serve(vec![bytes_response("200 OK", b"moved")]);
+        let port = target_base.rsplit(':').next().unwrap();
+        let redirect = format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://localhost:{port}/storage/x?sig=secret\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+        );
+        let (base, _) = serve(vec![Some(redirect)]);
+        let mut out = Vec::new();
+        let exchange = client_with(&base, Duration::from_secs(5), vec![])
+            .download_exchange(
+                &MediaTarget::Playback {
+                    file_id: "b/u".into(),
+                },
+                &mut out,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                exchange.status,
+                exchange.landed_host.as_str(),
+                out.as_slice()
+            ),
+            (200, "localhost", b"moved".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_exchange_fails_like_a_download() {
+        let (base, _) = serve_script(
+            &ok_head(10),
+            vec![(Duration::ZERO, b"12345".to_vec())],
+            Duration::ZERO,
+        );
+        let mut out = Vec::new();
+        let err = client_with(&base, Duration::from_secs(5), vec![])
+            .download_exchange(&original(), &mut out)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProtoError::Network(_)), "{err:?}");
     }
 }

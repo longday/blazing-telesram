@@ -2,7 +2,7 @@
 //! account's self chat only (send, edit, delete, typing, and `react-self`, which sets, replaces or
 //! removes the account's own reaction on a self-chat message); never prints cookie values.
 //! `listen` prints reaction pushes through `Debug` like every other push and `history` lists the
-//! reactions of a message after its text. `download` saves one file or image
+//! reactions of a message after its text. `download` saves one file, image or voice message
 //! of any chat into a local directory (never overwriting) and prints host and path of the
 //! request, never its query. `reactors` lists who reacted to one message (a read, covered by no
 //! write guard). `create-private` and `create-chat` are the commands that change the
@@ -13,18 +13,19 @@
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, IsTerminal};
+use std::io::{ErrorKind, IsTerminal, Write};
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
-use yandex_proto::media::{MediaConfig, MediaTarget};
+use yandex_proto::media::{Exchange, MediaClient, MediaConfig, MediaTarget};
 use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
@@ -42,7 +43,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe react-self <micros> <code|remove> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
-       bt-probe download <chat> <micros> [--item N] [--to <dir>]
+       bt-probe download <chat> <micros> [--item N] [--to <dir>] [--url original|plain]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
        bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]
@@ -50,8 +51,9 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
 BT_WRITE_ONLY_CHAT limits every write command to the chat it names: a write to another chat, a set but empty value, and create-private / create-chat (a new chat is never the named one) are refused with exit code 2 before any connection or request
-download takes the file or the N-th (from 1) image of the message with that timestamp, saves it
+download takes the file, voice message or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
+download --url is the playback research request: it asks for one URL variant (original: file_shortterm/{id}?attach=true, plain: file_shortterm/{id}), needs --to <dir> that already exists with mode 0700 (the sample directory: the bytes are message content, nothing else is saved under a name that shows them) and prints only status, landed host, content-type, content-length, accept-ranges, whether content-disposition is present, bytes received and sha256; a non-2xx answer reads no body, prints the same lines and exits 1
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
@@ -534,24 +536,31 @@ async fn me() -> Result<(), Failure> {
 
 /// Starts the client and waits until the push socket is subscribed, so requests do not fail offline.
 async fn connect(session: &Session, config: ClientConfig) -> Result<(Client, XivaEvents), Failure> {
+    let (client, events, subscription_id) = connect_silent(session, config).await?;
+    println!("connected, subscription-id: {subscription_id}");
+    Ok((client, events))
+}
+
+/// `connect` without the banner, for the research download whose output is restricted.
+async fn connect_silent(
+    session: &Session,
+    config: ClientConfig,
+) -> Result<(Client, XivaEvents, String), Failure> {
     let (client, mut events) = Client::start(session, config).map_err(fail)?;
     let wait = async {
         loop {
             match events.recv().await {
-                Some(XivaEvent::Connected { subscription_id }) => {
-                    println!("connected, subscription-id: {subscription_id}");
-                    return Ok(());
-                }
+                Some(XivaEvent::Connected { subscription_id }) => return Ok(subscription_id),
                 Some(XivaEvent::SessionExpired) => return Err(fail(ProtoError::SessionExpired)),
                 Some(_) => {}
                 None => return Err((1, "connection task stopped".to_owned())),
             }
         }
     };
-    tokio::time::timeout(CONNECT_TIMEOUT, wait)
+    let subscription_id = tokio::time::timeout(CONNECT_TIMEOUT, wait)
         .await
         .map_err(|_| (1, "timed out waiting for the push socket".to_owned()))??;
-    Ok((client, events))
+    Ok((client, events, subscription_id))
 }
 
 async fn chats() -> Result<(), Failure> {
@@ -903,11 +912,44 @@ async fn create_chat(plan: GroupPlan<'_>) -> Result<(), Failure> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UrlVariant {
+    /// `MediaTarget::Original`: what the app's Download sends.
+    Original,
+    /// `MediaTarget::Playback`: the web client's `voicePlayUrl`.
+    Plain,
+}
+
+impl UrlVariant {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "original" => Some(Self::Original),
+            "plain" => Some(Self::Plain),
+            _ => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Plain => "plain",
+        }
+    }
+
+    fn target(self, file_id: String) -> MediaTarget {
+        match self {
+            Self::Original => MediaTarget::Original { file_id },
+            Self::Plain => MediaTarget::Playback { file_id },
+        }
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DownloadFlags<'a> {
     /// 1-based position inside a gallery.
     item: Option<usize>,
     to: Option<&'a str>,
+    url: Option<UrlVariant>,
 }
 
 fn download_flags<'a>(mut flags: &[&'a str]) -> Option<DownloadFlags<'a>> {
@@ -916,6 +958,7 @@ fn download_flags<'a>(mut flags: &[&'a str]) -> Option<DownloadFlags<'a>> {
         match *name {
             "--item" => parsed.item = Some(value.parse().ok().filter(|n| *n >= 1)?),
             "--to" => parsed.to = Some(value),
+            "--url" => parsed.url = Some(UrlVariant::parse(value)?),
             _ => return None,
         }
         flags = rest;
@@ -941,7 +984,7 @@ fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, Strin
         Some(n) => Err(format!("--item {n}: the message holds one file")),
     };
     match body {
-        WireBody::File(file) => single(file),
+        WireBody::File(file) | WireBody::Voice { file, .. } => single(file),
         WireBody::Image(image) => single(&image.file),
         WireBody::Gallery { items, .. } => {
             let position = item.unwrap_or(1);
@@ -997,17 +1040,25 @@ fn host_and_path(url: &str) -> &str {
     rest.split(['?', '#']).next().unwrap_or(rest)
 }
 
+fn open_new(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 /// Creates `name` in `dir`; an existing entry of that name is an error and is left untouched.
 fn create_destination(dir: &Path, name: &str) -> Result<File, String> {
     let path = dir.join(name);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
-            kind => format!("cannot create {}: {kind}", path.display()),
-        })
+    open_new(&path).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
+        kind => format!("cannot create {}: {kind}", path.display()),
+    })
+}
+
+/// `create_destination` for a sample: the error names neither the directory nor the file.
+fn create_sample(dir: &Path, name: &str) -> Result<File, String> {
+    open_new(&dir.join(name)).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => "sample already exists".to_owned(),
+        kind => format!("cannot create the sample: {kind}"),
+    })
 }
 
 fn error_class(error: &ProtoError) -> &'static str {
@@ -1026,6 +1077,9 @@ fn or_dash(value: Option<u64>) -> String {
 }
 
 async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Result<(), Failure> {
+    if let Some(variant) = flags.url {
+        return sample_download(chat, timestamp, &flags, variant).await;
+    }
     let dir = Path::new(flags.to.unwrap_or("."));
     if !dir.is_dir() {
         return Err((2, format!("--to {}: not a directory", dir.display())));
@@ -1073,6 +1127,143 @@ async fn download(chat: &str, timestamp: i64, flags: DownloadFlags<'_>) -> Resul
     println!("status: 2xx");
     println!("target: {}", host_and_path(&url));
     Ok(())
+}
+
+/// The sample directory of the research: it holds message content, so it must exist already
+/// and be reachable by its owner only.
+fn check_sample_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta =
+        fs::metadata(dir).map_err(|e| format!("--to: cannot read the directory: {}", e.kind()))?;
+    if !meta.is_dir() {
+        return Err("--to: not a directory".to_owned());
+    }
+    if meta.permissions().mode() & 0o077 != 0 {
+        return Err("--to: the sample directory must have mode 0700".to_owned());
+    }
+    Ok(())
+}
+
+/// The file name of a sample: timestamp, position, URL variant and, when the server's name has
+/// a short alphanumeric extension, that extension (a player may look at it). Nothing else of the
+/// server's name is kept.
+fn sample_name(timestamp: i64, chosen: &Chosen<'_>, variant: UrlVariant) -> String {
+    let name = local_name(chosen.file);
+    let extension = Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| (1..=8).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric()));
+    let stem = format!("{timestamp}-{}-{}", chosen.position, variant.label());
+    match extension {
+        Some(extension) => format!("{stem}.{extension}"),
+        None => stem,
+    }
+}
+
+/// Writes through to `inner` and hashes exactly what `inner` accepted.
+struct Hashing<W> {
+    inner: W,
+    hash: Sha256,
+}
+
+impl<W: Write> Write for Hashing<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.hash.update(&buf[..written]);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// What `download --url` prints: exactly these fields, one per line, and nothing else.
+fn sample_report(exchange: &Exchange, sha256: Option<&str>) -> String {
+    let show = |value: Option<&str>| value.unwrap_or("-").to_owned();
+    let disposition = if exchange.has_content_disposition {
+        "present"
+    } else {
+        "absent"
+    };
+    format!(
+        "status: {}\nlanded: {}\ncontent-type: {}\ncontent-length: {}\naccept-ranges: {}\ncontent-disposition: {disposition}\nreceived: {} bytes\nsha256: {}\n",
+        exchange.status,
+        exchange.landed_host,
+        show(exchange.content_type.as_deref()),
+        or_dash(exchange.content_length),
+        show(exchange.accept_ranges.as_deref()),
+        exchange.received,
+        show(sha256),
+    )
+}
+
+/// One request for `target` whose body goes to `dir/name` (never over an existing file) and
+/// whose report goes to `report`. A non-2xx answer reads no body: the report is still written,
+/// the file is removed and the result is a failure. A failed transfer leaves no file.
+async fn save_sample(
+    media: &MediaClient,
+    target: &MediaTarget,
+    dir: &Path,
+    name: &str,
+    report: &mut dyn Write,
+) -> Result<(), Failure> {
+    let mut out = Hashing {
+        inner: create_sample(dir, name).map_err(|e| (1, e))?,
+        hash: Sha256::new(),
+    };
+    let result = media.download_exchange(target, &mut out).await;
+    let Hashing { inner, hash } = out;
+    drop(inner);
+    let exchange = result.map_err(|e| {
+        // A partial file under the final name would look like a finished download.
+        let _ = fs::remove_file(dir.join(name));
+        let class = error_class(&e);
+        (1, format!("download failed ({class}): {}", fail(e).1))
+    })?;
+    let succeeded = (200..300).contains(&exchange.status);
+    let digest = succeeded.then(|| format!("{:x}", hash.finalize()));
+    write!(report, "{}", sample_report(&exchange, digest.as_deref()))
+        .and_then(|()| report.flush())
+        .map_err(|e| (1, format!("cannot write the report: {}", e.kind())))?;
+    if succeeded {
+        return Ok(());
+    }
+    let _ = fs::remove_file(dir.join(name));
+    Err(match exchange.status {
+        401 => fail(ProtoError::SessionExpired),
+        status => (1, format!("status {status}: no body was read")),
+    })
+}
+
+/// `download --url`: one request for the chosen URL variant into the sample directory,
+/// reported as the research needs it and nothing more (no path, no name, no query, no body,
+/// no connection banner).
+async fn sample_download(
+    chat: &str,
+    timestamp: i64,
+    flags: &DownloadFlags<'_>,
+    variant: UrlVariant,
+) -> Result<(), Failure> {
+    let dir = Path::new(flags.to.ok_or_else(|| {
+        (
+            2,
+            "--url needs --to <sample directory> (existing, mode 0700)".to_owned(),
+        )
+    })?);
+    check_sample_dir(dir).map_err(|e| (2, e))?;
+    let session = load_session()?;
+    let config = ClientConfig::production();
+    let media = MediaClient::new(config.media.clone(), &config.http, session.cookies.clone())
+        .map_err(fail)?;
+    let (client, _events, _subscription) = connect_silent(&session, config).await?;
+    let message = find_message(&client, chat, timestamp).await?;
+    let chosen = select_file(&message.body, flags.item)
+        .map_err(|e| (1, format!("message {timestamp}: {e}")))?;
+    let target = variant.target(chosen.file.id.clone());
+    let name = sample_name(timestamp, &chosen, variant);
+    save_sample(&media, &target, dir, &name, &mut std::io::stdout()).await
 }
 
 async fn listen(watch: Option<&str>) -> Result<(), Failure> {
@@ -1669,14 +1860,16 @@ mod download_tests {
             download_flags(&["--to", "/tmp/x", "--item", "3"]),
             Some(DownloadFlags {
                 item: Some(3),
-                to: Some("/tmp/x")
+                to: Some("/tmp/x"),
+                url: None
             })
         );
         assert_eq!(
             download_flags(&["--item", "1"]),
             Some(DownloadFlags {
                 item: Some(1),
-                to: None
+                to: None,
+                url: None
             })
         );
         for bad in [
@@ -1834,6 +2027,253 @@ mod download_tests {
             fail(ProtoError::Protocol("search: no data".into())).1,
             "unexpected server response: search: no data"
         );
+    }
+
+    #[test]
+    fn the_url_flag_names_one_of_two_variants() {
+        for (name, variant) in [
+            ("original", UrlVariant::Original),
+            ("plain", UrlVariant::Plain),
+        ] {
+            assert_eq!(
+                download_flags(&["--url", name]),
+                Some(DownloadFlags {
+                    url: Some(variant),
+                    ..DownloadFlags::default()
+                })
+            );
+            assert_eq!(variant.label(), name);
+        }
+        assert_eq!(
+            download_flags(&["--to", "/s", "--url", "plain", "--item", "2"]),
+            Some(DownloadFlags {
+                item: Some(2),
+                to: Some("/s"),
+                url: Some(UrlVariant::Plain)
+            })
+        );
+        for bad in [
+            &["--url", "Plain"][..],
+            &["--url", ""],
+            &["--url", "attach"],
+            &["--url"],
+            &["--url", "plain", "stray"],
+        ] {
+            assert_eq!(download_flags(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn each_variant_asks_for_its_own_target() {
+        let id = || "disk/0a1b-2c".to_owned();
+        let url = |variant: UrlVariant| {
+            variant
+                .target(id())
+                .url(&MediaConfig::production())
+                .unwrap()
+        };
+        assert!(url(UrlVariant::Original).ends_with("/file_shortterm/disk/0a1b-2c?attach=true"));
+        assert!(url(UrlVariant::Plain).ends_with("/file_shortterm/disk/0a1b-2c"));
+    }
+
+    #[test]
+    fn select_file_accepts_a_voice_message() {
+        let voice = file("disk/v", Some("voice.ogg"));
+        let body = WireBody::Voice {
+            file: voice.clone(),
+            duration: Some(12),
+            waveform: None,
+        };
+        assert_eq!(
+            select_file(&body, None),
+            Ok(Chosen {
+                file: &voice,
+                position: 1,
+                count: 1
+            })
+        );
+        assert!(select_file(&body, Some(1)).is_ok());
+        assert!(
+            select_file(&body, Some(2))
+                .unwrap_err()
+                .contains("one file")
+        );
+    }
+
+    #[test]
+    fn the_hashing_writer_hashes_what_it_wrote() {
+        let mut out = Hashing {
+            inner: Vec::new(),
+            hash: Sha256::new(),
+        };
+        out.write_all(b"a").unwrap();
+        out.write_all(b"bc").unwrap();
+        assert_eq!(out.inner, b"abc");
+        assert_eq!(
+            format!("{:x}", out.hash.finalize()),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn an_existing_sample_is_refused_without_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1-1-plain.ogg"), b"keep").unwrap();
+        let error = create_sample(dir.path(), "1-1-plain.ogg").unwrap_err();
+        assert_eq!(error, "sample already exists");
+        assert_eq!(
+            std::fs::read(dir.path().join("1-1-plain.ogg")).unwrap(),
+            b"keep"
+        );
+        let missing = create_sample(&dir.path().join("missing"), "x").unwrap_err();
+        assert!(
+            missing.starts_with("cannot create the sample: "),
+            "{missing}"
+        );
+        assert!(!missing.contains("missing"), "{missing}");
+    }
+
+    #[test]
+    fn the_report_has_exactly_the_research_fields() {
+        let exchange = Exchange {
+            status: 200,
+            landed_host: "storage.example".into(),
+            content_type: Some("audio/ogg".into()),
+            content_length: Some(6),
+            accept_ranges: None,
+            has_content_disposition: true,
+            received: 6,
+        };
+        assert_eq!(
+            sample_report(&exchange, Some("ab")),
+            "status: 200\nlanded: storage.example\ncontent-type: audio/ogg\ncontent-length: 6\naccept-ranges: -\ncontent-disposition: present\nreceived: 6 bytes\nsha256: ab\n"
+        );
+    }
+
+    /// Answers the i-th connection with `responses[i]`; returns the base URL.
+    fn serve_each(responses: Vec<String>) -> String {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base
+    }
+
+    fn media_at(base: &str) -> MediaClient {
+        let config = MediaConfig {
+            files_base: base.into(),
+            avatars_base: base.into(),
+        };
+        MediaClient::new(config, &yandex_proto::HttpSettings::default(), vec![]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sample_is_saved_and_reported_with_nothing_else() {
+        let base = serve_each(vec![
+            "HTTP/1.1 200 OK\r\ncontent-type: audio/ogg\r\naccept-ranges: bytes\r\ncontent-disposition: attachment; filename=\"secret-name.ogg\"\r\nset-cookie: s=secret\r\ncontent-length: 3\r\nconnection: close\r\n\r\nabc".into(),
+            "HTTP/1.1 403 Forbidden\r\ncontent-length: 11\r\nconnection: close\r\n\r\ndenied-BODY".into(),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let media = media_at(&base);
+        let target = MediaTarget::Playback {
+            file_id: "disk/u".into(),
+        };
+        let mut report = Vec::new();
+        save_sample(&media, &target, dir.path(), "1-1-plain.ogg", &mut report)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(report).unwrap(),
+            "status: 200\nlanded: 127.0.0.1\ncontent-type: audio/ogg\ncontent-length: 3\naccept-ranges: bytes\ncontent-disposition: present\nreceived: 3 bytes\nsha256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("1-1-plain.ogg")).unwrap(),
+            b"abc"
+        );
+
+        // A refusal: the report names the status, no body is kept, the exit is a failure.
+        let mut report = Vec::new();
+        let failure = save_sample(&media, &target, dir.path(), "1-1-refused", &mut report)
+            .await
+            .unwrap_err();
+        assert_eq!(failure, (1, "status 403: no body was read".to_owned()));
+        assert_eq!(
+            String::from_utf8(report).unwrap(),
+            "status: 403\nlanded: 127.0.0.1\ncontent-type: -\ncontent-length: 11\naccept-ranges: -\ncontent-disposition: absent\nreceived: 0 bytes\nsha256: -\n"
+        );
+        assert!(!dir.path().join("1-1-refused").exists());
+
+        // An existing sample stops the run before any request, naming neither dir nor file.
+        let mut report = Vec::new();
+        let failure = save_sample(&media, &target, dir.path(), "1-1-plain.ogg", &mut report)
+            .await
+            .unwrap_err();
+        assert_eq!(failure, (1, "sample already exists".to_owned()));
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn only_a_private_existing_directory_is_a_sample_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let set = |mode| std::fs::set_permissions(dir.path(), PermissionsExt::from_mode(mode));
+        set(0o700).unwrap();
+        assert_eq!(check_sample_dir(dir.path()), Ok(()));
+        for mode in [0o750, 0o705, 0o755, 0o777] {
+            set(mode).unwrap();
+            assert!(
+                check_sample_dir(dir.path()).unwrap_err().contains("0700"),
+                "{mode:o}"
+            );
+        }
+        assert!(check_sample_dir(&dir.path().join("missing")).is_err());
+        let plain = dir.path().join("file");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(check_sample_dir(&plain).is_err());
+    }
+
+    #[test]
+    fn a_sample_name_shows_no_server_name_but_a_short_extension() {
+        let name = |raw: Option<&str>, position, variant| {
+            let one = file("disk/0a1b-2c", raw);
+            let chosen = Chosen {
+                file: &one,
+                position,
+                count: 3,
+            };
+            sample_name(1700000000123456, &chosen, variant)
+        };
+        assert_eq!(
+            name(Some("My secret voice.ogg"), 1, UrlVariant::Plain),
+            "1700000000123456-1-plain.ogg"
+        );
+        assert_eq!(
+            name(Some("clip.MP4"), 2, UrlVariant::Original),
+            "1700000000123456-2-original.MP4"
+        );
+        for unusable in [
+            Some("noextension"),
+            Some("a.toolongextension"),
+            Some("a.o g"),
+            Some("a.ö"),
+            Some("a."),
+            Some(".hidden"),
+            None,
+        ] {
+            assert_eq!(
+                name(unusable, 1, UrlVariant::Original),
+                "1700000000123456-1-original",
+                "{unusable:?}"
+            );
+        }
     }
 }
 

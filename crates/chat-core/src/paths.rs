@@ -107,17 +107,35 @@ pub fn unique_name(name: &str, n: u32) -> String {
 pub struct Partial {
     path: PathBuf,
     committed: bool,
+    guard: Option<fn(&Path) -> io::Result<()>>,
 }
 
 impl Partial {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Makes the cleanup ask `guard` about the folder first: when it refuses (the folder was
+    /// swapped for a symlink, say) the file is left alone, because removing it by name would
+    /// reach through the swapped path into a place that is not ours.
+    #[must_use]
+    pub fn guard_cleanup(mut self, guard: fn(&Path) -> io::Result<()>) -> Self {
+        self.guard = Some(guard);
+        self
+    }
 }
 
 impl Drop for Partial {
     fn drop(&mut self) {
-        if !self.committed {
+        if self.committed {
+            return;
+        }
+        let allowed = match (self.guard, self.path.parent()) {
+            (None, _) => true,
+            (Some(guard), Some(dir)) => guard(dir).is_ok(),
+            (Some(_), None) => false,
+        };
+        if allowed {
             // Best effort: the file may already be gone, and Drop cannot report.
             let _ = fs::remove_file(&self.path);
         }
@@ -154,6 +172,7 @@ pub fn create_partial_with_mode(dir: &Path, name: &str, mode: u32) -> io::Result
                     Partial {
                         path,
                         committed: false,
+                        guard: None,
                     },
                 ));
             }
@@ -358,6 +377,20 @@ mod tests {
         drop(partial);
         drop(file);
         assert!(names(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn a_guarded_partial_is_left_alone_when_its_folder_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let refuse: fn(&Path) -> io::Result<()> =
+            |_| Err(io::Error::new(io::ErrorKind::NotADirectory, "refused"));
+        let accept: fn(&Path) -> io::Result<()> = |_| Ok(());
+        let (file, refused) = create_partial(dir.path(), "a.txt").unwrap();
+        let refused = refused.guard_cleanup(refuse);
+        let (file2, accepted) = create_partial(dir.path(), "b.txt").unwrap();
+        let accepted = accepted.guard_cleanup(accept);
+        drop((refused, accepted, file, file2));
+        assert_eq!(names(dir.path()), ["a.txt.part"]);
     }
 
     #[test]

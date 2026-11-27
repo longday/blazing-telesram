@@ -1,0 +1,48 @@
+{
+  "Chats": [
+    {
+      "ChatId": "0/0/33333333-3333-4333-8333-333333333333",
+      "Messages": [
+        {
+          "Meta": {
+            "Origin": 28
+          },
+          "ServerMessage": {
+            "ClientMessage": {
+              "Plain": {
+                "ChatId": "0/0/33333333-3333-4333-8333-333333333333",
+                "CustomPayload": "<custom payload>",
+                "PayloadId": "00000000-0000-4000-8000-000000000002",
+                "Voice": {
+                  "Duration": 2494,
+                  "FileInfo": {
+                    "Id2": "bucket-b/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "Name": "voice.ogg",
+                    "Size": 4517
+                  },
+                  "Text": "<transcript>",
+                  "WasRecognized": true,
+                  "Waveform": "AAAAAAAAADZUVTVWZmWDY2ZnVmZVVWMRRUUkMzQ1YkNDUyQiOMrKuKqqrKvMuZqaqXrLq6zbmIdmeZmpiqeru7mJdTU0QVMhIBEgIDMjAjMgIAIkNDNSRCEzM0VDMjMTAyIRQg=="
+                }
+              }
+            },
+            "ReadsVersion": 2335,
+            "ServerMessageInfo": {
+              "From": {
+                "AvatarId": "user_avatar/yapic/1/a",
+                "DisplayName": "<name>",
+                "Guid": "00000000-0000-4000-8000-000000000001",
+                "Version": 1779743684180659
+              },
+              "PrevTimestamp": 1785853395203064,
+              "SeqNo": 2356,
+              "Timestamp": 1785853413266064,
+              "Version": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "RequestId": "00000000-0000-4000-8000-000000000003"
+}

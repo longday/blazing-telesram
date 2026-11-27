@@ -563,31 +563,38 @@ fn require_plain_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-/// [`require_plain_dir`] for the account's media folder and the playback folder inside it.
-fn require_plain_playback_path(dir: &Path) -> io::Result<()> {
-    if let Some(account_dir) = dir.parent() {
-        require_plain_dir(account_dir)?;
-    }
-    require_plain_dir(dir)
+/// The folders below the trusted runtime directory that lead to `dir`, outermost first:
+/// `media`, the account's folder, and the playback folder itself.
+fn playback_components(dir: &Path) -> Vec<&Path> {
+    let mut parts: Vec<&Path> = dir.ancestors().take(3).collect();
+    parts.reverse();
+    parts
 }
 
-/// The playback folder, created `0700` when missing; refused, before anything is created, when it
-/// or the account folder is a symlink or not a folder, and brought to `0700` when it exists with
-/// another mode.
+/// [`require_plain_dir`] for every folder from `media` down to the playback folder `dir`; the
+/// runtime directory above them is the trusted root.
+fn require_plain_playback_path(dir: &Path) -> io::Result<()> {
+    playback_components(dir)
+        .into_iter()
+        .try_for_each(require_plain_dir)
+}
+
+/// The playback folder, created `0700` when missing; refused, before anything below the runtime
+/// directory is created, when `media`, the account folder or it is a symlink or not a folder, and
+/// brought to `0700` when it exists with another mode.
 fn prepare_playback_dir(runtime_dir: &Path, account: &UserId) -> io::Result<PathBuf> {
     let dir = playback_dir(runtime_dir, account);
-    if let Some(account_dir) = dir.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(account_dir)?;
-        require_plain_dir(account_dir)?;
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(runtime_dir)?;
+    for part in playback_components(&dir) {
+        match DirBuilder::new().mode(0o700).create(part) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            _ => {}
+        }
+        require_plain_dir(part)?;
     }
-    match DirBuilder::new().mode(0o700).create(&dir) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
-    }
-    require_plain_dir(&dir)?;
     if fs::symlink_metadata(&dir)?.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
@@ -762,6 +769,12 @@ async fn run_download<B: Backend>(
     let mode = if landing.private { 0o600 } else { 0o666 };
     let (mut file, partial) =
         create_partial_with_mode(dir, &name, mode).map_err(DownloadError::Destination)?;
+    // A playback folder swapped for a symlink must not make the cleanup remove by name through it.
+    let partial = if landing.private {
+        partial.guard_cleanup(require_plain_playback_path)
+    } else {
+        partial
+    };
     let throttle = Throttle::default();
     let report = |received: u64, total: Option<u64>| {
         if throttle.admit(Instant::now(), received, total) {
@@ -8254,6 +8267,57 @@ mod tests {
     }
 
     #[test]
+    fn a_symlinked_media_folder_is_never_cleaned_nor_written_through() {
+        let outside = tempfile::tempdir().unwrap();
+        for who in [UID, "other"] {
+            let folder = outside.path().join(who).join(PLAYBACK_DIR);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("file"), "mine").unwrap();
+        }
+        // The runtime folder is trusted, `media` below it is not: the start wipe (stored account),
+        // the switch to the account the server names, and the download all stop at the symlink.
+        let h = start(
+            |s, dir| {
+                std::os::unix::fs::symlink(outside.path(), dir.join("media")).unwrap();
+                s.account = "other".into();
+                s.files.insert("b/1".into(), b"voice".to_vec());
+            },
+            50,
+        );
+        h.online();
+        let intact = || {
+            [UID, "other"].iter().all(|who| {
+                let file = outside.path().join(who).join(PLAYBACK_DIR).join("file");
+                fs::read(file).is_ok_and(|bytes| bytes == b"mine")
+            })
+        };
+        assert!(intact(), "start or switch followed the symlink");
+        h.download(&playback("b/1"), "a.mp4");
+        h.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: playback("b/1"),
+                reason: DownloadFailure::Destination,
+            }
+        });
+        h.quiet();
+        assert!(h.fake.state().download_calls.is_empty());
+        assert!(intact());
+        assert_eq!(
+            fs::read_dir(outside.path().join("other").join(PLAYBACK_DIR))
+                .unwrap()
+                .count(),
+            1,
+            "nothing may land outside"
+        );
+        assert!(
+            fs::symlink_metadata(h.dir.path().join("media"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[test]
     fn an_existing_playback_folder_with_a_wider_mode_is_brought_to_0700() {
         let h = start(
             |s, _| {
@@ -8292,6 +8356,8 @@ mod tests {
     #[test]
     fn a_playback_folder_swapped_for_a_symlink_during_the_transfer_is_not_finalised_into() {
         let outside = tempfile::tempdir().unwrap();
+        // The name the partial had: removing it by name through the swapped path would hit this.
+        fs::write(outside.path().join("playback-b%2F1.mp4.part"), "foreign").unwrap();
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start_downloads(&[("b/1", b"hello world")], |s| {
             s.download_gate = Some(gate.clone())
@@ -8309,8 +8375,37 @@ mod tests {
                 reason: DownloadFailure::Destination,
             }
         });
-        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(outside.path().join("playback-b%2F1.mp4.part")).unwrap(),
+            b"foreign",
+            "a foreign file behind the swapped path must survive the cleanup"
+        );
         assert!(!moved.join("playback-b%2F1.mp4").exists());
+    }
+
+    #[test]
+    fn cancelling_after_the_playback_folder_was_swapped_removes_nothing_outside() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("playback-b%2F1.mp4.part"), "foreign").unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        fs::rename(h.playback_dir(), h.dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), h.playback_dir()).unwrap();
+        h.client.send(Command::CancelDownload(playback("b/1")));
+        h.next("cancelled", |e| {
+            *e == ClientEvent::DownloadCancelled(playback("b/1"))
+        });
+        h.quiet();
+        assert_eq!(
+            fs::read(outside.path().join("playback-b%2F1.mp4.part")).unwrap(),
+            b"foreign"
+        );
     }
 
     fn hits(title: &str) -> SearchHits {

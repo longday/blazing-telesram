@@ -231,12 +231,6 @@ pub fn duration_label(ms: u64) -> String {
     }
 }
 
-/// Media summary line, e.g. `0:42 · 12 МБ`; a part that is not known is left out, none gives an empty string.
-pub fn duration_size_line(duration_ms: Option<u64>, size: Option<u64>) -> String {
-    let parts = [duration_ms.map(duration_label), size.map(human_size)];
-    parts.into_iter().flatten().collect::<Vec<_>>().join(" · ")
-}
-
 /// Scales `width`x`height` down to fit inside `max`x`max` keeping the aspect ratio; never scales up.
 /// Unknown dimensions give a square.
 pub fn fit_thumbnail(width: u32, height: u32, max: f32) -> (f32, f32) {
@@ -350,19 +344,6 @@ mod tests {
         assert_eq!(duration_label(3_723_000), "1:02:03");
         assert_eq!(duration_label(36_000_000), "10:00:00");
         assert_eq!(duration_label(u64::MAX), "5124095576030:25:51");
-    }
-
-    #[test]
-    fn duration_size_lines() {
-        assert_eq!(
-            duration_size_line(Some(42_000), Some(12 * (1 << 20) + 300_000)),
-            "0:42 · 12 МБ"
-        );
-        assert_eq!(duration_size_line(Some(5_000), Some(1536)), "0:05 · 1,5 КБ");
-        assert_eq!(duration_size_line(Some(0), Some(0)), "0:00 · 0 Б");
-        assert_eq!(duration_size_line(Some(67_000), None), "1:07");
-        assert_eq!(duration_size_line(None, Some(1536)), "1,5 КБ");
-        assert_eq!(duration_size_line(None, None), "");
     }
 
     #[test]
