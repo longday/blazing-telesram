@@ -1,4 +1,5 @@
 use serde_json::Value;
+use yandex_proto::manage::{created_chat_id, parse_created_chat};
 use yandex_proto::request::SearchEntity;
 use yandex_proto::search::parse_search;
 use yandex_proto::wire::{
@@ -30,7 +31,14 @@ fn fixtures_hold_no_credentials() {
     .map(|n| format!("research-{n}"));
     let live = ["message", "seen-marker", "typing", "reaction", "heartbeat"]
         .map(|n| format!("live-push-{n}"));
-    let members = ["members-group", "members-private", "whoami"].map(|n| format!("live-{n}"));
+    let members = [
+        "members-group",
+        "members-private",
+        "whoami",
+        "create-private",
+        "create-chat",
+    ]
+    .map(|n| format!("live-{n}"));
     for name in research.iter().chain(&live).chain(&members) {
         let text = fixture(&format!("{name}.json")).to_string().to_lowercase();
         for needle in ["session_id", "sessionid2", "csrf", "cookie", "@yandex"] {
@@ -604,6 +612,44 @@ fn live_members_refusal_fixture() {
         parse_members(&refusal["data"]).is_err(),
         "an error body is not a member page"
     );
+}
+
+/// Live `create_private_chat` reply (task 5.1, 2026-11-27, request `{guid, wait_for_update: true}`
+/// with no `onetime_user_token`): `status: ok`, `data` = the chat (`data.chat.chat_id`) and the
+/// partner's user object. The chat already existed, so this is the "open an existing chat" answer.
+#[test]
+fn live_create_private_fixture() {
+    let reply = fixture("live-create-private.json");
+    assert_eq!(reply["status"], "ok");
+    let data = &reply["data"];
+    assert_eq!(
+        created_chat_id(data).as_deref(),
+        Some("00000000-0000-4000-8000-0000000000b1_00000000-0000-4000-8000-0000000000a1")
+    );
+    assert_eq!(data["chat"]["private"], true);
+    assert_eq!(data["chat"]["members_count"], 2);
+    // The group parser reads the same envelope without inventing refusals.
+    let created = parse_created_chat(data);
+    assert!(created.refused.is_empty());
+    assert_eq!(created.chat, created_chat_id(data));
+}
+
+/// Live `create_chat` reply (task 6.2, 2026-11-27, flag-on payload): `status: ok` and `data` is
+/// the new chat itself, so the id is `data.chat_id` (not `data.chat.chat_id` as the web bundle
+/// suggested); there is no `errors` key when every participant was added.
+#[test]
+fn live_create_chat_fixture() {
+    let reply = fixture("live-create-chat.json");
+    assert_eq!(reply["status"], "ok");
+    let data = &reply["data"];
+    let created = parse_created_chat(data);
+    assert_eq!(
+        created.chat.as_deref(),
+        Some("0/0/00000000-0000-4000-8000-0000000000c1")
+    );
+    assert!(created.refused.is_empty());
+    assert_eq!(data["members_count"], 2);
+    assert_eq!(data["role"], "admin");
 }
 
 /// A live `list_reactions` page (2026-11-27, `research-reactors-page.json`: the first four entries
