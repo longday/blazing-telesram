@@ -6819,6 +6819,106 @@ fn a_group_created_but_not_named_by_the_list_closes_the_dialog_with_a_toast(
 }
 
 #[gpui::test]
+fn the_group_dialog_fits_the_smallest_window_with_several_participants(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    cx.simulate_resize(size(px(850.), px(560.)));
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    click(cx, "new-chat-mode-group");
+    cx.simulate_input("Дружба");
+    for row in ["candidate-alice", "candidate-boris", "candidate-anna"] {
+        click(cx, row);
+    }
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris", "anna"]);
+
+    let window = px(560.);
+    let card = bounds(cx, "new-chat-card").expect("the card is on screen");
+    assert!(
+        card.top() >= px(0.) && card.bottom() <= window - px(16.),
+        "the card is capped to the window with a margin: {card:?}"
+    );
+    for selector in ["new-chat-create", "new-chat-cancel", "new-chat-mode-group"] {
+        let b = bounds(cx, selector).unwrap();
+        assert!(
+            b.top() >= px(0.) && b.bottom() <= window,
+            "{selector} is inside the window: {b:?}"
+        );
+        assert!(b.bottom() <= card.bottom(), "{selector} is inside the card");
+    }
+
+    // It can still be confirmed.
+    click(cx, "new-chat-create");
+    assert_eq!(
+        h.commands(),
+        [create_group("Дружба", &["alice", "boris", "anna"])]
+    );
+}
+
+#[gpui::test]
+fn cancel_before_confirming_a_group_sends_nothing_and_the_next_dialog_starts_empty(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    click(cx, "new-chat-cancel");
+    assert!(!dialog_open(&h, cx));
+    assert!(h.commands().is_empty(), "cancel creates nothing");
+    assert_eq!(creation(&h, cx), None);
+
+    // Escape does the same, from the group variant.
+    open_dialog_again(&h, cx);
+    click(cx, "new-chat-mode-group");
+    click(cx, "candidate-alice");
+    cx.simulate_keystrokes("escape");
+    assert!(!dialog_open(&h, cx));
+    assert!(h.commands().is_empty());
+
+    // Nothing of the earlier dialog is left in the next one.
+    open_dialog_again(&h, cx);
+    assert!(!h.desktop.read_with(cx, |d, _| d.new_chat_is_group()));
+    click(cx, "new-chat-mode-group");
+    assert!(members_chosen(&h, cx).is_empty());
+    assert_eq!(group_title(&h, cx), "");
+}
+
+#[gpui::test]
+fn offline_a_group_refusal_is_shown_and_the_title_and_participants_kept(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    fill_group(&h, cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert!(
+        dialog_open(&h, cx),
+        "losing the connection does not close the dialog"
+    );
+    click(cx, "new-chat-create");
+    assert_eq!(
+        group_creations(&h.commands()),
+        1,
+        "the one command of the press; the core answers it offline"
+    );
+    // The core refuses at once, without a request to the server; the dialog says so.
+    h.feed(
+        cx,
+        [ClientEvent::CreationFailed {
+            reason: "Нет соединения".into(),
+            unknown: false,
+        }],
+    );
+    assert!(shown(cx, "new-chat-error"));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(group_title(&h, cx), "Дружба");
+    assert_eq!(members_chosen(&h, cx), ["alice", "boris"]);
+    assert_eq!(
+        creation(&h, cx),
+        Some(crate::store::CreationState::Failed {
+            reason: "Нет соединения".into(),
+            unknown: false
+        })
+    );
+    assert_eq!(h.commands().len(), 0, "nothing is sent by itself");
+}
+
+#[gpui::test]
 fn the_dialog_blocks_the_chat_and_yields_to_nothing_under_it(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);

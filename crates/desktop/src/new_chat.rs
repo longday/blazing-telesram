@@ -27,6 +27,8 @@ const LIST_HEIGHT: f32 = 240.;
 /// The list is shorter in the group variant, which also shows the title and the participants.
 const GROUP_LIST_HEIGHT: f32 = 144.;
 const MEMBERS_HEIGHT: f32 = 108.;
+/// Space kept between the card and the window edge.
+const CARD_MARGIN: f32 = 16.;
 
 /// A person the dialog offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -282,7 +284,8 @@ fn note(selector: &'static str, text: impl Into<SharedString>) -> Div {
 /// selected), `new-chat-empty`, `new-chat-identity`, `new-chat-nomatch`, `new-chat-participant` (+ `-avatar`;
 /// private), `new-chat-members` with `new-chat-members-empty`, `new-chat-member-<guid>` (+ `-avatar`) and
 /// `new-chat-remove-<guid>` (group), `new-chat-title-long`, `new-chat-sending`, `new-chat-error`,
-/// `new-chat-unknown`, `new-chat-unverified`, `new-chat-cancel`, `new-chat-create`.
+/// `new-chat-unknown`, `new-chat-unverified`, `new-chat-cancel`, `new-chat-create`; `new-chat-card` is the
+/// panel (never taller than the window) and `new-chat-body` its scrolling middle.
 pub fn render(
     state: &NewChat,
     panel: Option<ChatId>,
@@ -522,9 +525,18 @@ pub fn render(
 
     let mode_button =
         |mode: Mode, id: &'static str, label: &'static str| {
-            button(id, label)
+            let selected = state.mode == mode;
+            div()
+                .id(id)
+                .px(px(14.))
+                .py(px(8.))
+                .rounded(px(8.))
+                .text_size(px(14.))
+                .cursor_pointer()
+                .bg(rgb(if selected { ROW_SELECTED } else { FIELD }))
+                .hover(|s| s.bg(rgb(if selected { ROW_SELECTED } else { ROW_HOVER })))
+                .child(label)
                 .debug_selector(move || id.into())
-                .when(state.mode == mode, |b| b.bg(rgb(ROW_SELECTED)))
                 .when(sending, |b| b.text_color(rgb(MUTED)).cursor_default())
                 .when(!sending, |b| {
                     b.on_click(cx.listener(move |this, _, window, cx| {
@@ -556,10 +568,14 @@ pub fn render(
                 .on_click(cx.listener(|this, _, _, cx| this.confirm_new_chat(cx)))
         });
 
+    // The card never outgrows the window: the heading and the buttons keep their place, what lies between
+    // them (fields, people, participants, notices) scrolls. Without that a group with a few participants is
+    // taller than the smallest window and "Создать" is out of reach.
     div()
         .debug_selector(|| "new-chat-view".into())
         .absolute()
         .size_full()
+        .p(px(CARD_MARGIN))
         .occlude()
         .flex()
         .items_center()
@@ -567,7 +583,9 @@ pub fn render(
         .bg(rgba(0x000000aa))
         .child(
             div()
+                .debug_selector(|| "new-chat-card".into())
                 .w(px(420.))
+                .max_h_full()
                 .p(px(20.))
                 .rounded(px(12.))
                 .bg(rgb(PANEL))
@@ -576,27 +594,49 @@ pub fn render(
                 .gap(px(12.))
                 .child(
                     div()
-                        .text_size(px(17.))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child("Новый чат"),
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.))
+                        .child(
+                            div()
+                                .text_size(px(17.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Новый чат"),
+                        )
+                        .child(modes),
                 )
-                .child(modes)
-                .children(title_field)
                 .child(
                     div()
-                        .debug_selector(|| "new-chat-search".into())
-                        .px(px(12.))
-                        .py(px(7.))
-                        .rounded(px(20.))
-                        .bg(rgb(FIELD))
-                        .child(state.search.clone()),
+                        .id("new-chat-body")
+                        .debug_selector(|| "new-chat-body".into())
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(
+                            div()
+                                .flex_none()
+                                .flex()
+                                .flex_col()
+                                .gap(px(12.))
+                                .children(title_field)
+                                .child(
+                                    div()
+                                        .debug_selector(|| "new-chat-search".into())
+                                        .px(px(12.))
+                                        .py(px(7.))
+                                        .rounded(px(20.))
+                                        .bg(rgb(FIELD))
+                                        .child(state.search.clone()),
+                                )
+                                .child(list)
+                                .children(participant)
+                                .children(members)
+                                .children(message),
+                        ),
                 )
-                .child(list)
-                .children(participant)
-                .children(members)
-                .children(message)
                 .child(
                     div()
+                        .flex_none()
                         .flex()
                         .justify_end()
                         .gap(px(8.))
