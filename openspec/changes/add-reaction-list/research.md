@@ -66,3 +66,53 @@ New command `bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]
 5. P5 Errors: a deleted message, a timestamp that does not exist, a message in a chat the account cannot read (a channel the account only follows): the status and `Details` strings the adapter must map.
 
 Findings go into this file ("Live verification") when 3.1 runs; any contradiction of `design.md` reopens the affected decision.
+
+## Live verification (task 3.1, 2026-11-27, read-only, inside `bt-vm`)
+
+Setup: release `bt-probe` built in the VM from `main` (`df1a66f`, with `reactors`), signed-in session in `~/bt/.runtime`, outbound network restored (the 2026-11-26 failure, see "Live reads attempted", was an environment fault). Every call was `bt-probe reactors` (`list_reactions`, always `Mode: 0`) with `BT_LOG=yandex_proto::xiva=trace`; the raw reply frames were read inside the VM by a script that printed only keys, value types, counts, numeric timestamps and type codes, and booleans. No write of any kind was sent. Targets: the self-chat message with the ✅ reaction (1 reactor, the account); a read-only scan of `bt-probe history` over all 116 chats (2 channels, 70 groups, 44 private; counts only) found messages with 2 to 21 reactions. The scan read **one history page per chat** (the latest messages, up to 50; `reached_start=false` for most), so every "largest" or "none" below is about the messages sampled, not the whole account history. The paging target is a group message with 16 reactors (three types: 12 + 2 + 2).
+
+### P1 Shape
+
+- **Reply:** `{"ReadsVersion": int, "UserReactions": [...]}`. `ReadsVersion` is a top-level key not in the web client's deserializer (B) or in the notes; the client ignores it (it is not a total or a paging marker: 1607 for one message, 6540 for another).
+- **Entry:** exactly `Timestamp` (int, microseconds, when the user reacted), `Type` (int, e.g. 100101 for ✅, 100108, 100104) and `UserInfo` (object); all three present in every entry inspected key by key (the 1-entry self-chat reply and a 4-entry page).
+- **`UserInfo`:** `AvatarId`, `DisplayName`, `Guid`, `Nickname` (strings), `Uid` and `Version` (ints), all six present in every entry inspected. So the name and avatar come with the entry, as designed (D3). An entry without them was not observed (the variants in `wire_fixtures.rs` are synthetic).
+- **Empty list:** a message nobody reacted to answers `{"ReadsVersion": n}` with no `UserReactions` key and no error, as assumed (`parse_reactors` reads it as an empty page).
+- **`Mode: 0` is accepted:** every successful call sent it. Other modes were not sent (the client never sends them).
+- **Own entry:** the account's own reaction is a normal entry (✅ on the self-chat message: 1 entry whose `UserInfo.Guid` is the account's guid).
+
+### P2 Order and cursor
+
+- **Newest reaction first.** The 4-entry page and the 1-entry page were strictly descending in `Timestamp`; for the 16-entry list the cursor splits it consistently with a strictly descending order (cursor = the 9th entry returned exactly the 7 after it).
+- **`MaxTimestamp` is exclusive:** a page requested with cursor `c` holds only entries with `Timestamp < c`; the boundary entry is not repeated (cursor = the newest of the 16 returned the other 15; cursor = the oldest returned none). In four full walks (limits 5, 7, 16, 30) every page lay strictly below its cursor and its oldest entry was strictly older than the previous page's oldest. Design D5's "inclusive repeat" branch is harmless but never fires on this server.
+- **Out-of-range cursors:** a cursor below every entry (1) or equal to the oldest: an empty reply (`{"ReadsVersion": n}`), not an error. A cursor above every entry (a future time, or the newest + 1): the first page again. **`MaxTimestamp: 0` also gives the first page** (0 behaves as unset); the client never sends 0 (`before` is the oldest timestamp of a page).
+
+### P3 `Limit`
+
+- Honoured exactly while the list has that many: `Limit` 1, 2, 15 and 16 returned 1, 2, 15 and 16 of the 16 entries; 17, 30, 50, 100, 1000 and 100000 were all accepted (no error) and returned the 16 that exist.
+- **The server cap is not observed:** no readable message sampled (one page per chat) had more than 16 reactors (the larger ones are channel messages, which refuse, see P5), so `Limit` 1000 and 100000 cannot tell a cap from the end of the list. Older messages with longer lists may exist. `Limit` 0 and a missing `Limit` cannot be sent by `bt-probe` (`--limit` is at least 1) and were not tried.
+- **A short page was the end in every walk:** after a page with `n < Limit` the next page was empty (limits 5, 7 and 30; with limit 16 the full page was followed by an empty one). So design D5's `raw < Limit` rule held for every list available; it is **not proved** for a list longer than 16. `REACTORS_PAGE` stays 30 (Q2): no `Limit` up to 100000 was refused. Residual risk: if the server capped `Limit` between 17 and 29, a capped page would read as the end and the list would stop early (labelled "N of M", never presented as complete, spec "Complete or labelled").
+
+### P4 Consistency
+
+- The 16 entries of the group message, over every page size, equal the sum of its row's counts (12 + 2 + 2 = 16), with 16 distinct guids and none repeated across pages (limit 5: pages of 5, 5, 5, 1; limit 7: 7, 7, 2; limits 16 and 30: one page). The one-reactor messages (self chat and a private chat) had 1 entry each. The own entry is present (P1).
+
+### P5 Errors
+
+All refusals are a reply with `Status` 4 and an `ErrorInfo` object `{Message: string, WorkerId: int}`; **there is no `Details` key** (the key `wire::check_status` reads), so today a refusal surfaces as `status 4 ENTITY_NOT_FOUND` without the server's reason.
+
+| Request | Answer |
+|---------|--------|
+| a timestamp that does not exist (1, or a future time) in the self chat or a private chat | `Status` 4, `ErrorInfo.Message` "message not found" |
+| an unknown or malformed chat id | `Status` 4, "chat not found" (a malformed id is not told apart from an unknown one) |
+| a message of a **channel** the account follows (3 messages with 16 to 21 reactions, any `Limit`) | `Status` 4, **"reactions are anonymous"**: the list is never available for channel messages |
+| `Timestamp` 0 or negative | no reply frame: the socket proxy answers with a transport error (`error_code=2`); the probe fails with exit code 1 (the app never sends such a timestamp) |
+| a deleted message | **not observed**: none was at hand and none may be made (no writes); the nearest observation is "message not found" for a missing timestamp |
+| a chat the account is not in | **not observed** (only an invented id: "chat not found") |
+| a missing `Timestamp` key | **not observed** (the probe cannot omit it) |
+
+### Consequences for the design (see `design.md` Risks)
+
+1. **Channels:** the entry «Кто отреагировал» is offered for any sent message with a reaction (spec "Opening the list"), but in channels the server always refuses with "reactions are anonymous", so the list always ends in the `Failed` state. The design's "Failed with the reason, not a special case" holds, but the reason text is lost today (next point). Decision for the main session: hide the entry in channel chats, or keep the refusal.
+2. **Reason text:** `check_status` reads `Details`, the live refusal carries `ErrorInfo.Message`; the failure shows no reason beyond the status name. The client test `a_refused_reactors_read_is_the_usual_proto_error` uses the synthetic `Details` shape. The fix is in `wire.rs` (not a file this task owns).
+3. **No contradiction** with D1 (`Mode: 0` accepted, shape as designed), D5 (cursor, order, end rule), D3 (names in the entry) or `REACTORS_PAGE = 30`; the unobserved cap is recorded above.
+4. **Fixture:** `research-reactors-page.json` is now the sanitized first 4 entries of the 16-reactor group message (placeholders for guid, name, nickname, avatar and uid; `Version` normalized; timestamps rebased); `live_reactors_page` and `live_reactors_empty_and_refused_replies` in `wire_fixtures.rs` assert it; the missing-avatar, missing-name and missing-timestamp variants are built from it in the test and marked unobserved.
