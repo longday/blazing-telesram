@@ -96,20 +96,25 @@ fn fetch_target(media: &MediaRef) -> Result<MediaTarget, BackendError> {
         MediaKind::Thumbnail => Ok(MediaTarget::Thumbnail {
             file_id: media.id.clone(),
         }),
-        MediaKind::File => Err(BackendError::Protocol(
-            "originals are not fetched into memory; they go through download".into(),
+        MediaKind::File | MediaKind::Playback => Err(BackendError::Protocol(
+            "originals and playback copies are not fetched into memory; they go through download"
+                .into(),
         )),
     }
 }
 
-/// What `download` streams: only the original of a file or image (`MediaKind::File`).
+/// What `download` streams: the original of a file or image (`MediaKind::File`) or its playback
+/// copy (`MediaKind::Playback`).
 fn download_target(media: &MediaRef) -> Result<MediaTarget, BackendError> {
     match media.kind {
         MediaKind::File => Ok(MediaTarget::Original {
             file_id: media.id.clone(),
         }),
+        MediaKind::Playback => Ok(MediaTarget::Playback {
+            file_id: media.id.clone(),
+        }),
         MediaKind::Avatar | MediaKind::Thumbnail => Err(BackendError::Protocol(
-            "only originals (MediaKind::File) can be downloaded".into(),
+            "only originals and playback copies can be downloaded".into(),
         )),
     }
 }
@@ -1245,7 +1250,21 @@ fn body(wire: &WireBody) -> MessageBody {
             name: file.name.clone().unwrap_or_else(|| "Файл".into()),
             size: file.size.unwrap_or(0),
         },
-        WireBody::Voice { .. } => MessageBody::Unsupported("Голосовое сообщение".into()),
+        WireBody::Voice {
+            file,
+            duration,
+            waveform,
+        } => MessageBody::Voice {
+            media: MediaRef {
+                id: file.id.clone(),
+                kind: MediaKind::File,
+            },
+            // `Voice.Duration` is already milliseconds (R3).
+            duration_ms: *duration,
+            size: file.size.unwrap_or(0),
+            name: file.name.clone(),
+            waveform: waveform.clone(),
+        },
         WireBody::Sticker { .. } => MessageBody::Unsupported("Стикер".into()),
         WireBody::Poll { title } => MessageBody::Unsupported(format!("Опрос: {title}")),
         WireBody::System {
@@ -1906,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn download_targets_an_original_and_fetch_keeps_refusing_one() {
+    fn download_targets_an_original_or_a_playback_copy_and_fetch_refuses_both() {
         let media = |kind| MediaRef {
             id: "b/1".into(),
             kind,
@@ -1914,6 +1933,12 @@ mod tests {
         assert_eq!(
             download_target(&media(MediaKind::File)),
             Ok(MediaTarget::Original {
+                file_id: "b/1".into()
+            })
+        );
+        assert_eq!(
+            download_target(&media(MediaKind::Playback)),
+            Ok(MediaTarget::Playback {
                 file_id: "b/1".into()
             })
         );
@@ -1939,10 +1964,12 @@ mod tests {
                 size: AvatarSize::Small
             })
         );
-        let Err(BackendError::Protocol(message)) = fetch_target(&media(MediaKind::File)) else {
-            panic!("file must be refused")
-        };
-        assert!(message.contains("download"), "{message}");
+        for kind in [MediaKind::File, MediaKind::Playback] {
+            let Err(BackendError::Protocol(message)) = fetch_target(&media(kind)) else {
+                panic!("{kind:?} must be refused")
+            };
+            assert!(message.contains("download"), "{message}");
+        }
     }
 
     #[test]
@@ -1987,6 +2014,53 @@ mod tests {
             MessageBody::Unsupported("Foo".into())
         );
         assert_eq!(body(&WireBody::Deleted), MessageBody::Deleted);
+    }
+
+    #[test]
+    fn a_voice_message_keeps_its_original_ref_duration_size_name_and_waveform() {
+        let voice = |name: Option<&str>, size, duration, waveform: Option<Vec<u8>>| {
+            body(&WireBody::Voice {
+                file: WireFile {
+                    id: "b/v".into(),
+                    name: name.map(Into::into),
+                    size,
+                },
+                duration,
+                waveform,
+            })
+        };
+        assert_eq!(
+            voice(Some("v.ogg"), Some(9), Some(12_345), Some(vec![0, 7, 15])),
+            MessageBody::Voice {
+                media: MediaRef {
+                    id: "b/v".into(),
+                    kind: MediaKind::File
+                },
+                duration_ms: Some(12_345),
+                size: 9,
+                name: Some("v.ogg".into()),
+                waveform: Some(vec![0, 7, 15]),
+            }
+        );
+        // Duration is milliseconds on the wire and in the body: no conversion.
+        let MessageBody::Voice { duration_ms, .. } = voice(None, Some(1), Some(1_000), None) else {
+            panic!("voice")
+        };
+        assert_eq!(duration_ms, Some(1_000));
+        // No duration, no name, no size, no waveform: absent stays absent, size is 0.
+        assert_eq!(
+            voice(None, None, None, None),
+            MessageBody::Voice {
+                media: MediaRef {
+                    id: "b/v".into(),
+                    kind: MediaKind::File
+                },
+                duration_ms: None,
+                size: 0,
+                name: None,
+                waveform: None,
+            }
+        );
     }
 
     #[test]
@@ -2152,7 +2226,7 @@ mod tests {
                     duration: Some(2),
                     waveform: None,
                 },
-                "[Голосовое сообщение]",
+                "Голосовое сообщение",
             ),
             (
                 WireBody::Sticker {
