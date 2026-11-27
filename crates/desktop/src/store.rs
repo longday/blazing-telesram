@@ -1937,6 +1937,53 @@ mod tests {
                 "the overlay arrives from the core as an event"
             );
         }
+
+        // A flag flip arrives as an upsert of the whole message (PIN 2.4).
+        #[gpui::test]
+        fn a_flag_flip_changes_a_loaded_message_in_place_with_one_touched_row(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::loaded(cx);
+            let mut flipped = msg(2, "b");
+            flipped.important = true;
+            rig.apply(cx, ClientEvent::MessageUpserted(flipped));
+            assert_eq!(rig.take_events(), [delta(vec![1])]);
+            let messages = rig.messages(cx);
+            assert_eq!(messages.len(), 2);
+            assert!(messages[1].important && !messages[1].edited);
+        }
+
+        #[gpui::test]
+        fn a_flag_flip_for_an_unloaded_message_is_ignored_without_events(cx: &mut TestAppContext) {
+            // No timeline at all.
+            let rig = Rig::new(cx);
+            let mut flipped = msg(2, "b");
+            flipped.important = true;
+            rig.apply(cx, ClientEvent::MessageUpserted(flipped.clone()));
+            assert!(rig.take_events().is_empty());
+            assert!(
+                rig.store
+                    .read_with(cx, |s, _| s.timeline(&chat()).is_none()),
+                "no timeline is made up"
+            );
+
+            // A loaded window that starts after the message: it arrives with its page.
+            let rig = Rig::new(cx);
+            rig.apply(
+                cx,
+                ClientEvent::History(HistoryChunk {
+                    chat: chat(),
+                    messages: vec![msg(5, "e"), msg(6, "f")],
+                    reached_start: false,
+                    replaces: None,
+                    payloads: vec![],
+                }),
+            );
+            rig.take_events();
+            rig.apply(cx, ClientEvent::MessageUpserted(flipped));
+            assert!(rig.take_events().is_empty());
+            assert_eq!(rig.messages(cx).len(), 2);
+        }
     }
 
     mod search {
