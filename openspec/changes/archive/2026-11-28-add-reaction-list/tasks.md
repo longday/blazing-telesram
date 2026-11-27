@@ -154,6 +154,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Do: with `BT_WRITE_ONLY_CHAT` set to the self chat (so any accidental write is refused), run the app in `bt-vm`: open the list of the disposable self-chat message and of a multi-reactor message (Q6), check names, emoji, times, the own marker, "N из M" if applicable, the offline state with the network off (restored right after, in the same command by a trap), and that no reaction changed (the message's chips and version before and after). Screenshots stay in `.runtime/vm/` (not committed).
   - Done when: findings are in `research.md`; any contradiction is reflected in the design and spec.
 
+- [x] 8.3 Archive (done 2026-11-28: delta specs synced into `openspec/specs/reaction-list` (new) and `openspec/specs/message-editing`, change archived)
   - Owns: the change directory and `openspec/specs` through the archive workflow.
   - Depends on: every task above checked.
   - Do: follow the `openspec-archive-change` skill.
