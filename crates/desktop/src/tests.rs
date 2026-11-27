@@ -10030,15 +10030,38 @@ fn the_bubble_keeps_its_bounds_in_every_state(cx: &mut TestAppContext) {
     );
     check(cx, "failed to open");
 
-    // The longest failure text takes the place of the time and the bubble is still as big.
+    // Every download failure, started afresh each time (a failure event only settles a loading
+    // message): its text takes the place of the time and the bubble is still as big. The first event
+    // forgets the saved copy, so the next click has to fetch.
     h.fake.open_returns(Ok(FOURTEEN));
-    for reason in [DownloadFailure::NotFound, DownloadFailure::Other] {
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: playback_of("vf"),
+            reason: DownloadFailure::Other,
+        }],
+    );
+    for reason in [
+        DownloadFailure::Offline,
+        DownloadFailure::Network,
+        DownloadFailure::NotFound,
+        DownloadFailure::Disk,
+        DownloadFailure::Destination,
+        DownloadFailure::Other,
+    ] {
+        click(cx, msg!(5, "voice-toggle"));
+        assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading, "{reason:?}");
+        check(cx, "loading again");
         h.feed(
             cx,
             [ClientEvent::DownloadFailed {
                 media: playback_of("vf"),
                 reason,
             }],
+        );
+        assert_eq!(
+            voice_phase(&h, cx, 5),
+            VoicePhase::Failed(PlayFailure::Download(reason))
         );
         check(cx, "download failed");
     }
