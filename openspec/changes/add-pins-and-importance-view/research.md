@@ -133,7 +133,7 @@ Shapes (timestamps in microseconds, abbreviated as `T_A`/`T_B` for the pinned me
 
 Earlier attempt of 2026-11-26 (kept as history): the VM had no outbound network then (cause not determined; the host's full-tunnel VPN was suspected, not verified); the network was restored on 2026-11-27.
 
-The repository held no sample before 0.1: no fixture, log or cache row contained `PinnedMessageInfo`, `PinnedMessageTimestamps`, `IsImportant` or a `Pin` push. The fixtures are still synthetic until task 1.5 replaces them with sanitised captures of the shapes above.
+The repository held no sample before 0.1: no fixture, log or cache row contained `PinnedMessageInfo`, `PinnedMessageTimestamps`, `IsImportant` or a `Pin` push. Since task 1.5's code (2026-11-27) the three `Pin` push fixtures (`research-push-pin.json`, `-replaced.json`, `-removed.json`) are built from the shapes recorded in 0.2 above, with placeholder ids and timestamps; they are **not raw captures**, because the 0.1/0.2 traces were only analysed in the VM and never stored, and stay shape-built placeholders pending a live recapture (task 1.5 is not ticked until then). `research-chat-pinned.json` (chat entry) and `research-history-important.json` remain synthetic, built from the documented shapes.
 
 ## What would settle the open questions
 

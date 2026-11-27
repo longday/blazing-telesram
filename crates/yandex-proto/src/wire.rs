@@ -305,8 +305,9 @@ pub enum PushEvent {
         chat: String,
     },
     /// The chat's message pin changed (`Pin` push): `pinned` is the pinned message's timestamp,
-    /// `None` when nothing is pinned now; `at` is `ServerMessageInfo.Timestamp`, the action time
-    /// that orders this push against a chat-list entry's `pin_action_ts`.
+    /// `None` when nothing is pinned now; `at` is the action time, `ServerMessageInfo.
+    /// LastEditTimestamp` (else `Version`), which equals the next chat entry's `pin_action_ts`
+    /// and orders this push against it. It is present on an unpin too.
     PinChanged {
         chat: String,
         pinned: Option<Micros>,
@@ -1071,14 +1072,18 @@ pub fn decode_push(body: &Json) -> Result<PushEvent, WireError> {
         }
     }
     // `Pin` is a snapshot of the chat's pin: a `Timestamp` means that message is pinned now, no
-    // `Timestamp` means nothing is. `ServerMessageInfo.Timestamp` is the action time. A `Pin`
-    // without a `ChatId` falls through to `Ignored`.
+    // `Timestamp` means nothing is. `ServerMessageInfo.Timestamp` is NOT the action time: it is the
+    // pinned message's own timestamp (absent on unpin). The action time is `LastEditTimestamp`
+    // (equal to `Version`), the value the next chat entry carries as `LastActionTsMcs` (research
+    // 0.2). A `Pin` without a `ChatId` falls through to `Ignored`.
     if let Some((pin, chat)) = present(client, "Pin").and_then(|p| Some((p, string(p, "ChatId")?)))
     {
         return Ok(PushEvent::PinChanged {
             chat,
             pinned: pin.get("Timestamp").and_then(positive_micros),
-            at: present(body, "ServerMessageInfo").and_then(|i| int_field(i, "Timestamp")),
+            at: present(body, "ServerMessageInfo").and_then(|i| {
+                int_field(i, "LastEditTimestamp").or_else(|| int_field(i, "Version"))
+            }),
         });
     }
     // `NotificationBehaviour` rides along with real kinds (seen markers, bot requests): a
@@ -1564,7 +1569,7 @@ mod tests {
     fn pin_push_is_a_snapshot_of_the_pin() {
         let set = pin_push(
             json!({ "ChatId": "c", "Timestamp": 7 }),
-            json!({ "Timestamp": 90 }),
+            json!({ "Timestamp": 7, "LastEditTimestamp": 90, "Version": 90 }),
         );
         assert_eq!(
             decode_push(&set),
@@ -1575,7 +1580,10 @@ mod tests {
             })
         );
         // A missing `Timestamp` means nothing is pinned; the action time still travels.
-        let removed = pin_push(json!({ "ChatId": "c" }), json!({ "Timestamp": 91 }));
+        let removed = pin_push(
+            json!({ "ChatId": "c" }),
+            json!({ "LastEditTimestamp": 91, "Version": 91 }),
+        );
         assert_eq!(
             decode_push(&removed),
             Ok(PushEvent::PinChanged {
@@ -1587,7 +1595,7 @@ mod tests {
         for zero in [json!(0), json!(-4), json!(null), json!("x")] {
             let push = pin_push(
                 json!({ "ChatId": "c", "Timestamp": zero }),
-                json!({ "Timestamp": 92 }),
+                json!({ "LastEditTimestamp": 92 }),
             );
             assert_eq!(
                 decode_push(&push),
@@ -1602,7 +1610,7 @@ mod tests {
         // Digit strings are read as every other timestamp.
         let string = pin_push(
             json!({ "ChatId": "c", "Timestamp": "7" }),
-            json!({ "Timestamp": "90" }),
+            json!({ "LastEditTimestamp": "90" }),
         );
         assert_eq!(
             decode_push(&string),
@@ -1615,7 +1623,7 @@ mod tests {
     }
 
     #[test]
-    fn pin_push_without_a_server_timestamp_has_no_action_time() {
+    fn pin_push_without_an_action_time_has_none() {
         let no_info = json!({ "ClientMessage": { "Pin": { "ChatId": "c", "Timestamp": 7 } } });
         assert_eq!(
             decode_push(&no_info),
@@ -1625,7 +1633,13 @@ mod tests {
                 at: None
             })
         );
-        for info in [json!({}), json!({ "Timestamp": null })] {
+        // `Timestamp` is the pinned message's own timestamp, never the action time.
+        for info in [
+            json!({}),
+            json!({ "Timestamp": 7 }),
+            json!({ "Timestamp": 7, "LastEditTimestamp": null }),
+            json!({ "LastEditTimestamp": "x", "Version": null }),
+        ] {
             let push = pin_push(json!({ "ChatId": "c", "Timestamp": 7 }), info.clone());
             assert_eq!(
                 decode_push(&push),
@@ -1637,11 +1651,11 @@ mod tests {
                 "{info}"
             );
         }
-        // A present timestamp is passed through as is (D1: "when present"); the engine compares it.
+        // A present action time is passed through as is (D1: "when present"); the engine compares it.
         for at in [0, -1] {
             let push = pin_push(
                 json!({ "ChatId": "c", "Timestamp": 7 }),
-                json!({ "Timestamp": at }),
+                json!({ "LastEditTimestamp": at }),
             );
             assert_eq!(
                 decode_push(&push),
@@ -1652,6 +1666,49 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn pin_push_action_time_is_last_edit_timestamp_not_the_message_timestamp() {
+        // Research 0.2: `Timestamp` is the pinned message's own (older) timestamp.
+        let set = pin_push(
+            json!({ "ChatId": "c", "Timestamp": 7 }),
+            json!({ "Timestamp": 7, "LastEditTimestamp": 900, "Version": 901 }),
+        );
+        assert_eq!(
+            decode_push(&set),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: Some(7),
+                at: Some(900)
+            })
+        );
+        // `Version` stands in only when `LastEditTimestamp` is missing.
+        let version_only = pin_push(
+            json!({ "ChatId": "c", "Timestamp": 7 }),
+            json!({ "Timestamp": 7, "Version": 901 }),
+        );
+        assert_eq!(
+            decode_push(&version_only),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: Some(7),
+                at: Some(901)
+            })
+        );
+        // The unpin push has no `Timestamp` anywhere and still has the action time.
+        let unpin = pin_push(
+            json!({ "ChatId": "c" }),
+            json!({ "LastEditTimestamp": 902, "Version": 902 }),
+        );
+        assert_eq!(
+            decode_push(&unpin),
+            Ok(PushEvent::PinChanged {
+                chat: "c".into(),
+                pinned: None,
+                at: Some(902)
+            })
+        );
     }
 
     #[test]

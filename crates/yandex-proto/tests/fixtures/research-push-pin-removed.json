@@ -1,5 +1,5 @@
 {
-  "_synthetic": "SYNTHETIC fixture built from the documented shape (ClientMessage.Pin { ChatId } with no Timestamp means nothing is pinned; web bundle ek, research.md Pins); not a live capture. Replace with a sanitised capture once task 0.2 observes a real push. Placeholders only.",
+  "_provenance": "Sanitised shape of the live `Pin` push observed in research 0.2 (2026-11-27): unpin. Rebuilt from the recorded shape because the raw capture was not stored; ids and timestamps are placeholders, no message text, no tokens. No Pin.Timestamp and no ServerMessageInfo.Timestamp; the action time is LastEditTimestamp (= Version).",
   "ClientMessage": {
     "Pin": {
       "ChatId": "0/0/00000003-0000-4000-8000-000000000003"
@@ -7,10 +7,9 @@
   },
   "ServerMessageInfo": {
     "From": {
-      "DisplayName": "Test User",
       "Guid": "00000007-0000-4000-8000-000000000007"
     },
-    "Timestamp": 1795172999000001,
-    "Version": 1
+    "LastEditTimestamp": 1795172999000001,
+    "Version": 1795172999000001
   }
 }
