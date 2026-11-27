@@ -6,7 +6,7 @@ use crate::format::{
 };
 use crate::store::ChatStore;
 use crate::theme::*;
-use crate::viewer::{Action, ActionLine, action_line};
+use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
 use crate::widgets::avatar;
 use bt_chat_core::model::{
     ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody,
@@ -524,7 +524,8 @@ fn picture(
 
 /// The file's name, size and one action line that follows its download state (design Decision 7).
 /// Debug selectors: `msg-{ts}-file`, and in the action line `-download`, `-cancel`, `-retry` for the
-/// button, `-saved` for the "saved as" text and `-status` for any other text.
+/// button, `-reveal` for the «Показать в Finder» link (only while the file is saved), `-saved` for
+/// the "saved as" text and `-status` for any other text.
 fn file_card(
     ctx: &RowContext,
     store: &ChatStore,
@@ -591,7 +592,9 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
         status,
         action,
         enabled,
+        reveal,
     } = line;
+    let reveal_original = original.clone();
     let suffix = match action {
         Action::Download | Action::DownloadAgain => "download",
         Action::Cancel => "cancel",
@@ -619,6 +622,7 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
     } else {
         button.text_color(rgb(MUTED)).cursor_default()
     };
+    let reveal_store = ctx.store.clone();
     let kind = if saved { "saved" } else { "status" };
     div()
         .h(px(18.))
@@ -635,6 +639,21 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
                 .text_color(rgb(MUTED))
                 .child(text)
         }))
+        .when(reveal, |row| {
+            row.child(
+                div()
+                    .id(SharedString::from(format!("file-reveal-{ts}")))
+                    .debug_selector(move || format!("msg-{ts}-reveal"))
+                    .flex_none()
+                    .text_color(rgb(ACCENT))
+                    .cursor_pointer()
+                    .child(REVEAL_LABEL)
+                    .on_click(move |_, _, cx| {
+                        reveal_store
+                            .update(cx, |store, cx| store.reveal_download(&reveal_original, cx));
+                    }),
+            )
+        })
         .child(button)
 }
 

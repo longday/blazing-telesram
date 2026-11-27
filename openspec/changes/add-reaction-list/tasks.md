@@ -51,7 +51,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 3. Live verification (read-only, inside `bt-vm`)
 
-- [ ] 3.1 Confirm the protocol points (research "Verification plan")
+- [x] 3.1 Confirm the protocol points (research "Verification plan"; findings in research "Live verification", 2026-11-27)
   - Owns: `openspec/changes/add-reaction-list/research.md` (append "Live verification"); `design.md`, `proposal.md`, `specs/**` of this change if a finding contradicts them; the fixture `research-reactors-page.json` (swap in a sanitized live shape) and its assertions.
   - Depends on: 2.1 built in the VM; VM outbound network (it had none on 2026-11-26, see `research.md`); a signed-in session in `~/bt/.runtime`. Without them: report "blocked by environment" and leave the box unchecked.
   - Do: P1 shape and that an explicit `Mode: 0` is accepted, P3 `Limit` cap, edge values and whether a short page is always the end, P5 errors (deleted message, missing timestamp, unreadable chat) on the disposable self-chat message of `add-message-reactions` 7.2 (one reactor) and read-only chats; P2 order, cursor bound (inclusive repeat) and strict progress of `oldest`, and P4 count consistency need a message with several reactors: Q6 = A, find it by a read-only scan of `bt-probe history` counts over the user's chats inside `bt-vm` (counts only), then run `reactors` on it. Use its own `~/bt/src-reactors`, not the shared `~/bt/src`. Keep names and guids in the VM; record only shapes, counts and booleans.

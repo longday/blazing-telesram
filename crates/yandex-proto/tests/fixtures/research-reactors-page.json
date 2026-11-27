@@ -1,11 +1,12 @@
 {
+  "ReadsVersion": 1607,
   "UserReactions": [
     {
-      "Timestamp": 1795172185683559,
-      "Type": 100101,
+      "Timestamp": 1795489105771133,
+      "Type": 100108,
       "UserInfo": {
         "AvatarId": "user_avatar/yapic/1000/fake-1",
-        "DisplayName": "Test User One",
+        "DisplayName": "Test User 1",
         "Guid": "00000007-0000-4000-8000-000000000001",
         "Nickname": "test-user-1",
         "Uid": 4001,
@@ -13,29 +14,39 @@
       }
     },
     {
-      "Timestamp": 1795172100000000,
-      "Type": 7,
+      "Timestamp": 1795176644017321,
+      "Type": 100108,
       "UserInfo": {
         "AvatarId": "user_avatar/yapic/1000/fake-2",
-        "DisplayName": "Test User Two",
+        "DisplayName": "Test User 2",
         "Guid": "00000007-0000-4000-8000-000000000002",
+        "Nickname": "test-user-2",
+        "Uid": 4002,
         "Version": 1793302709442679
       }
     },
     {
-      "Timestamp": 1795172000000000,
-      "Type": 100101,
+      "Timestamp": 1795172896602932,
+      "Type": 100108,
       "UserInfo": {
-        "DisplayName": "Test User Three",
+        "AvatarId": "user_avatar/yapic/1000/fake-3",
+        "DisplayName": "Test User 3",
         "Guid": "00000007-0000-4000-8000-000000000003",
+        "Nickname": "test-user-3",
+        "Uid": 4003,
         "Version": 1793302709442679
       }
     },
     {
       "Timestamp": 1795171900000000,
-      "Type": 100102,
+      "Type": 100104,
       "UserInfo": {
-        "Guid": "00000007-0000-4000-8000-000000000004"
+        "AvatarId": "user_avatar/yapic/1000/fake-4",
+        "DisplayName": "Test User 4",
+        "Guid": "00000007-0000-4000-8000-000000000004",
+        "Nickname": "test-user-4",
+        "Uid": 4004,
+        "Version": 1793302709442679
       }
     }
   ]

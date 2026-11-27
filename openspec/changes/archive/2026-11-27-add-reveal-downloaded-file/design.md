@@ -39,7 +39,7 @@ impl ChatStore {
 
 `reveal_download` does nothing unless the state is `Saved(path)`. It then asks `path.try_exists()`:
 
-- `Ok(false)` (the user deleted or moved the file): the state is cleared with `set_download(original.clone(), None, cx)`, which emits `StoreEvent::Download` and puts the card back to «Скачать» (as after a cancel); no `Reveal`. Rejected: keeping `Saved` and doing nothing (a dead button that never explains itself), a new `DownloadFailure` variant or a toast (a new type in `chat-core`/`model.rs` and files outside this change's scope, for a rare case); the card that stops claiming «Сохранено» is the honest answer.
+- `Ok(false)` (the user deleted or moved the file): the state is cleared with `set_download(original.clone(), None, cx)`, which emits `StoreEvent::Download` and puts the card back to «Скачать» (as after a cancel); then `reveal_download` calls `cx.notify()` itself, because `set_download` does not notify and the card must re-render; no `Reveal`. Rejected: keeping `Saved` and doing nothing (a dead button that never explains itself), a new `DownloadFailure` variant or a toast (a new type in `chat-core`/`model.rs` and files outside this change's scope, for a rare case); the card that stops claiming «Сохранено» is the honest answer.
 - `Ok(true)` or `Err(_)` (for example a permission error on a stat): emit `StoreEvent::Reveal(path.clone())`; Finder decides. Only a definite "does not exist" clears the state.
 
 The stat runs on the UI thread: one metadata call on a local path, on a user click. Accepted.

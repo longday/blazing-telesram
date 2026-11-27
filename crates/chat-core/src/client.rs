@@ -175,6 +175,12 @@ enum Input {
     },
     LiveClosed(u64),
     Chats(Result<Vec<ChatSummary>, BackendError>),
+    /// The answer to a pinned-message preview read for `(chat, timestamp)`.
+    PinPreview {
+        chat: ChatId,
+        timestamp: MessageTs,
+        result: Result<Option<MessagePreview>, BackendError>,
+    },
     History(HistoryFetch),
     /// History requests that ended without answering: `.0` of them never posted a result.
     HistoryAbandoned(usize),
@@ -265,6 +271,19 @@ enum Phase {
     Expired,
 }
 
+/// An unanswered pinned-message preview read.
+struct PinRead {
+    /// `Engine::live_seq` when the read started: a history request whose `mark` is not above it
+    /// started before the read and may return an older copy of the message than this read will.
+    clock: u64,
+    /// A live change or a history page requested after the read started gave the message's newer
+    /// state meanwhile: the answer is dropped instead of overwriting it.
+    superseded: bool,
+    /// A resolution was asked for while the read was out (`Some(true)` when one of them wanted
+    /// a forced read): exactly one new read follows its answer.
+    pending: Option<bool>,
+}
+
 struct Engine<B> {
     backend: Arc<B>,
     config: ClientConfig,
@@ -333,6 +352,11 @@ struct Engine<B> {
     /// A creation ended unknown and the list could not be read afterwards, so its chat may exist unseen.
     /// The next creation reads the list first and is not sent unless that succeeds.
     creation_unverified: bool,
+    /// Pinned-message preview reads not yet answered: at most one per `(chat, timestamp)`.
+    pin_inflight: HashMap<(ChatId, MessageTs), PinRead>,
+    /// Per pinned message, `live_seq` when the read whose answer was applied last started:
+    /// a history page requested no later than that may hold an older copy and is not applied.
+    pin_fresh: HashMap<(ChatId, MessageTs), u64>,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -432,6 +456,42 @@ fn replay_live(
             }
             _ => {}
         }
+    }
+}
+
+/// How the chat row and the pinned bar word a message: `"Вы"` for an own message, else the
+/// author's name, with the shared one-line text.
+fn message_preview_of(message: &Message) -> MessagePreview {
+    MessagePreview {
+        author: if message.outgoing {
+            Some("Вы".to_owned())
+        } else {
+            message.author_name.clone()
+        },
+        text: message.body.preview_text(),
+        timestamp: message.timestamp,
+    }
+}
+
+/// Applies the pin of a chat-list entry (`incoming`) over the cached summary of the same chat
+/// (D5.2). An entry whose `pin_action_ts` is older than the cached one is stale: the cached pin
+/// and clock stay and only the rest of the entry applies. Otherwise the entry's pin wins, keeps
+/// the cached resolved preview when the pinned timestamp is the same, and the clock becomes the
+/// larger of the two (an absent value never lowers it).
+fn carry_pin(cached: &ChatSummary, incoming: &mut ChatSummary) {
+    if let (Some(new), Some(old)) = (incoming.pin_action_ts, cached.pin_action_ts)
+        && new < old
+    {
+        incoming.pinned_message = cached.pinned_message.clone();
+        incoming.pin_action_ts = cached.pin_action_ts;
+        return;
+    }
+    incoming.pin_action_ts = incoming.pin_action_ts.max(cached.pin_action_ts);
+    if let (Some(new), Some(old)) = (&mut incoming.pinned_message, &cached.pinned_message)
+        && new.timestamp == old.timestamp
+        && new.preview.is_none()
+    {
+        new.preview = old.preview.clone();
     }
 }
 
@@ -647,6 +707,8 @@ impl<B: Backend> Engine<B> {
             profile_inflight: false,
             creation_inflight: false,
             creation_unverified: false,
+            pin_inflight: HashMap::new(),
+            pin_fresh: HashMap::new(),
         }
     }
 
@@ -714,6 +776,11 @@ impl<B: Backend> Engine<B> {
             Input::Live { epoch, event } if epoch == self.epoch => self.handle_live(event),
             Input::LiveClosed(epoch) if epoch == self.epoch => self.connection_lost(),
             Input::Chats(result) => self.handle_chats(result),
+            Input::PinPreview {
+                chat,
+                timestamp,
+                result,
+            } => self.handle_pin_preview(chat, timestamp, result),
             Input::History(fetch) => self.handle_history(fetch),
             Input::HistoryAbandoned(count) => {
                 self.history_out = self.history_out.saturating_sub(count);
@@ -787,6 +854,7 @@ impl<B: Backend> Engine<B> {
                     })),
                     _ => {}
                 }
+                self.resolve_pin_preview(&chat, false);
                 if fetch {
                     self.spawn_history(chat, None);
                 }
@@ -868,7 +936,7 @@ impl<B: Backend> Engine<B> {
     }
 
     fn handle_connected(&mut self, result: Result<Connected, BackendError>) {
-        let (account, chats, live) = match result {
+        let (account, mut chats, live) = match result {
             Ok(connected) => connected,
             Err(BackendError::SessionExpired) => return self.expire(),
             Err(error) => {
@@ -880,6 +948,7 @@ impl<B: Backend> Engine<B> {
         if account != self.account {
             self.switch_account(account);
         }
+        self.carry_pins(&mut chats);
         let stored = self.cache.replace_chats(&chats);
         if self.db(stored).is_some() {
             let sorted = self.db(self.cache.chats()).unwrap_or(chats);
@@ -901,6 +970,10 @@ impl<B: Backend> Engine<B> {
         // A connection starts with nothing watched, including after a reconnect.
         self.backend.watch(self.open_chat.as_ref());
         self.set_connection(ConnectionState::Online);
+        // An edit or deletion made while we were away is not in the cached preview.
+        if let Some(chat) = self.open_chat.clone() {
+            self.resolve_pin_preview(&chat, true);
+        }
         if refresh_chats {
             let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
             tokio::spawn(async move { post(&inputs, Input::Chats(backend.chat_list().await)) });
@@ -969,6 +1042,8 @@ impl<B: Backend> Engine<B> {
         self.reaction_ledger.clear();
         self.reaction_inflight.clear();
         self.members_inflight.clear();
+        self.pin_inflight.clear();
+        self.pin_fresh.clear();
         self.profile_inflight = false;
         self.creation_inflight = false;
         self.creation_unverified = false;
@@ -1027,6 +1102,7 @@ impl<B: Backend> Engine<B> {
                 self.db(self.cache.upsert_message(&message));
                 self.emit(ClientEvent::MessageUpserted(message.clone()));
                 self.update_preview(&message);
+                self.follow_pin(&message);
             }
             LiveEvent::ReactionsChanged {
                 chat,
@@ -1074,11 +1150,19 @@ impl<B: Backend> Engine<B> {
                     timestamp,
                 });
                 self.mark_preview_deleted(&chat, timestamp);
+                self.follow_pin_deleted(&chat, timestamp);
             }
-            LiveEvent::ChatChanged(summary) => {
+            LiveEvent::ChatChanged(mut summary) => {
+                // A summary comes from a chat-list entry: the pin rules of a list refresh apply.
+                if let Some(cached) = self.db(self.cache.chat(&summary.id)).flatten() {
+                    carry_pin(&cached, &mut summary);
+                }
                 self.db(self.cache.upsert_chat(&summary));
+                let chat = summary.id.clone();
                 self.emit(ClientEvent::ChatUpdated(summary));
+                self.resolve_pin_preview(&chat, false);
             }
+            LiveEvent::PinChanged { chat, pinned, at } => self.handle_pin_push(chat, pinned, at),
             LiveEvent::Disconnected => {
                 if self.phase == Phase::Online {
                     self.phase = Phase::Reconnecting;
@@ -1146,14 +1230,18 @@ impl<B: Backend> Engine<B> {
     /// accepts for rows it may drop is kept (`reaction_ledger`). Returns the mark they replay from.
     fn begin_snapshots(&mut self, count: usize) -> u64 {
         self.history_out += count;
+        // Also a tick of the clock: a request started after any earlier read has a higher mark.
+        self.live_seq += 1;
         self.live_seq
     }
 
     /// Drops the ledger once no request is left that could put an older row back, except what an
     /// unanswered own choice still relies on: the state the cache accepted of its message, which a
-    /// later page may bring back.
+    /// later page may bring back. The same moment ends `pin_fresh`: it guards only against pages
+    /// already out.
     fn forget_idle_reactions(&mut self) {
         if self.history_out == 0 {
+            self.pin_fresh.clear();
             let inflight = &self.reaction_inflight;
             self.reaction_ledger.retain(|chat, held| {
                 held.retain(|timestamp, _| inflight.contains_key(&(chat.clone(), *timestamp)));
@@ -1249,7 +1337,7 @@ impl<B: Backend> Engine<B> {
         if matches!(message.body, MessageBody::Deleted) {
             return;
         }
-        let text = message.body.preview_text();
+        let preview = message_preview_of(message);
         let last = chat.last_message.as_ref().map(|p| p.timestamp);
         if last.is_some_and(|last| last > message.timestamp) {
             return;
@@ -1257,17 +1345,7 @@ impl<B: Backend> Engine<B> {
         if last != Some(message.timestamp) && !message.outgoing {
             chat.unread = chat.unread.saturating_add(1);
         }
-        // Same attribution as the backend's chat summaries.
-        let author = if message.outgoing {
-            Some("Вы".to_owned())
-        } else {
-            message.author_name.clone()
-        };
-        chat.last_message = Some(MessagePreview {
-            author,
-            text,
-            timestamp: message.timestamp,
-        });
+        chat.last_message = Some(preview);
         self.db(self.cache.upsert_chat(&chat));
         self.emit(ClientEvent::ChatUpdated(chat));
     }
@@ -1290,13 +1368,234 @@ impl<B: Backend> Engine<B> {
         self.emit(ClientEvent::ChatUpdated(row));
     }
 
+    // -- pinned message --------------------------------------------------------------------
+    // The pin lives in the chat's cached summary only (`ChatSummary.pinned_message`); none of
+    // this touches the `messages` table or `chat_state` (D5.5).
+
+    /// D5.1: a pin push. Unknown chats are ignored; a push older than the chat's pin clock is
+    /// dropped without a write or an event; with no timestamp the last arrival wins.
+    fn handle_pin_push(&mut self, chat: ChatId, pinned: Option<MessageTs>, at: Option<i64>) {
+        let Some(mut summary) = self.db(self.cache.chat(&chat)).flatten() else {
+            return;
+        };
+        if let (Some(at), Some(clock)) = (at, summary.pin_action_ts)
+            && at < clock
+        {
+            return;
+        }
+        summary.pin_action_ts = summary.pin_action_ts.max(at);
+        summary.pinned_message = pinned.map(|timestamp| match summary.pinned_message.take() {
+            Some(same) if same.timestamp == timestamp => same,
+            _ => PinnedMessage {
+                timestamp,
+                preview: None,
+            },
+        });
+        self.db(self.cache.upsert_chat(&summary));
+        self.emit(ClientEvent::PinChanged {
+            chat: chat.clone(),
+            pinned: summary.pinned_message,
+        });
+        self.resolve_pin_preview(&chat, false);
+    }
+
+    /// Puts the pins of a fresh chat list under D5.2 (see `carry_pin`).
+    fn carry_pins(&self, incoming: &mut [ChatSummary]) {
+        let Some(cached) = self.db(self.cache.chats()) else {
+            return;
+        };
+        let cached: HashMap<&ChatId, &ChatSummary> = cached.iter().map(|c| (&c.id, c)).collect();
+        for summary in incoming {
+            if let Some(old) = cached.get(&summary.id) {
+                carry_pin(old, summary);
+            }
+        }
+    }
+
+    /// D5.3: gives the open chat's pin a preview. `refresh` skips the cache and asks the server
+    /// even when a preview is shown (a reconnect: the cached text may predate an edit). Offline
+    /// or a failed read leaves things as they are, without an error event.
+    fn resolve_pin_preview(&mut self, chat: &ChatId, refresh: bool) {
+        if self.open_chat.as_ref() != Some(chat) {
+            return;
+        }
+        let Some(pin) = self
+            .db(self.cache.chat(chat))
+            .flatten()
+            .and_then(|summary| summary.pinned_message)
+        else {
+            return;
+        };
+        let timestamp = pin.timestamp;
+        if !refresh {
+            if pin.preview.is_some() {
+                return;
+            }
+            if let Some(message) = self.db(self.cache.message(chat, timestamp)).flatten() {
+                return self.set_pin_preview(chat, timestamp, message_preview_of(&message));
+            }
+        }
+        if !self.is_online() {
+            return;
+        }
+        let key = (chat.clone(), timestamp);
+        if let Some(read) = self.pin_inflight.get_mut(&key) {
+            read.pending = Some(read.pending.unwrap_or(false) || refresh);
+            return;
+        }
+        let clock = self.live_seq;
+        self.pin_inflight.insert(
+            key,
+            PinRead {
+                clock,
+                superseded: false,
+                pending: None,
+            },
+        );
+        let (backend, inputs, chat) = (self.backend.clone(), self.inputs.clone(), chat.clone());
+        tokio::spawn(async move {
+            let result = backend.message_preview(&chat, timestamp).await;
+            post(
+                &inputs,
+                Input::PinPreview {
+                    chat,
+                    timestamp,
+                    result,
+                },
+            );
+        });
+    }
+
+    fn handle_pin_preview(
+        &mut self,
+        chat: ChatId,
+        timestamp: MessageTs,
+        result: Result<Option<MessagePreview>, BackendError>,
+    ) {
+        // No entry: the account changed meanwhile, and the answer belongs to the old one.
+        let Some(read) = self.pin_inflight.remove(&(chat.clone(), timestamp)) else {
+            return;
+        };
+        match result {
+            Ok(Some(_)) if read.superseded => {}
+            Ok(Some(preview)) => {
+                // Only a page that is out now can hold an older copy; with none out nothing
+                // needs guarding, and the entry would only linger.
+                if self.history_out > 0 {
+                    self.pin_fresh.insert((chat.clone(), timestamp), read.clock);
+                }
+                self.set_pin_preview(&chat, timestamp, preview)
+            }
+            Ok(None) => {}
+            Err(BackendError::SessionExpired) => self.expire(),
+            Err(error) => {
+                tracing::debug!(kind = error_kind(&error), "pinned message preview failed")
+            }
+        }
+        if let Some(refresh) = read.pending {
+            self.resolve_pin_preview(&chat, refresh);
+        }
+    }
+
+    /// Stores `preview` as the preview of the chat's pin and emits it, only while the pin still
+    /// has `timestamp` (a result for a pin that changed meanwhile is dropped) and the preview
+    /// differs from what is there.
+    fn set_pin_preview(&mut self, chat: &ChatId, timestamp: MessageTs, preview: MessagePreview) {
+        let Some(mut summary) = self.db(self.cache.chat(chat)).flatten() else {
+            return;
+        };
+        let Some(pin) = summary
+            .pinned_message
+            .as_mut()
+            .filter(|pin| pin.timestamp == timestamp && pin.preview.as_ref() != Some(&preview))
+        else {
+            return;
+        };
+        pin.preview = Some(preview);
+        self.db(self.cache.upsert_chat(&summary));
+        self.emit(ClientEvent::PinChanged {
+            chat: chat.clone(),
+            pinned: summary.pinned_message,
+        });
+    }
+
+    /// A newer state of the pinned message than an unanswered read can bring: the read's answer
+    /// is dropped when it arrives.
+    fn supersede_pin_read(&mut self, chat: &ChatId, timestamp: MessageTs) {
+        if let Some(read) = self.pin_inflight.get_mut(&(chat.clone(), timestamp)) {
+            read.superseded = true;
+        }
+    }
+
+    /// D5.4: the pinned message was upserted: its preview follows the new copy.
+    fn follow_pin(&mut self, message: &Message) {
+        self.supersede_pin_read(&message.chat, message.timestamp);
+        self.set_pin_preview(
+            &message.chat,
+            message.timestamp,
+            message_preview_of(message),
+        );
+    }
+
+    /// D5.4: the pinned message was deleted: its preview becomes the deleted placeholder.
+    fn follow_pin_deleted(&mut self, chat: &ChatId, timestamp: MessageTs) {
+        self.supersede_pin_read(chat, timestamp);
+        let Some(pin) = self
+            .db(self.cache.chat(chat))
+            .flatten()
+            .and_then(|summary| summary.pinned_message)
+            .filter(|pin| pin.timestamp == timestamp)
+        else {
+            return;
+        };
+        let preview = match self.db(self.cache.message(chat, timestamp)).flatten() {
+            Some(message) => message_preview_of(&message),
+            None => MessagePreview {
+                author: pin.preview.and_then(|p| p.author),
+                text: DELETED_PREVIEW.into(),
+                timestamp,
+            },
+        };
+        self.set_pin_preview(chat, timestamp, preview);
+    }
+
+    /// D5.4: a history chunk that holds the pinned message refreshes its preview when the copy
+    /// differs.
+    fn follow_pin_in(&mut self, chunk: &HistoryChunk, started: u64) {
+        let Some(pin) = self
+            .db(self.cache.chat(&chunk.chat))
+            .flatten()
+            .and_then(|summary| summary.pinned_message)
+        else {
+            return;
+        };
+        let key = (chunk.chat.clone(), pin.timestamp);
+        // A page requested before the last applied read may hold an older copy than that read.
+        if self.pin_fresh.get(&key).is_some_and(|&seq| started <= seq) {
+            return;
+        }
+        if let Some(message) = chunk.messages.iter().find(|m| m.timestamp == pin.timestamp) {
+            // Only a page requested after an unanswered read started is newer than its answer.
+            if let Some(read) = self.pin_inflight.get_mut(&key)
+                && started > read.clock
+            {
+                read.superseded = true;
+            }
+            self.set_pin_preview(&chunk.chat, pin.timestamp, message_preview_of(message));
+        }
+    }
+
     fn handle_chats(&mut self, result: Result<Vec<ChatSummary>, BackendError>) {
         match result {
-            Ok(chats) => {
+            Ok(mut chats) => {
+                self.carry_pins(&mut chats);
                 let stored = self.cache.replace_chats(&chats);
                 self.db(stored);
                 let sorted = self.db(self.cache.chats()).unwrap_or(chats);
                 self.emit(ClientEvent::ChatsReplaced(sorted));
+                if let Some(chat) = self.open_chat.clone() {
+                    self.resolve_pin_preview(&chat, false);
+                }
             }
             Err(BackendError::SessionExpired) => self.expire(),
             Err(_) => {}
@@ -2287,6 +2586,7 @@ impl<B: Backend> Engine<B> {
                     fetch.mark,
                     chunk,
                 );
+                self.follow_pin_in(&chunk, fetch.mark);
                 self.settle_delivered(&chunk);
                 let chunk = if fetch.before.is_none() {
                     self.with_outbox(chunk)
@@ -2779,6 +3079,13 @@ mod tests {
         create_gate: Option<Arc<tokio::sync::Notify>>,
         /// Failures of the next `chat_list` calls, one per call, then the list again.
         chat_list_errors: VecDeque<BackendError>,
+        /// Answers of `message_preview` per message, repeated on every call; `Ok(None)` when unset.
+        preview_results: HashMap<(ChatId, MessageTs), Result<Option<MessagePreview>, BackendError>>,
+        /// Every `message_preview` call: chat and message.
+        preview_calls: Vec<(ChatId, MessageTs)>,
+        /// When set, `message_preview` of that message records its call, then waits here before
+        /// answering; other messages answer at once.
+        preview_gate: Option<(MessageTs, Arc<tokio::sync::Notify>)>,
         /// When set, `bootstrap` and `history` do a real TCP round trip with this echo server
         /// first, which panics ("IO is disabled") on a runtime built without the I/O driver.
         socket_addr: Option<std::net::SocketAddr>,
@@ -3085,6 +3392,29 @@ mod tests {
                 gate.notified().await;
             }
             result
+        }
+        async fn message_preview(
+            &self,
+            chat: &ChatId,
+            timestamp: MessageTs,
+        ) -> Result<Option<MessagePreview>, BackendError> {
+            let gate = {
+                let mut s = self.state();
+                s.preview_calls.push((chat.clone(), timestamp));
+                s.preview_gate
+                    .as_ref()
+                    .filter(|(gated, _)| *gated == timestamp)
+                    .map(|(_, gate)| gate.clone())
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            // Looked up after the gate: a test may change the answer while the call waits.
+            self.state()
+                .preview_results
+                .get(&(chat.clone(), timestamp))
+                .cloned()
+                .unwrap_or(Ok(None))
         }
     }
 
@@ -8312,5 +8642,6 @@ mod tests {
         }
     }
 
+    mod pins;
     mod reaction_model;
 }

@@ -1,0 +1,64 @@
+{
+  "status": "ok",
+  "data": {
+    "chat": {
+      "chat_id": "00000000-0000-4000-8000-0000000000b1_00000000-0000-4000-8000-0000000000a1",
+      "version": 1000000000000001,
+      "create_timestamp": 1000000000,
+      "private": true,
+      "public": false,
+      "rights": [
+        "read",
+        "write",
+        "mark_as_important",
+        "pin_message",
+        "edit_message",
+        "write_to_thread",
+        "manage_meetings",
+        "send_stickers",
+        "send_reactions",
+        "send_attachments",
+        "download_files",
+        "make_ext_call",
+        "share"
+      ],
+      "role": "member",
+      "role_version": 1000000000000001,
+      "members_count": 2,
+      "members": [
+        "00000000-0000-4000-8000-0000000000a1",
+        "00000000-0000-4000-8000-0000000000b1"
+      ],
+      "roles": { "admin": [] },
+      "organization_ids": [1]
+    },
+    "user": {
+      "guid": "00000000-0000-4000-8000-0000000000b1",
+      "display_name": "Test Person",
+      "public_name": "Test Person",
+      "registration_status": "U",
+      "version": 1000000000000002,
+      "account_category": 2,
+      "is_connect": true,
+      "contacts": [
+        { "organization_id": 1, "default": true, "type": "email", "value": "person@example.test" }
+      ],
+      "employees_info": [
+        {
+          "organization_id": 1,
+          "position": "Position",
+          "display_name": "Test Person",
+          "is_admin": true,
+          "department": { "id": "1", "name": "Department" }
+        }
+      ],
+      "employee_info": {
+        "organization_id": 1,
+        "position": "Position",
+        "display_name": "Test Person",
+        "is_admin": true,
+        "department": { "id": "1", "name": "Department" }
+      }
+    }
+  }
+}

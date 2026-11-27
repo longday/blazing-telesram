@@ -1,0 +1,44 @@
+{
+  "status": "ok",
+  "data": {
+    "chat_id": "0/0/00000000-0000-4000-8000-0000000000c1",
+    "version": 1000000000000001,
+    "create_timestamp": 1000000000,
+    "name": "Test group",
+    "description": "",
+    "public": false,
+    "rights": [
+      "leave",
+      "read",
+      "write",
+      "change",
+      "add_users",
+      "change_role",
+      "list_members",
+      "remove_users",
+      "mark_as_important",
+      "pin_message",
+      "delete_message",
+      "change_rights",
+      "edit_message",
+      "write_to_thread",
+      "manage_meetings",
+      "send_stickers",
+      "send_reactions",
+      "send_attachments",
+      "download_files",
+      "make_ext_call",
+      "share",
+      "create_invite_link"
+    ],
+    "role": "admin",
+    "role_version": 1000000000000001,
+    "members_count": 2,
+    "members": [
+      "00000000-0000-4000-8000-0000000000a1",
+      "00000000-0000-4000-8000-0000000000b1"
+    ],
+    "roles": { "admin": ["00000000-0000-4000-8000-0000000000a1"] },
+    "has_bots": false
+  }
+}
