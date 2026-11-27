@@ -8,6 +8,7 @@ use crate::widgets::{Icon, button, icon};
 use bt_chat_core::model::{ChatId, Delivery, Draft, Message, MessageBody, MessageTs, ReplyTarget};
 use bt_chat_core::reactions::{KNOWN, ReactionCode};
 use gpui::{prelude::*, *};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -144,7 +145,7 @@ fn copy_text(m: &Message) -> Option<&str> {
             caption.as_deref()
         }
         MessageBody::File { name, .. } => Some(name),
-        MessageBody::Deleted | MessageBody::Unsupported(_) => None,
+        MessageBody::Voice { .. } | MessageBody::Deleted | MessageBody::Unsupported(_) => None,
     }
 }
 
@@ -164,12 +165,13 @@ fn reactable(m: &Message) -> bool {
 
 fn quote_text(m: &Message) -> String {
     let text = match &m.body {
-        MessageBody::Text(text) => text.as_str(),
+        MessageBody::Text(text) => Cow::Borrowed(text.as_str()),
         MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            caption.as_deref().unwrap_or("Фото")
+            Cow::Borrowed(caption.as_deref().unwrap_or("Фото"))
         }
-        MessageBody::File { name, .. } => name,
-        MessageBody::Deleted | MessageBody::Unsupported(_) => "",
+        MessageBody::File { name, .. } => Cow::Borrowed(name.as_str()),
+        MessageBody::Voice { .. } => Cow::Owned(m.body.preview_text()),
+        MessageBody::Deleted | MessageBody::Unsupported(_) => Cow::Borrowed(""),
     };
     text.chars().take(QUOTE_CHARS).collect()
 }
@@ -1021,5 +1023,56 @@ impl Desktop {
                         .child(toast.text.clone()),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: it would bring gpui's `test` attribute macro over `#[test]`.
+    use super::{MenuAction, copy_text, editable, menu_actions, quote_text};
+    use bt_chat_core::model::{
+        ChatId, Delivery, MediaKind, MediaRef, Message, MessageBody, UserId,
+    };
+
+    fn voice() -> Message {
+        Message {
+            chat: ChatId("0/0/c".into()),
+            timestamp: 1,
+            author: UserId("u".into()),
+            author_name: None,
+            author_avatar: None,
+            outgoing: false,
+            body: MessageBody::Voice {
+                media: MediaRef {
+                    id: "b/1".into(),
+                    kind: MediaKind::File,
+                },
+                duration_ms: Some(5_000),
+                size: 4_000,
+                name: Some("v.ogg".into()),
+                waveform: None,
+            },
+            edited: false,
+            reply_to: None,
+            forwarded_from: None,
+            delivery: Delivery::Sent,
+            reactions: Default::default(),
+            important: false,
+        }
+    }
+
+    #[test]
+    fn a_voice_message_can_be_replied_to_and_quotes_its_preview_text() {
+        let m = voice();
+        assert_eq!(quote_text(&m), "Голосовое сообщение");
+        assert!(menu_actions(&m).contains(&MenuAction::Reply));
+    }
+
+    #[test]
+    fn a_voice_message_has_no_text_to_copy_and_cannot_be_edited() {
+        let m = voice();
+        assert_eq!(copy_text(&m), None);
+        assert!(!menu_actions(&m).contains(&MenuAction::Copy));
+        assert!(!editable(&m));
     }
 }
