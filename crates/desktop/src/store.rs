@@ -4685,6 +4685,33 @@ mod tests {
         }
 
         #[gpui::test]
+        fn a_video_message_requests_nothing_however_often_its_history_arrives(
+            cx: &mut TestAppContext,
+        ) {
+            let video = |ts: i64, id: &str| {
+                message(
+                    ts,
+                    MessageBody::Video {
+                        media: media(id, MediaKind::File),
+                        name: "clip.mp4".into(),
+                        size: 9,
+                        width: 4,
+                        height: 3,
+                        duration_ms: Some(42_000),
+                    },
+                )
+            };
+            let rig = Rig::new(cx);
+            rig.history(cx, vec![video(1, "m1"), video(2, "m2")]);
+            rig.history(cx, vec![video(1, "m1"), video(2, "m2")]);
+            assert_eq!(
+                rig.commands(),
+                [],
+                "no preview, no original, no playback copy"
+            );
+        }
+
+        #[gpui::test]
         fn a_playback_ref_is_never_fetched_but_a_thumbnail_still_is(cx: &mut TestAppContext) {
             let rig = Rig::new(cx);
             let playback = media("v1", MediaKind::File).playback();
