@@ -299,7 +299,12 @@ pub struct ChatStore {
     last_search: SearchId,
     /// Member lists by chat, held in memory only.
     members: HashMap<ChatId, MembersState>,
+    /// Chats whose `LoadMembers` was sent before the connection last came back and is still out. Its
+    /// answer may predate the reconnect, so it is dropped and the list is asked for once more.
+    members_stale: HashSet<ChatId>,
     profile: Option<ProfileState>,
+    /// The same for the profile read.
+    profile_stale: bool,
     creation: Option<CreationState>,
     /// The person of the creation in flight.
     creating: Option<UserId>,
@@ -349,7 +354,9 @@ impl ChatStore {
             search: None,
             last_search: SearchId(0),
             members: HashMap::new(),
+            members_stale: HashSet::new(),
             profile: None,
+            profile_stale: false,
             creation: None,
             creating: None,
             pending_open: None,
@@ -414,6 +421,16 @@ impl ChatStore {
                 self.media_requested.remove(&media);
             }
             ClientEvent::Connection(state) => {
+                // A read still out when the connection comes back was sent before it: its answer is
+                // not current (the HTTP request is not cancelled by the drop).
+                if state == ConnectionState::Online && self.connection != ConnectionState::Online {
+                    self.members_stale.extend(
+                        (self.members.iter())
+                            .filter(|(_, s)| **s == MembersState::Loading)
+                            .map(|(chat, _)| chat.clone()),
+                    );
+                    self.profile_stale = self.profile == Some(ProfileState::Loading);
+                }
                 self.connection = state;
                 cx.emit(StoreEvent::Connection);
             }
@@ -434,7 +451,9 @@ impl ChatStore {
                 self.downloads.clear();
                 self.search = None;
                 self.members.clear();
+                self.members_stale.clear();
                 self.profile = None;
+                self.profile_stale = false;
                 self.reactors = None;
                 self.cancel_refresh();
                 self.creation = None;
@@ -890,6 +909,7 @@ impl ChatStore {
         if self.members.get(&chat) == Some(&MembersState::Loading) {
             return;
         }
+        self.members_stale.remove(&chat);
         self.members.insert(chat.clone(), MembersState::Loading);
         self.send(Command::LoadMembers(chat.clone()));
         cx.emit(StoreEvent::Members(chat));
@@ -900,9 +920,15 @@ impl ChatStore {
         self.members.get(chat)
     }
 
-    /// Stores the outcome of a member load; an outcome for a chat that is not loading is ignored.
+    /// Stores the outcome of a member load; an outcome for a chat that is not loading is ignored. An
+    /// outcome of a load sent before the connection came back is dropped instead, and the list is read
+    /// once more, so it stays `Loading` until an answer to a request sent after the reconnect.
     fn finish_members(&mut self, chat: ChatId, outcome: MembersState, cx: &mut Context<Self>) {
         if self.members.get(&chat) != Some(&MembersState::Loading) {
+            return;
+        }
+        if self.members_stale.remove(&chat) {
+            self.send(Command::LoadMembers(chat));
             return;
         }
         if let MembersState::Ready(members) = &outcome {
@@ -919,6 +945,7 @@ impl ChatStore {
         if self.profile == Some(ProfileState::Loading) {
             return;
         }
+        self.profile_stale = false;
         self.profile = Some(ProfileState::Loading);
         self.send(Command::LoadProfile);
         cx.emit(StoreEvent::Profile);
@@ -931,6 +958,10 @@ impl ChatStore {
 
     fn finish_profile(&mut self, outcome: ProfileState, cx: &mut Context<Self>) {
         if self.profile != Some(ProfileState::Loading) {
+            return;
+        }
+        if std::mem::take(&mut self.profile_stale) {
+            self.send(Command::LoadProfile);
             return;
         }
         if let ProfileState::Ready(profile) = &outcome {

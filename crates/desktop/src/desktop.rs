@@ -708,7 +708,8 @@ impl Desktop {
     }
 
     /// The connection came back: an open panel or profile whose data was withheld as offline (or whose
-    /// load was refused offline) asks again, so nothing from before the drop is shown as current.
+    /// load was refused offline) asks again, so nothing from before the drop is shown as current. A load
+    /// still out is not asked twice: the store drops its answer and reads once more (`finish_members`).
     fn resume_reads(&mut self, cx: &mut Context<Self>) {
         let store = self.store.read(cx);
         if store.connection() != ConnectionState::Online {
