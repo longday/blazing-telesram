@@ -2171,6 +2171,7 @@ fn another_account_drops_the_composer_without_saving_it_as_a_draft(cx: &mut Test
 
     // The save that was pending when the account changed does not fire either.
     cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
     assert_eq!(writes(&h), []);
 }
 
