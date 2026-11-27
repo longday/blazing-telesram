@@ -384,11 +384,12 @@ fn id_string(value: &Json, key: &str) -> Option<String> {
     }
 }
 
-/// Standard-alphabet base64 (`+`, `/`, trailing `=` optional) to bytes. Anything else, a
-/// misplaced `=` or an impossible length is `None`, and so is an empty result.
+/// Standard-alphabet base64 (`+`, `/`) to bytes. Padding is optional, but when present it must
+/// complete the last quartet, and the bits after the last whole byte must be zero. Anything
+/// else, a misplaced `=` or an impossible length is `None`, and so is an empty result.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
     let digits = text.trim_end_matches('=');
-    if text.len() - digits.len() > 2 || digits.len() % 4 == 1 {
+    if digits.len() % 4 == 1 || (digits.len() < text.len() && text.len() % 4 != 0) {
         return None;
     }
     let mut bytes = Vec::with_capacity(digits.len() / 4 * 3 + 2);
@@ -410,7 +411,7 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
             acc &= (1 << bits) - 1;
         }
     }
-    (!bytes.is_empty()).then_some(bytes)
+    (acc == 0 && !bytes.is_empty()).then_some(bytes)
 }
 
 /// A packed waveform (two 4-bit levels per byte, high nibble first) as one level per element.
@@ -1234,7 +1235,8 @@ mod tests {
         // 100 and 101 bytes give 200 and 202 levels, none above 15.
         for bytes in [100_usize, 101] {
             let pad = if bytes == 100 { "==" } else { "=" };
-            let text = format!("{}{pad}", "/".repeat(bytes.div_ceil(3) * 4 - pad.len()));
+            let digits = bytes.div_ceil(3) * 4 - pad.len();
+            let text = format!("{}A{pad}", "/".repeat(digits - 1));
             let levels = waveform(voice(json!({ "Waveform": text }))).unwrap();
             assert_eq!(levels.len(), bytes * 2);
             assert!(levels.iter().all(|&l| l <= 15));
@@ -1260,6 +1262,11 @@ mod tests {
             json!("A"),
             json!("AAE=A"),
             json!("AA==="),
+            json!("QUJD="),
+            json!("QUJD=="),
+            json!("QQ="),
+            json!("QR=="),
+            json!("AAF="),
             json!("AA=A"),
             json!("AA E="),
             json!("-_8="),
@@ -1288,6 +1295,10 @@ mod tests {
         assert_eq!(decode_base64("QQ"), Some(b"A".to_vec()));
         assert_eq!(decode_base64("+/8="), Some(vec![0xfb, 0xff]));
         assert_eq!(decode_base64("QUJDRA=="), Some(b"ABCD".to_vec()));
+        // Padding must complete the last quartet, and the unused bits must be zero.
+        for bad in ["QUJD=", "QUJD==", "QQ=", "QUI==", "QQ===", "QR==", "AAF="] {
+            assert_eq!(decode_base64(bad), None, "{bad}");
+        }
         // An odd number of bytes is fine: every byte is two levels.
         assert_eq!(unpack_levels(&decode_base64("QUJD").unwrap()).len(), 6);
     }
