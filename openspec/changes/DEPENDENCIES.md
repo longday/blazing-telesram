@@ -74,7 +74,7 @@ Merge note (2026-11-27): PIN-app was merged into `main` as `270d503` (`--no-ff` 
 
 ## add-media-playback (MP)
 
-Proposal merged into `main` as `d7c0b82` (2026-11-28, `--no-ff` from `propose/media-playback` `47e68d3`, proposal review approved; only `openspec/changes/add-media-playback/**`; `git merge-tree` clean; `openspec validate --all --strict` 17/17). Nothing is implemented yet. Source: `openspec/changes/add-media-playback/tasks.md` (0.7 is ticked, host reading of `gpui`). The change adds no wire method and no write: `ALLOWED_METHODS` and the write-set tests stay unchanged.
+Proposal merged into `main` as `d7c0b82` (2026-11-28, `--no-ff` from `propose/media-playback` `47e68d3`, proposal review approved; only `openspec/changes/add-media-playback/**`; `git merge-tree` clean; `openspec validate --all --strict` 17/17). Status (2026-11-28): research 0.1-0.8 done (0.8 on `mp/0.8`); on `integ/add-media-playback` merged: 1.1, 1.2, 2.1, 2.2, 3.1, 4.1, 5.1, 5.2, 5.3, 5.5, 5.6; 4.2 is in review on `mp/4.2`; PB-W (1.3, 2.3, 3.2, 5.4, 5.7, 5.8) has not started. Source: `openspec/changes/add-media-playback/tasks.md`. The change adds no wire method and no write: `ALLOWED_METHODS` and the write-set tests stay unchanged.
 
 **Merge units** (tasks.md "Merge units"; rule 2 and rule 3: the unit holds the first consumer of everything it adds):
 
@@ -85,30 +85,30 @@ Proposal merged into `main` as `d7c0b82` (2026-11-28, `--no-ff` from `propose/me
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 0.1 | **ready**, **[live]**, reads only, no user: inventory of voice and video messages and the raw shape of their wire objects; trace deleted afterwards. **R1 fallback** (the admin web client sends a sample) is a write by another account: **not started without the main session's decision**; without it 0.1 ends with "none" and R2-R6 are declared blocked (defaults in `research.md`) | free live slot (it is free: PIN 6.2's remainder waits for the user), VM network and session | `research.md` |
-| 0.2 | **code part ready** (no dependency), then **[live]** on the 0.1 samples (one live task at a time, rule 5); merges alone | code: none; live run: 0.1 samples | `yandex-proto/src/media.rs`, `yandex-proto/src/bin/bt-probe.rs`, `research.md`; sample directory `~/bt/samples-<agent>/` (0700) |
-| 0.3 | blocked-by 0.2 samples, **[live]** (reads the samples with `file`, `afinfo`, `mdls` in the VM; does not delete them) | 0.2 | `research.md` |
-| 0.4 | blocked-by 0.3 samples (or a synthesised `afconvert` sample for a pure device check); VM, no account (the sound device and `AVAudioPlayer` in the VM) | 0.3 | `research.md` |
-| 0.5 | blocked-by 0.3 (formats to cover); VM, no account: candidate audio crates A, B, C of design D5 in a scratch crate outside the repository | 0.3 | `research.md` |
-| 0.6 | blocked-by 0.3 and 0.4 finished; VM, no account: `open <path>` hand-off of a video sample; **the last user of the samples, deletes `~/bt/samples-<agent>/`** and confirms with `ls` | 0.3, 0.4 | `research.md` |
+| 0.1 | **done** (2026-11-28, live, reads only): inventory of voice and video messages and the raw shape of their wire objects; samples exist, the R1 fallback was not needed | | `research.md` |
+| 0.2 | **done** (code merged alone, live run on the 0.1 samples) | 0.1 samples | `yandex-proto/src/media.rs`, `yandex-proto/src/bin/bt-probe.rs`, `research.md` |
+| 0.3 | **done**: formats, duration unit, waveform | 0.2 | `research.md` |
+| 0.4 | **done**: sound device and `AVAudioPlayer` in the VM | 0.3 | `research.md` |
+| 0.5 | **done**: candidate audio crates A, B, C of design D5 | 0.3 | `research.md` |
+| 0.6 | **done**: `open <path>` hand-off; deleted `~/bt/samples-<agent>/` | 0.3, 0.4 | `research.md` |
 | 0.7 | **done** (2026-11-28, host, `gpui` 0.2.2 source reading; `research.md` R7) | | `research.md` |
 | 0.8 | **done** (2026-11-28, `mp/0.8`): research closed, answers written into `design.md` (D2, D4, D5, D8), the **[blocked]** marks lifted, **4.2 unblocked**; the sample directory is gone (confirmed in the VM) | 0.1-0.6 | `design.md`, `tasks.md`, `research.md` |
-| 1.1 | PB-V: `WireBody::Voice.waveform` (base64 of 4-bit levels, high nibble first), live capture fixture `research-history-voice.json` | 0.1 | `wire.rs`, `tests/wire_fixtures.rs`, the fixture |
-| 1.2 | PB-V: keep `MediaTarget::Playback` (plain `file_shortterm/{id}`), delete `MediaTarget::VideoStream` and the probe's `stream` value (R2) | 0.2 (merged), 0.3 | `yandex-proto/src/media.rs`, `bin/bt-probe.rs` |
+| 1.1 | **merged** in integ, PB-V: `WireBody::Voice.waveform` (base64 of 4-bit levels, high nibble first), live capture fixture `research-history-voice.json` | 0.1 | `wire.rs`, `tests/wire_fixtures.rs`, the fixture |
+| 1.2 | **merged** in integ, PB-V: keep `MediaTarget::Playback` (plain `file_shortterm/{id}`), delete `MediaTarget::VideoStream` and the probe's `stream` value (R2) | 0.2 (merged), 0.3 | `yandex-proto/src/media.rs`, `bin/bt-probe.rs` |
 | 1.3 | PB-W: `WireBody::Video` from `PreviewHint.VideoPreview`, `select_file` `Video` arm, fixture `research-history-video.json` | 0.1, 1.1 and 1.2 merged | `wire.rs`, `tests/wire_fixtures.rs`, `bin/bt-probe.rs` |
-| 2.1 | ready (no dependency), PB-V: `MediaKind::Playback`, `MessageBody::Voice`, `preview_text`, `kind_name` arm (the workspace builds only with 3.1 and 5.3 in the unit) | none | `chat-core/src/model.rs`, `cache.rs`, `fixtures.rs` |
-| 2.2 | PB-V: `start_download` accepts `Playback` (D3), its own semaphore, playback directory wiped at start and in `switch_account` | 2.1 | `chat-core/src/client.rs` (and `client/tests/` if tests live there) |
+| 2.1 | **merged** in `integ/add-media-playback`, PB-V: `MediaKind::Playback`, `MessageBody::Voice`, `preview_text`, `kind_name` arm (the workspace builds only with 3.1 and 5.3 in the unit) | none | `chat-core/src/model.rs`, `cache.rs`, `fixtures.rs` |
+| 2.2 | **merged** in integ, PB-V: `start_download` accepts `Playback` (D3), its own semaphore, playback directory wiped at start and in `switch_account` | 2.1 | `chat-core/src/client.rs` (and `client/tests/` if tests live there) |
 | 2.3 | PB-W: `MessageBody::Video`, preview text «Видео» | 2.1 merged | `model.rs`, `fixtures.rs`, `cache.rs` only if a match needs it |
-| 3.1 | PB-V: `body()` maps `Voice`, `download_target` for `Playback` / `File` | 1.1, 1.2, 2.1 | `desktop/src/yandex_backend.rs` |
+| 3.1 | **merged** in integ, PB-V: `body()` maps `Voice`, `download_target` for `Playback` / `File` | 1.1, 1.2, 2.1 | `desktop/src/yandex_backend.rs` |
 | 3.2 | PB-W: `Video` only for a whitelisted extension (D8, one `pub(crate)` constant also used by 5.7) | 1.3, 2.3, 3.1 merged | `yandex_backend.rs` |
-| 4.1 | PB-V: `player.rs` (`AudioOutput`, `Player`, `VoiceView`, fake output in test support) | 2.1, 2.2 | `desktop/src/player.rs`, `main.rs` (module list line) |
-| 4.2 | **[blocked: 0.8]**, PB-V: `audio.rs`, the backend chosen by D5, `Cargo.toml` (pinned `=` versions), `Cargo.lock`, `main.rs` registers `AudioFactory` | 0.8, 4.1 | `desktop/src/audio.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md`, `main.rs` |
-| 5.1 | PB-V: `want_media` ignores `Playback` like `File` | 2.1 | `desktop/src/store.rs` |
-| 5.2 | ready (no dependency), PB-V: `duration_label`, size line helper | none | `desktop/src/format.rs` |
-| 5.3 | PB-V: the voice bubble (D7), `RowContext` gets the `Player` handle | 2.1, 4.1, 5.2 | `desktop/src/timeline.rs`, `theme.rs` only if a colour is missing |
+| 4.1 | **merged** in integ, PB-V: `player.rs` (`AudioOutput`, `Player`, `VoiceView`, fake output in test support) | 2.1, 2.2 | `desktop/src/player.rs`, `main.rs` (module list line) |
+| 4.2 | **in review** on `mp/4.2`, PB-V: `audio.rs`, the backend chosen by D5 (A-engine), `Cargo.toml` (pinned `=` versions), `Cargo.lock`, `main.rs` registers `AudioFactory` | 0.8, 4.1 | `desktop/src/audio.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md`, `main.rs` |
+| 5.1 | **merged** in integ, PB-V: `want_media` ignores `Playback` like `File` | 2.1 | `desktop/src/store.rs` |
+| 5.2 | **merged** in integ, PB-V: `duration_label`, size line helper | none | `desktop/src/format.rs` |
+| 5.3 | **merged** in integ, PB-V: the voice bubble (D7), `RowContext` gets the `Player` handle | 2.1, 4.1, 5.2 | `desktop/src/timeline.rs`, `theme.rs` only if a colour is missing |
 | 5.4 | PB-W: the video card (D8) | 2.3, 5.3 merged, 5.7 | `timeline.rs` |
-| 5.5 | PB-V: `Desktop` owns the `Player`, stops it on chat change, delete and removal | 4.1, 5.3 | `desktop/src/desktop.rs` |
-| 5.6 | PB-V: voice playback section at the end of `tests.rs` (`// ---- voice playback (PB 5.6) ----`) | 5.1, 5.3, 5.5 | `desktop/src/tests.rs` |
+| 5.5 | **merged** in integ, PB-V: `Desktop` owns the `Player`, stops it on chat change, delete and removal | 4.1, 5.3 | `desktop/src/desktop.rs` |
+| 5.6 | **merged** in integ, PB-V: voice playback section at the end of `tests.rs` (`// ---- voice playback (PB 5.6) ----`) | 5.1, 5.3, 5.5 | `desktop/src/tests.rs` |
 | 5.7 | PB-W: `Player::open_video`, `PlayerEvent::OpenExternal`, the whitelist checked on the actual path before every emit; `main.rs` arm `cx.open_with_system` | 3.2, 4.1 merged | `player.rs`, `main.rs` |
 | 5.8 | PB-W: video playback section of `tests.rs` (`// ---- video playback (PB 5.8) ----`) | 5.4, 5.7 | `tests.rs` |
 | 6.1 | final run per unit on the integration branch and again on `main` after each merge (see PB-V above); results recorded here by the Integrator | the unit | build/test/lint matrix |
@@ -117,14 +117,14 @@ Proposal merged into `main` as `d7c0b82` (2026-11-28, `--no-ff` from `propose/me
 
 File ownership (rule 1, one owner at task granularity; the PB-V files are held by the integration branch until PB-V merges, then PB-W's tasks take them): `media.rs` and `bin/bt-probe.rs` (0.2, then 1.2, then 1.3); `wire.rs` and `tests/wire_fixtures.rs` (1.1, then 1.3); `model.rs`, `cache.rs`, `fixtures.rs` (2.1, then 2.3); chat-core `client.rs` (2.2); `yandex_backend.rs` (3.1, then 3.2); `player.rs` (4.1, then 5.7); `main.rs` (4.1, 4.2, then 5.7; serialise: 4.1 module list line, then 4.2, then 5.7); `audio.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md` (4.2); `store.rs` (5.1); `format.rs` (5.2); `timeline.rs` and `theme.rs` (5.3, then 5.4); `desktop.rs` (5.5); `tests.rs` (5.6, then 5.8); `research.md` (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8 one after another); `design.md` and `tasks.md` (0.8; ticks by the Integrator at merge). **Overlap with other open changes: none in flight** (CM has only the blocked live tasks 5.1/5.3, PIN only live 6.2 and the unticked 3.3 on `main`; PIN's `research.md` is another file); a task that is not started holds nothing (rule 6).
 
-Order: 0.1 (live) -> 0.2 code, merged alone -> 0.2 live run on the 0.1 samples -> 0.3 -> 0.4, 0.5 (VM, no account) -> 0.6 (deletes the samples) -> 0.8 (lifts 4.2); PB-V tasks without research (2.1, 5.2, then 2.2, 4.1, 5.1, 5.3, 5.5, 5.6) can run meanwhile on `integ/add-media-playback`, 1.1 after 0.1, 1.2 after 0.2/0.3, 3.1 after 1.1, 1.2, 2.1, 4.2 after 0.8 and 4.1 -> PB-V merge -> PB-W -> 6.2 -> 6.3 archive.
+Order (done: research 0.1-0.8 and the PB-V tasks listed above): 4.2 review and merge into `integ/add-media-playback` -> PB-V merge into `main` -> PB-W (1.3, 2.3, 3.2, 5.7, 5.4, 5.8) -> 6.2 -> 6.3 archive.
 
 ## Ready now
 
 - **Nothing is startable without the user** in CM or PIN. PIN 6.2 part 1 (strip/marker in the admin chat) is done and merged (`3233c95`), together with the 4.5 fix; the branches `pins/6.2`, `pins/bar-preview` and their worktrees are removed. PIN 3.3 code, PIN 1.5 and PIN 4.5 are on `main` (`a395100`, `db5950c`, `3233c95`). What is left for PIN (6.2 self-chat UI path with the live re-check of 4.5, 6.2 Q6, closing 3.3, then 6.3 archive) needs the user's web session of the app account.
 - RL: archived (2026-11-28); nothing is left open.
 - CM: CM-G (6.3 + 6.4) and 7.1 are on `main` (`942a109`, `18141dc`); only 5.1 and 5.3 are open, both blocked on the user (a target with no existing private chat), and they alone block the CM archive; 6.F does not run (6.2 PASS).
-- **MP: the research is closed (0.1-0.8 done), no task is blocked by it.** Startable without further research: 0.2 code part (merges alone), 1.1, 1.2, 2.1, 5.2 and then the PB-V tasks in their order (the integration branch `integ/add-media-playback` is created from `main` when the first PB-V task starts), 4.2 after 4.1. The archive 6.3 comes last.
+- **MP: the research is closed (0.1-0.8 done) and the PB-V tasks except 4.2 are merged in `integ/add-media-playback`; 4.2 is in review on `mp/4.2`.** Next: 4.2 merge, PB-V merge into `main`, then PB-W; the archive 6.3 comes last.
 
 ## Needs the user
 

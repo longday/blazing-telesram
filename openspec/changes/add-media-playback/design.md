@@ -161,7 +161,7 @@ The card (`timeline.rs`): the same 300 px layout as `file_card`, with a **44 px 
 
 ### D9. Download stays independent of Play
 
-Voice and video bubbles show the Download action row with the original's key `media.original()` (D7, D8), exactly as a file card: same `store.download`, same Downloads destination, name rules, progress, cancel, retry, reveal. Voice's download name is `FileInfo.Name` (R1: present and `.ogg` on all 17), else «Голосовое сообщение.ogg» (the sanitiser's fallback name is «Файл»). Play's transfer is a different key (D3) so both can run at once. The attachment-download spec changes only where the new behaviour touches it (two modified requirements).
+Voice and video bubbles show the Download action row with the original's key `media.original()` (D7, D8), exactly as a file card: same `store.download`, same Downloads destination, name rules, progress, cancel, retry, reveal. Voice's download name is `FileInfo.Name` (R1: present and `.ogg` on all 17), else «Голосовое сообщение» with no extension (the code's `VOICE_NAME`; it is only a fallback for a name the server never omitted in the account). Play's transfer is a different key (D3) so both can run at once. The attachment-download spec changes only where the new behaviour touches it (two modified requirements).
 
 ### D10. What is deliberately not built, and why
 
