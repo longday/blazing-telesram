@@ -9411,6 +9411,15 @@ fn voice_view(h: &Harness, cx: &mut VisualTestContext, i: i64) -> VoiceView {
         .read_with(cx, |d, cx| d.player.read(cx).voice(&key))
 }
 
+/// A message whose file was opened and that is not playing now: idle at 0, with the length the
+/// output measured (the fake's default, 14 s) kept for the bubble.
+fn idle_after_open() -> VoiceView {
+    VoiceView {
+        total: Some(Duration::from_secs(14)),
+        ..VoiceView::default()
+    }
+}
+
 fn voice_phase(h: &Harness, cx: &mut VisualTestContext, i: i64) -> VoicePhase {
     voice_view(h, cx, i).phase
 }
@@ -9644,7 +9653,7 @@ fn a_second_voice_message_stops_the_first(cx: &mut TestAppContext) {
     click(cx, msg!(6, "voice-toggle"));
     assert_eq!(
         voice_view(&h, cx, 5),
-        VoiceView::default(),
+        idle_after_open(),
         "the first is back at its start"
     );
     assert_eq!(voice_phase(&h, cx, 6), VoicePhase::Playing);
@@ -9693,7 +9702,7 @@ fn the_end_resets_the_bubble_and_play_starts_again_from_the_start(cx: &mut TestA
     );
     assert_eq!(
         voice_view(&h, cx, 5),
-        VoiceView::default(),
+        idle_after_open(),
         "idle again: the bubble shows the duration"
     );
     assert_eq!(h.fake.take_calls(), [Call::Stop], "no sound continues");
@@ -9722,14 +9731,14 @@ fn switching_chat_stops_the_sound_and_coming_back_does_not_resume_it(cx: &mut Te
     h.fake.take_calls();
 
     click(cx, row!("p"));
-    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(voice_view(&h, cx, 5), idle_after_open());
     assert_eq!(h.fake.take_calls(), [Call::Stop]);
     let reads = h.fake.position_reads();
     voice_wait(cx, 1_000);
     assert_eq!(h.fake.position_reads(), reads, "no timer is left");
 
     click(cx, row!("g"));
-    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(voice_view(&h, cx, 5), idle_after_open());
     assert_eq!(h.fake.take_calls(), [], "nothing resumes by itself");
 }
 
@@ -9755,7 +9764,7 @@ fn a_playing_message_that_is_deleted_stops_and_shows_the_placeholder(cx: &mut Te
             timestamp: ts(5),
         }],
     );
-    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(voice_view(&h, cx, 5), idle_after_open());
     assert_eq!(h.fake.take_calls(), [Call::Stop]);
     assert!(shown(cx, msg!(5, "deleted")));
 

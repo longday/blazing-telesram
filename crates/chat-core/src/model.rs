@@ -448,6 +448,10 @@ pub enum ClientEvent {
     Connection(ConnectionState),
     SessionExpired,
     SignedOut,
+    /// The server reported another account than the stored session claimed. Everything the UI
+    /// holds of the previous account (chats, timelines, files, running transfers) is void; the
+    /// chat list of the new account and its drafts follow.
+    AccountSwitched,
     /// Persisted drafts, once at startup.
     Drafts(Vec<Draft>),
     /// The pending message `payload` was settled; drop it before the server copy arrives as
