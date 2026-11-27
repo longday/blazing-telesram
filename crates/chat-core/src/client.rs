@@ -769,6 +769,12 @@ async fn run_download<B: Backend>(
     let mode = if landing.private { 0o600 } else { 0o666 };
     let (mut file, partial) =
         create_partial_with_mode(dir, &name, mode).map_err(DownloadError::Destination)?;
+    // A playback folder swapped for a symlink must not make the cleanup remove by name through it.
+    let partial = if landing.private {
+        partial.guard_cleanup(require_plain_playback_path)
+    } else {
+        partial
+    };
     let throttle = Throttle::default();
     let report = |received: u64, total: Option<u64>| {
         if throttle.admit(Instant::now(), received, total) {
@@ -8350,6 +8356,8 @@ mod tests {
     #[test]
     fn a_playback_folder_swapped_for_a_symlink_during_the_transfer_is_not_finalised_into() {
         let outside = tempfile::tempdir().unwrap();
+        // The name the partial had: removing it by name through the swapped path would hit this.
+        fs::write(outside.path().join("playback-b%2F1.mp4.part"), "foreign").unwrap();
         let gate = Arc::new(tokio::sync::Notify::new());
         let h = start_downloads(&[("b/1", b"hello world")], |s| {
             s.download_gate = Some(gate.clone())
@@ -8367,8 +8375,37 @@ mod tests {
                 reason: DownloadFailure::Destination,
             }
         });
-        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(outside.path().join("playback-b%2F1.mp4.part")).unwrap(),
+            b"foreign",
+            "a foreign file behind the swapped path must survive the cleanup"
+        );
         assert!(!moved.join("playback-b%2F1.mp4").exists());
+    }
+
+    #[test]
+    fn cancelling_after_the_playback_folder_was_swapped_removes_nothing_outside() {
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("playback-b%2F1.mp4.part"), "foreign").unwrap();
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start_downloads(&[("b/1", b"hello world")], |s| {
+            s.download_gate = Some(gate.clone())
+        });
+        h.online();
+        h.download(&playback("b/1"), "a.mp4");
+        h.wait_for("the transfer", |s| s.download_calls.len() == 1);
+        fs::rename(h.playback_dir(), h.dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), h.playback_dir()).unwrap();
+        h.client.send(Command::CancelDownload(playback("b/1")));
+        h.next("cancelled", |e| {
+            *e == ClientEvent::DownloadCancelled(playback("b/1"))
+        });
+        h.quiet();
+        assert_eq!(
+            fs::read(outside.path().join("playback-b%2F1.mp4.part")).unwrap(),
+            b"foreign"
+        );
     }
 
     fn hits(title: &str) -> SearchHits {
