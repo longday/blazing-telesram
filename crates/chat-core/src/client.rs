@@ -1093,8 +1093,14 @@ impl<B: Backend> Engine<B> {
                         message.inherit_reactions(&cached);
                         // The server stamps `LastEditTimestamp` on a flag-only change too (a mark
                         // or a clear repeats the whole message, observed live, research Q4): the
-                        // text is the same, so it is not an edit and must not read as one.
-                        if cached.body == message.body && cached.important != message.important {
+                        // content (text, quote, forward) is the same, so it is not an edit and
+                        // must not read as one. Author name and avatar are resolved display data,
+                        // not content, and a push may carry them differently from history.
+                        if cached.body == message.body
+                            && cached.reply_to == message.reply_to
+                            && cached.forwarded_from == message.forwarded_from
+                            && cached.important != message.important
+                        {
                             message.edited = cached.edited;
                         }
                     }
@@ -3958,6 +3964,50 @@ mod tests {
         h.fake.push(LiveEvent::MessageUpserted(both));
         let shown = h.upserted("edit with flag");
         assert_eq!((shown.important, shown.edited), (true, true));
+    }
+
+    #[test]
+    fn a_changed_quote_or_forward_with_the_flag_is_still_an_edit() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        let mut quoted = msg("a", 10, "hello");
+        quoted.reply_to = Some(ReplyQuote {
+            author: Some("x".into()),
+            text: "old".into(),
+            timestamp: Some(3),
+        });
+        h.fake.push(LiveEvent::MessageUpserted(quoted.clone()));
+        h.upserted("quoted copy");
+        let mut requoted = flag_flip(&quoted, true);
+        requoted.reply_to = Some(ReplyQuote {
+            author: Some("x".into()),
+            text: "new".into(),
+            timestamp: Some(4),
+        });
+        h.fake.push(LiveEvent::MessageUpserted(requoted));
+        let shown = h.upserted("requoted with flag");
+        assert_eq!((shown.important, shown.edited), (true, true));
+
+        let mut forwarded = msg("a", 11, "fwd");
+        forwarded.forwarded_from = Some("A".into());
+        h.fake.push(LiveEvent::MessageUpserted(forwarded.clone()));
+        h.upserted("forwarded copy");
+        let mut reforwarded = flag_flip(&forwarded, true);
+        reforwarded.forwarded_from = Some("B".into());
+        h.fake.push(LiveEvent::MessageUpserted(reforwarded));
+        let shown = h.upserted("reforwarded with flag");
+        assert_eq!((shown.important, shown.edited), (true, true));
+
+        // The same quote and forward with only the flag changed is still not an edit.
+        let mut plain = msg("a", 12, "kept");
+        plain.reply_to = quoted.reply_to.clone();
+        plain.forwarded_from = Some("A".into());
+        h.fake.push(LiveEvent::MessageUpserted(plain.clone()));
+        h.upserted("quote and forward copy");
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&plain, true)));
+        let shown = h.upserted("quote kept, flag only");
+        assert_eq!((shown.important, shown.edited), (true, false));
     }
 
     #[test]
