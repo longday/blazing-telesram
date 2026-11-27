@@ -2,8 +2,9 @@
 
 use crate::desktop::Desktop;
 use crate::format::{
-    Clock, avatar_color, clock_time, day_key, day_label, fit_thumbnail, human_size,
+    Clock, avatar_color, clock_time, day_key, day_label, duration_label, fit_thumbnail, human_size,
 };
+use crate::player::{Player, VoiceKey, VoicePhase, VoiceView, failure_label};
 use crate::store::ChatStore;
 use crate::theme::*;
 use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
@@ -16,6 +17,7 @@ use bt_chat_core::reactions::{NEUTRAL_GLYPH, ReactionCount, emoji};
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 const GROUP_GAP_US: i64 = 5 * 60 * 1_000_000;
 const BUBBLE_MAX: f32 = 480.;
@@ -25,6 +27,25 @@ const AVATAR: f32 = 36.;
 /// Width available to the content of a bubble.
 const CONTENT_W: f32 = BUBBLE_MAX - 2. * BUBBLE_PAD_X;
 const GRID_GAP: f32 = 4.;
+/// Bars of a voice bubble's waveform (design D7).
+const VOICE_BARS: usize = 28;
+const VOICE_CIRCLE: f32 = 40.;
+const VOICE_GAP: f32 = 10.;
+const VOICE_BAR_W: f32 = 3.;
+const VOICE_BAR_PITCH: f32 = 6.;
+const VOICE_BARS_W: f32 = VOICE_BARS as f32 * VOICE_BAR_PITCH;
+/// The slot of the time label, also the room of a failure text: two short lines wrap inside it.
+const VOICE_TIME_W: f32 = 92.;
+/// Fixed width of a voice bubble's content, so it never changes size between states.
+const VOICE_W: f32 = VOICE_CIRCLE + VOICE_GAP + VOICE_BARS_W + VOICE_GAP + VOICE_TIME_W;
+/// Bar height range in px; a message without a waveform shows `VOICE_BAR_FLAT` bars.
+const VOICE_BAR_MIN: f32 = 4.;
+const VOICE_BAR_MAX: f32 = 26.;
+const VOICE_BAR_FLAT: f32 = 8.;
+/// The tallest level of a message's waveform (levels run 0 to 15, 0 silence).
+const WAVEFORM_MAX_LEVEL: u8 = 15;
+/// Name offered to the Download action and to the playback copy when the message has none.
+const VOICE_NAME: &str = "Голосовое сообщение";
 
 /// Consecutive messages by one author within a few minutes of each other on the same day share a group.
 pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
@@ -43,6 +64,7 @@ pub type RowBounds = Rc<RefCell<Vec<(MessageTs, Bounds<Pixels>)>>>;
 #[derive(Clone)]
 pub struct RowContext {
     pub store: Entity<ChatStore>,
+    pub player: Entity<Player>,
     pub desktop: WeakEntity<Desktop>,
     pub chat: ChatId,
     pub clock: Clock,
@@ -130,12 +152,12 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
                 .gap(px(8.))
                 .when(m.outgoing, |d| d.justify_end())
                 .children(avatar_slot)
-                .child(bubble(ctx, store, m, in_group_chat && group_start)),
+                .child(bubble(ctx, store, cx, m, in_group_chat && group_start)),
         )
         .into_any_element()
 }
 
-fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> Div {
+fn bubble(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message, show_name: bool) -> Div {
     let ts = m.timestamp;
     let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
     div()
@@ -182,7 +204,7 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
         .when_some(m.reply_to.as_ref(), |d, quote| {
             d.child(reply_quote(ts, quote))
         })
-        .child(body(ctx, store, m))
+        .child(body(ctx, store, cx, m))
         .when_some(failure(ctx, m), |d, failure| d.child(failure))
         .when_some(reaction_chips(ctx, m), |d, chips| d.child(chips))
         .child(
@@ -351,7 +373,7 @@ fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {
         )
 }
 
-fn body(ctx: &RowContext, store: &ChatStore, m: &Message) -> AnyElement {
+fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElement {
     let ts = m.timestamp;
     match &m.body {
         MessageBody::Text(text) => text_block(text.clone()).into_any_element(),
@@ -379,6 +401,20 @@ fn body(ctx: &RowContext, store: &ChatStore, m: &Message) -> AnyElement {
         MessageBody::File { media, name, size } => {
             file_card(ctx, store, ts, media, name, *size).into_any_element()
         }
+        MessageBody::Voice {
+            media,
+            duration_ms,
+            name,
+            waveform,
+            ..
+        } => voice_bubble(
+            ctx,
+            store,
+            cx,
+            m,
+            (media, *duration_ms, name.as_deref(), waveform.as_deref()),
+        )
+        .into_any_element(),
         MessageBody::Deleted => div()
             .debug_selector(move || format!("msg-{ts}-deleted"))
             .italic()
@@ -585,6 +621,196 @@ fn file_card(
         )
 }
 
+/// What the circle, the time slot and the lit bars show for one player state (design D7). Pure, so
+/// every state's text is testable without a window.
+#[derive(Debug, PartialEq, Eq)]
+struct VoiceFace {
+    glyph: &'static str,
+    /// The time, or the failure text that takes its place.
+    label: String,
+    failed: bool,
+    /// Bars before the playhead.
+    lit: usize,
+}
+
+fn voice_face(view: &VoiceView, wire_ms: Option<u64>) -> VoiceFace {
+    let total = shown_total_ms(wire_ms, view.total).map(duration_label);
+    let total = total.unwrap_or_default();
+    let elapsed = duration_label(view.position.as_millis() as u64);
+    let lit = view.total.map_or(0, |total| lit_bars(view.position, total));
+    let (glyph, label, failed, lit) = match view.phase {
+        VoicePhase::Idle => ("▶", total, false, 0),
+        VoicePhase::Loading => ("…", total, false, 0),
+        VoicePhase::Playing => ("⏸", elapsed, false, lit),
+        VoicePhase::Paused if view.position.is_zero() => ("▶", total, false, lit),
+        VoicePhase::Paused => ("▶", elapsed, false, lit),
+        VoicePhase::Failed(failure) => ("▶", failure_label(failure).to_owned(), true, 0),
+    };
+    VoiceFace {
+        glyph,
+        label,
+        failed,
+        lit,
+    }
+}
+
+/// The total the bubble shows: the length the message carries until the file is open, then the file's
+/// own length, except that a difference of up to a second keeps the first figure so the label does not
+/// flicker when the file opens (design D6).
+fn shown_total_ms(wire_ms: Option<u64>, file: Option<Duration>) -> Option<u64> {
+    let file_ms = file.map(|f| f.as_millis() as u64);
+    match (wire_ms, file_ms) {
+        (Some(wire), Some(file)) if wire.abs_diff(file) <= 1000 => Some(wire),
+        (_, Some(file)) => Some(file),
+        (wire, None) => wire,
+    }
+}
+
+/// How many of the bars lie before the playhead; none for an unknown or empty total, all at the end.
+fn lit_bars(position: Duration, total: Duration) -> usize {
+    let total = total.as_millis();
+    if total == 0 {
+        return 0;
+    }
+    let lit = position.as_millis() * VOICE_BARS as u128 / total;
+    lit.min(VOICE_BARS as u128) as usize
+}
+
+/// The waveform samples reduced to one value per bar: each bar takes the maximum of the samples it
+/// spans, and with fewer samples than bars each sample spans several bars. `None` for no samples.
+fn resample_waveform(samples: &[u8]) -> Option<[u8; VOICE_BARS]> {
+    let n = samples.len();
+    if n == 0 {
+        return None;
+    }
+    let mut bars = [0; VOICE_BARS];
+    for (i, bar) in bars.iter_mut().enumerate() {
+        let start = i * n / VOICE_BARS;
+        let end = ((i + 1) * n / VOICE_BARS).clamp(start + 1, n);
+        *bar = samples[start..end].iter().copied().max().unwrap_or(0);
+    }
+    Some(bars)
+}
+
+/// Bar heights in px: the levels (0 to `WAVEFORM_MAX_LEVEL`, 0 silence) scaled into the bar range, so a
+/// silent bar is still visible; flat bars when there is no waveform.
+fn bar_heights(waveform: Option<&[u8]>) -> [f32; VOICE_BARS] {
+    let Some(bars) = waveform.and_then(resample_waveform) else {
+        return [VOICE_BAR_FLAT; VOICE_BARS];
+    };
+    bars.map(|level| {
+        let level = f32::from(level.min(WAVEFORM_MAX_LEVEL));
+        VOICE_BAR_MIN + (VOICE_BAR_MAX - VOICE_BAR_MIN) * level / f32::from(WAVEFORM_MAX_LEVEL)
+    })
+}
+
+/// The voice bubble of design D7: a circle that plays and pauses, the waveform with the played part
+/// lit, the time (or the failure text), and below it the Download action row of the original. Every
+/// slot has a fixed size, so the bubble is the same size in every state. Debug selectors:
+/// `msg-{ts}-voice` (the bubble), `-voice-toggle` (the circle), `-voice-bars`, `-voice-time`, and the
+/// action row's own. The circle's element id is `voice-toggle-{ts}`.
+fn voice_bubble(
+    ctx: &RowContext,
+    store: &ChatStore,
+    cx: &App,
+    m: &Message,
+    voice: (&MediaRef, Option<u64>, Option<&str>, Option<&[u8]>),
+) -> Div {
+    let (media, duration_ms, name, waveform) = voice;
+    let ts = m.timestamp;
+    let key = VoiceKey {
+        chat: ctx.chat.clone(),
+        timestamp: ts,
+    };
+    let face = voice_face(&ctx.player.read(cx).voice(&key), duration_ms);
+    let original = media.original();
+    let online = store.connection() == ConnectionState::Online;
+    let line = action_line(store.download_state(&original), online);
+    let toggle = {
+        let (player, original, name) = (
+            ctx.player.clone(),
+            original.clone(),
+            name.map(str::to_owned),
+        );
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            player.update(cx, |player, cx| {
+                player.toggle_voice(key.clone(), &original, name.as_deref(), cx)
+            });
+        }
+    };
+    let lit = face.lit;
+    let bars = bar_heights(waveform)
+        .into_iter()
+        .enumerate()
+        .map(|(i, height)| {
+            div()
+                .w(px(VOICE_BAR_W))
+                .h(px(height))
+                .flex_none()
+                .rounded(px(VOICE_BAR_W / 2.))
+                .bg(rgb(if i < lit { ACCENT } else { MUTED }))
+        });
+    div()
+        .debug_selector(move || format!("msg-{ts}-voice"))
+        .w(px(VOICE_W))
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(VOICE_CIRCLE))
+                .flex()
+                .items_center()
+                .gap(px(VOICE_GAP))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("voice-toggle-{ts}")))
+                        .debug_selector(move || format!("msg-{ts}-voice-toggle"))
+                        .size(px(VOICE_CIRCLE))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(rgb(BADGE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(16.))
+                        .cursor_pointer()
+                        .on_click(toggle)
+                        .child(face.glyph),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("msg-{ts}-voice-bars"))
+                        .w(px(VOICE_BARS_W))
+                        .h(px(VOICE_CIRCLE))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .gap(px(VOICE_BAR_PITCH - VOICE_BAR_W))
+                        .children(bars),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("msg-{ts}-voice-time"))
+                        .w(px(VOICE_TIME_W))
+                        .h(px(VOICE_CIRCLE))
+                        .flex_none()
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .text_size(px(if face.failed { 11. } else { 12. }))
+                        .text_color(rgb(MUTED))
+                        .child(div().max_w(px(VOICE_TIME_W)).child(face.label)),
+                ),
+        )
+        .child(action_row(
+            ctx,
+            ts,
+            original,
+            name.unwrap_or(VOICE_NAME),
+            line,
+        ))
+}
+
 /// Status text and the button of a file card. The row has one height in every state, so the message
 /// does not change size while a download runs.
 fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: ActionLine) -> Div {
@@ -659,8 +885,14 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
 
 #[cfg(test)]
 mod tests {
-    use super::shows_important_marker;
-    use bt_chat_core::model::{ChatId, Delivery, Message, MessageBody, UserId};
+    use super::{
+        CONTENT_W, VOICE_BAR_FLAT, VOICE_BAR_MAX, VOICE_BAR_MIN, VOICE_BARS, VOICE_BARS_W,
+        VOICE_CIRCLE, VOICE_W, VoiceFace, WAVEFORM_MAX_LEVEL, bar_heights, lit_bars,
+        resample_waveform, shown_total_ms, shows_important_marker, voice_face,
+    };
+    use crate::player::{PlayFailure, VoicePhase, VoiceView};
+    use bt_chat_core::model::{ChatId, Delivery, DownloadFailure, Message, MessageBody, UserId};
+    use std::time::Duration;
 
     fn message(body: MessageBody, important: bool) -> Message {
         Message {
@@ -689,5 +921,173 @@ mod tests {
             MessageBody::Deleted,
             true
         )));
+    }
+
+    fn view(phase: VoicePhase, position_ms: u64, total_ms: Option<u64>) -> VoiceView {
+        VoiceView {
+            phase,
+            position: Duration::from_millis(position_ms),
+            total: total_ms.map(Duration::from_millis),
+        }
+    }
+
+    #[test]
+    fn fewer_samples_than_bars_repeat_each_sample_in_order() {
+        let bars = resample_waveform(&[10, 20, 30]).unwrap();
+        assert_eq!((bars[0], bars[9], bars[10]), (10, 10, 20));
+        assert_eq!((bars[18], bars[27]), (20, 30));
+        assert!(bars.windows(2).all(|pair| pair[0] <= pair[1]));
+        // One sample fills every bar.
+        assert_eq!(resample_waveform(&[7]).unwrap(), [7; VOICE_BARS]);
+    }
+
+    #[test]
+    fn as_many_samples_as_bars_map_one_to_one() {
+        let samples: Vec<u8> = (0..VOICE_BARS as u8).map(|i| i % 16).collect();
+        assert_eq!(resample_waveform(&samples).unwrap().as_slice(), samples);
+    }
+
+    #[test]
+    fn more_samples_than_bars_take_the_maximum_of_each_span() {
+        // 56 samples: two per bar; the spike sits in the second sample of bar 3.
+        let mut samples = vec![1u8; 56];
+        samples[7] = 15;
+        let bars = resample_waveform(&samples).unwrap();
+        assert_eq!(bars[3], 15);
+        assert_eq!(bars.iter().filter(|&&bar| bar == 15).count(), 1);
+        assert_eq!(bars[2], 1);
+        // About 200 levels (and 100, 101): the last sample is not lost.
+        for n in [100, 101, 200, 201] {
+            let mut samples = vec![0u8; n];
+            samples[n - 1] = 15;
+            assert_eq!(resample_waveform(&samples).unwrap()[VOICE_BARS - 1], 15);
+        }
+    }
+
+    #[test]
+    fn an_empty_waveform_gives_flat_bars_like_none() {
+        assert_eq!(resample_waveform(&[]), None);
+        assert_eq!(bar_heights(Some(&[])), [VOICE_BAR_FLAT; VOICE_BARS]);
+        assert_eq!(bar_heights(None), [VOICE_BAR_FLAT; VOICE_BARS]);
+    }
+
+    #[test]
+    fn bar_heights_scale_the_levels_into_the_bar_range() {
+        let level = |l: u8| bar_heights(Some(&[l; 40]))[0];
+        // Silence is the shortest bar, the top level the tallest, never zero or NaN.
+        assert_eq!(level(0), VOICE_BAR_MIN);
+        assert_eq!(level(WAVEFORM_MAX_LEVEL), VOICE_BAR_MAX);
+        assert!(level(1) > level(0) && level(8) > level(1) && level(15) > level(8));
+        // A value above the documented range does not grow the bar past the maximum.
+        assert_eq!(level(200), VOICE_BAR_MAX);
+        let ramp: Vec<u8> = (0..=15).collect();
+        assert!(
+            bar_heights(Some(&ramp))
+                .windows(2)
+                .all(|pair| pair[0] <= pair[1])
+        );
+    }
+
+    #[test]
+    fn lit_bars_follow_the_position_and_clamp_at_the_ends() {
+        let total = Duration::from_secs(14);
+        let lit = |ms| lit_bars(Duration::from_millis(ms), total);
+        assert_eq!(lit(0), 0);
+        assert_eq!(lit(499), 0);
+        assert_eq!(lit(500), 1);
+        assert_eq!(lit(7000), 14);
+        assert_eq!(lit(13_999), 27);
+        assert_eq!(lit(14_000), VOICE_BARS);
+        assert_eq!(lit(99_000), VOICE_BARS);
+        assert_eq!(lit_bars(Duration::from_secs(3), Duration::ZERO), 0);
+    }
+
+    #[test]
+    fn the_bubble_geometry_adds_up_to_its_fixed_width() {
+        assert_eq!(VOICE_W, 320.);
+        assert_eq!(VOICE_BARS_W, 168.);
+        const { assert!(VOICE_W <= CONTENT_W) };
+        const { assert!(VOICE_BAR_MAX <= VOICE_CIRCLE) };
+    }
+
+    #[test]
+    fn before_the_file_opens_the_time_is_the_message_duration() {
+        let idle = voice_face(&view(VoicePhase::Idle, 0, None), Some(14_900));
+        assert_eq!(
+            idle,
+            VoiceFace {
+                glyph: "▶",
+                label: "0:14".into(),
+                failed: false,
+                lit: 0
+            }
+        );
+        // No duration on the wire and no file: nothing until it is known.
+        assert_eq!(voice_face(&view(VoicePhase::Idle, 0, None), None).label, "");
+        let loading = voice_face(&view(VoicePhase::Loading, 0, None), Some(67_000));
+        assert_eq!(
+            (loading.glyph, loading.label.as_str(), loading.lit),
+            ("…", "1:07", 0)
+        );
+    }
+
+    #[test]
+    fn playing_and_paused_show_the_elapsed_time_and_lit_bars() {
+        let playing = voice_face(
+            &view(VoicePhase::Playing, 3_400, Some(14_000)),
+            Some(14_000),
+        );
+        assert_eq!(
+            playing,
+            VoiceFace {
+                glyph: "⏸",
+                label: "0:03".into(),
+                failed: false,
+                lit: 6
+            }
+        );
+        let paused = voice_face(&view(VoicePhase::Paused, 7_000, Some(14_000)), Some(14_000));
+        assert_eq!(
+            (paused.glyph, paused.label.as_str(), paused.lit),
+            ("▶", "0:07", 14)
+        );
+        // Paused at the very start shows the total again.
+        let at_zero = voice_face(&view(VoicePhase::Paused, 0, Some(14_000)), Some(14_000));
+        assert_eq!((at_zero.label.as_str(), at_zero.lit), ("0:14", 0));
+        // Playing at the very start shows the elapsed time.
+        let started = voice_face(&view(VoicePhase::Playing, 0, Some(14_000)), Some(14_000));
+        assert_eq!(started.label, "0:00");
+    }
+
+    #[test]
+    fn the_total_keeps_the_wire_figure_unless_the_file_differs_by_over_a_second() {
+        let file = Some(Duration::from_millis(14_800));
+        assert_eq!(shown_total_ms(Some(14_000), file), Some(14_000));
+        assert_eq!(shown_total_ms(Some(13_800), file), Some(13_800));
+        assert_eq!(shown_total_ms(Some(13_799), file), Some(14_800));
+        assert_eq!(shown_total_ms(None, file), Some(14_800));
+        assert_eq!(shown_total_ms(Some(5_000), None), Some(5_000));
+        assert_eq!(shown_total_ms(None, None), None);
+    }
+
+    #[test]
+    fn a_failure_text_takes_the_place_of_the_time() {
+        let failed = |failure| view(VoicePhase::Failed(failure), 0, None);
+        let cases = [
+            (PlayFailure::Download(DownloadFailure::Offline), "Нет сети"),
+            (
+                PlayFailure::Download(DownloadFailure::NotFound),
+                "Файл недоступен",
+            ),
+            (PlayFailure::Unsupported, "Формат не поддерживается"),
+            (PlayFailure::NoOutput, "Нет вывода звука"),
+        ];
+        for (failure, text) in cases {
+            let face = voice_face(&failed(failure), Some(14_000));
+            assert_eq!(
+                (face.glyph, face.label.as_str(), face.failed, face.lit),
+                ("▶", text, true, 0)
+            );
+        }
     }
 }
