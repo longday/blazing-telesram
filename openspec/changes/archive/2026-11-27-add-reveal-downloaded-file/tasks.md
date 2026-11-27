@@ -68,7 +68,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
   - Do: run the app, download one file and one image original from a chat the account already has, choose «Показать в Finder» on the card and in the viewer (a Finder window shows the file selected), delete the file in Finder and choose it again (the card returns to «Скачать»), restart the app (no button until a new download). Remove the downloaded test files from the VM afterwards. Report only booleans, never file names.
   - Done when: each step has an observed answer or an explicit "not observed".
 
-- [ ] 5.3 Archive
+- [x] 5.3 Archive
   - Owns: the change directory and `openspec/specs` through the archive workflow.
   - Depends on: 1.1, 2.1, 2.2, 3.1, 4.1, 5.1 checked; 5.2 checked or explicitly reported as blocked by environment (the user decides whether to wait for it).
   - Do: follow the `openspec-archive-change` skill; the `attachment-download` main spec gains «Reveal in Finder» and the modified «Authenticated and private transfer»; update `DEPENDENCIES.md` (move the change to "Archived").
