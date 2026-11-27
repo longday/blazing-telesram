@@ -5,6 +5,7 @@ use crate::desktop::{
 };
 use crate::format::{Clock, fit_thumbnail};
 use crate::logging::{LogBuffer, LogLine};
+use crate::player::fake::{self, Fake};
 use crate::search_results::StatusLine;
 use crate::store::{
     ChatFilter, ChatStore, DownloadState, MESSAGE_GONE, REACTORS_REFRESH_DELAY, ReactorsState,
@@ -136,6 +137,8 @@ struct Harness {
     commands: Receiver<Command>,
     store: Entity<ChatStore>,
     desktop: Entity<Desktop>,
+    /// The script of the registered audio output.
+    fake: Fake,
 }
 
 fn harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
@@ -154,6 +157,8 @@ fn harness_with(
     events: Vec<ClientEvent>,
     setup: impl FnOnce(&mut Desktop, &mut Context<Desktop>) + 'static,
 ) -> (Harness, &mut VisualTestContext) {
+    let fake = fake::reset();
+    cx.update(fake::install);
     cx.update(|cx| {
         if !cx.has_global::<KeysBound>() {
             crate::input::bind(cx);
@@ -187,6 +192,7 @@ fn harness_with(
             commands,
             store,
             desktop,
+            fake,
         },
         vcx,
     )
@@ -9325,4 +9331,1002 @@ fn the_bar_line_names_the_author_outside_private_chats_and_is_one_line(_cx: &mut
     // No text yet: nothing under the label.
     assert_eq!(line(ChatKind::Group, None), None);
     assert_eq!(line(ChatKind::Private, None), None);
+}
+
+// ---- voice playback (PB 5.6) ----
+//
+// The harness registers the scripted `AudioFactory` of `player::fake`, so a click on the circle drives the
+// real `Player` and the real store with a fake output; `fake.set_position` plus the executor's clock stand for
+// the sound advancing. Debug bounds say where an element is, not which glyph, time or text it shows, so the
+// bubble also records what it puts into its elements at render (`timeline::VOICE_SHOWN`, like the pinned
+// bar's `BAR_LINE`); `rendered` clears that record before an action and reads it after, so the face asserted
+// is the one the row painted after the change.
+
+use crate::player::fake::Call;
+use crate::player::{OpenError, PlayFailure, VoiceKey, VoicePhase, VoiceView, failure_label};
+use crate::timeline::probe::{VOICE_SHOWN, VoiceShown};
+
+const FOURTEEN: Duration = Duration::from_secs(14);
+
+/// What a voice bubble was rendered with (`timeline::VoiceShown`): the glyph and the time text put into the
+/// elements, bars built and bars in the accent colour (`accent`, the lit part), a click handler on the circle.
+fn face(glyph: &str, label: &str, accent: usize, enabled: bool) -> VoiceShown {
+    VoiceShown {
+        glyph: glyph.into(),
+        label: label.into(),
+        bars: 28,
+        accent,
+        enabled,
+    }
+}
+
+/// What bubble `i` was last rendered with.
+fn rendered_now(i: i64) -> VoiceShown {
+    VOICE_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("bubble {i} was never rendered"))
+}
+
+/// Runs `act`, then returns what bubble `i` was rendered with. The record is cleared first, so it is
+/// there again only if the row really rendered after `act` and a stale one cannot pass.
+fn rendered(
+    cx: &mut VisualTestContext,
+    i: i64,
+    act: impl FnOnce(&mut VisualTestContext),
+) -> VoiceShown {
+    VOICE_SHOWN.with(|shown| shown.borrow_mut().remove(&ts(i)));
+    act(cx);
+    VOICE_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("bubble {i} was not rendered again"))
+}
+
+/// A voice message of 14 s in chat "g".
+fn voice_message(i: i64, file: &str, name: Option<&str>) -> Message {
+    message(
+        "g",
+        i,
+        "bob",
+        false,
+        MessageBody::Voice {
+            media: original(file),
+            duration_ms: Some(14_000),
+            size: 4_000,
+            name: name.map(str::to_owned),
+            waveform: Some((0..40).map(|i| (i % 16) as u8).collect()),
+        },
+    )
+}
+
+fn playback_of(file: &str) -> MediaRef {
+    original(file).playback()
+}
+
+fn voice_view(h: &Harness, cx: &mut VisualTestContext, i: i64) -> VoiceView {
+    let key = VoiceKey {
+        chat: chat_g(),
+        timestamp: ts(i),
+    };
+    h.desktop
+        .read_with(cx, |d, cx| d.player.read(cx).voice(&key))
+}
+
+fn voice_phase(h: &Harness, cx: &mut VisualTestContext, i: i64) -> VoicePhase {
+    voice_view(h, cx, i).phase
+}
+
+/// Online, chat "g" open with `messages`, and an audio output that opens files as 14 s long.
+fn voice_chat(
+    cx: &mut TestAppContext,
+    messages: Vec<Message>,
+) -> (Harness, &mut VisualTestContext) {
+    let (h, cx) = harness(cx);
+    h.fake.open_returns(Ok(FOURTEEN));
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, messages);
+    (h, cx)
+}
+
+/// Lets `millis` of the test clock pass and runs what became due.
+fn voice_wait(cx: &mut VisualTestContext, millis: u64) {
+    cx.executor().advance_clock(Duration::from_millis(millis));
+    cx.run_until_parked();
+}
+
+/// The playback copy of `file` arrives; returns its path.
+fn playback_arrives(
+    h: &Harness,
+    cx: &mut VisualTestContext,
+    dir: &tempfile::TempDir,
+    file: &str,
+) -> PathBuf {
+    let path = saved_file(dir, &format!("{file}.ogg"));
+    saved(h, cx, &playback_of(file), &path);
+    path
+}
+
+macro_rules! voice_parts {
+    ($ts:literal) => {
+        [
+            msg!($ts),
+            msg!($ts, "voice"),
+            msg!($ts, "voice-toggle"),
+            msg!($ts, "voice-bars"),
+            msg!($ts, "voice-time"),
+        ]
+    };
+}
+
+/// Where and how big the bubble, its circle, bars and time slot are.
+fn voice_layout(
+    cx: &mut VisualTestContext,
+    parts: [&'static str; 5],
+) -> Vec<((f32, f32), (f32, f32))> {
+    parts
+        .into_iter()
+        .map(|part| (origin(cx, part), dims(cx, part)))
+        .collect()
+}
+
+#[gpui::test]
+fn a_voice_body_renders_the_player_and_asks_for_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_group(&h, cx);
+    let mut messages: Vec<Message> = (1..=40).map(|i| text("g", i)).collect();
+    messages.push(voice_message(41, "vf", Some("v.ogg")));
+    messages.extend((42..=44).map(|i| text("g", i)));
+    h.feed(cx, [history("g", messages, true)]);
+    for part in voice_parts!(41) {
+        assert!(shown(cx, part), "{part}");
+    }
+    assert!(
+        !shown(cx, msg!(41, "unsupported")),
+        "not the placeholder any more"
+    );
+    assert!(shown(cx, msg!(41, "download")), "the original's action row");
+    assert_eq!(voice_view(&h, cx, 41), VoiceView::default());
+    assert_eq!(
+        rendered_now(41),
+        face("▶", "0:14", 0, true),
+        "idle: play glyph, the duration, no bar lit, a clickable circle"
+    );
+
+    // Scrolled through and a new voice message arriving: still no request, no file, no sound.
+    scroll(cx, 600.);
+    scroll(cx, -600.);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(voice_message(45, "vg", None))],
+    );
+    assert!(
+        shown(cx, msg!(45, "voice")),
+        "the new message has its player"
+    );
+    assert_eq!(h.commands(), [], "nothing is requested");
+    for file in ["vf", "vg"] {
+        assert_eq!(download_state(&h, cx, &playback_of(file)), None);
+        assert_eq!(download_state(&h, cx, &original(file)), None);
+    }
+    assert_eq!(h.fake.take_calls(), []);
+    assert_eq!(h.fake.created(), 0, "no output is even made");
+}
+
+#[gpui::test]
+fn the_first_click_fetches_the_playback_copy_and_the_sound_follows_the_clock(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        seen,
+        face("…", "0:14", 0, true),
+        "loading: the loading glyph, the duration, no bar lit"
+    );
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: playback_of("vf"),
+            name: Some("v.ogg".into())
+        }],
+        "the playback copy is asked for, not the original"
+    );
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+    assert_eq!(
+        download_state(&h, cx, &playback_of("vf")),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
+    assert_eq!(download_state(&h, cx, &original("vf")), None);
+    assert!(
+        !shown(cx, msg!(5, "cancel")),
+        "the action row belongs to the original's download"
+    );
+    assert_eq!(h.fake.take_calls(), [], "no sound before the copy is here");
+
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: playback_of("vf"),
+            received: 2_000,
+            total: Some(4_000),
+        }],
+    );
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+
+    let mut path = None;
+    let seen = rendered(cx, 5, |cx| {
+        path = Some(playback_arrives(&h, cx, &dir, "vf"))
+    });
+    let path = path.unwrap();
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "playing: the pause glyph");
+    assert_eq!(
+        voice_view(&h, cx, 5),
+        VoiceView {
+            phase: VoicePhase::Playing,
+            position: Duration::ZERO,
+            total: Some(FOURTEEN),
+        }
+    );
+    assert_eq!(h.fake.take_calls(), [Call::Open(path), Call::Play]);
+
+    // The glyph, the elapsed time and the lit bars as rendered, advancing with the clock.
+    for (secs, label, lit) in [(2, "0:02", 4), (5, "0:05", 10), (9, "0:09", 18)] {
+        let seen = rendered(cx, 5, |cx| {
+            h.fake.set_position(Duration::from_secs(secs));
+            voice_wait(cx, 200);
+        });
+        assert_eq!(seen, face("⏸", label, lit, true), "{secs} s");
+    }
+    assert_eq!(h.commands(), [], "playing sends nothing");
+}
+
+#[gpui::test]
+fn the_circle_pauses_and_resumes_in_place(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    h.fake.take_calls();
+    h.fake.set_position(Duration::from_secs(5));
+    voice_wait(cx, 200);
+
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        seen,
+        face("▶", "0:05", 10, true),
+        "paused: play glyph, the elapsed time, the lit part kept"
+    );
+    let paused = voice_view(&h, cx, 5);
+    assert_eq!(paused.phase, VoicePhase::Paused);
+    assert_eq!(paused.position, Duration::from_secs(5));
+    assert_eq!(h.fake.take_calls(), [Call::Pause]);
+    h.fake.set_position(Duration::from_secs(9));
+    voice_wait(cx, 1_000);
+    assert_eq!(voice_view(&h, cx, 5), paused, "paused stays at 0:05");
+
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:05", 10, true), "resumed where it was");
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    assert_eq!(h.fake.take_calls(), [Call::Play], "resumed, not reopened");
+    h.fake.set_position(Duration::from_secs(6));
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(seen, face("⏸", "0:06", 12, true));
+    assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(6));
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn a_second_voice_message_stops_the_first(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(
+        cx,
+        vec![
+            voice_message(5, "vf", Some("v.ogg")),
+            voice_message(6, "vg", Some("v.ogg")),
+            voice_message(7, "vh", Some("v.ogg")),
+            voice_message(8, "vi", Some("v.ogg")),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    let second = playback_arrives(&h, cx, &dir, "vg");
+    click(cx, msg!(5, "voice-toggle"));
+    h.fake.set_position(Duration::from_secs(5));
+    voice_wait(cx, 200);
+    assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(5));
+    h.fake.take_calls();
+
+    click(cx, msg!(6, "voice-toggle"));
+    assert_eq!(
+        voice_view(&h, cx, 5),
+        VoiceView::default(),
+        "the first is back at its start"
+    );
+    assert_eq!(voice_phase(&h, cx, 6), VoicePhase::Playing);
+    assert_eq!(
+        h.fake.take_calls(),
+        [Call::Stop, Call::Open(second), Call::Play]
+    );
+    assert_eq!(h.fake.created(), 1, "one output, reused");
+
+    // Starting another while one still loads cancels the fetch of the first.
+    click(cx, msg!(7, "voice-toggle"));
+    h.commands();
+    click(cx, msg!(8, "voice-toggle"));
+    assert_eq!(voice_view(&h, cx, 7), VoiceView::default());
+    assert_eq!(voice_phase(&h, cx, 8), VoicePhase::Loading);
+    assert_eq!(
+        h.commands(),
+        [
+            Command::CancelDownload(playback_of("vh")),
+            Command::Download {
+                media: playback_of("vi"),
+                name: Some("v.ogg".into())
+            }
+        ]
+    );
+}
+
+#[gpui::test]
+fn the_end_resets_the_bubble_and_play_starts_again_from_the_start(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    h.fake.set_position(Duration::from_secs(13));
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(seen, face("⏸", "0:13", 26, true));
+    assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(13));
+    h.fake.take_calls();
+
+    h.fake.finish();
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(
+        seen,
+        face("▶", "0:14", 0, true),
+        "ended: the duration again, play glyph, no bar lit"
+    );
+    assert_eq!(
+        voice_view(&h, cx, 5),
+        VoiceView::default(),
+        "idle again: the bubble shows the duration"
+    );
+    assert_eq!(h.fake.take_calls(), [Call::Stop], "no sound continues");
+    let reads = h.fake.position_reads();
+    voice_wait(cx, 2_000);
+    assert_eq!(h.fake.position_reads(), reads, "the timer ended with it");
+
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "from the start again");
+    let view = voice_view(&h, cx, 5);
+    assert_eq!(
+        (view.phase, view.position),
+        (VoicePhase::Playing, Duration::ZERO)
+    );
+    assert_eq!(h.fake.take_calls(), [Call::Open(path), Call::Play]);
+    assert_eq!(h.commands(), [], "the copy is reused");
+}
+
+#[gpui::test]
+fn switching_chat_stops_the_sound_and_coming_back_does_not_resume_it(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    h.fake.take_calls();
+
+    click(cx, row!("p"));
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.take_calls(), [Call::Stop]);
+    let reads = h.fake.position_reads();
+    voice_wait(cx, 1_000);
+    assert_eq!(h.fake.position_reads(), reads, "no timer is left");
+
+    click(cx, row!("g"));
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.take_calls(), [], "nothing resumes by itself");
+}
+
+#[gpui::test]
+fn a_playing_message_that_is_deleted_stops_and_shows_the_placeholder(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(
+        cx,
+        vec![
+            voice_message(5, "vf", Some("v.ogg")),
+            voice_message(6, "vg", Some("v.ogg")),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    h.fake.take_calls();
+
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(5),
+        }],
+    );
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.take_calls(), [Call::Stop]);
+    assert!(shown(cx, msg!(5, "deleted")));
+
+    // One that is still loading: its fetch is cancelled.
+    click(cx, msg!(6, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 6), VoicePhase::Loading);
+    h.commands();
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(6),
+        }],
+    );
+    assert_eq!(voice_view(&h, cx, 6), VoiceView::default());
+    assert_eq!(h.commands(), [Command::CancelDownload(playback_of("vg"))]);
+    assert!(shown(cx, msg!(6, "deleted")));
+}
+
+#[gpui::test]
+fn a_deleted_body_never_gets_a_player(cx: &mut TestAppContext) {
+    // The deletion is applied before the first frame: bounds of an earlier frame would never go away.
+    let mut deleted = voice_message(5, "vf", Some("v.ogg"));
+    deleted.body = MessageBody::Deleted;
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
+        history(
+            "g",
+            vec![
+                deleted,
+                voice_message(6, "vg", Some("v.ogg")),
+                voice_message(7, "vh", None),
+            ],
+            true,
+        ),
+        ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(7),
+        },
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    click(cx, row!("g"));
+    h.commands();
+    assert!(shown(cx, msg!(5, "deleted")));
+    assert!(shown(cx, msg!(7, "deleted")));
+    for part in [
+        msg!(5, "voice"),
+        msg!(5, "voice-toggle"),
+        msg!(5, "download"),
+        msg!(7, "voice"),
+        msg!(7, "voice-toggle"),
+        msg!(7, "download"),
+    ] {
+        assert!(!shown(cx, part), "{part}: a deleted message has no player");
+    }
+    assert!(shown(cx, msg!(6, "voice-toggle")), "a live one has");
+}
+
+#[gpui::test]
+fn the_session_ending_stops_the_sound(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    h.fake.take_calls();
+
+    h.feed(cx, [ClientEvent::SessionExpired]);
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.take_calls(), [Call::Stop]);
+}
+
+#[gpui::test]
+fn signing_out_while_the_audio_loads_clears_the_bubble(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+
+    h.feed(cx, [ClientEvent::SignedOut]);
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.take_calls(), []);
+}
+
+#[gpui::test]
+fn offline_without_a_copy_the_circle_does_nothing_and_asks_for_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::Connection(ConnectionState::Offline)],
+        |_, _| {},
+    );
+    open_with(&h, cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    assert!(shown(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        rendered_now(5),
+        face("▶", "Нет сети", 0, false),
+        "before any click: the offline text in place of the duration and no click handler"
+    );
+
+    // Unavailable before the click: the click starts nothing and does not even turn into a failure.
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(h.commands(), []);
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(download_state(&h, cx, &playback_of("vf")), None);
+    assert_eq!(h.fake.created(), 0);
+    assert_eq!(h.fake.take_calls(), []);
+
+    // Back online the same bubble plays: nothing was remembered as failed.
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)])
+    });
+    assert_eq!(
+        seen,
+        face("▶", "0:14", 0, true),
+        "connectivity is back: the duration and an enabled circle"
+    );
+    h.commands();
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: playback_of("vf"),
+            name: Some("v.ogg".into())
+        }]
+    );
+}
+
+#[gpui::test]
+fn offline_with_a_copy_the_voice_message_plays(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = saved_file(&dir, "vf.ogg");
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::Downloaded {
+            media: playback_of("vf"),
+            path: path.clone(),
+        },
+        ClientEvent::Connection(ConnectionState::Offline),
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    h.fake.open_returns(Ok(FOURTEEN));
+    open_with(&h, cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    assert_eq!(h.fake.take_calls(), [Call::Open(path), Call::Play]);
+    assert_eq!(h.commands(), [], "the copy is local: nothing is fetched");
+}
+
+#[gpui::test]
+fn a_load_started_online_can_still_be_cancelled_after_the_connection_drops(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+    h.commands();
+
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)])
+    });
+    assert_eq!(
+        seen,
+        face("…", "0:14", 0, true),
+        "offline while loading the circle is still enabled"
+    );
+    h.commands();
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(
+        h.commands(),
+        [Command::CancelDownload(playback_of("vf"))],
+        "the circle still cancels offline"
+    );
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+}
+
+#[gpui::test]
+fn playback_goes_on_and_pauses_when_the_connection_is_lost(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    click(cx, msg!(5, "voice-toggle"));
+    h.fake.take_calls();
+
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    h.fake.set_position(Duration::from_secs(3));
+    voice_wait(cx, 200);
+    assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(3));
+
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Paused);
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    assert_eq!(h.fake.take_calls(), [Call::Pause, Call::Play]);
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn every_download_failure_has_its_text_and_the_next_click_retries(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let cases = [
+        (DownloadFailure::Offline, "Нет сети"),
+        (DownloadFailure::Network, "Нет сети"),
+        (DownloadFailure::NotFound, "Файл недоступен"),
+        (DownloadFailure::Disk, "Файл недоступен"),
+        (DownloadFailure::Destination, "Ошибка"),
+        (DownloadFailure::Other, "Ошибка"),
+    ];
+    for (reason, label) in cases {
+        click(cx, msg!(5, "voice-toggle"));
+        assert_eq!(
+            voice_phase(&h, cx, 5),
+            VoicePhase::Loading,
+            "{reason:?}: the click retries"
+        );
+        assert_eq!(
+            h.commands(),
+            [Command::Download {
+                media: playback_of("vf"),
+                name: Some("v.ogg".into())
+            }],
+            "{reason:?}"
+        );
+        let seen = rendered(cx, 5, |cx| {
+            h.feed(
+                cx,
+                [ClientEvent::DownloadFailed {
+                    media: playback_of("vf"),
+                    reason,
+                }],
+            )
+        });
+        let failure = PlayFailure::Download(reason);
+        assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Failed(failure));
+        assert_eq!(failure_label(failure), label, "{reason:?}");
+        assert_eq!(
+            seen,
+            face("▶", label, 0, true),
+            "{reason:?}: its text in place of the time"
+        );
+    }
+    assert!(
+        !shown(cx, msg!(5, "retry")),
+        "the original's row has no failure of its own"
+    );
+    assert_eq!(h.fake.take_calls(), []);
+}
+
+#[gpui::test]
+fn an_unplayable_file_says_so_keeps_download_and_the_next_click_retries(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    let cases = [
+        (
+            OpenError::Unsupported,
+            PlayFailure::Unsupported,
+            "Формат не поддерживается",
+        ),
+        (
+            OpenError::NoOutput,
+            PlayFailure::NoOutput,
+            "Нет вывода звука",
+        ),
+        (
+            OpenError::Io,
+            PlayFailure::Download(DownloadFailure::Disk),
+            "Файл недоступен",
+        ),
+    ];
+    for (error, failure, label) in cases {
+        h.fake.open_returns(Err(error));
+        let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+        assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Failed(failure));
+        assert_eq!(failure_label(failure), label);
+        assert_eq!(
+            seen,
+            face("▶", label, 0, true),
+            "{error:?}: its text in place of the time"
+        );
+    }
+    assert_eq!(
+        h.commands(),
+        [],
+        "a bad copy is not fetched again by itself"
+    );
+
+    // Download of the original is independent of the failure.
+    click(cx, msg!(5, "download"));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: original("vf"),
+            name: Some("v.ogg".into())
+        }]
+    );
+
+    h.fake.open_returns(Ok(FOURTEEN));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "the retry shows playing");
+    assert_eq!(
+        voice_phase(&h, cx, 5),
+        VoicePhase::Playing,
+        "the retry plays"
+    );
+    assert_eq!(h.commands(), [], "and fetches nothing: the copy is on disk");
+}
+
+#[gpui::test]
+fn the_bubble_keeps_its_bounds_in_every_state(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let idle = voice_layout(cx, voice_parts!(5));
+    assert_eq!(idle[1].1.0, 300.0, "the content is 300 px wide");
+    let check = |cx: &mut VisualTestContext, state: &str| {
+        assert_eq!(voice_layout(cx, voice_parts!(5)), idle, "{state}");
+    };
+
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
+    check(cx, "loading");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: playback_of("vf"),
+            received: 1_000,
+            total: Some(4_000),
+        }],
+    );
+    check(cx, "loading with progress");
+
+    playback_arrives(&h, cx, &dir, "vf");
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    check(cx, "playing");
+    for secs in [1, 7, 13] {
+        h.fake.set_position(Duration::from_secs(secs));
+        voice_wait(cx, 200);
+        check(cx, "playing, later");
+    }
+
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Paused);
+    check(cx, "paused");
+    click(cx, msg!(5, "voice-toggle"));
+    h.fake.finish();
+    voice_wait(cx, 200);
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Idle);
+    check(cx, "ended");
+
+    h.fake.open_returns(Err(OpenError::Unsupported));
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(
+        voice_phase(&h, cx, 5),
+        VoicePhase::Failed(PlayFailure::Unsupported)
+    );
+    check(cx, "failed to open");
+
+    // Every download failure, started afresh each time (a failure event only settles a loading
+    // message): its text takes the place of the time and the bubble is still as big. The first event
+    // forgets the saved copy, so the next click has to fetch.
+    h.fake.open_returns(Ok(FOURTEEN));
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: playback_of("vf"),
+            reason: DownloadFailure::Other,
+        }],
+    );
+    for reason in [
+        DownloadFailure::Offline,
+        DownloadFailure::Network,
+        DownloadFailure::NotFound,
+        DownloadFailure::Disk,
+        DownloadFailure::Destination,
+        DownloadFailure::Other,
+    ] {
+        click(cx, msg!(5, "voice-toggle"));
+        assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading, "{reason:?}");
+        check(cx, "loading again");
+        h.feed(
+            cx,
+            [ClientEvent::DownloadFailed {
+                media: playback_of("vf"),
+                reason,
+            }],
+        );
+        assert_eq!(
+            voice_phase(&h, cx, 5),
+            VoicePhase::Failed(PlayFailure::Download(reason))
+        );
+        check(cx, "download failed");
+    }
+}
+
+#[gpui::test]
+fn unavailable_and_available_bubbles_are_the_same_size(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::Connection(ConnectionState::Offline)],
+        |_, _| {},
+    );
+    open_with(&h, cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let unavailable = voice_layout(cx, voice_parts!(5));
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    assert_eq!(voice_layout(cx, voice_parts!(5)), unavailable);
+}
+
+/// Where the timeline's list is scrolled to, comparable (`ListOffset` is not).
+fn list_top(h: &Harness, cx: &mut VisualTestContext) -> (usize, Pixels) {
+    let top = h.list(cx).logical_scroll_top();
+    (top.item_ix, top.offset_in_item)
+}
+
+#[gpui::test]
+fn a_tick_does_not_scroll_the_timeline_or_move_the_bubble(cx: &mut TestAppContext) {
+    let mut messages: Vec<Message> = (1..=40).map(|i| text("g", i)).collect();
+    messages.push(voice_message(41, "vf", Some("v.ogg")));
+    messages.extend((42..=44).map(|i| text("g", i)));
+    let (h, cx) = voice_chat(cx, messages);
+    let dir = tempfile::tempdir().unwrap();
+    playback_arrives(&h, cx, &dir, "vf");
+    scroll(cx, 60.);
+    cx.run_until_parked();
+    let top = list_top(&h, cx);
+    let at = y(cx, msg!(41, "voice"));
+    let layout = voice_layout(cx, voice_parts!(41));
+
+    click(cx, msg!(41, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 41), VoicePhase::Playing);
+    for secs in 1..=5 {
+        h.fake.set_position(Duration::from_secs(secs));
+        voice_wait(cx, 200);
+        assert_eq!(list_top(&h, cx), top, "tick {secs}");
+        assert_eq!(y(cx, msg!(41, "voice")), at, "tick {secs}");
+    }
+    click(cx, msg!(41, "voice-toggle"));
+    click(cx, msg!(41, "voice-toggle"));
+    h.fake.finish();
+    voice_wait(cx, 200);
+    assert_eq!(voice_phase(&h, cx, 41), VoicePhase::Idle);
+    assert_eq!(list_top(&h, cx), top);
+    assert_eq!(voice_layout(cx, voice_parts!(41)), layout);
+}
+
+#[gpui::test]
+fn the_action_row_downloads_the_original_and_never_offers_the_playback_copy(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = voice_chat(
+        cx,
+        vec![
+            voice_message(5, "vf", Some("v.ogg")),
+            voice_message(6, "vg", None),
+        ],
+    );
+    let dir = tempfile::tempdir().unwrap();
+    click(cx, msg!(5, "download"));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: original("vf"),
+            name: Some("v.ogg".into())
+        }],
+        "Download sends the original's command"
+    );
+    assert_eq!(
+        voice_phase(&h, cx, 5),
+        VoicePhase::Idle,
+        "and does not play"
+    );
+    click(cx, msg!(6, "download"));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: original("vg"),
+            name: Some("Голосовое сообщение".into())
+        }],
+        "a voice message without a name is offered under the placeholder name"
+    );
+
+    let path = saved_file(&dir, "v.ogg");
+    saved(&h, cx, &original("vf"), &path);
+    assert!(shown(cx, msg!(5, "saved")));
+    assert!(
+        shown(cx, msg!(5, "reveal")),
+        "Saved shows «Показать в Finder»"
+    );
+    let log = record_store_events(&h, cx);
+    click(cx, msg!(5, "reveal"));
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(path)]);
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn a_playback_copy_is_never_shown_as_a_saved_download(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = saved_file(&dir, "vf.ogg");
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::Downloaded {
+            media: playback_of("vf"),
+            path,
+        },
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    open_with(&h, cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    assert!(shown(cx, msg!(5, "voice")));
+    assert!(
+        shown(cx, msg!(5, "download")),
+        "the original is not downloaded"
+    );
+    assert!(!shown(cx, msg!(5, "saved")));
+    assert!(!shown(cx, msg!(5, "reveal")));
+
+    // Playing the copy changes nothing about that.
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
+    assert!(!shown(cx, msg!(5, "saved")));
+    assert!(!shown(cx, msg!(5, "reveal")));
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn a_message_cached_as_unsupported_voice_renders_the_placeholder(cx: &mut TestAppContext) {
+    let cached = message(
+        "g",
+        5,
+        "bob",
+        false,
+        MessageBody::Unsupported("Голосовое сообщение".into()),
+    );
+    let events = vec![
+        ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
+        history("g", vec![cached], true),
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    click(cx, row!("g"));
+    assert!(shown(cx, msg!(5, "unsupported")));
+    for part in voice_parts!(5).into_iter().skip(1) {
+        assert!(!shown(cx, part), "{part}: no player for the cached form");
+    }
+    assert_eq!(
+        h.commands(),
+        [Command::OpenChat(chat_g())],
+        "opening the chat is all that is sent: a cached placeholder asks for nothing"
+    );
+}
+
+#[gpui::test]
+fn a_chat_row_whose_last_message_is_voice_shows_the_plain_label(cx: &mut TestAppContext) {
+    let voice = voice_message(5, "vf", Some("v.ogg"));
+    let mut summary = chat("g", ChatKind::Group, "Команда", None);
+    summary.last_message = Some(MessagePreview {
+        author: None,
+        text: voice.body.preview_text(),
+        timestamp: ts(5),
+    });
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(vec![summary])],
+        |_, _| {},
+    );
+    cx.run_until_parked();
+    h.store.read_with(cx, |s, _| {
+        let summary = s.chat(&chat_g()).unwrap();
+        assert_eq!(
+            chat_preview(s, summary),
+            Preview::Message("Голосовое сообщение".into()),
+            "no brackets"
+        );
+    });
 }
