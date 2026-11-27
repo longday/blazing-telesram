@@ -2153,6 +2153,28 @@ fn text_and_reply_target_are_restored_after_a_chat_switch(cx: &mut TestAppContex
 }
 
 #[gpui::test]
+fn another_account_drops_the_composer_without_saving_it_as_a_draft(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![text("g", 1), text("g", 2)]);
+    choose_reply_to_2(cx);
+    cx.simulate_input("черновик аккаунта А");
+    h.commands();
+
+    h.feed(cx, [ClientEvent::AccountSwitched]);
+    assert_eq!(composer_text(&h, cx), "");
+    assert_eq!(composer_reply(&h, cx), None);
+    assert_eq!(
+        writes(&h),
+        [],
+        "nothing of account A is saved into account B's cache"
+    );
+
+    // The save that was pending when the account changed does not fire either.
+    cx.executor().advance_clock(Duration::from_secs(2));
+    assert_eq!(writes(&h), []);
+}
+
+#[gpui::test]
 fn a_chat_with_a_draft_shows_it_instead_of_the_last_message(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![text("g", 1)]);
