@@ -25,6 +25,7 @@ fn fixtures_hold_no_credentials() {
         "history-important",
         "chat-pinned",
         "push-pin",
+        "push-pin-replaced",
         "push-pin-removed",
         "reactors-page",
     ]
@@ -273,10 +274,11 @@ fn push_fixtures() {
     );
 }
 
-/// Synthetic pushes (`research-push-pin*.json`, built from the documented `Pin` shape, not live
-/// captures): a timestamp pins, its absence unpins; the action time is the server timestamp.
+/// Pushes rebuilt from the live shapes of research 0.2 (`research-push-pin*.json`; the raw captures
+/// were not stored, ids and timestamps are placeholders): a `Timestamp` pins, its absence unpins;
+/// the action time is `LastEditTimestamp`, never the pinned message's own `Timestamp`.
 #[test]
-fn synthetic_pin_push_fixtures() {
+fn live_shape_pin_push_fixtures() {
     let chat = "0/0/00000003-0000-4000-8000-000000000003";
     assert_eq!(
         decode_push(&fixture("research-push-pin.json")),
@@ -284,6 +286,15 @@ fn synthetic_pin_push_fixtures() {
             chat: chat.into(),
             pinned: Some(1_795_070_677_887_127),
             at: Some(1_795_172_185_683_559)
+        })
+    );
+    // The replacing message is older than the replaced one; the action time is newer.
+    assert_eq!(
+        decode_push(&fixture("research-push-pin-replaced.json")),
+        Ok(PushEvent::PinChanged {
+            chat: chat.into(),
+            pinned: Some(1_795_060_123_456_789),
+            at: Some(1_795_172_190_000_001)
         })
     );
     assert_eq!(
