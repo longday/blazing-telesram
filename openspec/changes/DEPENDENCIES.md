@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Two changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`. Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **MP** `add-media-playback`. Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -21,7 +21,7 @@ Owner: Integrator. Updated: 2026-11-28. Two changes are open: **CM** `add-chat-m
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it.
 3. **Zero build warnings** (`cargo build --workspace --all-targets`; no CI and no `-D warnings`, but `main` builds with 0 warnings). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. A unit therefore contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used.
 4. **Cargo, `bt-probe` and the app run only in the Tart VM `bt-vm`, never on the host** (rule `containers.md`). Procedure: sync the tree to test into `~/bt/src-<name>` (tracked and untracked, no ignored files; `~/bt/src` is shared, so concurrent agents use their own directory), put `$HOME/.cargo/bin` in `PATH` (`tart exec` lacks it), build and run there; `.runtime` for live runs is the VM's `~/bt/.runtime`. Remove the `~/bt/src-<name>` directory when the task is done. `git` and `openspec` on the host are fine. How to start the VM and the full workflow: [docs/vm.md](../../docs/vm.md).
-5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**.
+5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**.
 6. **A task that is not started locks nothing.** Rule 1 holds files only for started, unmerged tasks. Tasks gated on approvals, live runs or open questions (for example CM 5.1, 5.3) hold no file until the moment they start; whoever starts a file first keeps it until its unit merges, the other waits.
 
 ## add-chat-members-and-creation (CM)
@@ -72,14 +72,63 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`) and **the whole PIN-app unit** (
 
 Merge note (2026-11-27): PIN-app was merged into `main` as `270d503` (`--no-ff` from `integ/pins-and-importance-view` `e4c2084`). The only conflict was `crates/desktop/src/tests.rs` (REV 4.1's section and PIN 4.4's section appended at the same place); both sets are kept whole (REV first, PIN after). REV 4.1 has no `Message { .. }` literal, so no `important: false` was needed there; `store.rs` and `timeline.rs` merged without conflict. `pins/0.2` was merged into `main` as `6e34584` (docs only; the numbering clash was resolved there: the wire `at` fix is task 1.5, `1.4` stays `Client::history_page`); the branches `integ/pins-and-importance-view` and `pins/0.2` and their worktrees are removed (the integ branch on origin too).
 
+## add-media-playback (MP)
+
+Proposal merged into `main` as `d7c0b82` (2026-11-28, `--no-ff` from `propose/media-playback` `47e68d3`, proposal review approved; only `openspec/changes/add-media-playback/**`; `git merge-tree` clean; `openspec validate --all --strict` 17/17). Nothing is implemented yet. Source: `openspec/changes/add-media-playback/tasks.md` (0.7 is ticked, host reading of `gpui`). The change adds no wire method and no write: `ALLOWED_METHODS` and the write-set tests stay unchanged.
+
+**Merge units** (tasks.md "Merge units"; rule 2 and rule 3: the unit holds the first consumer of everything it adds):
+
+- **PB-V** (voice) = 1.1, 1.2, 2.1, 2.2, 3.1, 4.1, 4.2, 5.1, 5.2, 5.3, 5.5, 5.6, on the branch **`integ/add-media-playback`**; merges into `main` **first**. Each task stops holding its files once merged into the integration branch (rule 1); the unit gets the full VM check before the merge to `main` (6.1: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-media-playback --strict`) and the Integrator re-runs it on `main` after the merge.
+- **PB-W** (video) = 1.3, 2.3, 3.2, 5.4, 5.7, 5.8, started **after PB-V is on `main`** (it extends files PB-V holds: `wire.rs`, `bin/bt-probe.rs`, `model.rs`, `yandex_backend.rs`, `timeline.rs`, `player.rs`, `main.rs`, `tests.rs`).
+- **0.2** merges **alone** (library variants `MediaTarget::Playback` / `VideoStream` plus a probe that uses them), before PB-V (1.2 owns the same files and depends on it).
+- Research 0.1, 0.3, 0.4, 0.5, 0.6, 0.8 merge as docs (`research.md`, `design.md`, `tasks.md`).
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | **ready**, **[live]**, reads only, no user: inventory of voice and video messages and the raw shape of their wire objects; trace deleted afterwards. **R1 fallback** (the admin web client sends a sample) is a write by another account: **not started without the main session's decision**; without it 0.1 ends with "none" and R2-R6 are declared blocked (defaults in `research.md`) | free live slot (it is free: PIN 6.2's remainder waits for the user), VM network and session | `research.md` |
+| 0.2 | **code part ready** (no dependency), then **[live]** on the 0.1 samples (one live task at a time, rule 5); merges alone | code: none; live run: 0.1 samples | `yandex-proto/src/media.rs`, `yandex-proto/src/bin/bt-probe.rs`, `research.md`; sample directory `~/bt/samples-<agent>/` (0700) |
+| 0.3 | blocked-by 0.2 samples, **[live]** (reads the samples with `file`, `afinfo`, `mdls` in the VM; does not delete them) | 0.2 | `research.md` |
+| 0.4 | blocked-by 0.3 samples (or a synthesised `afconvert` sample for a pure device check); VM, no account (the sound device and `AVAudioPlayer` in the VM) | 0.3 | `research.md` |
+| 0.5 | blocked-by 0.3 (formats to cover); VM, no account: candidate audio crates A, B, C of design D5 in a scratch crate outside the repository | 0.3 | `research.md` |
+| 0.6 | blocked-by 0.3 and 0.4 finished; VM, no account: `open <path>` hand-off of a video sample; **the last user of the samples, deletes `~/bt/samples-<agent>/`** and confirms with `ls` | 0.3, 0.4 | `research.md` |
+| 0.7 | **done** (2026-11-28, host, `gpui` 0.2.2 source reading; `research.md` R7) | | `research.md` |
+| 0.8 | blocked-by 0.1-0.6 (or their declared "cannot run" with the default): closes the research, writes the answers into `design.md` (D2, D4, D5, D8), lifts the **[blocked]** marks; **lifts the block of 4.2** | 0.1-0.6 | `design.md`, `tasks.md`, `research.md` |
+| 1.1 | **[blocked: 0.1]**, PB-V: `WireBody::Voice.waveform`, live capture fixture `research-history-voice.json` | 0.1 | `wire.rs`, `tests/wire_fixtures.rs`, the fixture |
+| 1.2 | **[blocked: 0.2, 0.3]**, PB-V: settle the `MediaTarget` variants by the research (delete `VideoStream` unless R2 made it the answer) | 0.2 (merged), 0.3 | `yandex-proto/src/media.rs`, `bin/bt-probe.rs` |
+| 1.3 | **[blocked: 0.1]**, PB-W: `WireBody::Video` from `PreviewHint.VideoPreview`, `select_file` `Video` arm, fixture `research-history-video.json` | 0.1, 1.1 and 1.2 merged | `wire.rs`, `tests/wire_fixtures.rs`, `bin/bt-probe.rs` |
+| 2.1 | ready (no dependency), PB-V: `MediaKind::Playback`, `MessageBody::Voice`, `preview_text`, `kind_name` arm (the workspace builds only with 3.1 and 5.3 in the unit) | none | `chat-core/src/model.rs`, `cache.rs`, `fixtures.rs` |
+| 2.2 | PB-V: `start_download` accepts `Playback` (D3), its own semaphore, playback directory wiped at start and in `switch_account` | 2.1 | `chat-core/src/client.rs` (and `client/tests/` if tests live there) |
+| 2.3 | PB-W: `MessageBody::Video`, preview text «Видео» | 2.1 merged | `model.rs`, `fixtures.rs`, `cache.rs` only if a match needs it |
+| 3.1 | PB-V: `body()` maps `Voice`, `download_target` for `Playback` / `File` | 1.1, 1.2, 2.1 | `desktop/src/yandex_backend.rs` |
+| 3.2 | PB-W: `Video` only for a whitelisted extension (D8, one `pub(crate)` constant also used by 5.7) | 1.3, 2.3, 3.1 merged | `yandex_backend.rs` |
+| 4.1 | PB-V: `player.rs` (`AudioOutput`, `Player`, `VoiceView`, fake output in test support) | 2.1, 2.2 | `desktop/src/player.rs`, `main.rs` (module list line) |
+| 4.2 | **[blocked: 0.8]**, PB-V: `audio.rs`, the backend chosen by D5, `Cargo.toml` (pinned `=` versions), `Cargo.lock`, `main.rs` registers `AudioFactory` | 0.8, 4.1 | `desktop/src/audio.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md`, `main.rs` |
+| 5.1 | PB-V: `want_media` ignores `Playback` like `File` | 2.1 | `desktop/src/store.rs` |
+| 5.2 | ready (no dependency), PB-V: `duration_label`, size line helper | none | `desktop/src/format.rs` |
+| 5.3 | PB-V: the voice bubble (D7), `RowContext` gets the `Player` handle | 2.1, 4.1, 5.2 | `desktop/src/timeline.rs`, `theme.rs` only if a colour is missing |
+| 5.4 | PB-W: the video card (D8) | 2.3, 5.3 merged, 5.7 | `timeline.rs` |
+| 5.5 | PB-V: `Desktop` owns the `Player`, stops it on chat change, delete and removal | 4.1, 5.3 | `desktop/src/desktop.rs` |
+| 5.6 | PB-V: voice playback section at the end of `tests.rs` (`// ---- voice playback (PB 5.6) ----`) | 5.1, 5.3, 5.5 | `desktop/src/tests.rs` |
+| 5.7 | PB-W: `Player::open_video`, `PlayerEvent::OpenExternal`, the whitelist checked on the actual path before every emit; `main.rs` arm `cx.open_with_system` | 3.2, 4.1 merged | `player.rs`, `main.rs` |
+| 5.8 | PB-W: video playback section of `tests.rs` (`// ---- video playback (PB 5.8) ----`) | 5.4, 5.7 | `tests.rs` |
+| 6.1 | final run per unit on the integration branch and again on `main` after each merge (see PB-V above); results recorded here by the Integrator | the unit | build/test/lint matrix |
+| 6.2 | **[live]**, reads only, no user: hand check of the real app in the VM (play, pause, resume, end, chat switch, offline, video hand-off, Downloads untouched, log without paths, playback directory empty after a restart); audible output cannot be verified in the VM (a limit, reported); own `~/bt/src-<name>`, removed afterwards | 6.1 for the unit under test, R1 samples; the live slot | none (checks only) |
+| 6.3 | **archive last**: update this file (units PB-V, PB-W, 0.2, live slot use of 0.1-0.3, 6.2), then `openspec-archive-change`: the new `media-playback` main spec, the modified `attachment-download` and `message-history` requirements; after both units merge and 6.1/6.2 pass (6.2 may be reported blocked by the environment) | everything above | this file, archive |
+
+File ownership (rule 1, one owner at task granularity; the PB-V files are held by the integration branch until PB-V merges, then PB-W's tasks take them): `media.rs` and `bin/bt-probe.rs` (0.2, then 1.2, then 1.3); `wire.rs` and `tests/wire_fixtures.rs` (1.1, then 1.3); `model.rs`, `cache.rs`, `fixtures.rs` (2.1, then 2.3); chat-core `client.rs` (2.2); `yandex_backend.rs` (3.1, then 3.2); `player.rs` (4.1, then 5.7); `main.rs` (4.1, 4.2, then 5.7; serialise: 4.1 module list line, then 4.2, then 5.7); `audio.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md` (4.2); `store.rs` (5.1); `format.rs` (5.2); `timeline.rs` and `theme.rs` (5.3, then 5.4); `desktop.rs` (5.5); `tests.rs` (5.6, then 5.8); `research.md` (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.8 one after another); `design.md` and `tasks.md` (0.8; ticks by the Integrator at merge). **Overlap with other open changes: none in flight** (CM has only the blocked live tasks 5.1/5.3, PIN only live 6.2 and the unticked 3.3 on `main`; PIN's `research.md` is another file); a task that is not started holds nothing (rule 6).
+
+Order: 0.1 (live) -> 0.2 code, merged alone -> 0.2 live run on the 0.1 samples -> 0.3 -> 0.4, 0.5 (VM, no account) -> 0.6 (deletes the samples) -> 0.8 (lifts 4.2); PB-V tasks without research (2.1, 5.2, then 2.2, 4.1, 5.1, 5.3, 5.5, 5.6) can run meanwhile on `integ/add-media-playback`, 1.1 after 0.1, 1.2 after 0.2/0.3, 3.1 after 1.1, 1.2, 2.1, 4.2 after 0.8 and 4.1 -> PB-V merge -> PB-W -> 6.2 -> 6.3 archive.
+
 ## Ready now
 
 - **Nothing is startable without the user** in CM or PIN. PIN 6.2 part 1 (strip/marker in the admin chat) is done and merged (`3233c95`), together with the 4.5 fix; the branches `pins/6.2`, `pins/bar-preview` and their worktrees are removed. PIN 3.3 code, PIN 1.5 and PIN 4.5 are on `main` (`a395100`, `db5950c`, `3233c95`). What is left for PIN (6.2 self-chat UI path with the live re-check of 4.5, 6.2 Q6, closing 3.3, then 6.3 archive) needs the user's web session of the app account.
 - RL: archived (2026-11-28); nothing is left open.
 - CM: CM-G (6.3 + 6.4) and 7.1 are on `main` (`942a109`, `18141dc`); only 5.1 and 5.3 are open, both blocked on the user (a target with no existing private chat), and they alone block the CM archive; 6.F does not run (6.2 PASS).
+- **MP: ready now: 0.1** (live inventory of voice and video messages, reads only, no user; the live slot is free). Also startable without research: 0.2 code part (merges alone), 2.1, 5.2 (no dependency; the integration branch `integ/add-media-playback` is created from `main` when the first PB-V task starts). Blocked: 1.1, 1.3 (0.1), 1.2 (0.2, 0.3), 4.2 (0.8); 0.3-0.6 and 0.8 follow the research order. The archive 6.3 comes last.
 
 ## Needs the user
 
 - Approval of the target: CM 6.2 is done (2026-11-27). **CM 5.1 and 5.3 need the user**: they need a target with **no** existing private chat with the app account (a target that already has one only returns or opens that chat, which is not a creation, and the web client cannot delete a private chat to free the existing target); the user names such a target (a person the app account has never chatted with) or decides to close CM without them. Do not repeat the run against the existing target.
 - PIN 0.2 is done (the web client was the other party, no user action needed). **PIN 6.2 part 1 (bar and marker in the admin chat) is done** (2026-11-27, merged `3233c95`; deviation: the private admin chat, not the self chat). **PIN 6.2 remainder needs the user**: (a) the self-chat UI path, i.e. the bar and marker in the self chat, with a live look at the 4.5 fix (the pinned text under the label, not "…"); (b) **Q6**: an edit authored by the app account is required, and `bt-probe edit-self` refuses any chat but the self chat, so the user marks a message of the self chat as important in a web session **of the app account** (the web client of `admin@sgnl.pro` cannot, it is another account); then `edit-self <ts> <text>` with and without `--important` and `history` (task 6.2 text; `research.md` 0.2 note on Q6). Closing 3.3 and the 6.3 archive wait for it.
+- **MP needs no user.** One decision belongs to the main session: the **R1 fallback** (the admin web client `admin@sgnl.pro` sends a voice or video sample to the app account) is a write by another account, not a read, and is NOT started without that decision; if 0.1 finds no sample, it ends with "none" and R2-R6 are declared blocked with the defaults of `research.md`.
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, recorded in the archived `add-reaction-list/research.md`); PIN 0.1 is no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
