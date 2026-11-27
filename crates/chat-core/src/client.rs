@@ -1237,9 +1237,11 @@ impl<B: Backend> Engine<B> {
 
     /// Drops the ledger once no request is left that could put an older row back, except what an
     /// unanswered own choice still relies on: the state the cache accepted of its message, which a
-    /// later page may bring back.
+    /// later page may bring back. The same moment ends `pin_fresh`: it guards only against pages
+    /// already out.
     fn forget_idle_reactions(&mut self) {
         if self.history_out == 0 {
+            self.pin_fresh.clear();
             let inflight = &self.reaction_inflight;
             self.reaction_ledger.retain(|chat, held| {
                 held.retain(|timestamp, _| inflight.contains_key(&(chat.clone(), *timestamp)));
@@ -1477,7 +1479,11 @@ impl<B: Backend> Engine<B> {
         match result {
             Ok(Some(_)) if read.superseded => {}
             Ok(Some(preview)) => {
-                self.pin_fresh.insert((chat.clone(), timestamp), read.clock);
+                // Only a page that is out now can hold an older copy; with none out nothing
+                // needs guarding, and the entry would only linger.
+                if self.history_out > 0 {
+                    self.pin_fresh.insert((chat.clone(), timestamp), read.clock);
+                }
                 self.set_pin_preview(&chat, timestamp, preview)
             }
             Ok(None) => {}

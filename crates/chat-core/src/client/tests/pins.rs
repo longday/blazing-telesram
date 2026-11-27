@@ -905,3 +905,70 @@ fn a_pushed_chat_summary_goes_through_the_same_arbitration() {
     assert_eq!((row.unread, &row.pinned_message), (9, &None));
     assert_eq!(cached(&h, "a").pin_action_ts, Some(200));
 }
+
+/// The engine driven by hand, so that `pin_fresh` can be looked at.
+#[test]
+fn the_freshness_guard_is_released_once_no_history_request_is_out() {
+    let (events, _event_rx) = async_channel::unbounded();
+    let (inputs, input_rx) = async_channel::unbounded();
+    let fake = Fake::default();
+    fake.state()
+        .preview_results
+        .insert((id("a"), 7), Ok(Some(text_preview(7, "fresh"))));
+    let mut cache = Cache::open_in_memory().unwrap();
+    let mut summary = pinned_chat("a", Some(7), Some(10));
+    summary.pinned_message = pinned(7, Some(text_preview(7, "before")));
+    cache.replace_chats(&[summary]).unwrap();
+    let config = ClientConfig::new(
+        Path::new("/nonexistent"),
+        Path::new("/nonexistent").join("session.json"),
+        account(),
+    );
+    let mut engine = Engine::new(Arc::new(fake), config, events, inputs, cache);
+    engine.phase = Phase::Online;
+    engine.open_chat = Some(id("a"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let _enter = rt.enter();
+    let answer = |engine: &mut Engine<Fake>| {
+        engine.resolve_pin_preview(&id("a"), true);
+        let input = rt.block_on(input_rx.recv()).unwrap();
+        assert!(matches!(input, Input::PinPreview { .. }));
+        engine.handle(input);
+    };
+
+    // A page is out while the read is answered: the guard is kept for it.
+    let mark = engine.begin_snapshots(2);
+    answer(&mut engine);
+    assert_eq!(engine.pin_fresh.len(), 1);
+    let page = |mark| HistoryFetch {
+        chat: id("a"),
+        before: None,
+        known_newest: None,
+        mark,
+        result: Ok(HistoryChunk {
+            chat: id("a"),
+            messages: Vec::new(),
+            reached_start: true,
+            replaces: None,
+            payloads: Vec::new(),
+        }),
+    };
+    engine.handle(Input::History(page(mark)));
+    assert_eq!(engine.pin_fresh.len(), 1, "one page is still out");
+    engine.handle(Input::History(page(mark)));
+    assert!(engine.pin_fresh.is_empty(), "the last page released it");
+
+    // With no page out, an answer leaves nothing behind.
+    answer(&mut engine);
+    assert!(engine.pin_fresh.is_empty());
+
+    // Pages that never answer (`HistoryAbandoned`) release it as well.
+    engine.begin_snapshots(1);
+    answer(&mut engine);
+    assert_eq!(engine.pin_fresh.len(), 1);
+    engine.handle(Input::HistoryAbandoned(1));
+    assert!(engine.pin_fresh.is_empty());
+}
