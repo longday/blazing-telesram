@@ -2089,6 +2089,7 @@ mod download_tests {
         let body = WireBody::Voice {
             file: voice.clone(),
             duration: Some(12),
+            waveform: None,
         };
         assert_eq!(
             select_file(&body, None),

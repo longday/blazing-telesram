@@ -23,6 +23,7 @@ fn fixtures_hold_no_credentials() {
         "push-deleted",
         "push-reaction-removed",
         "history-important",
+        "history-voice",
         "chat-pinned",
         "push-pin",
         "push-pin-replaced",
@@ -216,6 +217,7 @@ fn history_fixture_covers_every_message_type() {
         &by_ts(1008).body,
         WireBody::Voice {
             duration: Some(12),
+            waveform: None,
             ..
         }
     ));
@@ -241,6 +243,65 @@ fn history_fixture_covers_every_message_type() {
             .unwrap()
             .reached_start
     );
+}
+
+/// A live history frame (2026-11-28, `research-history-voice.json`) holding one voice message the
+/// app account sent from the web client: ids, names and the transcript are placeholders, every
+/// number (timestamps, `Duration`, `Size`) and the `Waveform` string are verbatim. `Duration` is
+/// the raw wire integer (milliseconds); the waveform is base64 of packed 4-bit levels (200 here).
+#[test]
+fn live_voice_history_fixture() {
+    let chat = "0/0/33333333-3333-4333-8333-333333333333";
+    let raw = fixture("research-history-voice.json");
+    let page = parse_history(&raw, chat, 50).unwrap();
+    assert_eq!((page.messages.len(), page.skipped), (1, 0));
+    let message = &page.messages[0];
+    assert_eq!(message.timestamp, 1_785_853_413_266_064);
+    let WireBody::Voice {
+        file,
+        duration,
+        waveform,
+    } = &message.body
+    else {
+        panic!("voice: {:?}", message.body)
+    };
+    assert_eq!(file.id, "bucket-b/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+    assert_eq!(
+        (file.name.as_deref(), file.size),
+        (Some("voice.ogg"), Some(4517))
+    );
+    assert_eq!(*duration, Some(2494));
+    let levels = waveform.as_deref().expect("the live Waveform decodes");
+    assert_eq!(levels.len(), 200);
+    assert!(levels.iter().all(|&l| l <= 15));
+    assert_eq!(&levels[..14], [0; 14]);
+    assert_eq!(&levels[14..20], [3, 6, 5, 4, 5, 5]);
+    assert_eq!(levels.iter().map(|&l| u32::from(l)).sum::<u32>(), 1002);
+
+    // Without the waveform, or with one that is not base64, the message is still a voice message.
+    for waveform in [None, Some("not base64!"), Some("")] {
+        let mut raw = raw.clone();
+        let voice =
+            &mut raw["Chats"][0]["Messages"][0]["ServerMessage"]["ClientMessage"]["Plain"]["Voice"];
+        match waveform {
+            Some(text) => voice["Waveform"] = text.into(),
+            None => {
+                voice.as_object_mut().unwrap().remove("Waveform");
+            }
+        }
+        let page = parse_history(&raw, chat, 50).unwrap();
+        assert!(
+            matches!(
+                &page.messages[0].body,
+                WireBody::Voice {
+                    duration: Some(2494),
+                    waveform: None,
+                    ..
+                }
+            ),
+            "{waveform:?}"
+        );
+    }
 }
 
 #[test]

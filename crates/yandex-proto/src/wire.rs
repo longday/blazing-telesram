@@ -141,9 +141,14 @@ pub enum WireBody {
     Text(String),
     Image(WireImage),
     File(WireFile),
+    /// `Duration` is the raw wire integer (milliseconds per the live data, R3); `waveform` is
+    /// the base64 `Waveform` string unpacked to one level per element, 0 (silence) to 15, two
+    /// levels per byte with the high nibble first (R3), and `None` when it is absent or not
+    /// base64 (never an error).
     Voice {
         file: WireFile,
         duration: Option<u64>,
+        waveform: Option<Vec<u8>>,
     },
     Gallery {
         items: Vec<WireImage>,
@@ -379,6 +384,40 @@ fn id_string(value: &Json, key: &str) -> Option<String> {
     }
 }
 
+/// Standard-alphabet base64 (`+`, `/`, trailing `=` optional) to bytes. Anything else, a
+/// misplaced `=` or an impossible length is `None`, and so is an empty result.
+fn decode_base64(text: &str) -> Option<Vec<u8>> {
+    let digits = text.trim_end_matches('=');
+    if text.len() - digits.len() > 2 || digits.len() % 4 == 1 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(digits.len() / 4 * 3 + 2);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in digits.bytes() {
+        let value = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    (!bytes.is_empty()).then_some(bytes)
+}
+
+/// A packed waveform (two 4-bit levels per byte, high nibble first) as one level per element.
+fn unpack_levels(bytes: &[u8]) -> Vec<u8> {
+    bytes.iter().flat_map(|b| [b >> 4, b & 15]).collect()
+}
+
 /// `UserInfo` has `DisplayName` and `PublicName`; the former is what the web client shows.
 fn display_name(value: &Json) -> Option<String> {
     string(value, "DisplayName").or_else(|| string(value, "PublicName"))
@@ -570,6 +609,11 @@ fn plain_body(plain: &Json) -> WireBody {
             Some(file) => WireBody::Voice {
                 file,
                 duration: voice.get("Duration").and_then(Json::as_u64),
+                waveform: voice
+                    .get("Waveform")
+                    .and_then(Json::as_str)
+                    .and_then(decode_base64)
+                    .map(|bytes| unpack_levels(&bytes)),
             },
             None => WireBody::Other("Voice".into()),
         };
@@ -1146,6 +1190,106 @@ mod tests {
         assert_eq!(namespace_of("100/0/abc_1784"), Some(100));
         assert_eq!(namespace_of("aaa_bbb"), None);
         assert_eq!(namespace_of("x/0/abc"), None);
+    }
+
+    fn voice(extra: Json) -> WireBody {
+        let mut voice = json!({
+            "FileInfo": { "Id2": "bucket/id", "Name": "voice.ogg", "Size": 4031 },
+            "Duration": 2494
+        });
+        voice
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        plain_body(&json!({ "Voice": voice }))
+    }
+
+    fn waveform(body: WireBody) -> Option<Vec<u8>> {
+        let WireBody::Voice { duration, .. } = &body else {
+            panic!("not a voice: {body:?}")
+        };
+        assert_eq!(*duration, Some(2494), "Duration stays the raw integer");
+        let WireBody::Voice { waveform, .. } = body else {
+            unreachable!()
+        };
+        waveform
+    }
+
+    #[test]
+    fn a_voice_waveform_is_base64_of_packed_four_bit_levels() {
+        // "AAEC/f7/" is 00 01 02 fd fe ff: high nibble first, two levels per byte.
+        assert_eq!(
+            waveform(voice(json!({ "Waveform": "AAEC/f7/" }))),
+            Some(vec![0, 0, 0, 1, 0, 2, 15, 13, 15, 14, 15, 15])
+        );
+        // The live strings are padded: 100 bytes -> "==", 101 bytes -> "=".
+        assert_eq!(
+            waveform(voice(json!({ "Waveform": "AAE=" }))),
+            Some(vec![0, 0, 0, 1])
+        );
+        assert_eq!(
+            waveform(voice(json!({ "Waveform": "AA==" }))),
+            Some(vec![0, 0])
+        );
+        // 100 and 101 bytes give 200 and 202 levels, none above 15.
+        for bytes in [100_usize, 101] {
+            let pad = if bytes == 100 { "==" } else { "=" };
+            let text = format!("{}{pad}", "/".repeat(bytes.div_ceil(3) * 4 - pad.len()));
+            let levels = waveform(voice(json!({ "Waveform": text }))).unwrap();
+            assert_eq!(levels.len(), bytes * 2);
+            assert!(levels.iter().all(|&l| l <= 15));
+        }
+    }
+
+    #[test]
+    fn every_byte_unpacks_to_its_high_then_low_nibble() {
+        let bytes: Vec<u8> = (0..=255).collect();
+        let levels = unpack_levels(&bytes);
+        assert_eq!(levels.len(), 512);
+        for (byte, pair) in bytes.iter().zip(levels.chunks(2)) {
+            assert_eq!(pair, [byte >> 4, byte & 15]);
+        }
+    }
+
+    #[test]
+    fn a_voice_waveform_that_is_absent_or_unknown_is_none() {
+        assert_eq!(waveform(voice(json!({}))), None);
+        for unknown in [
+            json!(null),
+            json!(""),
+            json!("A"),
+            json!("AAE=A"),
+            json!("AA==="),
+            json!("AA=A"),
+            json!("AA E="),
+            json!("-_8="),
+            json!([0, 1, 2]),
+            json!(12),
+            json!({ "bars": "AAE=" }),
+        ] {
+            assert_eq!(
+                waveform(voice(json!({ "Waveform": unknown.clone() }))),
+                None,
+                "{unknown}"
+            );
+        }
+        // A malformed waveform does not hide the message: file and duration are kept.
+        let WireBody::Voice { file, .. } = voice(json!({ "Waveform": "!!" })) else {
+            panic!("voice")
+        };
+        assert_eq!(file.id, "bucket/id");
+    }
+
+    #[test]
+    fn base64_follows_the_standard_alphabet() {
+        assert_eq!(decode_base64("QUJD"), Some(b"ABC".to_vec()));
+        assert_eq!(decode_base64("QUI="), Some(b"AB".to_vec()));
+        assert_eq!(decode_base64("QQ=="), Some(b"A".to_vec()));
+        assert_eq!(decode_base64("QQ"), Some(b"A".to_vec()));
+        assert_eq!(decode_base64("+/8="), Some(vec![0xfb, 0xff]));
+        assert_eq!(decode_base64("QUJDRA=="), Some(b"ABCD".to_vec()));
+        // An odd number of bytes is fine: every byte is two levels.
+        assert_eq!(unpack_levels(&decode_base64("QUJD").unwrap()).len(), 6);
     }
 
     #[test]
