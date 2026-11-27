@@ -1089,7 +1089,21 @@ impl<B: Backend> Engine<B> {
                     .db(self.cache.message(&message.chat, message.timestamp))
                     .flatten()
                 {
-                    Some(cached) => message.inherit_reactions(&cached),
+                    Some(cached) => {
+                        message.inherit_reactions(&cached);
+                        // The server stamps `LastEditTimestamp` on a flag-only change too (a mark
+                        // or a clear repeats the whole message, observed live, research Q4): the
+                        // content (text, quote, forward) is the same, so it is not an edit and
+                        // must not read as one. Author name and avatar are resolved display data,
+                        // not content, and a push may carry them differently from history.
+                        if cached.body == message.body
+                            && cached.reply_to == message.reply_to
+                            && cached.forwarded_from == message.forwarded_from
+                            && cached.important != message.important
+                        {
+                            message.edited = cached.edited;
+                        }
+                    }
                     None => self.inherit_held_reactions(&mut message),
                 }
                 self.record_live(
@@ -3832,6 +3846,168 @@ mod tests {
             ClientEvent::ChatUpdated(summary.clone())
         );
         assert_eq!(h.cache().chat(&id("b")).unwrap(), Some(summary));
+    }
+
+    /// The flag-only change the server sends as a repeated `Plain` with `LastEditTimestamp` set.
+    fn flag_flip(of: &Message, important: bool) -> Message {
+        let mut flipped = of.clone();
+        flipped.important = important;
+        flipped.edited = true;
+        flipped
+    }
+
+    #[test]
+    fn a_flag_flip_of_a_loaded_message_changes_it_in_place_and_is_not_an_edit() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 10, "hello")));
+        let original = h.upserted("first copy");
+        h.drain();
+
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&original, true)));
+        let marked = h.upserted("marked");
+        assert_eq!(
+            (
+                marked.timestamp,
+                &marked.body,
+                marked.important,
+                marked.edited
+            ),
+            (10, &original.body, true, false)
+        );
+        assert_eq!(h.cache().message(&id("a"), 10).unwrap().unwrap(), marked);
+        h.quiet();
+        assert!(
+            !h.drain().iter().any(|e| matches!(
+                e,
+                ClientEvent::History(_) | ClientEvent::ActionFailed { .. }
+            )),
+            "a flag flip must not reload the timeline or fail"
+        );
+    }
+
+    #[test]
+    fn clearing_the_flag_is_not_an_edit_either() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 10, "hello")));
+        let original = h.upserted("first copy");
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&original, true)));
+        let marked = h.upserted("marked");
+        h.drain();
+
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&marked, false)));
+        let cleared = h.upserted("cleared");
+        assert_eq!((cleared.important, cleared.edited), (false, false));
+        assert_eq!(h.cache().message(&id("a"), 10).unwrap().unwrap(), cleared);
+
+        // A message that was really edited earlier keeps `edited` through a flip.
+        let mut edited = msg("a", 11, "hi!");
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited.clone()));
+        h.upserted("edited copy");
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&edited, true)));
+        let marked = h.upserted("edited then marked");
+        assert_eq!((marked.important, marked.edited), (true, true));
+    }
+
+    #[test]
+    fn a_flag_flip_for_an_unloaded_message_is_taken_without_error() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        // Nothing is cached for 20: there is no cached text to compare, so the rule has nothing
+        // to keep and the copy is stored as the server sent it.
+        let mut flipped = msg("a", 20, "far back");
+        flipped.important = true;
+        flipped.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(flipped.clone()));
+        assert_eq!(h.upserted("unloaded flip"), flipped);
+        h.quiet();
+        assert!(
+            !h.drain().iter().any(|e| matches!(
+                e,
+                ClientEvent::History(_) | ClientEvent::ActionFailed { .. }
+            )),
+            "a flip for an unloaded message is not an error"
+        );
+        // The engine keeps working afterwards.
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 21, "next")));
+        assert_eq!(h.upserted("later message").timestamp, 21);
+    }
+
+    #[test]
+    fn a_real_edit_still_shows_edited_when_the_flag_is_unchanged_or_changes_with_it() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        h.fake
+            .push(LiveEvent::MessageUpserted(msg("a", 10, "hello")));
+        let original = h.upserted("first copy");
+
+        let mut edited = original.clone();
+        edited.body = MessageBody::Text("hello!".into());
+        edited.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(edited));
+        assert!(h.upserted("edit").edited);
+
+        // Text and flag change together: that is an edit.
+        let mut both = h.cache().message(&id("a"), 10).unwrap().unwrap();
+        both.body = MessageBody::Text("hello!!".into());
+        both.important = true;
+        both.edited = true;
+        h.fake.push(LiveEvent::MessageUpserted(both));
+        let shown = h.upserted("edit with flag");
+        assert_eq!((shown.important, shown.edited), (true, true));
+    }
+
+    #[test]
+    fn a_changed_quote_or_forward_with_the_flag_is_still_an_edit() {
+        let h = start(|s, _| s.chats = vec![chat("a", Some(1), None)], 50);
+        h.online();
+        let mut quoted = msg("a", 10, "hello");
+        quoted.reply_to = Some(ReplyQuote {
+            author: Some("x".into()),
+            text: "old".into(),
+            timestamp: Some(3),
+        });
+        h.fake.push(LiveEvent::MessageUpserted(quoted.clone()));
+        h.upserted("quoted copy");
+        let mut requoted = flag_flip(&quoted, true);
+        requoted.reply_to = Some(ReplyQuote {
+            author: Some("x".into()),
+            text: "new".into(),
+            timestamp: Some(4),
+        });
+        h.fake.push(LiveEvent::MessageUpserted(requoted));
+        let shown = h.upserted("requoted with flag");
+        assert_eq!((shown.important, shown.edited), (true, true));
+
+        let mut forwarded = msg("a", 11, "fwd");
+        forwarded.forwarded_from = Some("A".into());
+        h.fake.push(LiveEvent::MessageUpserted(forwarded.clone()));
+        h.upserted("forwarded copy");
+        let mut reforwarded = flag_flip(&forwarded, true);
+        reforwarded.forwarded_from = Some("B".into());
+        h.fake.push(LiveEvent::MessageUpserted(reforwarded));
+        let shown = h.upserted("reforwarded with flag");
+        assert_eq!((shown.important, shown.edited), (true, true));
+
+        // The same quote and forward with only the flag changed is still not an edit.
+        let mut plain = msg("a", 12, "kept");
+        plain.reply_to = quoted.reply_to.clone();
+        plain.forwarded_from = Some("A".into());
+        h.fake.push(LiveEvent::MessageUpserted(plain.clone()));
+        h.upserted("quote and forward copy");
+        h.fake
+            .push(LiveEvent::MessageUpserted(flag_flip(&plain, true)));
+        let shown = h.upserted("quote kept, flag only");
+        assert_eq!((shown.important, shown.edited), (true, false));
     }
 
     #[test]
