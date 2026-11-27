@@ -163,16 +163,19 @@ Filled in by the tasks above, newest last. Format: task id, date, who, then the 
   - Cleanup: handler quit after every case (`pkill -x`) true; process list re-diffed empty true; scratch directory removed true; sample directory `~/bt/samples-MpT02/` removed and `ls` confirms it is gone: true.
   - Not tested: a second `open` of the same path (task 6.2), `.m4v`, `.avi`, `.3gp`, another default player installed, audible or visible playback.
 - R7: done 2026-11-28, see above.
+- 0.8: done 2026-11-28 (task 0.8, agent MpR8; host, documents only). **The research is closed**: R1-R7 are answered, the answers are written into `design.md` D2, D4, D5, D8 and the defaults of `tasks.md` are replaced; no code task waits for research. The sample directory `~/bt/samples-MpT02/` is gone: `tart exec bt-vm` `ls -la ~/bt/` (run through `sh -c`) lists no `samples-*` entry, and `ls -d ~/bt/samples-*` answers "No such file or directory" (R6 deleted it; confirmed here).
 
-## What each unknown decides (summary)
+## What each unknown decides (summary): closed 2026-11-28
 
-| Unknown | Answered by | Decides | If it cannot be answered |
+Research tasks R1-R7 are done. The right column is the answer; where it differs from the default this document stated before the research, the default is not used.
+
+| Unknown | Answered by | Decides | Answer |
 |---|---|---|---|
-| Does the account hold voice/video samples | R1 | whether R2-R6 can run | web client as other party (main session's call), else blocked |
-| `Voice.Duration` unit | R3 (with R1) | the conversion in the adapter (D2) | the bubble shows the decoded duration once loaded and none before; the adapter treats the raw value as seconds [INFERENCE] until R3 |
-| Audio format(s) of voice messages | R3, R4 | backend branch (D5) | branch A is built first; a sample it cannot open turns on the next branch |
-| Waveform encoding | R1, R3 | decoder or flat bars (D7) | flat bars; no decoder written |
-| Playable URL, redirect, range | R2 | `MediaTarget::Playback` URL (D4) | `file_shortterm/{id}?attach=true` as for Download (known to work) |
-| Video recognition and extensions | R1, R3 | whitelist (D8) | `PreviewHint` present and extension in the default whitelist |
-| Hand-off works, needs an extension | R6 | D3 naming, D8 | the whitelist plus `open` is still the plan; a failure reopens D8 |
-| Sound output in the VM | R4 | how task 6.2 is observed | position-advance check instead of listening |
+| Does the account hold voice/video samples | R1 | whether R2-R6 can run | yes: 17 voice, 238 `MiscFile` of which 94 with a video extension; the fallback was not needed |
+| `Voice.Duration` unit | R3 (with R1) | the conversion in the adapter (D2) | **milliseconds**; copied unchanged (the old "seconds until R3" default is wrong); it is the web client's stopwatch, up to about 0.3 s over the real length |
+| Audio format(s) of voice messages | R3, R4, R5 | backend branch (D5) | Ogg Opus, mono, 17 of 17; `AVAudioPlayer` alone plays 10 of 17, so **A-engine** (`AVAudioFile` + `AVAudioEngine` + `AVAudioPlayerNode`, 1 new crate); reserve C4 |
+| Waveform encoding | R1, R3 | decoder or flat bars (D2, D7) | base64 of 4-bit levels, two per byte, high nibble first, 200 or 202 values 0-15; decoded in `wire.rs` (flat bars only when the field is absent or invalid) |
+| Playable URL, redirect, range | R2 | `MediaTarget::Playback` URL (D4) | `file_shortterm/{id}`, no query (byte-identical to `?attach=true`); `video_streams` is an HLS manifest and is deleted (task 1.2) |
+| Video recognition and extensions | R1, R3, R6 | whitelist (D2, D8) | extension whitelist `mp4`, `mov` decides; `PreviewHint` is optional (present on 12 % of videos); `webm` and `mkv` stay file cards |
+| Hand-off works, needs an extension | R6 | D3 naming, D8 | yes for `.mp4`, `.MP4`, `.MOV` and a hash name plus `.mp4` (QuickTime Player); no extension opens TextEdit, a made-up one fails; the whitelist plus `open` is the plan |
+| Sound output in the VM | R4 | how task 6.2 is observed | the VM has a virtual output device; position advance is what 6.2 observes, sound cannot be heard |
