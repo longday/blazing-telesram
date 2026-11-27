@@ -5,6 +5,8 @@
 //! unknown message type becomes [`WireBody::Other`], never an error, so the timeline can show a
 //! placeholder. Only a missing address (timestamp, chat id) rejects a message.
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use serde_json::Value as Json;
 
 use crate::error::ProtoError;
@@ -384,34 +386,10 @@ fn id_string(value: &Json, key: &str) -> Option<String> {
     }
 }
 
-/// Standard-alphabet base64 (`+`, `/`) to bytes. Padding is optional, but when present it must
-/// complete the last quartet, and the bits after the last whole byte must be zero. Anything
-/// else, a misplaced `=` or an impossible length is `None`, and so is an empty result.
+/// Standard-alphabet base64 with canonical padding and zero trailing bits (what the server
+/// sends, R3) to bytes; anything else and an empty result are `None`.
 fn decode_base64(text: &str) -> Option<Vec<u8>> {
-    let digits = text.trim_end_matches('=');
-    if digits.len() % 4 == 1 || (digits.len() < text.len() && text.len() % 4 != 0) {
-        return None;
-    }
-    let mut bytes = Vec::with_capacity(digits.len() / 4 * 3 + 2);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for c in digits.bytes() {
-        let value = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        };
-        acc = (acc << 6) | u32::from(value);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            bytes.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    (acc == 0 && !bytes.is_empty()).then_some(bytes)
+    STANDARD.decode(text).ok().filter(|bytes| !bytes.is_empty())
 }
 
 /// A packed waveform (two 4-bit levels per byte, high nibble first) as one level per element.
@@ -1292,11 +1270,13 @@ mod tests {
         assert_eq!(decode_base64("QUJD"), Some(b"ABC".to_vec()));
         assert_eq!(decode_base64("QUI="), Some(b"AB".to_vec()));
         assert_eq!(decode_base64("QQ=="), Some(b"A".to_vec()));
-        assert_eq!(decode_base64("QQ"), Some(b"A".to_vec()));
+        // The server always pads (R3, 17 of 17), so padding is required and canonical, and the
+        // unused bits must be zero.
         assert_eq!(decode_base64("+/8="), Some(vec![0xfb, 0xff]));
         assert_eq!(decode_base64("QUJDRA=="), Some(b"ABCD".to_vec()));
-        // Padding must complete the last quartet, and the unused bits must be zero.
-        for bad in ["QUJD=", "QUJD==", "QQ=", "QUI==", "QQ===", "QR==", "AAF="] {
+        for bad in [
+            "QQ", "QUJD=", "QUJD==", "QQ=", "QUI==", "QQ===", "QR==", "AAF=",
+        ] {
             assert_eq!(decode_base64(bad), None, "{bad}");
         }
         // An odd number of bytes is fine: every byte is two levels.
