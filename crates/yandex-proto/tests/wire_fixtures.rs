@@ -26,6 +26,7 @@ fn fixtures_hold_no_credentials() {
         "chat-pinned",
         "push-pin",
         "push-pin-replaced",
+        "push-pin-replaced-newer",
         "push-pin-removed",
         "reactors-page",
     ]
@@ -274,27 +275,37 @@ fn push_fixtures() {
     );
 }
 
-/// Pushes rebuilt from the live shapes of research 0.2 (`research-push-pin*.json`; the raw captures
-/// were not stored, ids and timestamps are placeholders): a `Timestamp` pins, its absence unpins;
-/// the action time is `LastEditTimestamp`, never the pinned message's own `Timestamp`.
+/// Live captures of `Pin` pushes (`research-push-pin*.json`, 2026-11-27, chat id and guids replaced by
+/// placeholders, timestamps verbatim): a `Timestamp` pins, its absence unpins; the action time is
+/// `LastEditTimestamp`, never the pinned message's own `Timestamp`.
 #[test]
-fn live_shape_pin_push_fixtures() {
-    let chat = "0/0/00000003-0000-4000-8000-000000000003";
+fn live_pin_push_fixtures() {
+    let chat = "00000001-0000-4000-8000-000000000001_00000002-0000-4000-8000-000000000002";
+    // Pin of A (the older message).
     assert_eq!(
         decode_push(&fixture("research-push-pin.json")),
         Ok(PushEvent::PinChanged {
             chat: chat.into(),
-            pinned: Some(1_795_070_677_887_127),
-            at: Some(1_795_172_185_683_559)
+            pinned: Some(1_795_800_545_954_038),
+            at: Some(1_795_800_682_870_038)
         })
     );
-    // The replacing message is older than the replaced one; the action time is newer.
+    // B (newer) replaces A: the pinned message is newer, the action time later.
+    assert_eq!(
+        decode_push(&fixture("research-push-pin-replaced-newer.json")),
+        Ok(PushEvent::PinChanged {
+            chat: chat.into(),
+            pinned: Some(1_795_800_549_275_038),
+            at: Some(1_795_800_826_776_038)
+        })
+    );
+    // A (older) replaces B: the pinned message is older than the replaced one, the action time newer.
     assert_eq!(
         decode_push(&fixture("research-push-pin-replaced.json")),
         Ok(PushEvent::PinChanged {
             chat: chat.into(),
-            pinned: Some(1_795_060_123_456_789),
-            at: Some(1_795_172_190_000_001)
+            pinned: Some(1_795_800_545_954_038),
+            at: Some(1_795_800_969_725_038)
         })
     );
     assert_eq!(
@@ -302,7 +313,7 @@ fn live_shape_pin_push_fixtures() {
         Ok(PushEvent::PinChanged {
             chat: chat.into(),
             pinned: None,
-            at: Some(1_795_172_999_000_001)
+            at: Some(1_795_801_115_044_038)
         })
     );
 }

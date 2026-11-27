@@ -1,0 +1,17 @@
+{
+  "_provenance": "Live capture, 2026-11-27 (UTC), same session as research-push-pin.json: message B (sent after A) pinned while A was pinned, so the replacement is by the NEWER message. Sanitised: chat id and sender guid replaced by placeholders; no message text, no tokens; all keys and the timestamps (microseconds) are verbatim. ServerMessageInfo.Timestamp is B's own timestamp; the action time is LastEditTimestamp (= Version) and is newer than the previous pin's.",
+  "ClientMessage": {
+    "Pin": {
+      "ChatId": "00000001-0000-4000-8000-000000000001_00000002-0000-4000-8000-000000000002",
+      "Timestamp": 1795800549275038
+    }
+  },
+  "ServerMessageInfo": {
+    "From": {
+      "Guid": "00000001-0000-4000-8000-000000000001"
+    },
+    "LastEditTimestamp": 1795800826776038,
+    "Timestamp": 1795800549275038,
+    "Version": 1795800826776038
+  }
+}
