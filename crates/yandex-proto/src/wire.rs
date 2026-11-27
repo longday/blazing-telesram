@@ -539,19 +539,16 @@ fn video_preview(holder: &Json) -> Option<&Json> {
     present(present(holder, "PreviewHint")?, "VideoPreview").filter(|p| p.is_object())
 }
 
+/// The hint's numbers are JSON integers on the wire (R1); a string, a float or a negative number
+/// is a missing key (0), unlike `image`, whose existing reader is lenient.
 fn video(file: WireFile, preview: &Json) -> WireVideo {
-    let dimension = |key| {
-        int_field(preview, key)
-            .and_then(|v| u32::try_from(v).ok())
-            .unwrap_or(0)
-    };
+    let number = |key: &str| preview.get(key).and_then(Json::as_u64).unwrap_or(0);
+    let dimension = |key: &str| u32::try_from(number(key)).unwrap_or(0);
     WireVideo {
         file,
         width: dimension("Width"),
         height: dimension("Height"),
-        duration_ms: int_field(preview, "DurationMs")
-            .and_then(|v| u64::try_from(v).ok())
-            .unwrap_or(0),
+        duration_ms: number("DurationMs"),
     }
 }
 
@@ -1394,6 +1391,22 @@ mod tests {
         assert_eq!(
             video(json!({ "Width": "wide", "Height": -1, "DurationMs": -5 })),
             (0, 0, 0)
+        );
+        // Numbers that are strings or floats on the wire are not integers: zeros too (R1 shows
+        // integers only), and a dimension beyond `u32` is 0, not a wrapped value.
+        assert_eq!(
+            video(json!({ "Width": "640", "Height": 360.0, "DurationMs": "9000" })),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            video(json!({ "Width": 640.0, "DurationMs": 9000.0 })),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            video(
+                json!({ "Width": 4_294_967_296_u64, "Height": 4_294_967_295_u64, "DurationMs": 4_294_967_296_u64 })
+            ),
+            (0, u32::MAX, 4_294_967_296)
         );
         // The file keeps its own fields whatever the hint holds.
         let WireBody::Video(v) = misc_file(json!({ "PreviewHint": { "VideoPreview": {} } })) else {
