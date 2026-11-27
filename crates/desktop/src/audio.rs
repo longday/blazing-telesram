@@ -79,6 +79,27 @@ impl Default for CoreAudio {
     }
 }
 
+/// What `play` does in a state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlayAction {
+    /// Already playing.
+    Keep,
+    /// Continue a paused file.
+    Resume,
+    /// Schedule the file again and play it from the start.
+    Restart,
+}
+
+/// A file that has ended is exhausted, so it starts again, also when it was paused after the end
+/// and before the player noticed (the node has nothing left to resume).
+fn play_action(run: Run, finished: bool) -> PlayAction {
+    match run {
+        Run::Playing if !finished => PlayAction::Keep,
+        Run::Paused if !finished => PlayAction::Resume,
+        Run::Ready | Run::Playing | Run::Paused => PlayAction::Restart,
+    }
+}
+
 /// Called by the completion handler of the schedule of generation `generation`.
 fn record_end(ended: &AtomicU64, generation: u64) {
     ended.fetch_max(generation, Ordering::SeqCst);
@@ -176,9 +197,9 @@ impl AudioOutput for CoreAudio {
         let Some(track) = self.track.as_ref() else {
             return Err(OpenError::Unsupported);
         };
-        match self.run {
-            Run::Playing if !self.finished() => Ok(()),
-            Run::Paused => {
+        match play_action(self.run, self.finished()) {
+            PlayAction::Keep => Ok(()),
+            PlayAction::Resume => {
                 // SAFETY: as in `start`; the node is touched only while the engine runs.
                 unsafe {
                     if !track.engine.isRunning() {
@@ -189,8 +210,7 @@ impl AudioOutput for CoreAudio {
                 self.run = Run::Playing;
                 Ok(())
             }
-            // Never played, stopped, or ended: from the start.
-            Run::Ready | Run::Playing => self.start(),
+            PlayAction::Restart => self.start(),
         }
     }
 
@@ -258,12 +278,44 @@ mod tests {
     }
 
     fn open(bytes: &[u8]) -> (CoreAudio, Result<Duration, OpenError>) {
+        open_named("sample.wav", bytes)
+    }
+
+    fn open_named(name: &str, bytes: &[u8]) -> (CoreAudio, Result<Duration, OpenError>) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("sample.wav");
+        let path = dir.path().join(name);
         std::fs::write(&path, bytes).unwrap();
         let mut output = CoreAudio::default();
         let opened = output.open(&path);
         (output, opened)
+    }
+
+    #[test]
+    fn play_resumes_only_a_paused_file_that_has_not_ended() {
+        use PlayAction::*;
+        assert_eq!(play_action(Run::Ready, false), Restart);
+        assert_eq!(play_action(Run::Playing, false), Keep);
+        assert_eq!(play_action(Run::Paused, false), Resume);
+        // The end came, and the player has not ticked yet: playing, or paused in that gap.
+        assert_eq!(play_action(Run::Playing, true), Restart);
+        assert_eq!(play_action(Run::Paused, true), Restart);
+    }
+
+    #[test]
+    fn a_pause_after_the_end_restarts_from_the_start() {
+        let mut output = CoreAudio {
+            run: Run::Playing,
+            ..CoreAudio::default()
+        };
+        let mine = output.generation.load(Ordering::SeqCst);
+        record_end(&output.ended, mine);
+        output.pause();
+        assert_eq!(output.run, Run::Paused);
+        assert!(output.finished(), "pausing does not undo the end");
+        assert_eq!(
+            play_action(output.run, output.finished()),
+            PlayAction::Restart
+        );
     }
 
     #[test]
@@ -337,6 +389,14 @@ mod tests {
         assert!(!output.finished(), "nothing was played");
         let (_, opened) = open(&wav(48_000 * 3, 48_000));
         assert_eq!(opened, Ok(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn a_wav_without_an_extension_opens_with_its_length() {
+        // The fallback name of a voice message has no extension.
+        let (output, opened) = open_named("sample", &wav(4000, 8000));
+        assert_eq!(opened, Ok(Duration::from_millis(500)));
+        assert_eq!(output.position(), Duration::ZERO);
     }
 
     #[test]
