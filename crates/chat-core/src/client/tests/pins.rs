@@ -568,6 +568,75 @@ fn a_reconnect_during_a_read_that_then_fails_still_gets_its_read() {
     assert_eq!(h.fake.state().preview_calls.len(), 2);
 }
 
+/// The chat is open and its first history request (an old copy of message 7) waits at the
+/// returned history gate; a reconnect then starts the preview read of message 7, which waits at
+/// the preview gate and would answer "fresh", and a catch-up history request that also waits.
+fn history_before_read() -> (Harness, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+    let history_gate = Arc::new(tokio::sync::Notify::new());
+    let preview_gate = Arc::new(tokio::sync::Notify::new());
+    let seeded = {
+        let mut summary = pinned_chat("a", Some(7), Some(10));
+        summary.pinned_message = pinned(7, Some(text_preview(7, "before")));
+        summary
+    };
+    let h = start(
+        |s, dir| {
+            seed_cache(dir, &[seeded], "a", &[], false);
+            s.chats = vec![pinned_chat("a", Some(7), Some(10))];
+            s.history.insert(id("a"), vec![msg("a", 7, "old copy")]);
+            s.history_gate = Some(history_gate.clone());
+            s.preview_gate = Some((7, preview_gate.clone()));
+            s.preview_results
+                .insert((id("a"), 7), Ok(Some(text_preview(7, "fresh"))));
+        },
+        50,
+    );
+    h.online();
+    h.client.send(Command::OpenChat(id("a")));
+    h.wait_for("the first history request", |s| s.history_calls.len() == 1);
+    h.fake.push(LiveEvent::Reconnected);
+    h.wait_for("the read and the catch-up", |s| {
+        s.preview_calls.len() == 1 && s.history_calls.len() == 2
+    });
+    h.quiet();
+    (h, history_gate, preview_gate)
+}
+
+fn text_of(event: &ClientEvent, text: &'static str) -> bool {
+    matches!(event, ClientEvent::PinChanged { pinned: Some(p), .. }
+        if p.preview.as_ref().is_some_and(|p| p.text == text))
+}
+
+#[test]
+fn a_page_requested_before_the_read_does_not_make_its_fresh_answer_stale() {
+    let (h, history_gate, preview_gate) = history_before_read();
+    // The older page returns first, with an old copy of the pinned message.
+    history_gate.notify_one();
+    h.next("the old copy", |e| text_of(e, "old copy"));
+    preview_gate.notify_one();
+    h.next("the fresh answer", |e| text_of(e, "fresh"));
+    assert_eq!(
+        cached(&h, "a").pinned_message,
+        pinned(7, Some(text_preview(7, "fresh")))
+    );
+}
+
+#[test]
+fn a_page_requested_before_an_applied_read_does_not_bring_back_an_older_copy() {
+    let (h, history_gate, preview_gate) = history_before_read();
+    preview_gate.notify_one();
+    h.next("the fresh answer", |e| text_of(e, "fresh"));
+    // Now the older page returns with its old copy: it must not replace the fresh preview.
+    history_gate.notify_one();
+    h.next("the older page", |e| matches!(e, ClientEvent::History(_)));
+    let events = settle(&h);
+    assert!(events.iter().all(|e| !is_pin_event(e)), "{events:?}");
+    assert_eq!(
+        cached(&h, "a").pinned_message,
+        pinned(7, Some(text_preview(7, "fresh")))
+    );
+}
+
 // -- follow-through (rule 4) and storage (rule 5) ----------------------------------------------
 
 #[test]

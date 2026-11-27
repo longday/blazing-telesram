@@ -272,10 +272,12 @@ enum Phase {
 }
 
 /// An unanswered pinned-message preview read.
-#[derive(Default)]
 struct PinRead {
-    /// A live change or history chunk gave the message's newer state meanwhile: the answer is
-    /// dropped instead of overwriting it.
+    /// `Engine::live_seq` when the read started: a history request whose `mark` is not above it
+    /// started before the read and may return an older copy of the message than this read will.
+    clock: u64,
+    /// A live change or a history page requested after the read started gave the message's newer
+    /// state meanwhile: the answer is dropped instead of overwriting it.
     superseded: bool,
     /// A resolution was asked for while the read was out (`Some(true)` when one of them wanted
     /// a forced read): exactly one new read follows its answer.
@@ -352,6 +354,9 @@ struct Engine<B> {
     creation_unverified: bool,
     /// Pinned-message preview reads not yet answered: at most one per `(chat, timestamp)`.
     pin_inflight: HashMap<(ChatId, MessageTs), PinRead>,
+    /// Per pinned message, `live_seq` when the read whose answer was applied last started:
+    /// a history page requested no later than that may hold an older copy and is not applied.
+    pin_fresh: HashMap<(ChatId, MessageTs), u64>,
 }
 
 fn post(tx: &Sender<Input>, input: Input) {
@@ -703,6 +708,7 @@ impl<B: Backend> Engine<B> {
             creation_inflight: false,
             creation_unverified: false,
             pin_inflight: HashMap::new(),
+            pin_fresh: HashMap::new(),
         }
     }
 
@@ -1037,6 +1043,7 @@ impl<B: Backend> Engine<B> {
         self.reaction_inflight.clear();
         self.members_inflight.clear();
         self.pin_inflight.clear();
+        self.pin_fresh.clear();
         self.profile_inflight = false;
         self.creation_inflight = false;
         self.creation_unverified = false;
@@ -1223,6 +1230,8 @@ impl<B: Backend> Engine<B> {
     /// accepts for rows it may drop is kept (`reaction_ledger`). Returns the mark they replay from.
     fn begin_snapshots(&mut self, count: usize) -> u64 {
         self.history_out += count;
+        // Also a tick of the clock: a request started after any earlier read has a higher mark.
+        self.live_seq += 1;
         self.live_seq
     }
 
@@ -1432,7 +1441,15 @@ impl<B: Backend> Engine<B> {
             read.pending = Some(read.pending.unwrap_or(false) || refresh);
             return;
         }
-        self.pin_inflight.insert(key, PinRead::default());
+        let clock = self.live_seq;
+        self.pin_inflight.insert(
+            key,
+            PinRead {
+                clock,
+                superseded: false,
+                pending: None,
+            },
+        );
         let (backend, inputs, chat) = (self.backend.clone(), self.inputs.clone(), chat.clone());
         tokio::spawn(async move {
             let result = backend.message_preview(&chat, timestamp).await;
@@ -1453,13 +1470,16 @@ impl<B: Backend> Engine<B> {
         timestamp: MessageTs,
         result: Result<Option<MessagePreview>, BackendError>,
     ) {
-        let read = self
-            .pin_inflight
-            .remove(&(chat.clone(), timestamp))
-            .unwrap_or_default();
+        // No entry: the account changed meanwhile, and the answer belongs to the old one.
+        let Some(read) = self.pin_inflight.remove(&(chat.clone(), timestamp)) else {
+            return;
+        };
         match result {
             Ok(Some(_)) if read.superseded => {}
-            Ok(Some(preview)) => self.set_pin_preview(&chat, timestamp, preview),
+            Ok(Some(preview)) => {
+                self.pin_fresh.insert((chat.clone(), timestamp), read.clock);
+                self.set_pin_preview(&chat, timestamp, preview)
+            }
             Ok(None) => {}
             Err(BackendError::SessionExpired) => self.expire(),
             Err(error) => {
@@ -1535,7 +1555,7 @@ impl<B: Backend> Engine<B> {
 
     /// D5.4: a history chunk that holds the pinned message refreshes its preview when the copy
     /// differs.
-    fn follow_pin_in(&mut self, chunk: &HistoryChunk) {
+    fn follow_pin_in(&mut self, chunk: &HistoryChunk, started: u64) {
         let Some(pin) = self
             .db(self.cache.chat(&chunk.chat))
             .flatten()
@@ -1543,8 +1563,18 @@ impl<B: Backend> Engine<B> {
         else {
             return;
         };
+        let key = (chunk.chat.clone(), pin.timestamp);
+        // A page requested before the last applied read may hold an older copy than that read.
+        if self.pin_fresh.get(&key).is_some_and(|&seq| started <= seq) {
+            return;
+        }
         if let Some(message) = chunk.messages.iter().find(|m| m.timestamp == pin.timestamp) {
-            self.supersede_pin_read(&chunk.chat, pin.timestamp);
+            // Only a page requested after an unanswered read started is newer than its answer.
+            if let Some(read) = self.pin_inflight.get_mut(&key)
+                && started > read.clock
+            {
+                read.superseded = true;
+            }
             self.set_pin_preview(&chunk.chat, pin.timestamp, message_preview_of(message));
         }
     }
@@ -2550,7 +2580,7 @@ impl<B: Backend> Engine<B> {
                     fetch.mark,
                     chunk,
                 );
-                self.follow_pin_in(&chunk);
+                self.follow_pin_in(&chunk, fetch.mark);
                 self.settle_delivered(&chunk);
                 let chunk = if fetch.before.is_none() {
                     self.with_outbox(chunk)
