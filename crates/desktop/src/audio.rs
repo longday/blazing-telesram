@@ -60,9 +60,10 @@ struct CoreAudio {
     last: Cell<Duration>,
     /// Bumped by `stop` and by every `scheduleFile`.
     generation: Arc<AtomicU64>,
-    /// The generation whose completion handler fired last (`u64::MAX`: none). The handler runs on
-    /// another thread; storing its own generation, instead of a flag, leaves no window in which a
-    /// handler that raced a `stop` could be taken for an end.
+    /// The newest generation whose completion handler fired (0: none; generations start at 1).
+    /// The handler runs on another thread and the handlers of a `stop` and of the run after it
+    /// can arrive in either order, so the number only grows (`record_end`); a handler of an older
+    /// schedule then neither counts as an end nor undoes a newer one.
     ended: Arc<AtomicU64>,
 }
 
@@ -72,10 +73,15 @@ impl Default for CoreAudio {
             track: None,
             run: Run::Ready,
             last: Cell::new(Duration::ZERO),
-            generation: Arc::new(AtomicU64::new(0)),
-            ended: Arc::new(AtomicU64::new(u64::MAX)),
+            generation: Arc::new(AtomicU64::new(1)),
+            ended: Arc::new(AtomicU64::new(0)),
         }
     }
+}
+
+/// Called by the completion handler of the schedule of generation `generation`.
+fn record_end(ended: &AtomicU64, generation: u64) {
+    ended.fetch_max(generation, Ordering::SeqCst);
 }
 
 impl CoreAudio {
@@ -97,7 +103,7 @@ impl CoreAudio {
             let ended = Arc::clone(&self.ended);
             let handler = RcBlock::new(move |_: AVAudioPlayerNodeCompletionCallbackType| {
                 // Only the number is stored; `finished` compares it with the current generation.
-                ended.store(mine, Ordering::SeqCst);
+                record_end(&ended, mine);
             });
             track
                 .node
@@ -258,6 +264,36 @@ mod tests {
         let mut output = CoreAudio::default();
         let opened = output.open(&path);
         (output, opened)
+    }
+
+    #[test]
+    fn a_late_handler_of_an_older_schedule_never_hides_the_end() {
+        let output = CoreAudio::default();
+        assert!(!output.finished(), "a new output has not ended");
+        // A run (generation 2, after a `stop` had made it 1) schedules and ends first; the handler
+        // that the `stop` fired arrives afterwards, from another thread.
+        output.generation.fetch_add(2, Ordering::SeqCst);
+        let current = output.generation.load(Ordering::SeqCst);
+        record_end(&output.ended, current);
+        assert!(output.finished());
+        record_end(&output.ended, current - 1);
+        assert!(
+            output.finished(),
+            "the stale handler came second and changed nothing"
+        );
+    }
+
+    #[test]
+    fn a_handler_of_an_older_schedule_alone_is_not_an_end() {
+        let output = CoreAudio::default();
+        output.generation.fetch_add(2, Ordering::SeqCst);
+        let current = output.generation.load(Ordering::SeqCst);
+        record_end(&output.ended, current - 1);
+        assert!(!output.finished());
+        record_end(&output.ended, current);
+        assert!(output.finished());
+        output.generation.fetch_add(1, Ordering::SeqCst);
+        assert!(!output.finished(), "a `stop` after the end voids it");
     }
 
     #[test]
