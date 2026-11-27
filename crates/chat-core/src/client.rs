@@ -563,31 +563,38 @@ fn require_plain_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-/// [`require_plain_dir`] for the account's media folder and the playback folder inside it.
-fn require_plain_playback_path(dir: &Path) -> io::Result<()> {
-    if let Some(account_dir) = dir.parent() {
-        require_plain_dir(account_dir)?;
-    }
-    require_plain_dir(dir)
+/// The folders below the trusted runtime directory that lead to `dir`, outermost first:
+/// `media`, the account's folder, and the playback folder itself.
+fn playback_components(dir: &Path) -> Vec<&Path> {
+    let mut parts: Vec<&Path> = dir.ancestors().take(3).collect();
+    parts.reverse();
+    parts
 }
 
-/// The playback folder, created `0700` when missing; refused, before anything is created, when it
-/// or the account folder is a symlink or not a folder, and brought to `0700` when it exists with
-/// another mode.
+/// [`require_plain_dir`] for every folder from `media` down to the playback folder `dir`; the
+/// runtime directory above them is the trusted root.
+fn require_plain_playback_path(dir: &Path) -> io::Result<()> {
+    playback_components(dir)
+        .into_iter()
+        .try_for_each(require_plain_dir)
+}
+
+/// The playback folder, created `0700` when missing; refused, before anything below the runtime
+/// directory is created, when `media`, the account folder or it is a symlink or not a folder, and
+/// brought to `0700` when it exists with another mode.
 fn prepare_playback_dir(runtime_dir: &Path, account: &UserId) -> io::Result<PathBuf> {
     let dir = playback_dir(runtime_dir, account);
-    if let Some(account_dir) = dir.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(account_dir)?;
-        require_plain_dir(account_dir)?;
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(runtime_dir)?;
+    for part in playback_components(&dir) {
+        match DirBuilder::new().mode(0o700).create(part) {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            _ => {}
+        }
+        require_plain_dir(part)?;
     }
-    match DirBuilder::new().mode(0o700).create(&dir) {
-        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
-        _ => {}
-    }
-    require_plain_dir(&dir)?;
     if fs::symlink_metadata(&dir)?.permissions().mode() & 0o777 != 0o700 {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
@@ -8251,6 +8258,57 @@ mod tests {
                 "account_link={account_link}: nothing may be created outside"
             );
         }
+    }
+
+    #[test]
+    fn a_symlinked_media_folder_is_never_cleaned_nor_written_through() {
+        let outside = tempfile::tempdir().unwrap();
+        for who in [UID, "other"] {
+            let folder = outside.path().join(who).join(PLAYBACK_DIR);
+            fs::create_dir_all(&folder).unwrap();
+            fs::write(folder.join("file"), "mine").unwrap();
+        }
+        // The runtime folder is trusted, `media` below it is not: the start wipe (stored account),
+        // the switch to the account the server names, and the download all stop at the symlink.
+        let h = start(
+            |s, dir| {
+                std::os::unix::fs::symlink(outside.path(), dir.join("media")).unwrap();
+                s.account = "other".into();
+                s.files.insert("b/1".into(), b"voice".to_vec());
+            },
+            50,
+        );
+        h.online();
+        let intact = || {
+            [UID, "other"].iter().all(|who| {
+                let file = outside.path().join(who).join(PLAYBACK_DIR).join("file");
+                fs::read(file).is_ok_and(|bytes| bytes == b"mine")
+            })
+        };
+        assert!(intact(), "start or switch followed the symlink");
+        h.download(&playback("b/1"), "a.mp4");
+        h.next("refusal", |e| {
+            *e == ClientEvent::DownloadFailed {
+                media: playback("b/1"),
+                reason: DownloadFailure::Destination,
+            }
+        });
+        h.quiet();
+        assert!(h.fake.state().download_calls.is_empty());
+        assert!(intact());
+        assert_eq!(
+            fs::read_dir(outside.path().join("other").join(PLAYBACK_DIR))
+                .unwrap()
+                .count(),
+            1,
+            "nothing may land outside"
+        );
+        assert!(
+            fs::symlink_metadata(h.dir.path().join("media"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]
