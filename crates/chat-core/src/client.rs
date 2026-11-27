@@ -275,6 +275,8 @@ enum Action {
         timestamp: MessageTs,
         text: String,
         reply: Option<ReplyTarget>,
+        /// The cached flag, repeated because an edit rewrites the whole message (design D9).
+        important: bool,
     },
     Delete(MessageTs),
     /// `overlay` is the state the user was shown; its `mine` is the reaction asked for.
@@ -1902,29 +1904,35 @@ impl<B: Backend> Engine<B> {
     // -- edits, deletions, read markers, typing, drafts -----------------------------------
 
     /// An edit rewrites the whole message, so a reply must repeat its target or the server
-    /// drops the quote. A reply whose original is unknown cannot be repeated, and forwarded
-    /// messages are not edited at all (unverified, and other messengers forbid it): both are
-    /// refused, as is a message that is not cached.
+    /// drops the quote, and an important message repeats its flag (the cached value). A reply
+    /// whose original is unknown cannot be repeated, and forwarded messages are not edited at
+    /// all (unverified, and other messengers forbid it): both are refused, as is a message
+    /// that is not cached.
     fn edit(&mut self, chat: ChatId, timestamp: MessageTs, text: String) {
-        let reply = match self.db(self.cache.message(&chat, timestamp)).flatten() {
+        let (reply, important) = match self.db(self.cache.message(&chat, timestamp)).flatten() {
             Some(Message {
                 forwarded_from: None,
                 reply_to: None,
+                important,
                 ..
-            }) => Ok(None),
+            }) => (Ok(None), important),
             Some(Message {
                 forwarded_from: None,
                 reply_to: Some(quote),
+                important,
                 ..
-            }) => match quote.timestamp {
-                Some(original) => Ok(Some(ReplyTarget {
-                    timestamp: original,
-                    author: quote.author,
-                    text: quote.text,
-                })),
-                None => Err(()),
-            },
-            _ => Err(()),
+            }) => (
+                match quote.timestamp {
+                    Some(original) => Ok(Some(ReplyTarget {
+                        timestamp: original,
+                        author: quote.author,
+                        text: quote.text,
+                    })),
+                    None => Err(()),
+                },
+                important,
+            ),
+            _ => (Err(()), false),
         };
         match reply {
             Ok(reply) => self.run_action(
@@ -1933,6 +1941,7 @@ impl<B: Backend> Engine<B> {
                     timestamp,
                     text,
                     reply,
+                    important,
                 },
             ),
             Err(()) => self.emit(ClientEvent::ActionFailed {
@@ -1998,7 +2007,12 @@ impl<B: Backend> Engine<B> {
                     timestamp,
                     text,
                     reply,
-                } => backend.edit(&chat, *timestamp, text, reply.as_ref()).await,
+                    important,
+                } => {
+                    backend
+                        .edit(&chat, *timestamp, text, reply.as_ref(), *important)
+                        .await
+                }
                 Action::Delete(timestamp) => backend.delete(&chat, *timestamp).await,
                 Action::React { timestamp, overlay } => {
                     backend.react(&chat, *timestamp, overlay.mine).await
@@ -3057,7 +3071,7 @@ mod tests {
             text: String,
             reply: Option<ReplyTarget>,
         },
-        Edit(ChatId, MessageTs, String, Option<ReplyTarget>),
+        Edit(ChatId, MessageTs, String, Option<ReplyTarget>, bool),
         Delete(ChatId, MessageTs),
         Seen(ChatId, MessageTs),
         Typing(ChatId),
@@ -3328,12 +3342,14 @@ mod tests {
             timestamp: MessageTs,
             text: &str,
             reply_to: Option<&ReplyTarget>,
+            important: bool,
         ) -> Result<(), BackendError> {
             self.record(Call::Edit(
                 chat.clone(),
                 timestamp,
                 text.into(),
                 reply_to.cloned(),
+                important,
             ))
         }
         async fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
@@ -5389,7 +5405,10 @@ mod tests {
             (3, MessageBody::Text("new".into()), true)
         );
         assert!(edited.outgoing);
-        assert_eq!(h.fake.calls(), [Call::Edit(id("a"), 3, "new".into(), None)]);
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Edit(id("a"), 3, "new".into(), None, false)]
+        );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
         assert_eq!(
             (cached.body, cached.edited),
@@ -5585,13 +5604,59 @@ mod tests {
         };
         assert_eq!(
             h.fake.calls(),
-            [Call::Edit(id("a"), 3, "new".into(), Some(target))]
+            [Call::Edit(id("a"), 3, "new".into(), Some(target), false)]
         );
         let cached = h.cache().message(&id("a"), 3).unwrap().unwrap();
         assert_eq!(
             cached.reply_to,
             Some(quote(Some(2))),
             "the quote survives the local edit"
+        );
+    }
+
+    /// D9: the cached flag goes out with the edit (alone and beside a reply), the local result
+    /// keeps it, and a message without the flag sends none.
+    #[test]
+    fn editing_an_important_message_passes_the_cached_flag() {
+        let h = start_with_own_message(|m| m.important = true);
+        h.online();
+        h.history("catch-up");
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
+        let edited = h.upserted("edited message");
+        assert!(edited.important, "the flag stays on the edited message");
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Edit(id("a"), 3, "new".into(), None, true)]
+        );
+        assert!(h.cache().message(&id("a"), 3).unwrap().unwrap().important);
+    }
+
+    #[test]
+    fn editing_an_important_reply_passes_the_flag_and_the_target() {
+        let h = start_with_own_message(|m| {
+            m.important = true;
+            m.reply_to = Some(quote(Some(2)));
+        });
+        h.online();
+        h.history("catch-up");
+        h.client.send(Command::Edit {
+            chat: id("a"),
+            timestamp: 3,
+            text: "new".into(),
+        });
+        h.upserted("edited message");
+        let target = ReplyTarget {
+            timestamp: 2,
+            author: Some("Ann".into()),
+            text: "quoted".into(),
+        };
+        assert_eq!(
+            h.fake.calls(),
+            [Call::Edit(id("a"), 3, "new".into(), Some(target), true)]
         );
     }
 

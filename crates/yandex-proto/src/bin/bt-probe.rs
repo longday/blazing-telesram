@@ -38,7 +38,7 @@ use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError
 
 const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--watch <chat>]
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
-       bt-probe edit-self <micros> <text> [--reply <micros>] [--chat <self chat>]
+       bt-probe edit-self <micros> <text> [--reply <micros>] [--important] [--chat <self chat>]
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe react-self <micros> <code|remove> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
@@ -58,6 +58,7 @@ react-self puts the reaction <code> (a positive integer, the web client's reacti
 whoami, members and reactors are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
 reactors is read-only (a socket list_reactions, so BT_WRITE_ONLY_CHAT does not apply): it prints one page of the users who reacted to the message with that timestamp in <chat>, in server order; --before <micros> asks for the page older than that cursor, --limit <n> (at least 1, default 30) sets the page size. It always sends Mode 0; there is no --mode
 chats prints `pinned=<micros>` after the unread count of a chat that has a pinned message (the message's timestamp); a chat without a pin prints nothing extra
+edit-self rewrites the whole message: --important adds `IsImportant: true` to it (off by default, so the default frame is the plain edit's) for a message that is marked important, to check whether an edit without the flag clears it; it never marks a message by itself
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
@@ -279,10 +280,35 @@ fn send_flags<'a>(mut flags: &[&'a str]) -> Option<SendFlags<'a>> {
     flags.is_empty().then_some(parsed)
 }
 
-/// Edits take the same flags as sends minus the payload id. Without `--reply` an edit repeats the
-/// reply the message already has; `--reply` re-attaches one to a message that lost it.
-fn edit_flags<'a>(flags: &[&'a str]) -> Option<SendFlags<'a>> {
-    send_flags(flags).filter(|f| f.payload.is_none())
+/// The flags of `edit-self`: those of a send minus the payload id, and `--important`. Without
+/// `--reply` an edit repeats the reply the message already has; `--reply` re-attaches one to a
+/// message that lost it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EditFlags<'a> {
+    send: SendFlags<'a>,
+    important: bool,
+}
+
+fn edit_flags<'a>(mut flags: &[&'a str]) -> Option<EditFlags<'a>> {
+    let mut parsed = EditFlags::default();
+    loop {
+        match flags {
+            [] => return Some(parsed),
+            ["--important", rest @ ..] => {
+                parsed.important = true;
+                flags = rest;
+            }
+            [name, value, rest @ ..] => {
+                match *name {
+                    "--reply" => parsed.send.reply = Some(value.parse().ok()?),
+                    "--chat" => parsed.send.chat = Some(value),
+                    _ => return None,
+                }
+                flags = rest;
+            }
+            _ => return None,
+        }
+    }
 }
 
 fn print_committed(committed: &Committed) {
@@ -377,7 +403,11 @@ fn stored_reply(message: &WireMessage) -> Result<Option<ReplyRef>, String> {
     }
 }
 
-async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(), Failure> {
+async fn edit_self(timestamp: i64, text: &str, flags: EditFlags<'_>) -> Result<(), Failure> {
+    let EditFlags {
+        send: flags,
+        important,
+    } = flags;
     let allowed = write_only()?;
     let session = load_session()?;
     let chat = guarded_self_chat(flags.chat, &session.identity.guid, allowed.as_deref())?;
@@ -395,6 +425,7 @@ async fn edit_self(timestamp: i64, text: &str, flags: SendFlags<'_>) -> Result<(
                 timestamp,
                 text: text.to_owned(),
                 reply,
+                important,
             })
             .await
             .map_err(fail)?,
@@ -1292,12 +1323,41 @@ mod tests {
         }
         assert_eq!(
             edit_flags(&["--reply", "17"]),
-            Some(SendFlags {
-                reply: Some(17),
-                ..SendFlags::default()
+            Some(EditFlags {
+                send: SendFlags {
+                    reply: Some(17),
+                    ..SendFlags::default()
+                },
+                important: false,
             })
         );
         assert_eq!(edit_flags(&["--payload", "p"]), None);
+        assert_eq!(edit_flags(&[]), Some(EditFlags::default()));
+        assert_eq!(
+            edit_flags(&["--important"]),
+            Some(EditFlags {
+                important: true,
+                ..EditFlags::default()
+            })
+        );
+        assert_eq!(
+            edit_flags(&["--chat", "c", "--important", "--reply", "3"]),
+            Some(EditFlags {
+                send: SendFlags {
+                    reply: Some(3),
+                    chat: Some("c"),
+                    payload: None
+                },
+                important: true,
+            })
+        );
+        for bad in [
+            &["--important", "x"][..],
+            &["--reply", "--important"],
+            &["--important", "--payload", "p"],
+        ] {
+            assert_eq!(edit_flags(bad), None, "{bad:?}");
+        }
         assert_eq!(chat_flag(&[]), Some(None));
         assert_eq!(chat_flag(&["--chat", "c"]), Some(Some("c")));
         assert_eq!(chat_flag(&["c"]), None);

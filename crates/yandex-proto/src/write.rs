@@ -62,12 +62,14 @@ pub enum WriteRequest {
         text: String,
         reply: Option<ReplyRef>,
     },
-    /// Rewrites the whole `Plain`, so a reply must be repeated or the server drops its quote.
+    /// Rewrites the whole `Plain`, so a reply must be repeated or the server drops its quote. An
+    /// important message repeats `IsImportant: true` too (the key is sent only when set).
     Edit {
         chat: String,
         timestamp: i64,
         text: String,
         reply: Option<ReplyRef>,
+        important: bool,
     },
     /// A `Plain` without content addresses the message for deletion.
     Delete {
@@ -141,10 +143,14 @@ impl WriteRequest {
                 timestamp,
                 text,
                 reply,
+                important,
             } => {
                 let mut plain = json!({ "ChatId": chat, "Timestamp": timestamp, "Text": { "MessageText": text } });
                 if let Some(reply) = reply {
                     add_reply(&mut plain, chat, reply);
+                }
+                if *important {
+                    plain["IsImportant"] = json!(true);
                 }
                 json!({ "Plain": plain })
             }
@@ -309,6 +315,14 @@ mod tests {
                 timestamp: 5,
                 text: "new".into(),
                 reply: None,
+                important: false,
+            },
+            WriteRequest::Edit {
+                chat: CHAT.into(),
+                timestamp: 5,
+                text: "new".into(),
+                reply: None,
+                important: true,
             },
             WriteRequest::Edit {
                 chat: CHAT.into(),
@@ -318,6 +332,7 @@ mod tests {
                     timestamp: 4,
                     quote: "orig".into(),
                 }),
+                important: false,
             },
             WriteRequest::Delete {
                 chat: CHAT.into(),
@@ -449,6 +464,7 @@ mod tests {
             timestamp: 1_784_117_592_261_029,
             text: "new".into(),
             reply: None,
+            important: false,
         };
         assert_eq!(
             frame(&request).body,
@@ -469,6 +485,7 @@ mod tests {
                 timestamp: 10,
                 quote: "orig".into(),
             }),
+            important: false,
         };
         assert_eq!(
             frame(&request).body,
@@ -479,6 +496,61 @@ mod tests {
                 "ForwardedMessageRefs": [{ "ChatId": CHAT, "Timestamp": 10 }],
                 "ForwardedMessageStyles": [{ "Quote": "orig" }],
             } }))
+        );
+    }
+
+    /// An important message keeps its flag only if the edit repeats it (D9): the key is `true`
+    /// and sits beside the reply refs; the rest of the frame is the plain edit's.
+    #[test]
+    fn an_important_edit_carries_the_flag_and_others_do_not() {
+        let important = WriteRequest::Edit {
+            chat: CHAT.into(),
+            timestamp: 20,
+            text: "new".into(),
+            reply: None,
+            important: true,
+        };
+        assert_eq!(
+            frame(&important).body,
+            envelope(json!({ "Plain": {
+                "ChatId": CHAT,
+                "Timestamp": 20,
+                "Text": { "MessageText": "new" },
+                "IsImportant": true,
+            } }))
+        );
+        let reply = Some(ReplyRef {
+            timestamp: 10,
+            quote: "orig".into(),
+        });
+        let both = WriteRequest::Edit {
+            chat: CHAT.into(),
+            timestamp: 20,
+            text: "new".into(),
+            reply: reply.clone(),
+            important: true,
+        };
+        let plain = frame(&both).body["ClientMessage"]["Plain"].clone();
+        assert_eq!(plain["IsImportant"], json!(true));
+        assert_eq!(
+            plain["ForwardedMessageStyles"],
+            json!([{ "Quote": "orig" }])
+        );
+        // Without the flag the key is absent, not `false`.
+        let plain_edit = WriteRequest::Edit {
+            chat: CHAT.into(),
+            timestamp: 20,
+            text: "new".into(),
+            reply,
+            important: false,
+        };
+        let body = frame(&plain_edit).body;
+        assert!(
+            body["ClientMessage"]["Plain"]
+                .as_object()
+                .unwrap()
+                .get("IsImportant")
+                .is_none()
         );
     }
 

@@ -146,13 +146,15 @@ pub trait Backend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Option<MessageTs>, BackendError>> + Send;
 
     /// Rewrites the text of an own message. The server replaces the whole message, so a reply
-    /// must repeat its target (`reply_to`) or it loses its quote.
+    /// must repeat its target (`reply_to`) or it loses its quote, and an important message must
+    /// repeat its flag (`important`, the cached value) or the server may clear it.
     fn edit(
         &self,
         chat: &ChatId,
         timestamp: MessageTs,
         text: &str,
         reply_to: Option<&ReplyTarget>,
+        important: bool,
     ) -> impl Future<Output = Result<(), BackendError>> + Send;
 
     fn delete(
