@@ -742,6 +742,86 @@ fn voice_has_player(m: &Message) -> bool {
     matches!(m.body, MessageBody::Voice { .. }) && m.delivery == Delivery::Sent
 }
 
+/// What the voice bubble hands to its elements, recorded at the construction sites in test builds (as the
+/// pinned bar's `BAR_LINE` does for its text): every value passes through one of these functions on its
+/// way into the element tree, so a test reads what was actually put there, not what was computed.
+#[cfg(test)]
+pub(crate) mod probe {
+    use crate::theme::ACCENT;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    /// The glyph and the time text of the circle and the time slot, the bars built and those of them in
+    /// the accent colour (the lit part), and whether the circle got its click handler.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct VoiceShown {
+        pub glyph: String,
+        pub label: String,
+        pub bars: usize,
+        pub accent: usize,
+        pub enabled: bool,
+    }
+
+    thread_local! {
+        /// By message timestamp; a render starts the entry afresh, so a test that removes it before a
+        /// state change finds it again only if the row really rendered.
+        pub(crate) static VOICE_SHOWN: RefCell<HashMap<i64, VoiceShown>> = RefCell::new(HashMap::new());
+    }
+
+    fn record(ts: i64, record: impl FnOnce(&mut VoiceShown)) {
+        VOICE_SHOWN.with(|shown| record(shown.borrow_mut().entry(ts).or_default()));
+    }
+
+    pub(super) fn begin(ts: i64) {
+        VOICE_SHOWN.with(|shown| shown.borrow_mut().insert(ts, VoiceShown::default()));
+    }
+
+    pub(super) fn glyph(ts: i64, glyph: &'static str) -> &'static str {
+        record(ts, |s| s.glyph = glyph.to_owned());
+        glyph
+    }
+
+    pub(super) fn label(ts: i64, label: String) -> String {
+        record(ts, |s| s.label = label.clone());
+        label
+    }
+
+    pub(super) fn bar(ts: i64, color: u32) -> u32 {
+        record(ts, |s| {
+            s.bars += 1;
+            s.accent += usize::from(color == ACCENT);
+        });
+        color
+    }
+
+    pub(super) fn click<F>(ts: i64, handler: F) -> F {
+        record(ts, |s| s.enabled = true);
+        handler
+    }
+}
+
+/// The same hooks in a non-test build: they hand their value on.
+#[cfg(not(test))]
+mod probe {
+    pub(super) fn begin(_: i64) {}
+
+    pub(super) fn glyph(_: i64, glyph: &'static str) -> &'static str {
+        glyph
+    }
+
+    pub(super) fn label(_: i64, label: String) -> String {
+        label
+    }
+
+    pub(super) fn bar(_: i64, color: u32) -> u32 {
+        color
+    }
+
+    pub(super) fn click<F>(_: i64, handler: F) -> F {
+        handler
+    }
+}
+
 /// The voice bubble of design D7: a circle that plays and pauses, the waveform with the played part
 /// lit, the time (or the failure text), and below it the Download action row of the original. Every
 /// slot has a fixed size, so the bubble is the same size in every state. Debug selectors:
@@ -776,6 +856,7 @@ fn voice_bubble(
     };
     let face = voice_face_with(&view, duration_ms, unavailable);
     let enabled = playable && circle_enabled(view.phase, unavailable);
+    probe::begin(ts);
     let line = action_line(store.download_state(&original), online);
     let toggle = {
         let (player, original, name) = (
@@ -799,7 +880,7 @@ fn voice_bubble(
                 .h(px(height))
                 .flex_none()
                 .rounded(px(VOICE_BAR_W / 2.))
-                .bg(rgb(if i < lit { ACCENT } else { MUTED }))
+                .bg(rgb(probe::bar(ts, if i < lit { ACCENT } else { MUTED })))
         });
     div()
         .debug_selector(move || format!("msg-{ts}-voice"))
@@ -824,8 +905,10 @@ fn voice_bubble(
                         .items_center()
                         .justify_center()
                         .text_size(px(16.))
-                        .when(enabled, |d| d.cursor_pointer().on_click(toggle))
-                        .child(face.glyph),
+                        .when(enabled, |d| {
+                            d.cursor_pointer().on_click(probe::click(ts, toggle))
+                        })
+                        .child(probe::glyph(ts, face.glyph)),
                 )
                 .child(
                     div()
@@ -849,7 +932,11 @@ fn voice_bubble(
                         .items_center()
                         .text_size(px(if face.failed { 10. } else { 12. }))
                         .text_color(rgb(MUTED))
-                        .child(div().max_w(px(VOICE_TIME_W)).child(face.label)),
+                        .child(
+                            div()
+                                .max_w(px(VOICE_TIME_W))
+                                .child(probe::label(ts, face.label)),
+                        ),
                 ),
         )
         .when(playable, |d| {

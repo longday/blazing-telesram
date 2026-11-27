@@ -9337,15 +9337,49 @@ fn the_bar_line_names_the_author_outside_private_chats_and_is_one_line(_cx: &mut
 //
 // The harness registers the scripted `AudioFactory` of `player::fake`, so a click on the circle drives the
 // real `Player` and the real store with a fake output; `fake.set_position` plus the executor's clock stand for
-// the sound advancing. Debug bounds say where an element is, not which glyph, time or text it shows, so those
-// are asserted through what the bubble reads (the player's `VoiceView`, the store's download state, the
-// failure label of each case); the faces themselves are pure functions tested in `timeline.rs`.
+// the sound advancing. Debug bounds say where an element is, not which glyph, time or text it shows, so the
+// bubble also records what it puts into its elements at render (`timeline::VOICE_SHOWN`, like the pinned
+// bar's `BAR_LINE`); `rendered` clears that record before an action and reads it after, so the face asserted
+// is the one the row painted after the change.
 
-use crate::format::duration_label;
 use crate::player::fake::Call;
 use crate::player::{OpenError, PlayFailure, VoiceKey, VoicePhase, VoiceView, failure_label};
+use crate::timeline::probe::{VOICE_SHOWN, VoiceShown};
 
 const FOURTEEN: Duration = Duration::from_secs(14);
+
+/// What a voice bubble was rendered with (`timeline::VoiceShown`): the glyph and the time text put into the
+/// elements, bars built and bars in the accent colour (`accent`, the lit part), a click handler on the circle.
+fn face(glyph: &str, label: &str, accent: usize, enabled: bool) -> VoiceShown {
+    VoiceShown {
+        glyph: glyph.into(),
+        label: label.into(),
+        bars: 28,
+        accent,
+        enabled,
+    }
+}
+
+/// What bubble `i` was last rendered with.
+fn rendered_now(i: i64) -> VoiceShown {
+    VOICE_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("bubble {i} was never rendered"))
+}
+
+/// Runs `act`, then returns what bubble `i` was rendered with. The record is cleared first, so it is
+/// there again only if the row really rendered after `act` and a stale one cannot pass.
+fn rendered(
+    cx: &mut VisualTestContext,
+    i: i64,
+    act: impl FnOnce(&mut VisualTestContext),
+) -> VoiceShown {
+    VOICE_SHOWN.with(|shown| shown.borrow_mut().remove(&ts(i)));
+    act(cx);
+    VOICE_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("bubble {i} was not rendered again"))
+}
 
 /// A voice message of 14 s in chat "g".
 fn voice_message(i: i64, file: &str, name: Option<&str>) -> Message {
@@ -9451,12 +9485,12 @@ fn a_voice_body_renders_the_player_and_asks_for_nothing(cx: &mut TestAppContext)
         "not the placeholder any more"
     );
     assert!(shown(cx, msg!(41, "download")), "the original's action row");
-    let (idle, total) = (
-        voice_view(&h, cx, 41),
-        duration_label(FOURTEEN.as_millis() as u64),
+    assert_eq!(voice_view(&h, cx, 41), VoiceView::default());
+    assert_eq!(
+        rendered_now(41),
+        face("▶", "0:14", 0, true),
+        "idle: play glyph, the duration, no bar lit, a clickable circle"
     );
-    assert_eq!(idle, VoiceView::default());
-    assert_eq!(total, "0:14");
 
     // Scrolled through and a new voice message arriving: still no request, no file, no sound.
     scroll(cx, 600.);
@@ -9485,7 +9519,12 @@ fn the_first_click_fetches_the_playback_copy_and_the_sound_follows_the_clock(
     let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
     let dir = tempfile::tempdir().unwrap();
 
-    click(cx, msg!(5, "voice-toggle"));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        seen,
+        face("…", "0:14", 0, true),
+        "loading: the loading glyph, the duration, no bar lit"
+    );
     assert_eq!(
         h.commands(),
         [Command::Download {
@@ -9519,7 +9558,12 @@ fn the_first_click_fetches_the_playback_copy_and_the_sound_follows_the_clock(
     );
     assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
 
-    let path = playback_arrives(&h, cx, &dir, "vf");
+    let mut path = None;
+    let seen = rendered(cx, 5, |cx| {
+        path = Some(playback_arrives(&h, cx, &dir, "vf"))
+    });
+    let path = path.unwrap();
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "playing: the pause glyph");
     assert_eq!(
         voice_view(&h, cx, 5),
         VoiceView {
@@ -9530,19 +9574,14 @@ fn the_first_click_fetches_the_playback_copy_and_the_sound_follows_the_clock(
     );
     assert_eq!(h.fake.take_calls(), [Call::Open(path), Call::Play]);
 
-    // The elapsed time (what the bubble formats) and with it the lit part of the track only grow.
-    let mut shown_times = Vec::new();
-    let mut positions = Vec::new();
-    for secs in [2, 5, 9] {
-        h.fake.set_position(Duration::from_secs(secs));
-        voice_wait(cx, 200);
-        let view = voice_view(&h, cx, 5);
-        assert_eq!(view.phase, VoicePhase::Playing);
-        shown_times.push(duration_label(view.position.as_millis() as u64));
-        positions.push(view.position);
+    // The glyph, the elapsed time and the lit bars as rendered, advancing with the clock.
+    for (secs, label, lit) in [(2, "0:02", 4), (5, "0:05", 10), (9, "0:09", 18)] {
+        let seen = rendered(cx, 5, |cx| {
+            h.fake.set_position(Duration::from_secs(secs));
+            voice_wait(cx, 200);
+        });
+        assert_eq!(seen, face("⏸", label, lit, true), "{secs} s");
     }
-    assert_eq!(shown_times, ["0:02", "0:05", "0:09"]);
-    assert!(positions.windows(2).all(|w| w[0] < w[1]));
     assert_eq!(h.commands(), [], "playing sends nothing");
 }
 
@@ -9557,7 +9596,12 @@ fn the_circle_pauses_and_resumes_in_place(cx: &mut TestAppContext) {
     h.fake.set_position(Duration::from_secs(5));
     voice_wait(cx, 200);
 
-    click(cx, msg!(5, "voice-toggle"));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        seen,
+        face("▶", "0:05", 10, true),
+        "paused: play glyph, the elapsed time, the lit part kept"
+    );
     let paused = voice_view(&h, cx, 5);
     assert_eq!(paused.phase, VoicePhase::Paused);
     assert_eq!(paused.position, Duration::from_secs(5));
@@ -9566,11 +9610,13 @@ fn the_circle_pauses_and_resumes_in_place(cx: &mut TestAppContext) {
     voice_wait(cx, 1_000);
     assert_eq!(voice_view(&h, cx, 5), paused, "paused stays at 0:05");
 
-    click(cx, msg!(5, "voice-toggle"));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:05", 10, true), "resumed where it was");
     assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Playing);
     assert_eq!(h.fake.take_calls(), [Call::Play], "resumed, not reopened");
     h.fake.set_position(Duration::from_secs(6));
-    voice_wait(cx, 200);
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(seen, face("⏸", "0:06", 12, true));
     assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(6));
     assert_eq!(h.commands(), []);
 }
@@ -9633,12 +9679,18 @@ fn the_end_resets_the_bubble_and_play_starts_again_from_the_start(cx: &mut TestA
     let path = playback_arrives(&h, cx, &dir, "vf");
     click(cx, msg!(5, "voice-toggle"));
     h.fake.set_position(Duration::from_secs(13));
-    voice_wait(cx, 200);
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(seen, face("⏸", "0:13", 26, true));
     assert_eq!(voice_view(&h, cx, 5).position, Duration::from_secs(13));
     h.fake.take_calls();
 
     h.fake.finish();
-    voice_wait(cx, 200);
+    let seen = rendered(cx, 5, |cx| voice_wait(cx, 200));
+    assert_eq!(
+        seen,
+        face("▶", "0:14", 0, true),
+        "ended: the duration again, play glyph, no bar lit"
+    );
     assert_eq!(
         voice_view(&h, cx, 5),
         VoiceView::default(),
@@ -9649,7 +9701,8 @@ fn the_end_resets_the_bubble_and_play_starts_again_from_the_start(cx: &mut TestA
     voice_wait(cx, 2_000);
     assert_eq!(h.fake.position_reads(), reads, "the timer ended with it");
 
-    click(cx, msg!(5, "voice-toggle"));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "from the start again");
     let view = voice_view(&h, cx, 5);
     assert_eq!(
         (view.phase, view.position),
@@ -9796,6 +9849,11 @@ fn offline_without_a_copy_the_circle_does_nothing_and_asks_for_nothing(cx: &mut 
     );
     open_with(&h, cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
     assert!(shown(cx, msg!(5, "voice-toggle")));
+    assert_eq!(
+        rendered_now(5),
+        face("▶", "Нет сети", 0, false),
+        "before any click: the offline text in place of the duration and no click handler"
+    );
 
     // Unavailable before the click: the click starts nothing and does not even turn into a failure.
     click(cx, msg!(5, "voice-toggle"));
@@ -9806,7 +9864,14 @@ fn offline_without_a_copy_the_circle_does_nothing_and_asks_for_nothing(cx: &mut 
     assert_eq!(h.fake.take_calls(), []);
 
     // Back online the same bubble plays: nothing was remembered as failed.
-    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)])
+    });
+    assert_eq!(
+        seen,
+        face("▶", "0:14", 0, true),
+        "connectivity is back: the duration and an enabled circle"
+    );
     h.commands();
     click(cx, msg!(5, "voice-toggle"));
     assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
@@ -9850,7 +9915,14 @@ fn a_load_started_online_can_still_be_cancelled_after_the_connection_drops(
     assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Loading);
     h.commands();
 
-    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)])
+    });
+    assert_eq!(
+        seen,
+        face("…", "0:14", 0, true),
+        "offline while loading the circle is still enabled"
+    );
     h.commands();
     click(cx, msg!(5, "voice-toggle"));
     assert_eq!(
@@ -9909,16 +9981,23 @@ fn every_download_failure_has_its_text_and_the_next_click_retries(cx: &mut TestA
             }],
             "{reason:?}"
         );
-        h.feed(
-            cx,
-            [ClientEvent::DownloadFailed {
-                media: playback_of("vf"),
-                reason,
-            }],
-        );
+        let seen = rendered(cx, 5, |cx| {
+            h.feed(
+                cx,
+                [ClientEvent::DownloadFailed {
+                    media: playback_of("vf"),
+                    reason,
+                }],
+            )
+        });
         let failure = PlayFailure::Download(reason);
         assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Failed(failure));
         assert_eq!(failure_label(failure), label, "{reason:?}");
+        assert_eq!(
+            seen,
+            face("▶", label, 0, true),
+            "{reason:?}: its text in place of the time"
+        );
     }
     assert!(
         !shown(cx, msg!(5, "retry")),
@@ -9951,9 +10030,14 @@ fn an_unplayable_file_says_so_keeps_download_and_the_next_click_retries(cx: &mut
     ];
     for (error, failure, label) in cases {
         h.fake.open_returns(Err(error));
-        click(cx, msg!(5, "voice-toggle"));
+        let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
         assert_eq!(voice_phase(&h, cx, 5), VoicePhase::Failed(failure));
         assert_eq!(failure_label(failure), label);
+        assert_eq!(
+            seen,
+            face("▶", label, 0, true),
+            "{error:?}: its text in place of the time"
+        );
     }
     assert_eq!(
         h.commands(),
@@ -9972,7 +10056,8 @@ fn an_unplayable_file_says_so_keeps_download_and_the_next_click_retries(cx: &mut
     );
 
     h.fake.open_returns(Ok(FOURTEEN));
-    click(cx, msg!(5, "voice-toggle"));
+    let seen = rendered(cx, 5, |cx| click(cx, msg!(5, "voice-toggle")));
+    assert_eq!(seen, face("⏸", "0:00", 0, true), "the retry shows playing");
     assert_eq!(
         voice_phase(&h, cx, 5),
         VoicePhase::Playing,
