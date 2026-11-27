@@ -10,7 +10,7 @@ use std::time::Duration;
 use yandex_proto::bootstrap::bootstrap;
 use yandex_proto::client::{Client, ClientConfig};
 use yandex_proto::error::ProtoError;
-use yandex_proto::manage::ManageError;
+use yandex_proto::manage::{MAX_CHAT_TITLE, ManageError};
 use yandex_proto::media::{AvatarSize, MediaTarget};
 use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
@@ -163,6 +163,24 @@ fn creation_guard(allowed: Option<&ChatId>) -> Result<(), BackendError> {
         }),
         None => Ok(()),
     }
+}
+
+/// What `create_chat` is never sent: a blank or over-long title (the web client's own limit) or no
+/// participant. The same rule as the probe's `create-chat` and the dialog.
+fn group_request_check(title: &str, users: &[UserId]) -> Result<(), BackendError> {
+    let reason = if title.trim().is_empty() {
+        "название группы не задано"
+    } else if title.chars().count() > MAX_CHAT_TITLE {
+        "название группы слишком длинное"
+    } else if users.is_empty() {
+        "в группе нет участников"
+    } else {
+        return Ok(());
+    };
+    Err(BackendError::Rejected {
+        reason: reason.into(),
+        permanent: true,
+    })
 }
 
 impl YandexBackend {
@@ -645,15 +663,38 @@ impl Backend for YandexBackend {
                 tracing::info!(kind = KIND, named = created.is_some(), "created");
                 Ok(created.map(ChatId))
             }
-            Err(error) => {
-                let error = create_error(error);
-                tracing::warn!(
+            Err(error) => Err(logged_creation_error(KIND, error)),
+        }
+    }
+
+    async fn create_group_chat(
+        &self,
+        title: &str,
+        users: &[UserId],
+    ) -> Result<Option<ChatId>, CreateError> {
+        const KIND: &str = "create_chat";
+        if let Err(error) = creation_guard(self.write_only.as_ref()) {
+            tracing::warn!(kind = KIND, "creation blocked by BT_WRITE_ONLY_CHAT");
+            return Err(CreateError::Failed(error));
+        }
+        // The dialog never offers these; a caller that does is refused before anything is sent.
+        group_request_check(title, users).map_err(CreateError::Failed)?;
+        let (client, _) = self.client().map_err(CreateError::Failed)?;
+        let guids: Vec<String> = users.iter().map(|u| u.0.clone()).collect();
+        // The kind, the count and the outcome only: neither the title nor a person reaches the log.
+        tracing::info!(kind = KIND, participants = guids.len(), "create");
+        match client.create_chat(title, &guids).await {
+            Ok(created) => {
+                // A participant the server could not add does not fail the call: the group exists.
+                tracing::info!(
                     kind = KIND,
-                    unknown = matches!(error, CreateError::Unknown(_)),
-                    "creation did not succeed"
+                    named = created.chat.is_some(),
+                    refused = ?created.refused,
+                    "created"
                 );
-                Err(error)
+                Ok(created.chat.map(ChatId))
             }
+            Err(error) => Err(logged_creation_error(KIND, error)),
         }
     }
 
@@ -723,6 +764,17 @@ fn create_error(error: ManageError) -> CreateError {
         ManageError::NotSent(e) | ManageError::Rejected(e) => CreateError::Failed(backend_error(e)),
         ManageError::Unknown(e) => CreateError::Unknown(e.to_string()),
     }
+}
+
+/// `create_error`, logging the kind and whether the chat may exist (never a person or a title).
+fn logged_creation_error(kind: &str, error: ManageError) -> CreateError {
+    let error = create_error(error);
+    tracing::warn!(
+        kind,
+        unknown = matches!(error, CreateError::Unknown(_)),
+        "creation did not succeed"
+    );
+    error
 }
 
 fn blank(text: Option<&str>) -> bool {
@@ -3137,6 +3189,60 @@ mod tests {
         assert!(matches!(
             open.create_private_chat(&user).await,
             Err(CreateError::Failed(BackendError::Protocol(_)))
+        ));
+    }
+
+    #[test]
+    fn a_group_request_needs_a_title_within_the_limit_and_a_participant() {
+        let who = [UserId("u1".into())];
+        assert_eq!(group_request_check("Team", &who), Ok(()));
+        assert_eq!(
+            group_request_check(&"x".repeat(MAX_CHAT_TITLE), &who),
+            Ok(())
+        );
+        for (title, users) in [
+            ("", &who[..]),
+            ("  \t", &who[..]),
+            ("x".repeat(MAX_CHAT_TITLE + 1).leak(), &who[..]),
+            ("Team", &[][..]),
+        ] {
+            assert!(
+                matches!(
+                    group_request_check(title, users),
+                    Err(BackendError::Rejected {
+                        permanent: true,
+                        ..
+                    })
+                ),
+                "{title:?} {users:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_guarded_group_creation_never_reaches_the_connection() {
+        let users = [UserId("u1".into())];
+        let guarded = YandexBackend::new(test_session(), Some(ChatId("self".into())));
+        // Unbootstrapped: anything that got past the guard would fail with "not bootstrapped".
+        assert!(matches!(
+            guarded.create_group_chat("Team", &users).await,
+            Err(CreateError::Failed(BackendError::Rejected {
+                permanent: true,
+                ..
+            }))
+        ));
+        let open = YandexBackend::new(test_session(), None);
+        assert!(matches!(
+            open.create_group_chat("Team", &users).await,
+            Err(CreateError::Failed(BackendError::Protocol(_)))
+        ));
+        // An invalid request is refused before the connection is even looked at.
+        assert!(matches!(
+            open.create_group_chat(" ", &users).await,
+            Err(CreateError::Failed(BackendError::Rejected {
+                permanent: true,
+                ..
+            }))
         ));
     }
 
