@@ -24,13 +24,13 @@ Owner: Integrator. Updated: 2026-11-27. Four changes are open: **CM** `add-chat-
 
 ## add-chat-members-and-creation (CM)
 
-Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1 and the review fixes (offline views, probe write guard). Open: the `[approval]` gates 5.1, 5.3, 6.2 and what depends on them.
+Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1 and the review fixes (offline views, probe write guard). Open: the live gates 5.1, 5.3, 6.2 (approved by the user on 2026-11-27, running under `CmLive`) and what depends on them.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 5.1 | open, ready (2.2 merged); not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`, the user approves the target guid; `BT_WRITE_ONLY_CHAT` unset; deferred by the user | 2.2 | **[approval] [live]** |
-| 5.3 | blocked-by CM 5.1 (approval); 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
-| 6.2 | open, ready; **[approval] [live]**: real group creation (throwaway title, participants the user approves); live gate for 6.3, 6.4; `BT_WRITE_ONLY_CHAT` unset; deferred by the user | 6.1 | **[approval] [live]** |
+| 5.1 | **approved by the user on 2026-11-27** (target admin@sgnl.pro), run by `CmLive`; not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`; `BT_WRITE_ONLY_CHAT` unset | 2.2 | **[approval] [live]** |
+| 5.3 | **approved by the user on 2026-11-27**, run by `CmLive` after 5.1; 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
+| 6.2 | **approved by the user on 2026-11-27** (throwaway group, target admin@sgnl.pro), run by `CmLive`; **[approval] [live]**; live gate for 6.3, 6.4; `BT_WRITE_ONLY_CHAT` unset | 6.1 | **[approval] [live]** |
 | 6.3 | blocked-by CM 6.2 (live PASS); 3.3 is merged | 6.2, 3.3 | unit CM-G (with 6.4) |
 | 6.4 | blocked-by CM 6.3 (4.3 is merged) | 6.3, 4.3 | unit CM-G |
 | 6.F | conditional | 0.1 FAIL or 6.2 FAIL | removes group wording and code |
@@ -40,13 +40,15 @@ Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are firs
 
 ## add-reaction-list (RL)
 
-Done: 1.1, 1.2, 1.3, 2.1 (RL-proto), 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (RL-app) — all on `main` (RL-app merged 2026-11-27 as `b85d478`; build 0 warnings, `cargo test --workspace` 402 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline, `openspec validate --all --strict` 17/17), 6.6 (no work: flat list), 7.1, 8.1 (final full VM run passed on `main` `3bf6937`; checkbox merged to `main`). All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 and **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7, both on `main`. 3.1 and 8.2 are live reads in the VM (no write, no approval); they are still blocked: the VM has no outbound network (the host's full-tunnel VPN breaks the VM NAT).
+Done: 1.1, 1.2, 1.3, 2.1 (RL-proto), 3.1 (live verification, merged `7d97260`), 4.1, 4.2, 5.1, 6.1-6.5, 6.7 (RL-app) — all on `main` (RL-app merged 2026-11-27 as `b85d478`; build 0 warnings, `cargo test --workspace` 402 + 240 + 190 + 30 + 4 + 16 green, clippy at the 11-warning baseline, `openspec validate --all --strict` 17/17), 6.6 (no work: flat list), 7.1, 8.1 (final full VM run passed on `main` `3bf6937`; checkbox merged to `main`). All open questions (Q1-Q6) were answered on 2026-11-26. Units: **RL-proto** = 1.1, 1.2, 1.3, 2.1 and **RL-app** = 4.1, 4.2, 5.1, 6.1-6.5, 6.7, both on `main`. The VM network is back (3.1 ran on 2026-11-27); 8.2 is a live read (no write, no approval) and waits for a free live slot. After 3.1: `cargo test -p yandex-proto --locked --offline` 190 + 30 + 4 + 17 passed in `bt-vm`, fmt green.
 
 | ID | Status | Needs | Files |
 |----|--------|-------|-------|
-| 3.1 | blocked: the VM network; **[live]** | 2.1 (done) | `research.md`, the fixture |
+| 3.1 | **done**, on `main` (merge `7d97260`, implementation `03dd898`, review approved): live `list_reactions` verified, `Mode: 0` accepted, newest-first order, exclusive `MaxTimestamp`; the server `Limit` cap is not observed (no list above 16 reactors was readable); sanitized live fixture swapped in; findings in `research.md` "Live verification" | 2.1 (done) | `research.md`, `design.md`, the fixture, `wire_fixtures.rs` |
 | 8.1 | **done**, on `main` | 6.7 (done) | none |
-| 8.2, 8.3 | 8.2 blocked: the VM network **[live]**; 8.3 (archive) blocked-by 8.2 | 8.1 (done) | `research.md`, archive |
+| 8.2 | startable except rule 5 (the VM network is back; **[live]** read-only; after `CmLive`) | 8.1 (done) | `research.md` |
+| new | **channel refusal reason**, branch `reactors/refusal`: the server refuses the list for every channel message ("reactions are anonymous", `Status` 4, `ErrorInfo.Message`, no `Details`), and `check_status` loses that reason; hide the menu entry in channels or keep the refusal as decided by the main session; number and files are set in `tasks.md` by its owner; before 8.3 | 3.1 (done) | per its `tasks.md` entry |
+| 8.3 | blocked-by 8.2 and the channel-refusal task (archive) | 8.2, new | archive |
 
 ## add-pins-and-importance-view (PIN)
 
@@ -54,10 +56,10 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`), 1.2 (merged 2026-11-27 into `in
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 0.1 | blocked: VM network; **[live]** reads only | | `research.md` |
-| 0.2 | blocked-by 0.1's network and the user at the web client; **[live]** | 0.1 | `research.md`; decides Q4 and checks the Q5 timestamps |
+| 0.1 | **done** (live reads in the VM); branch `pins/0.1`, being merged into `integ/pins-and-importance-view` by Integrator2 | | `research.md` |
+| 0.2 | blocked-by the user at the web client (the network is back); **[live]** | 0.1 (done) | `research.md`; decides Q4 and checks the Q5 timestamps |
 | 1.2 | **done**, merged into `integ/pins-and-importance-view` (`b48b666`); holds no file any more (rule 1, merged into the integration branch) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
-| 1.3 | conditional on 0.1; after RL 1.1 (same `request.rs`) | 0.1 | `request.rs` |
+| 1.3 | **dropped**: chat-list entries carry `PinnedMessageTs`, so no `request.rs` change is needed (0.1) | 0.1 (done) | none |
 | 2.1 | **done**, merged into `integ/pins-and-importance-view` (`06f58ba`); holds no file any more (rule 1): chat-core `client.rs`, `model.rs`, `fixtures.rs`; desktop `store.rs`, `tests.rs`, `yandex_backend.rs` are released | 1.1 | `model.rs`, `fixtures.rs`, chat-core `client.rs`, `store.rs`, `tests.rs`, `yandex_backend.rs` |
 | 2.2 | **done**, merged into `integ/pins-and-importance-view` (`285cd05`, implementation `8734360`); holds no file any more (rule 1): `model.rs`, `backend.rs`, `cache.rs` are released | 2.1 (done) | `model.rs`, `backend.rs`, `cache.rs` (test) |
 | 2.3 | **in flight** (also owns `fixtures.rs`) | 2.2 (done) | chat-core `client.rs`, `fixtures.rs` |
@@ -79,7 +81,7 @@ Notes for the PIN integrator (`integ/pins-and-importance-view`): 2.2 is merged i
 
 ## add-reveal-downloaded-file (REV)
 
-Proposed 2026-11-27. Local action only: no protocol, core or server change (decisions in its `design.md`). One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`). **The REV unit is on `main`** (merge `4b1eaa7`, 2026-11-27; the integration branch `integ/reveal-downloaded-file` and the branch `rev/4.1` are deleted locally and on origin, their worktrees removed). 5.1 final run is done on `main` (details in its row); 5.2 hand check in the VM (**[live]**, not a gate) is blocked by the VM network; 5.3 archive follows 5.2 or the user's decision to archive without it. The D3 note that `reveal_download` calls `cx.notify()` after clearing a deleted file is in `design.md`. Nothing of REV holds a file any more (rule 1).
+Proposed 2026-11-27. Local action only: no protocol, core or server change (decisions in its `design.md`). One merge unit **REV** = 1.1, 2.1, 2.2, 3.1, 4.1 (rule 3: the store method and event are first called by the views and `main.rs`). **The REV unit is on `main`** (merge `4b1eaa7`, 2026-11-27; the integration branch `integ/reveal-downloaded-file` and the branch `rev/4.1` are deleted locally and on origin, their worktrees removed). 5.1 final run is done on `main` (details in its row); 5.2 hand check in the VM (**[live]**, not a gate) waits only for a free live slot (rule 5); 5.3 archive follows 5.2 or the user's decision to archive without it. The D3 note that `reveal_download` calls `cx.notify()` after clearing a deleted file is in `design.md`. Nothing of REV holds a file any more (rule 1).
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
@@ -89,19 +91,19 @@ Proposed 2026-11-27. Local action only: no protocol, core or server change (deci
 | 3.1 | **done**, merged into `integ/reveal-downloaded-file` (`72bf5fa`); holds no file any more (rule 1: `main.rs` is released) | 1.1 | `main.rs` |
 | 4.1 | **done**, on `main` (implementation `8a7c29c`, review approved; merged into integ and then `main` `--no-ff`, 2026-11-27); 358 lines added to `tests.rs`, none of them a `Message { .. }` literal | PIN 2.1 (done) | `tests.rs` |
 | 5.1 | **done**, on `main`: REV unit merge `4b1eaa7`, 5.1 checkbox `9d6406f`. In `bt-vm` on that tree: `cargo fmt --all --check` green; `cargo build --workspace --all-targets --locked --offline` 0 warnings; `cargo test --workspace --locked --offline` 417 + 240 + 190 + 30 + 4 + 16 passed, 0 failed; `cargo clippy --workspace --all-targets --locked --offline` at the 11-warning baseline (6 large-size-difference, 2 deref, 2 collapsible `if`, 1 large `Err`); `openspec validate add-reveal-downloaded-file --strict` valid | the REV unit (done) | build/test/lint matrix |
-| 5.2 | blocked: the VM has no outbound network (needs the network and a signed-in session; **[live]**; the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, rule 5) | 5.1 (done) | none (result in the task report) |
+| 5.2 | ready except rule 5: the VM network is back; **[live]** (the download reads the server, writes only to the VM's `~/Downloads`; one live task at a time, so after `CmLive`) | 5.1 (done) | none (result in the task report) |
 | 5.3 | blocked-by 5.2, or by the user's decision to archive with 5.2 reported "blocked by environment" (5.2 is not a gate for archiving, `tasks.md`) | 5.1 (done) | this file, archive |
 
 Unit **REV** shares files with: PIN-app (`tests.rs`: PIN 4.4, not started, locks nothing; `store.rs` 4.1 is free for PIN now, REV released it; `timeline.rs` 4.2 is done and merged into the PIN integ branch) and CM-G (`tests.rs`; not started, locks nothing, rule 6). RL-app is on `main` and holds nothing. It does not touch `desktop.rs`, `composer.rs`, `theme.rs`, `reactors.rs`, `yandex_backend.rs`, chat-core or `yandex-proto`.
 
 ## Ready now
 
-- Startable without the user, no unmet dependency, pairwise disjoint files (rule 1): none new. In flight in the PIN unit: **PIN 2.3** (`client.rs`, `fixtures.rs`), **PIN 3.2** (`yandex_backend.rs`), **PIN 4.1** (`store.rs`, `search_results.rs`, the `chat()` helper in `tests.rs`); then PIN 4.3 (after 4.1) and 4.4 (after 4.1 and 4.3). The REV unit is on `main`; nothing of REV is startable except 5.2 (blocked by the VM network) and 5.3.
-- RL 3.1 and 8.2 stay blocked on the VM network; RL 8.3 (archive) waits for 8.2.
-- CM has nothing startable without the user: CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
+- Startable without the user, no unmet dependency, pairwise disjoint files (rule 1): none new. In flight in the PIN unit: **PIN 2.3** (`client.rs`, `fixtures.rs`), **PIN 3.2** (`yandex_backend.rs`), **PIN 4.1** (`store.rs`, `search_results.rs`, the `chat()` helper in `tests.rs`); then PIN 4.3 (after 4.1) and 4.4 (after 4.1 and 4.3). The REV unit is on `main`; nothing of REV is startable except 5.2 (live, waits for a free slot) and 5.3.
+- RL: the new channel-refusal task (branch `reactors/refusal`, see the RL table) goes before 8.3; RL 8.2 is a live read, startable after `CmLive` finishes (rule 5); RL 8.3 (archive) waits for 8.2 and the refusal task. REV 5.2 is also live, so it queues behind `CmLive` and RL 8.2.
+- CM: 5.1, 5.3 and 6.2 are approved and run by `CmLive` (live, rule 5: nobody else starts a live task meanwhile); CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
 
 ## Needs the user
 
-- Approval of the target: CM 5.1, CM 5.3, CM 6.2 (real chat and group creation); deferred by the user, so these three and 6.3, 6.4, 7.1 stay open.
-- PIN 0.2 and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
-- RL 3.1 and 8.2, PIN 0.1 and REV 5.2 need the VM's outbound network (the host's full-tunnel VPN breaks the VM NAT), not a user decision.
+- Approval of the target: **given** on 2026-11-27 for CM 5.1, 5.3 and 6.2 (real chat and group creation; target admin@sgnl.pro); `CmLive` runs them, so 6.3, 6.4, 7.1 stay blocked on its PASS.
+- PIN 0.2 (awaits the user) and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
+- The VM's outbound network works again (the 2026-11-26 failure was an environment fault, `add-reaction-list/research.md`); RL 8.2, PIN 0.1 and REV 5.2 are no longer blocked by it. What remains is rule 5: one live task at a time.
