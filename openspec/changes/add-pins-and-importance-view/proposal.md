@@ -48,11 +48,11 @@ The client shows reactions now, but two other pieces of message state set by oth
 
 ## Open questions
 
-**Q4. Does an importance change look like an edit?** Expected: a `Plain` push with a higher `Version` and a changed `IsImportant` (web-client inference). Unknown: whether `LastEditTimestamp` is set then, in which case the existing rule would show the "edited" marker for a pure flag change, and whether the text is repeated. Options once observed:
+**Q4 (answered by 0.2, 2026-11-27: B). Does an importance change look like an edit?** Yes: a `Plain` push with the whole message repeated and `IsImportant` set (omitted when cleared), `LastEditTimestamp` newly set, `Version` unchanged; the existing rule would show "edited" for a pure flag change. Options that were open:
 - A. Take the server's `edited` as is. Right if the server does not set it.
 - B. When the new copy has the same body and a different flag, keep the cached copy's `edited`. Right if the server sets it; a small, local rule in the engine upsert.
 - C. Treat a flag change as a separate event if it arrives as one (it must not, per the web code).
-- **Recommended: decide after 0.2**; if 0.2 shows `LastEditTimestamp` unchanged, A; if set, B. Blocks 2.4 and the "importance changes apply live" scenarios' implementation check (the requirement text holds in both cases). The only open question; it is answered by observation, not taste.
+- **Decided: B** (0.2 shows `LastEditTimestamp` is set). Unblocks 2.4. See research "Live observation", 0.2.
 
 ## Answered questions
 
@@ -64,7 +64,7 @@ Answered on 2026-11-26 in the main session (autonomous mode: the user delegates 
 
 **Q3 = A. The important marker is a "⚡" glyph next to the time** in the bubble footer, plain text like the existing "🕓" pending mark. Rejected: B (tinted bubble or accent edge), C (both). Lifts the block from 4.2.
 
-**Q5 = B. Pin arbitration is by the action timestamp, else by arrival.** An input (a chat-list entry's `LastActionTsMcs`, a push's `ServerMessageInfo.Timestamp`) whose action timestamp is older than the latest one applied for that chat is ignored; when either side has none, the last arrival wins. The clock travels as its own field, `WireChat.pin_action_ts` and `ChatSummary.pin_action_ts`, separate from the optional pinned message so an unpin snapshot keeps it and the engine can compare a chat-list reply against it. The two timestamps being comparable is an assumption that task 0.2 checks; if 0.2 shows they are not, the decoder stops filling `at` for pushes (one line in `wire.rs`) and the arrival rule applies to pushes, with no other change. Rejected: A alone (stale pin after a race), C (no overwrite while connected). Lifts the block from 1.2 and 2.3.
+**Q5 = B. Pin arbitration is by the action timestamp, else by arrival.** An input (a chat-list entry's `LastActionTsMcs`, a push's `ServerMessageInfo.LastEditTimestamp`; corrected by 0.2: the push's `ServerMessageInfo.Timestamp` is the pinned message's own timestamp, not the action time) whose action timestamp is older than the latest one applied for that chat is ignored; when either side has none, the last arrival wins. The clock travels as its own field, `WireChat.pin_action_ts` and `ChatSummary.pin_action_ts`, separate from the optional pinned message so an unpin snapshot keeps it and the engine can compare a chat-list reply against it. 0.2 confirmed that the action times are comparable (the push's `LastEditTimestamp` equals the next entry's `LastActionTsMcs` to the microsecond); the decoder fix is task 1.4. Rejected: A alone (stale pin after a race), C (no overwrite while connected). Lifts the block from 1.2 and 2.3.
 
 **Q6 = B. Edit of an own important message sends `IsImportant: true`.** The web client does the same on every edit (`convertMessageToPlain`, offset 1208286); the adapter's own comment says the server replaces the whole message on edit, so omission probably clears the flag for everyone, already today. Only an edit of a message the cache holds as important carries the key; non-important edits stay byte-identical. Still verified live in 6.2 on a disposable self-chat message the user marks as important (an edit without the flag and one with it, `history` after each): if omission turns out to keep the flag, the change is removed again and Q6 becomes A. Rejected: A (leave the silent loss), C (refuse the edit). Lifts the block of 3.3 for implementation; it closes only with 6.2.
 
