@@ -17,7 +17,7 @@ use yandex_proto::session::Session;
 use yandex_proto::wire::{
     PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember,
     WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireReactorEntry,
-    WireReactors, WireSender, WireUser, refusal_reason,
+    WireReactors, WireSender, WireUser, refusal_reason, without_refusal_reason,
 };
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
@@ -660,13 +660,17 @@ fn members_error(error: ProtoError) -> BackendError {
 }
 
 /// A refused reactor list carries the server's reason (`ErrorInfo.Message`, e.g. "reactions are
-/// anonymous" for a channel message) as a permanent rejection the list shows. A refusal without a
-/// reason and every other failure keep the ordinary mapping.
+/// anonymous" for a channel message) and the status code and name, as a permanent rejection the
+/// list shows: «Сервер отказал: <reason> (status 4 ENTITY_NOT_FOUND)». A refusal without a reason
+/// and every other failure keep the ordinary mapping.
 fn reactors_error(error: ProtoError) -> BackendError {
     match error {
         ProtoError::Protocol(text) => match refusal_reason(&text) {
             Some(reason) => BackendError::Rejected {
-                reason: format!("{REACTORS_REFUSED}: {reason}"),
+                reason: format!(
+                    "{REACTORS_REFUSED}: {reason} ({})",
+                    without_refusal_reason(&text)
+                ),
                 permanent: true,
             },
             None => BackendError::Protocol(text),
@@ -3198,7 +3202,8 @@ mod tests {
         assert_eq!(
             backend.reactors(&chat, 111, None, 30).await,
             Err(BackendError::Rejected {
-                reason: "Сервер отказал: reactions are anonymous".into(),
+                reason: "Сервер отказал: reactions are anonymous (status 4 ENTITY_NOT_FOUND)"
+                    .into(),
                 permanent: true
             })
         );
@@ -3216,7 +3221,7 @@ mod tests {
                 "status 4 ENTITY_NOT_FOUND: message not found".into()
             )),
             BackendError::Rejected {
-                reason: "Сервер отказал: message not found".into(),
+                reason: "Сервер отказал: message not found (status 4 ENTITY_NOT_FOUND)".into(),
                 permanent: true
             }
         );
