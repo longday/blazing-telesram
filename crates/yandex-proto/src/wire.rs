@@ -138,11 +138,25 @@ pub struct WireImage {
     pub animated: bool,
 }
 
+/// A `MiscFile` that carries `PreviewHint.VideoPreview`. Only the hint makes a video here: a
+/// `MiscFile` without it stays [`WireBody::File`] (the adapter recognises a video by the
+/// extension of its name, hint or not). A key missing from the hint is 0; `BlurHash` is ignored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireVideo {
+    pub file: WireFile,
+    pub width: u32,
+    pub height: u32,
+    /// `DurationMs`, the container's duration in milliseconds.
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WireBody {
     Text(String),
     Image(WireImage),
     File(WireFile),
+    /// A `MiscFile` with a `PreviewHint.VideoPreview` object.
+    Video(WireVideo),
     /// `Duration` is the raw wire integer (milliseconds per the live data, R3); `waveform` is
     /// the base64 `Waveform` string unpacked to one level per element, 0 (silence) to 15, two
     /// levels per byte with the high nibble first (R3), and `None` when it is absent or not
@@ -520,6 +534,27 @@ fn image(holder: &Json) -> Option<WireImage> {
     })
 }
 
+/// `PreviewHint.VideoPreview` of a `MiscFile`, when it is an object.
+fn video_preview(holder: &Json) -> Option<&Json> {
+    present(present(holder, "PreviewHint")?, "VideoPreview").filter(|p| p.is_object())
+}
+
+fn video(file: WireFile, preview: &Json) -> WireVideo {
+    let dimension = |key| {
+        int_field(preview, key)
+            .and_then(|v| u32::try_from(v).ok())
+            .unwrap_or(0)
+    };
+    WireVideo {
+        file,
+        width: dimension("Width"),
+        height: dimension("Height"),
+        duration_ms: int_field(preview, "DurationMs")
+            .and_then(|v| u64::try_from(v).ok())
+            .unwrap_or(0),
+    }
+}
+
 /// Keys of a `Plain` body that are not content: anything else is an unknown content type.
 const PLAIN_META_KEYS: [&str; 14] = [
     "ChatId",
@@ -561,8 +596,13 @@ fn plain_body(plain: &Json) -> WireBody {
         return image(holder).map_or_else(|| WireBody::Other("Image".into()), WireBody::Image);
     }
     if let Some(holder) = present(plain, "MiscFile") {
-        return file_info(holder)
-            .map_or_else(|| WireBody::Other("MiscFile".into()), WireBody::File);
+        return file_info(holder).map_or_else(
+            || WireBody::Other("MiscFile".into()),
+            |file| match video_preview(holder) {
+                Some(preview) => WireBody::Video(video(file, preview)),
+                None => WireBody::File(file),
+            },
+        );
     }
     if present(plain, "Card").is_some() {
         return WireBody::Other("Card".into());
@@ -1281,6 +1321,130 @@ mod tests {
         }
         // An odd number of bytes is fine: every byte is two levels.
         assert_eq!(unpack_levels(&decode_base64("QUJD").unwrap()).len(), 6);
+    }
+
+    fn misc_file(extra: Json) -> WireBody {
+        let mut file = json!({
+            "FileInfo": { "Id2": "bucket/vid", "Name": "clip.mp4", "Size": 5_000_000, "Source": 1 }
+        });
+        file.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        plain_body(&json!({ "MiscFile": file }))
+    }
+
+    fn clip() -> WireFile {
+        WireFile {
+            id: "bucket/vid".into(),
+            name: Some("clip.mp4".into()),
+            size: Some(5_000_000),
+        }
+    }
+
+    #[test]
+    fn a_misc_file_with_the_video_hint_is_a_video() {
+        let hint = json!({ "PreviewHint": { "VideoPreview": {
+            "Width": 1080, "Height": 1920, "DurationMs": 42_000, "BlurHash": "LEHV6nWB2yk8pyo0adR*" } } });
+        assert_eq!(
+            misc_file(hint),
+            WireBody::Video(WireVideo {
+                file: clip(),
+                width: 1080,
+                height: 1920,
+                duration_ms: 42_000
+            })
+        );
+    }
+
+    #[test]
+    fn a_misc_file_without_the_video_hint_stays_a_file() {
+        assert_eq!(misc_file(json!({})), WireBody::File(clip()));
+        // The hint is not what the name says: the extension is the adapter's business.
+        for hint in [
+            json!({ "PreviewHint": {} }),
+            json!({ "PreviewHint": null }),
+            json!({ "PreviewHint": { "VideoPreview": null } }),
+            json!({ "PreviewHint": { "VideoPreview": "x" } }),
+            json!({ "PreviewHint": { "VideoPreview": [] } }),
+            json!({ "PreviewHint": { "OtherPreview": { "Width": 1 } } }),
+            json!({ "PreviewHint": "VideoPreview" }),
+        ] {
+            assert_eq!(misc_file(hint.clone()), WireBody::File(clip()), "{hint}");
+        }
+    }
+
+    #[test]
+    fn a_partial_video_hint_gives_zeros_for_the_missing_keys() {
+        let video = |preview: Json| {
+            let WireBody::Video(video) =
+                misc_file(json!({ "PreviewHint": { "VideoPreview": preview } }))
+            else {
+                panic!("not a video")
+            };
+            (video.width, video.height, video.duration_ms)
+        };
+        assert_eq!(video(json!({})), (0, 0, 0));
+        assert_eq!(video(json!({ "Width": 640 })), (640, 0, 0));
+        assert_eq!(video(json!({ "DurationMs": 7408 })), (0, 0, 7408));
+        assert_eq!(
+            video(json!({ "Width": 640, "Height": 480, "BlurHash": 7 })),
+            (640, 480, 0)
+        );
+        // A value of the wrong type or sign is a missing key, not an error.
+        assert_eq!(
+            video(json!({ "Width": "wide", "Height": -1, "DurationMs": -5 })),
+            (0, 0, 0)
+        );
+        // The file keeps its own fields whatever the hint holds.
+        let WireBody::Video(v) = misc_file(json!({ "PreviewHint": { "VideoPreview": {} } })) else {
+            panic!("not a video")
+        };
+        assert_eq!(v.file, clip());
+    }
+
+    #[test]
+    fn a_misc_file_without_a_file_id_is_still_a_placeholder() {
+        let body = plain_body(&json!({ "MiscFile": {
+            "FileInfo": { "Name": "clip.mp4" },
+            "PreviewHint": { "VideoPreview": { "Width": 1, "Height": 1, "DurationMs": 1 } }
+        } }));
+        assert_eq!(body, WireBody::Other("MiscFile".into()));
+    }
+
+    #[test]
+    fn a_forwarded_video_original_decodes_through_the_same_path() {
+        let original = json!({
+            "Payload": { "ChatId": "src", "MiscFile": {
+                "FileInfo": { "Id2": "bucket/vid", "Name": "clip.mp4", "Size": 5_000_000 },
+                "PreviewHint": { "VideoPreview": { "Width": 640, "Height": 360, "DurationMs": 9000 } }
+            } },
+            "ServerMessageInfo": { "Timestamp": 3, "From": { "Guid": "g", "DisplayName": "Anna" } }
+        });
+        let mut forward = msg(json!({ "ChatId": "c" }), json!({ "Timestamp": 9 }));
+        forward["ForwardedMessages"] = json!([original]);
+        let m = parse_server_message(&forward, None).unwrap();
+        let Relation::Forward { originals } = m.relation else {
+            panic!("not a forward")
+        };
+        assert_eq!(
+            originals[0].body,
+            WireBody::Video(WireVideo {
+                file: clip(),
+                width: 640,
+                height: 360,
+                duration_ms: 9000
+            })
+        );
+        // Without the hint the same original is a plain file.
+        forward["ForwardedMessages"][0]["Payload"]["MiscFile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("PreviewHint");
+        let m = parse_server_message(&forward, None).unwrap();
+        let Relation::Forward { originals } = m.relation else {
+            panic!("not a forward")
+        };
+        assert_eq!(originals[0].body, WireBody::File(clip()));
     }
 
     #[test]
