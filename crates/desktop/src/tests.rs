@@ -6919,6 +6919,49 @@ fn offline_a_group_refusal_is_shown_and_the_title_and_participants_kept(cx: &mut
 }
 
 #[gpui::test]
+fn the_focused_field_stays_in_view_while_the_body_scrolls_in_the_smallest_window(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    cx.simulate_resize(size(px(850.), px(560.)));
+    open_people_panel(&h, cx);
+    open_dialog(&h, cx);
+    click(cx, "new-chat-mode-group");
+    cx.simulate_input("Дружба");
+    for row in ["candidate-alice", "candidate-boris", "candidate-anna"] {
+        click(cx, row);
+    }
+    let (title, search) = (
+        bounds(cx, "new-chat-title").unwrap(),
+        bounds(cx, "new-chat-search").unwrap(),
+    );
+    let body = bounds(cx, "new-chat-body").unwrap();
+    let card = bounds(cx, "new-chat-card").unwrap();
+    assert!(
+        title.top() >= card.top() && search.bottom() <= body.top(),
+        "both fields lie above the scrolling part, inside the card: {title:?} {search:?} {body:?}"
+    );
+
+    // Scroll the body to the bottom; the focused title is not moved out of view.
+    for _ in 0..5 {
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(body.center().x, body.bottom() - px(6.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+            ..Default::default()
+        });
+    }
+    assert_eq!(bounds(cx, "new-chat-title").unwrap(), title);
+    assert_eq!(bounds(cx, "new-chat-search").unwrap(), search);
+    cx.simulate_input("!");
+    assert_eq!(group_title(&h, cx), "Дружба!", "typing reaches the title");
+    let title = bounds(cx, "new-chat-title").unwrap();
+    assert!(
+        title.top() >= card.top() && title.bottom() <= body.top(),
+        "and the edited field is visible: {title:?}"
+    );
+}
+
+#[gpui::test]
 fn the_dialog_blocks_the_chat_and_yields_to_nothing_under_it(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_people_panel(&h, cx);

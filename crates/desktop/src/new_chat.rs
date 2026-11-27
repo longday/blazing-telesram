@@ -568,9 +568,10 @@ pub fn render(
                 .on_click(cx.listener(|this, _, _, cx| this.confirm_new_chat(cx)))
         });
 
-    // The card never outgrows the window: the heading and the buttons keep their place, what lies between
-    // them (fields, people, participants, notices) scrolls. Without that a group with a few participants is
-    // taller than the smallest window and "Создать" is out of reach.
+    // The card never outgrows the window. The heading, the variant buttons and the input fields (title,
+    // search) stay on top and the buttons at the bottom, so a field that has the focus is never scrolled out
+    // of sight; the people, participants and notices between them scroll. Without that a group with a few
+    // participants is taller than the smallest window and "Создать" is out of reach.
     div()
         .debug_selector(|| "new-chat-view".into())
         .absolute()
@@ -604,7 +605,17 @@ pub fn render(
                                 .font_weight(FontWeight::MEDIUM)
                                 .child("Новый чат"),
                         )
-                        .child(modes),
+                        .child(modes)
+                        .children(title_field)
+                        .child(
+                            div()
+                                .debug_selector(|| "new-chat-search".into())
+                                .px(px(12.))
+                                .py(px(7.))
+                                .rounded(px(20.))
+                                .bg(rgb(FIELD))
+                                .child(state.search.clone()),
+                        ),
                 )
                 .child(
                     div()
@@ -618,16 +629,6 @@ pub fn render(
                                 .flex()
                                 .flex_col()
                                 .gap(px(12.))
-                                .children(title_field)
-                                .child(
-                                    div()
-                                        .debug_selector(|| "new-chat-search".into())
-                                        .px(px(12.))
-                                        .py(px(7.))
-                                        .rounded(px(20.))
-                                        .bg(rgb(FIELD))
-                                        .child(state.search.clone()),
-                                )
                                 .child(list)
                                 .children(participant)
                                 .children(members)
