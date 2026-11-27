@@ -29,7 +29,7 @@ Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1, 6.2 
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 5.1 | **blocked on the user**: needs a target with an existing private chat; the web client cannot delete or recreate a private chat, so there is no target for a creation test; the shapes observed so far are in `design.md` "Observed shapes"; unticked; **[approval] [live]** | 2.2 | **[approval] [live]** |
+| 5.1 | **blocked on the user**: needs a target with **no** existing private chat with the app account; the web client cannot delete a private chat, so the one target used so far is spent (a repeat only returns the existing chat); the shapes observed so far are in `design.md` "Observed shapes"; unticked; **[approval] [live]** | 2.2 | **[approval] [live]** |
 | 5.3 | **blocked on the user**, behind 5.1 (same target problem); 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
 | 6.2 | **done** (live PASS, merged 2026-11-27 as part of `17e336b`): the group landed in «Внешние чаты» in the web client, and the spec has no organisation requirement; payload and reply shape in `design.md` "D4 outcome" and "Observed shapes"; live fixtures `live-create-chat.json`, `live-create-private.json` | 6.1 | `design.md`, `tasks.md`, fixtures, `wire_fixtures.rs` |
 | 6.3 | **ready** (6.2 PASS, 3.3 merged); starts when its files are free: PIN 2.4 holds chat-core `client.rs` | 6.2 (done), 3.3 | unit CM-G (with 6.4): `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs` |
@@ -90,6 +90,6 @@ Merge note (2026-11-27): PIN-app was merged into `main` as `270d503` (`--no-ff` 
 
 ## Needs the user
 
-- Approval of the target: CM 6.2 is done (2026-11-27). **CM 5.1 and 5.3 need the user**: they need a target with an existing private chat (the web client cannot delete or recreate a private chat, so a creation test has no target without one); the user names the target or decides to close CM without them.
+- Approval of the target: CM 6.2 is done (2026-11-27). **CM 5.1 and 5.3 need the user**: they need a target with **no** existing private chat with the app account (a target that already has one only returns or opens that chat, which is not a creation, and the web client cannot delete a private chat to free the existing target); the user names such a target (a person the app account has never chatted with) or decides to close CM without them. Do not repeat the run against the existing target.
 - PIN 0.2 is done (the web client was the other party, no user action needed) and, per the main session, **PIN 6.2 no longer needs the user**: the web client is the other party. The only write stays the edit of the app account's own message under `BT_WRITE_ONLY_CHAT`.
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, `add-reaction-list/research.md`); RL 8.2 and PIN 0.1 are no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
