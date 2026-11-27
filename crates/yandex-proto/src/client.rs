@@ -95,7 +95,17 @@ impl Client {
         chat: &str,
         before: Option<i64>,
     ) -> Result<WireHistory, ProtoError> {
-        self.xiva.history(chat, before, self.history_limit).await
+        self.history_page(chat, before, self.history_limit).await
+    }
+
+    /// `history` with the page size chosen by the caller (one message to read a single row).
+    pub async fn history_page(
+        &self,
+        chat: &str,
+        before: Option<i64>,
+        limit: u32,
+    ) -> Result<WireHistory, ProtoError> {
+        self.xiva.history(chat, before, limit).await
     }
 
     /// Sends one write. Fails fast with `ProtoError::Network` while the push socket is not
@@ -568,6 +578,32 @@ mod tests {
             (body["Limit"].as_u64(), body["MaxTimestamp"].as_i64()),
             (Some(15), Some(99))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn history_page_sends_its_limit_and_cursor_while_history_keeps_the_configured_one() {
+        let reply = json!({ "Chats": [] });
+        let (client, sent) = client_with_replies(vec![reply.clone(), reply.clone(), reply]).await;
+
+        client.history_page("0/0/c", Some(101), 1).await.unwrap();
+        client.history_page("0/0/c", None, 7).await.unwrap();
+        client.history("0/0/c", Some(55)).await.unwrap();
+
+        let sent = sent.lock().unwrap();
+        let frame = |i: usize| {
+            let (method, body) = &sent[i];
+            assert_eq!(method, "history");
+            (
+                body["ChatId"].as_str().map(str::to_owned),
+                body["Limit"].as_u64(),
+                body.get("MaxTimestamp").map(|v| v.as_i64()),
+            )
+        };
+        assert_eq!(frame(0), (Some("0/0/c".into()), Some(1), Some(Some(101))));
+        // An absent cursor omits the key.
+        assert_eq!(frame(1), (Some("0/0/c".into()), Some(7), None));
+        // Ordinary history keeps the page size the client was configured with.
+        assert_eq!(frame(2), (Some("0/0/c".into()), Some(50), Some(Some(55))));
     }
 
     #[tokio::test(start_paused = true)]

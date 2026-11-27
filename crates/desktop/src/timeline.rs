@@ -200,9 +200,22 @@ fn bubble(ctx: &RowContext, store: &ChatStore, m: &Message, show_name: bool) -> 
                             .child("изм."),
                     )
                 })
+                .when(shows_important_marker(m), |d| {
+                    d.child(
+                        div()
+                            .debug_selector(move || format!("msg-{ts}-important"))
+                            .text_color(rgb(IMPORTANT_MARK))
+                            .child("⚡"),
+                    )
+                })
                 .child(clock_time(ts, ctx.clock))
                 .when(m.outgoing, |d| d.child(delivery_mark(ts, &m.delivery))),
         )
+}
+
+/// The "⚡" marker is for a live message the server flags as important; a deleted one shows none.
+fn shows_important_marker(m: &Message) -> bool {
+    m.important && !matches!(m.body, MessageBody::Deleted)
 }
 
 /// What the sender sees at the message time: a clock while queued, a check once the server has it, a red "!" when refused.
@@ -642,4 +655,39 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
             )
         })
         .child(button)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shows_important_marker;
+    use bt_chat_core::model::{ChatId, Delivery, Message, MessageBody, UserId};
+
+    fn message(body: MessageBody, important: bool) -> Message {
+        Message {
+            chat: ChatId("0/0/c".into()),
+            timestamp: 1,
+            author: UserId("alice".into()),
+            author_name: None,
+            author_avatar: None,
+            outgoing: false,
+            body,
+            edited: false,
+            reply_to: None,
+            forwarded_from: None,
+            delivery: Delivery::Sent,
+            reactions: Default::default(),
+            important,
+        }
+    }
+
+    #[test]
+    fn the_important_marker_needs_the_flag_and_a_live_body() {
+        let text = || MessageBody::Text("hi".into());
+        assert!(!shows_important_marker(&message(text(), false)));
+        assert!(shows_important_marker(&message(text(), true)));
+        assert!(!shows_important_marker(&message(
+            MessageBody::Deleted,
+            true
+        )));
+    }
 }

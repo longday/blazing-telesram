@@ -55,6 +55,14 @@ pub struct MessagePreview {
     pub timestamp: MessageTs,
 }
 
+/// The pinned message of a chat. `preview` is resolved lazily (only for the open chat) and is
+/// `None` until then, or when it could not be resolved; it is cached with the summary.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PinnedMessage {
+    pub timestamp: MessageTs,
+    pub preview: Option<MessagePreview>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ChatSummary {
     pub id: ChatId,
@@ -70,6 +78,15 @@ pub struct ChatSummary {
     /// cached before the field existed, which load as `None` until the next list refresh.
     #[serde(default)]
     pub partner: Option<UserId>,
+    /// The message pinned in the chat (not `pinned_rank`, which is the chat's own pin). Absent
+    /// in rows cached before the field existed, which load as `None`.
+    #[serde(default)]
+    pub pinned_message: Option<PinnedMessage>,
+    /// The latest pin action timestamp (microseconds) applied for this chat, from a chat-list
+    /// entry or a push. Kept when the pin is removed and never decreased; the engine compares
+    /// it to discard stale pin updates. Absent in rows cached before the field existed.
+    #[serde(default)]
+    pub pin_action_ts: Option<i64>,
 }
 
 /// What a member may do in a chat. The server's `role` `"admin"` is `Admin`; every other value,
@@ -238,6 +255,19 @@ impl MessageBody {
             _ => Vec::new(),
         }
     }
+
+    /// The one-line text of the body, as the chat row, search hits and reply quotes show it.
+    pub fn preview_text(&self) -> String {
+        match self {
+            MessageBody::Text(text) => text.clone(),
+            MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+                caption.clone().unwrap_or_else(|| "Фото".into())
+            }
+            MessageBody::File { name, .. } => name.clone(),
+            MessageBody::Deleted => "Сообщение удалено".into(),
+            MessageBody::Unsupported(kind) => format!("[{kind}]"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -257,6 +287,9 @@ pub struct Message {
     /// Server-confirmed reactions; rows cached before reactions existed have none.
     #[serde(default)]
     pub reactions: Reactions,
+    /// The server's importance flag; rows cached before it existed are not important.
+    #[serde(default)]
+    pub important: bool,
 }
 
 impl Message {
@@ -363,6 +396,13 @@ pub enum ClientEvent {
     ChatUpdated(ChatSummary),
     History(HistoryChunk),
     MessageUpserted(Message),
+    /// The pinned message of `chat` changed (a pin push, or the preview of the pin was
+    /// resolved or rebuilt). Carries nothing else on purpose: the row, its preview, unread
+    /// counter and position are untouched, and so is the timeline.
+    PinChanged {
+        chat: ChatId,
+        pinned: Option<PinnedMessage>,
+    },
     /// The reactions of a loaded message changed (a server update, or the optimistic overlay
     /// of the user's own choice and its rollback). Carries no message body on purpose: it
     /// must not look like a new or edited message.
@@ -727,6 +767,61 @@ mod tests {
         let message: Message = serde_json::from_value(json).unwrap();
         assert_eq!(message.reactions, Reactions::default());
         assert_eq!(message.body, MessageBody::Text("hi".into()));
+    }
+
+    #[test]
+    fn a_message_cached_without_the_importance_flag_is_not_important() {
+        let mut json = serde_json::to_value(crate::fixtures::msg("0/0/c", 1, "hi")).unwrap();
+        assert!(json.as_object_mut().unwrap().remove("important").is_some());
+        let message: Message = serde_json::from_value(json).unwrap();
+        assert!(!message.important);
+        assert_eq!(message.body, MessageBody::Text("hi".into()));
+
+        let mut important = crate::fixtures::msg("0/0/c", 1, "hi");
+        important.important = true;
+        let json = serde_json::to_string(&important).unwrap();
+        assert_eq!(serde_json::from_str::<Message>(&json).unwrap(), important);
+    }
+
+    #[test]
+    fn preview_text_strings() {
+        let media = || MediaRef {
+            id: "b/1".into(),
+            kind: MediaKind::Thumbnail,
+        };
+        let item = GalleryItem {
+            media: media(),
+            width: 4,
+            height: 3,
+            name: None,
+        };
+        let image = |caption: Option<&str>| MessageBody::Image {
+            media: media(),
+            width: 4,
+            height: 3,
+            caption: caption.map(Into::into),
+            name: None,
+        };
+        let gallery = |caption: Option<&str>| MessageBody::Gallery {
+            items: vec![item.clone()],
+            caption: caption.map(Into::into),
+        };
+        assert_eq!(MessageBody::Text("привет".into()).preview_text(), "привет");
+        assert_eq!(image(None).preview_text(), "Фото");
+        assert_eq!(image(Some("отпуск")).preview_text(), "отпуск");
+        assert_eq!(gallery(None).preview_text(), "Фото");
+        assert_eq!(gallery(Some("отпуск")).preview_text(), "отпуск");
+        let file = MessageBody::File {
+            media: media(),
+            name: "a.pdf".into(),
+            size: 3,
+        };
+        assert_eq!(file.preview_text(), "a.pdf");
+        assert_eq!(MessageBody::Deleted.preview_text(), "Сообщение удалено");
+        assert_eq!(
+            MessageBody::Unsupported("Poll".into()).preview_text(),
+            "[Poll]"
+        );
     }
 
     #[test]

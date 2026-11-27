@@ -17,6 +17,8 @@ pub fn chat(id: &str, last: Option<MessageTs>, pinned: Option<u32>) -> ChatSumma
         muted: false,
         pinned_rank: pinned,
         partner: None,
+        pinned_message: None,
+        pin_action_ts: None,
     }
 }
 
@@ -34,6 +36,7 @@ pub fn msg(chat: &str, ts: MessageTs, text: &str) -> Message {
         forwarded_from: None,
         delivery: Delivery::Sent,
         reactions: Default::default(),
+        important: false,
     }
 }
 

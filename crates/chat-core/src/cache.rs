@@ -526,7 +526,7 @@ pub fn move_aside(runtime_dir: &Path, account: &UserId, unix_secs: u64) -> io::R
 mod tests {
     use super::*;
     use crate::fixtures::{chat, id, msg};
-    use crate::model::Delivery;
+    use crate::model::{Delivery, MessagePreview, PinnedMessage};
 
     fn texts(chunk: &HistoryChunk) -> Vec<(MessageTs, String)> {
         chunk
@@ -724,6 +724,56 @@ mod tests {
             ChatSummary {
                 partner: None,
                 ..with_partner
+            }
+        );
+        assert_eq!(
+            cache.chats().unwrap().len(),
+            1,
+            "the list still shows the row"
+        );
+    }
+
+    #[test]
+    fn a_chat_row_written_before_pins_existed_loads_without_them() {
+        let mut cache = Cache::open_in_memory().unwrap();
+        let pinned = ChatSummary {
+            pinned_message: Some(PinnedMessage {
+                timestamp: 7,
+                preview: Some(MessagePreview {
+                    author: Some("Анна".into()),
+                    text: "закреплено".into(),
+                    timestamp: 7,
+                }),
+            }),
+            pin_action_ts: Some(9),
+            ..chat("a", Some(5), None)
+        };
+        cache.replace_chats(std::slice::from_ref(&pinned)).unwrap();
+        assert_eq!(
+            cache.chat(&id("a")).unwrap(),
+            Some(pinned.clone()),
+            "the fields round-trip"
+        );
+        let mut json: serde_json::Value = serde_json::from_str(&encode(&pinned)).unwrap();
+        let object = json.as_object_mut().unwrap();
+        assert!(
+            object.remove("pinned_message").is_some() && object.remove("pin_action_ts").is_some(),
+            "both fields are serialized today"
+        );
+        cache
+            .conn
+            .execute(
+                "UPDATE chats SET json = ?1 WHERE id = 'a'",
+                [json.to_string()],
+            )
+            .unwrap();
+        let loaded = cache.chat(&id("a")).unwrap().unwrap();
+        assert_eq!(
+            loaded,
+            ChatSummary {
+                pinned_message: None,
+                pin_action_ts: None,
+                ..pinned
             }
         );
         assert_eq!(

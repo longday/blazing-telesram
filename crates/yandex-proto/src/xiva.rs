@@ -286,6 +286,7 @@ fn push_kind(event: &PushEvent) -> &'static str {
         PushEvent::MessageUpserted(_) => "MessageUpserted",
         PushEvent::MessageDeleted { .. } => "MessageDeleted",
         PushEvent::ChatChanged { .. } => "ChatChanged",
+        PushEvent::PinChanged { .. } => "PinChanged",
         PushEvent::Typing { .. } => "Typing",
         PushEvent::Reaction { .. } => "Reaction",
         PushEvent::Ignored { .. } => "Ignored",
@@ -1450,6 +1451,34 @@ mod tests {
             "{text}"
         );
         capture.assert_absent(&[GUID, "00000004-0000-4000-8000-000000000004"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn debug_level_logs_the_pin_kind_without_chat_or_timestamps() {
+        const GUID: &str = "c9a71201-70b5-992e-61f2-b27e2d3fc8fb";
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let server = connector.accept();
+        let (_handle, mut events) = start(&connector);
+        next(&mut events).await;
+        let chat = format!("{GUID}_00000004-0000-4000-8000-000000000004");
+        server.push_frame(json!({
+            "ClientMessage": { "Pin": { "ChatId": chat, "Timestamp": 1795070677887127_i64 } },
+            "ServerMessageInfo": { "Timestamp": 1795172185683559_i64 }
+        }));
+        assert!(matches!(
+            next(&mut events).await,
+            XivaEvent::Push(PushEvent::PinChanged { .. })
+        ));
+        let text = capture.text();
+        assert!(text.contains("PinChanged"), "{text}");
+        capture.assert_absent(&[
+            GUID,
+            "00000004-0000-4000-8000-000000000004",
+            "1795070677887127",
+            "1795172185683559",
+        ]);
     }
 
     #[tokio::test(start_paused = true)]

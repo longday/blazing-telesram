@@ -19,7 +19,8 @@ use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageTs, UserId,
+    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessagePreview,
+    MessageTs, UserId,
 };
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
@@ -933,6 +934,33 @@ impl Desktop {
         cx.notify();
     }
 
+    /// Click on the pinned-message bar: scrolls the open chat to the pinned message when it is
+    /// loaded, and does nothing otherwise (no request, no loading state, no error).
+    pub(crate) fn scroll_to_pinned(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.as_ref() else {
+            return;
+        };
+        let store = self.store.read(cx);
+        let Some(timestamp) = store
+            .chat(&open.chat)
+            .and_then(|c| c.pinned_message.as_ref())
+            .map(|p| p.timestamp)
+        else {
+            return;
+        };
+        let Some(ix) = store
+            .timeline(&open.chat)
+            .and_then(|t| t.messages.iter().position(|m| m.timestamp == timestamp))
+        else {
+            return;
+        };
+        open.list.scroll_to(ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
     fn sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let query = self.search.read(cx).content.to_string();
         let store = self.store.read(cx);
@@ -1319,6 +1347,45 @@ impl Desktop {
         let empty = timeline.is_some_and(|t| t.loaded && t.messages.is_empty());
         let loading_older = timeline.is_some_and(|t| t.loading_older);
 
+        // Author only outside private chats; no preview yet leaves the label alone.
+        let pinned_bar = summary.and_then(|c| {
+            let pinned = c.pinned_message.as_ref()?;
+            let line = pinned_message_text(c.kind, pinned.preview.as_ref());
+            Some(
+                div()
+                    .id("pinned-message")
+                    .debug_selector(|| "pinned-message".into())
+                    .cursor_pointer()
+                    .on_click(cx.listener(|this, _, _, cx| this.scroll_to_pinned(cx)))
+                    .flex_none()
+                    .px(px(16.))
+                    .py(px(6.))
+                    .flex()
+                    .flex_col()
+                    .bg(rgb(PANEL))
+                    .border_b_1()
+                    .border_color(rgb(DIVIDER))
+                    .hover(|d| d.bg(rgb(ROW_HOVER)))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(rgb(ACCENT))
+                            .child("Закреплённое сообщение"),
+                    )
+                    .when_some(line, |d, text| {
+                        d.child(
+                            div()
+                                .debug_selector(|| "pinned-message-text".into())
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.))
+                                .text_color(rgb(MUTED))
+                                .child(text),
+                        )
+                    }),
+            )
+        });
+
         let content = if !loaded {
             centered("timeline-loading-initial", "Загрузка сообщений…")
         } else if empty {
@@ -1428,6 +1495,7 @@ impl Desktop {
                             }),
                     ),
             )
+            .children(pinned_bar)
             .child(div().flex_1().min_h_0().child(content))
             .child(self.composer_view(cx))
             .into_any_element()
@@ -1470,6 +1538,18 @@ fn connection_text(state: ConnectionState) -> Option<&'static str> {
         ConnectionState::Connecting => Some("Подключение…"),
         ConnectionState::Offline => Some("Нет сети · переподключение…"),
     }
+}
+
+/// The line of the pinned-message bar under its label: the author only outside private chats, then the
+/// text on one line. `None` while the text of the pinned message is not known: the label stays alone.
+pub(crate) fn pinned_message_text(
+    kind: ChatKind,
+    preview: Option<&MessagePreview>,
+) -> Option<String> {
+    preview.map(|p| match &p.author {
+        Some(author) if kind != ChatKind::Private => format!("{author}: {}", one_line(&p.text)),
+        _ => one_line(&p.text),
+    })
 }
 
 /// What a chat row shows under the title.

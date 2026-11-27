@@ -342,6 +342,9 @@ impl Backend for YandexBackend {
                             Err(_) => vec![],
                         }
                     }
+                    XivaEvent::Push(PushEvent::PinChanged { chat, pinned, at }) => {
+                        vec![pin_changed(chat, pinned, at)]
+                    }
                     XivaEvent::Push(PushEvent::Typing {
                         chat,
                         user,
@@ -640,6 +643,31 @@ impl Backend for YandexBackend {
                 Err(error)
             }
         }
+    }
+
+    async fn message_preview(
+        &self,
+        chat: &ChatId,
+        timestamp: MessageTs,
+    ) -> Result<Option<MessagePreview>, BackendError> {
+        let (client, me) = self.client()?;
+        // One row: the newest at or below `timestamp` (the bound is exclusive, hence + 1) is the
+        // message when the server still has it.
+        let page = client
+            .history_page(&chat.0, Some(timestamp.saturating_add(1)), 1)
+            .await
+            .map_err(backend_error)?;
+        let Some(found) = page.messages.into_iter().find(|m| m.timestamp == timestamp) else {
+            return Ok(None);
+        };
+        Users {
+            client: &client,
+            cache: &self.users,
+        }
+        .load(authors(std::slice::from_ref(&found)))
+        .await?;
+        let users = self.users.lock().unwrap();
+        Ok(Some(message_preview_of(&message(&found, &me, &users))))
     }
 }
 
@@ -1009,7 +1037,7 @@ fn search_hits(
                     } else {
                         sender_name(m.from.as_ref(), users)
                     },
-                    text: preview(&body(&m.body)),
+                    text: body(&m.body).preview_text(),
                 }
             })
             .collect(),
@@ -1057,18 +1085,10 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
             id,
             kind: MediaKind::Avatar,
         });
-    let last_message = chat.last_message.as_ref().map(|m| {
-        let message = message(m, me, users);
-        MessagePreview {
-            author: if message.outgoing {
-                Some("Вы".into())
-            } else {
-                message.author_name.clone()
-            },
-            text: preview(&message.body),
-            timestamp: m.timestamp,
-        }
-    });
+    let last_message = chat
+        .last_message
+        .as_ref()
+        .map(|m| message_preview_of(&message(m, me, users)));
     ChatSummary {
         id: ChatId(chat.id.clone()),
         kind: match chat.kind {
@@ -1083,18 +1103,35 @@ fn summary(chat: &WireChat, me: &str, users: &HashMap<String, WireUser>) -> Chat
         muted: chat.muted,
         pinned_rank: None,
         partner: chat.partner_guid.clone().map(UserId),
+        // The preview of a pinned message is resolved by the engine, for the open chat only.
+        pinned_message: chat.pinned.map(|timestamp| PinnedMessage {
+            timestamp,
+            preview: None,
+        }),
+        // Also without a pin: an unpin snapshot keeps its action time for arbitration.
+        pin_action_ts: chat.pin_action_ts,
     }
 }
 
-fn preview(body: &MessageBody) -> String {
-    match body {
-        MessageBody::Text(text) => text.clone(),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            caption.clone().unwrap_or_else(|| "Фото".into())
-        }
-        MessageBody::File { name, .. } => name.clone(),
-        MessageBody::Deleted => "Сообщение удалено".into(),
-        MessageBody::Unsupported(kind) => format!("[{kind}]"),
+/// The one-line preview of a message as the chat row and the pinned bar show it.
+fn message_preview_of(message: &Message) -> MessagePreview {
+    MessagePreview {
+        author: if message.outgoing {
+            Some("Вы".into())
+        } else {
+            message.author_name.clone()
+        },
+        text: message.body.preview_text(),
+        timestamp: message.timestamp,
+    }
+}
+
+/// A `Pin` push as a live update; `at` is the server's timestamp of the action when it has one.
+fn pin_changed(chat: String, pinned: Option<MessageTs>, at: Option<i64>) -> LiveEvent {
+    LiveEvent::PinChanged {
+        chat: ChatId(chat),
+        pinned,
+        at,
     }
 }
 
@@ -1251,6 +1288,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
             .as_ref()
             .map(|r| message_reactions(r, me))
             .unwrap_or_default(),
+        important: wire.important,
     };
     match &wire.relation {
         Relation::None => {}
@@ -1259,7 +1297,7 @@ fn message(wire: &WireMessage, me: &str, users: &HashMap<String, WireUser>) -> M
             reference,
             original,
         } => {
-            let original_text = original.as_ref().map(|o| preview(&body(&o.body)));
+            let original_text = original.as_ref().map(|o| body(&o.body).preview_text());
             // A forward with a comment parses as a reply to its original, which lives in another
             // chat. An edit would rebuild the reference with this chat's id, so such a quote gets
             // no target timestamp: it stays visible, and core refuses to edit the message.
@@ -1920,6 +1958,8 @@ mod tests {
             unread: 2,
             muted: true,
             last_message: Some(wire(WireBody::Text("hey".into()), Relation::None, "me")),
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let s = summary(&chat, "me", &users);
@@ -1929,6 +1969,177 @@ mod tests {
             (preview.author.as_deref(), preview.text.as_str()),
             (Some("Вы"), "hey")
         );
+    }
+
+    #[test]
+    fn the_importance_flag_is_copied_from_the_wire_row() {
+        let users = HashMap::new();
+        let mapped = |important: bool, from: &str| {
+            let mut row = wire(WireBody::Text("hi".into()), Relation::None, from);
+            row.important = important;
+            message(&row, "me", &users).important
+        };
+        assert!(mapped(true, "u1"));
+        assert!(mapped(true, "me"));
+        assert!(!mapped(false, "u1"));
+        assert!(!mapped(false, "me"));
+
+        // A deleted row keeps whatever the wire says; the view decides what to show.
+        let mut deleted = wire(WireBody::Deleted, Relation::None, "u1");
+        deleted.important = true;
+        let deleted = message(&deleted, "me", &users);
+        assert_eq!(
+            (deleted.body, deleted.important),
+            (MessageBody::Deleted, true)
+        );
+
+        // The live path maps the same field: an edit push carries the flag as well.
+        let mut push = wire(WireBody::Text("hi".into()), Relation::None, "u1");
+        push.important = true;
+        let LiveEvent::MessageUpserted(pushed) = upserted(&push, "me", &users) else {
+            panic!("upsert")
+        };
+        assert!(pushed.important);
+    }
+
+    /// Every wire body with the one-line text each surface must show for it. The strings are the
+    /// ones the adapter produced before `MessageBody::preview_text` moved to core.
+    fn preview_cases() -> Vec<(WireBody, &'static str)> {
+        let file = |name: Option<&str>| WireFile {
+            id: "b/1".into(),
+            name: name.map(Into::into),
+            size: Some(3),
+        };
+        let image = || yandex_proto::wire::WireImage {
+            file: file(Some("a.jpg")),
+            width: 4,
+            height: 3,
+            animated: false,
+        };
+        vec![
+            (WireBody::Text("привет".into()), "привет"),
+            (WireBody::Image(image()), "Фото"),
+            (
+                WireBody::Gallery {
+                    items: vec![image(), image()],
+                    text: None,
+                },
+                "Фото",
+            ),
+            (
+                WireBody::Gallery {
+                    items: vec![image()],
+                    text: Some("отпуск".into()),
+                },
+                "отпуск",
+            ),
+            // An empty gallery is text, with its caption or without.
+            (
+                WireBody::Gallery {
+                    items: Vec::new(),
+                    text: Some("подпись".into()),
+                },
+                "подпись",
+            ),
+            (WireBody::File(file(Some("a.pdf"))), "a.pdf"),
+            (WireBody::File(file(None)), "Файл"),
+            (
+                WireBody::Voice {
+                    file: file(None),
+                    duration: Some(2),
+                },
+                "[Голосовое сообщение]",
+            ),
+            (
+                WireBody::Sticker {
+                    id: "s".into(),
+                    set_id: None,
+                },
+                "[Стикер]",
+            ),
+            (WireBody::Poll { title: "Q".into() }, "[Опрос: Q]"),
+            (
+                WireBody::System {
+                    kind: "ChatCreatedInfo".into(),
+                    text: Some("Чат создан".into()),
+                },
+                "Чат создан",
+            ),
+            (
+                WireBody::System {
+                    kind: "ChatCreatedInfo".into(),
+                    text: None,
+                },
+                "[ChatCreatedInfo]",
+            ),
+            (WireBody::Deleted, "Сообщение удалено"),
+            (WireBody::Empty, ""),
+            (WireBody::Other("Foo".into()), "[Foo]"),
+        ]
+    }
+
+    #[test]
+    fn the_chat_row_preview_text_is_unchanged() {
+        for (wire_body, expected) in preview_cases() {
+            let chat = WireChat {
+                id: "0/0/a".into(),
+                kind: WireChatKind::Group,
+                title: Some("Team".into()),
+                avatar_id: None,
+                partner_guid: None,
+                last_activity: Some(10),
+                unread: 0,
+                muted: false,
+                last_message: Some(wire(wire_body.clone(), Relation::None, "u1")),
+                pinned: None,
+                pin_action_ts: None,
+                raw: serde_json::Value::Null,
+            };
+            let preview = summary(&chat, "me", &HashMap::new()).last_message.unwrap();
+            assert_eq!(preview.text, expected, "{wire_body:?}");
+        }
+    }
+
+    #[test]
+    fn search_hit_text_is_unchanged() {
+        let items = SearchItems {
+            messages: preview_cases()
+                .into_iter()
+                .map(|(body, _)| WireSearchMessage {
+                    body,
+                    ..search_message("0/1/g", None, "")
+                })
+                .collect(),
+            ..SearchItems::default()
+        };
+        let hits = search_hits(&items, "me", &HashMap::new(), &listed_chats(), 100);
+        let texts: Vec<_> = hits.messages.iter().map(|m| m.text.as_str()).collect();
+        let expected: Vec<_> = preview_cases().into_iter().map(|(_, text)| text).collect();
+        assert_eq!(texts, expected);
+    }
+
+    #[test]
+    fn the_reply_original_fallback_text_is_unchanged() {
+        for (wire_body, expected) in preview_cases() {
+            let relation = Relation::Reply {
+                quote: None,
+                reference: None,
+                original: Some(WireForwarded {
+                    chat: None,
+                    timestamp: Some(5),
+                    from: None,
+                    body: wire_body.clone(),
+                }),
+            };
+            let reply = message(
+                &wire(WireBody::Text("a".into()), relation, "u1"),
+                "me",
+                &HashMap::new(),
+            )
+            .reply_to
+            .unwrap();
+            assert_eq!(reply.text, expected, "{wire_body:?}");
+        }
     }
 
     fn search_message(
@@ -2118,6 +2329,8 @@ mod tests {
             unread: 0,
             muted: false,
             last_message: None,
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let users = HashMap::from([user("u1", "Ann")]);
@@ -2676,6 +2889,8 @@ mod tests {
             muted: false,
             pinned_rank: None,
             partner: partner.map(|p| UserId(p.into())),
+            pinned_message: None,
+            pin_action_ts: None,
         }
     }
 
@@ -2713,6 +2928,8 @@ mod tests {
             unread: 0,
             muted: false,
             last_message: None,
+            pinned: None,
+            pin_action_ts: None,
             raw: serde_json::Value::Null,
         };
         let users = HashMap::new();
@@ -2727,6 +2944,73 @@ mod tests {
         assert_eq!(
             summary(&chat(WireChatKind::Group, None), "me", &users).partner,
             None
+        );
+    }
+
+    #[test]
+    fn the_summary_maps_the_pin_and_keeps_the_action_clock_without_a_pin() {
+        let chat = |pinned, pin_action_ts| WireChat {
+            id: "0/0/x".into(),
+            kind: WireChatKind::Group,
+            title: Some("G".into()),
+            avatar_id: None,
+            partner_guid: None,
+            last_activity: None,
+            unread: 0,
+            muted: false,
+            last_message: None,
+            pinned,
+            pin_action_ts,
+            raw: serde_json::Value::Null,
+        };
+        let users = HashMap::new();
+
+        // The preview is never filled here: the engine resolves it for the open chat.
+        let pinned = summary(&chat(Some(42), Some(900)), "me", &users);
+        assert_eq!(
+            pinned.pinned_message,
+            Some(PinnedMessage {
+                timestamp: 42,
+                preview: None
+            })
+        );
+        assert_eq!(pinned.pin_action_ts, Some(900));
+
+        // An unpin snapshot has no pin and still carries its clock.
+        let unpinned = summary(&chat(None, Some(950)), "me", &users);
+        assert_eq!(
+            (unpinned.pinned_message, unpinned.pin_action_ts),
+            (None, Some(950))
+        );
+
+        let neither = summary(&chat(None, None), "me", &users);
+        assert_eq!(
+            (neither.pinned_message, neither.pin_action_ts),
+            (None, None)
+        );
+
+        // A pin of a message does not touch the pin of the chat.
+        assert_eq!(pinned.pinned_rank, None);
+    }
+
+    #[test]
+    fn a_pin_push_is_a_live_pin_change_with_its_action_time() {
+        assert_eq!(
+            pin_changed("0/0/c".into(), Some(42), Some(900)),
+            LiveEvent::PinChanged {
+                chat: ChatId("0/0/c".into()),
+                pinned: Some(42),
+                at: Some(900)
+            }
+        );
+        // An unpin names no message; a push without a server timestamp has no `at`.
+        assert_eq!(
+            pin_changed("0/0/c".into(), None, None),
+            LiveEvent::PinChanged {
+                chat: ChatId("0/0/c".into()),
+                pinned: None,
+                at: None
+            }
         );
     }
 
@@ -3158,6 +3442,147 @@ mod tests {
             guarded
                 .reactors(&ChatId("0/0/other".into()), 1, None, 30)
                 .await,
+            Err(BackendError::Protocol(_))
+        ));
+    }
+
+    fn history_reply(chat: &str, rows: Vec<serde_json::Value>) -> serde_json::Value {
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|row| serde_json::json!({ "ServerMessage": row }))
+            .collect();
+        serde_json::json!({ "Chats": [{ "ChatId": chat, "Messages": rows }] })
+    }
+
+    fn server_row(
+        chat: &str,
+        ts: i64,
+        from: &str,
+        deleted: bool,
+        content: serde_json::Value,
+    ) -> serde_json::Value {
+        let mut plain = serde_json::json!({ "ChatId": chat });
+        plain
+            .as_object_mut()
+            .unwrap()
+            .extend(content.as_object().unwrap().clone());
+        serde_json::json!({
+            "ClientMessage": { "Plain": plain },
+            "ServerMessageInfo": { "Timestamp": ts, "Deleted": deleted, "From": { "Guid": from } },
+        })
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_preview_of_a_message_is_one_history_read_and_names_the_author() {
+        let chat = "0/0/c";
+        let text = |ts, from, text| {
+            server_row(
+                chat,
+                ts,
+                from,
+                false,
+                serde_json::json!({ "Text": { "MessageText": text } }),
+            )
+        };
+        let photo = server_row(
+            chat,
+            200,
+            "u1",
+            false,
+            serde_json::json!({ "Image": { "FileInfo": { "Id2": "f1" }, "Width": 4, "Height": 3 } }),
+        );
+        let deleted = server_row(chat, 300, "u1", true, serde_json::json!({}));
+        // The server answers a limit-1 read with the one row at or below the bound.
+        let replies = vec![
+            history_reply(chat, vec![text(100, "u1", "привет")]),
+            history_reply(chat, vec![photo]),
+            history_reply(chat, vec![deleted]),
+            history_reply(chat, vec![text(400, "me", "мой текст")]),
+        ];
+        // BT_WRITE_ONLY_CHAT names another chat: a read is not a write and is not guarded.
+        let (backend, sent) = backend_with_replies(
+            Some(ChatId("self".into())),
+            replies,
+            HashMap::from([user("u1", "Ann"), user("me", "Me")]),
+        )
+        .await;
+        let chat = ChatId(chat.into());
+        let preview = |p: Option<MessagePreview>| {
+            let p = p.unwrap();
+            (p.author, p.text, p.timestamp)
+        };
+
+        assert_eq!(
+            preview(backend.message_preview(&chat, 100).await.unwrap()),
+            (Some("Ann".into()), "привет".into(), 100)
+        );
+        assert_eq!(
+            preview(backend.message_preview(&chat, 200).await.unwrap()),
+            (Some("Ann".into()), "Фото".into(), 200)
+        );
+        assert_eq!(
+            preview(backend.message_preview(&chat, 300).await.unwrap()),
+            (Some("Ann".into()), "Сообщение удалено".into(), 300)
+        );
+        assert_eq!(
+            preview(backend.message_preview(&chat, 400).await.unwrap()),
+            (Some("Вы".into()), "мой текст".into(), 400)
+        );
+
+        let sent = sent.lock().unwrap();
+        let asked: Vec<_> = sent
+            .iter()
+            .map(|(method, body)| {
+                (
+                    method.as_str(),
+                    body["ChatId"].as_str(),
+                    body["MaxTimestamp"].as_i64(),
+                    body["Limit"].as_u64(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                ("history", Some("0/0/c"), Some(101), Some(1)),
+                ("history", Some("0/0/c"), Some(201), Some(1)),
+                ("history", Some("0/0/c"), Some(301), Some(1)),
+                ("history", Some("0/0/c"), Some(401), Some(1)),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_message_the_server_no_longer_returns_has_no_preview() {
+        let chat = "0/0/c";
+        let other = server_row(
+            chat,
+            50,
+            "u1",
+            false,
+            serde_json::json!({ "Text": { "MessageText": "другое" } }),
+        );
+        let (backend, _) = backend_with_replies(
+            None,
+            vec![
+                history_reply(chat, vec![other]),
+                history_reply(chat, vec![]),
+                serde_json::json!({ "Chats": [] }),
+            ],
+            HashMap::from([user("u1", "Ann")]),
+        )
+        .await;
+        let chat = ChatId(chat.into());
+        for _ in 0..3 {
+            assert_eq!(backend.message_preview(&chat, 100).await, Ok(None));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_preview_needs_a_connection() {
+        let backend = YandexBackend::new(test_session(), None);
+        assert!(matches!(
+            backend.message_preview(&ChatId("0/0/c".into()), 1).await,
             Err(BackendError::Protocol(_))
         ));
     }

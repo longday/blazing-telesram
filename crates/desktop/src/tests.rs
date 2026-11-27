@@ -71,6 +71,8 @@ fn chat(id: &str, kind: ChatKind, title: &str, last: Option<i64>) -> ChatSummary
         muted: false,
         pinned_rank: None,
         partner: None,
+        pinned_message: None,
+        pin_action_ts: None,
     }
 }
 
@@ -88,6 +90,7 @@ fn message(chat: &str, i: i64, author: &str, outgoing: bool, body: MessageBody) 
         forwarded_from: None,
         delivery: bt_chat_core::model::Delivery::Sent,
         reactions: Default::default(),
+        important: false,
     }
 }
 
@@ -7771,4 +7774,719 @@ fn the_viewers_reveal_button_yields_the_event_of_the_saved_original(cx: &mut Tes
     click(cx, "viewer-reveal");
     assert_eq!(take_events(&log), [StoreEvent::Reveal(path)]);
     assert!(h.commands().is_empty());
+}
+
+// ---- PIN 4.4: pinned-message bar and important marker ----
+
+fn pin_preview(i: i64, author: Option<&str>, text: &str) -> PinnedMessage {
+    PinnedMessage {
+        timestamp: ts(i),
+        preview: Some(MessagePreview {
+            author: author.map(str::to_string),
+            text: text.into(),
+            timestamp: ts(i),
+        }),
+    }
+}
+
+fn pin_changed(chat_id: &str, pinned: Option<PinnedMessage>) -> ClientEvent {
+    ClientEvent::PinChanged {
+        chat: ChatId(chat_id.into()),
+        pinned,
+    }
+}
+
+fn pin_in_store(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Option<PinnedMessage> {
+    h.store.read_with(cx, |s, _| {
+        s.chat(&ChatId(chat_id.into()))
+            .and_then(|c| c.pinned_message.clone())
+    })
+}
+
+/// What the bar of `chat_id` shows under its label, as the bar itself builds it from the store's pin.
+fn pin_line(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> Option<String> {
+    h.store.read_with(cx, |s, _| {
+        let chat = s.chat(&ChatId(chat_id.into()))?;
+        let pinned = chat.pinned_message.as_ref()?;
+        crate::desktop::pinned_message_text(chat.kind, pinned.preview.as_ref())
+    })
+}
+
+fn summary_in_store(h: &Harness, cx: &mut VisualTestContext, chat_id: &str) -> ChatSummary {
+    h.store.read_with(cx, |s, _| {
+        s.chat(&ChatId(chat_id.into()))
+            .cloned()
+            .expect("the chat is listed")
+    })
+}
+
+fn important_message(chat_id: &str, i: i64, outgoing: bool, body: MessageBody) -> Message {
+    let mut m = message(
+        chat_id,
+        i,
+        if outgoing { "me" } else { "alice" },
+        outgoing,
+        body,
+    );
+    m.important = true;
+    m
+}
+
+/// Counts the store's notifications: a pin change that does not alter anything must not make one.
+fn pin_notifications(
+    h: &Harness,
+    cx: &mut VisualTestContext,
+) -> (std::rc::Rc<std::cell::Cell<usize>>, gpui::Subscription) {
+    let count = std::rc::Rc::new(std::cell::Cell::new(0));
+    let seen = count.clone();
+    let subscription =
+        cx.update(|_, app| app.observe(&h.store, move |_, _| seen.set(seen.get() + 1)));
+    (count, subscription)
+}
+
+fn pin_offset(h: &Harness, cx: &mut VisualTestContext) -> (usize, Pixels) {
+    let top = h.list(cx).logical_scroll_top();
+    (top.item_ix, top.offset_in_item)
+}
+
+/// Where the item at the top of the viewport sits below the top edge of the timeline.
+fn pin_anchor(h: &Harness, cx: &mut VisualTestContext) -> f32 {
+    let list = h.list(cx);
+    let item = list
+        .bounds_for_item(list.logical_scroll_top().item_ix)
+        .expect("the top item is laid out");
+    f32::from(
+        item.origin.y
+            - bounds(cx, "timeline")
+                .expect("timeline is on screen")
+                .origin
+                .y,
+    )
+}
+
+fn pin_bar_height(cx: &mut VisualTestContext) -> f32 {
+    f32::from(
+        bounds(cx, "pinned-message")
+            .expect("the bar was painted")
+            .size
+            .height,
+    )
+}
+
+fn pin_width(cx: &mut VisualTestContext, selector: &'static str) -> f32 {
+    f32::from(
+        bounds(cx, selector)
+            .unwrap_or_else(|| panic!("{selector} is not on screen"))
+            .size
+            .width,
+    )
+}
+
+/// Starts with `summary` as the only chat, opens it and drops the commands of the opening.
+fn pin_started(
+    cx: &mut TestAppContext,
+    summary: ChatSummary,
+    extra: Vec<ClientEvent>,
+) -> (Harness, &mut VisualTestContext) {
+    let mut events = vec![ClientEvent::ChatsReplaced(vec![summary])];
+    events.extend(extra);
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    click(cx, row!("g"));
+    h.commands();
+    (h, cx)
+}
+
+#[gpui::test]
+fn a_pin_change_shows_replaces_and_removes_the_bar_without_scrolling(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 41..=100, false)]);
+    scroll(cx, 600.);
+    let offset = pin_offset(&h, cx);
+    assert!(
+        offset.0 + 1 < h.list(cx).item_count(),
+        "scrolled away from the newest message"
+    );
+    let anchor = pin_anchor(&h, cx);
+    let timeline_top = y(cx, "timeline");
+    h.commands();
+    assert!(!shown(cx, "pinned-message"), "no pin, no bar");
+    let (renders, _subscription) = pin_notifications(&h, cx);
+
+    // Another user pins a message.
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(pin_preview(50, Some("ALICE"), "сообщение 50")),
+        )],
+    );
+    assert!(shown(cx, "pinned-message") && shown(cx, "pinned-message-text"));
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 50".into()));
+    let full = pin_bar_height(cx);
+    assert!(full > 0.);
+    assert!(
+        (y(cx, "timeline") - timeline_top - full).abs() < 0.5,
+        "the bar sits between the header and the timeline"
+    );
+    assert_eq!(pin_offset(&h, cx), offset, "the timeline did not scroll");
+    assert_eq!(pin_anchor(&h, cx), anchor);
+    assert_eq!(renders.get(), 1);
+
+    // The same state again changes nothing and wakes nobody; neither does a chat that is not listed.
+    h.feed(
+        cx,
+        [
+            pin_changed("g", Some(pin_preview(50, Some("ALICE"), "сообщение 50"))),
+            pin_changed("нет-такого", Some(pin_preview(1, None, "x"))),
+        ],
+    );
+    assert_eq!(renders.get(), 1);
+
+    // Replaced by another message.
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(pin_preview(60, Some("ALICE"), "сообщение 60")),
+        )],
+    );
+    assert_eq!(pin_in_store(&h, cx, "g").map(|p| p.timestamp), Some(ts(60)));
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 60".into()));
+    assert_eq!(pin_bar_height(cx), full);
+    assert_eq!(renders.get(), 2);
+
+    // The text of the new pin is not known yet: the label stays alone, a shorter bar.
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(PinnedMessage {
+                timestamp: ts(70),
+                preview: None,
+            }),
+        )],
+    );
+    assert!(pin_bar_height(cx) < full, "the label alone is one line");
+    assert_eq!(pin_line(&h, cx, "g"), None);
+    assert_eq!(pin_offset(&h, cx), offset);
+    assert_eq!(pin_anchor(&h, cx), anchor);
+
+    // Unpinned: the timeline starts directly under the header again.
+    h.feed(cx, [pin_changed("g", None)]);
+    assert_eq!(pin_in_store(&h, cx, "g"), None);
+    assert!(
+        (y(cx, "timeline") - timeline_top).abs() < 0.5,
+        "the bar is gone"
+    );
+    assert_eq!(pin_offset(&h, cx), offset);
+    assert_eq!(pin_anchor(&h, cx), anchor);
+    assert!(h.commands().is_empty(), "a pin change asks for nothing");
+}
+
+#[gpui::test]
+fn a_message_pin_never_marks_or_moves_the_chat_row(cx: &mut TestAppContext) {
+    let mut with_pin = chat("g", ChatKind::Group, "Команда", Some(20));
+    with_pin.unread = 2;
+    with_pin.pinned_message = Some(pin_preview(1, Some("ALICE"), "сообщение 1"));
+    let mut pinned_chat = chat("c", ChatKind::Private, "C", Some(5));
+    pinned_chat.pinned_rank = Some(0);
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::ChatsReplaced(vec![
+            chat("a", ChatKind::Private, "A", Some(10)),
+            chat("b", ChatKind::Private, "B", Some(30)),
+            with_pin,
+            pinned_chat,
+        ])],
+        |_, _| {},
+    );
+    let order = |cx: &mut VisualTestContext| {
+        let mut rows = [
+            ('a', y(cx, row!("a"))),
+            ('b', y(cx, row!("b"))),
+            ('c', y(cx, row!("c"))),
+            ('g', y(cx, row!("g"))),
+        ];
+        rows.sort_by(|l, r| l.1.total_cmp(&r.1));
+        rows.into_iter().map(|(id, _)| id).collect::<String>()
+    };
+    // Only the chat's own pin is a marker and a place; a chat with a pinned message keeps its activity order.
+    assert_eq!(order(cx), "cbga");
+    assert!(shown(cx, part!("c", "pinned")));
+    assert!(!shown(cx, part!("g", "pinned")));
+
+    click(cx, row!("g"));
+    h.commands();
+    let strip = |mut c: ChatSummary| {
+        c.pinned_message = None;
+        c
+    };
+    let (g0, b0) = (summary_in_store(&h, cx, "g"), summary_in_store(&h, cx, "b"));
+    let rows_y = |cx: &mut VisualTestContext| {
+        ["a", "b", "c", "g"].map(|id| match id {
+            "a" => y(cx, row!("a")),
+            "b" => y(cx, row!("b")),
+            "c" => y(cx, row!("c")),
+            _ => y(cx, row!("g")),
+        })
+    };
+    let places = rows_y(cx);
+
+    // The open chat's pin is replaced and removed, then the pin of a chat that is not open changes.
+    h.feed(
+        cx,
+        [
+            pin_changed("g", Some(pin_preview(7, Some("ALICE"), "сообщение 7"))),
+            pin_changed("b", Some(pin_preview(3, None, "чужое"))),
+        ],
+    );
+    assert_eq!(order(cx), "cbga");
+    assert_eq!(rows_y(cx), places, "rows did not move");
+    h.feed(cx, [pin_changed("g", None), pin_changed("b", None)]);
+    assert_eq!(order(cx), "cbga");
+    assert_eq!(rows_y(cx), places);
+
+    assert!(!shown(cx, part!("g", "pinned")) && !shown(cx, part!("b", "pinned")));
+    assert_eq!(
+        strip(summary_in_store(&h, cx, "g")),
+        strip(g0),
+        "preview, time, unread and the rest of the row are as they were"
+    );
+    assert_eq!(strip(summary_in_store(&h, cx, "b")), strip(b0));
+    assert_eq!(summary_in_store(&h, cx, "c").pinned_rank, Some(0));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_pin_set_in_a_chat_that_is_not_open_shows_when_it_is_opened(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 1..=3, true)]);
+    h.feed(
+        cx,
+        [pin_changed(
+            "p",
+            Some(pin_preview(11, None, "в личном чате")),
+        )],
+    );
+    assert!(!shown(cx, "pinned-message"), "the open chat has no pin");
+
+    click(cx, row!("p"));
+    h.feed(cx, [chunk("p", 11..=12, true)]);
+    assert!(shown(cx, "pinned-message") && shown(cx, "pinned-message-text"));
+}
+
+#[gpui::test]
+fn the_bar_shows_the_placeholder_of_a_photo_and_of_a_deleted_message(cx: &mut TestAppContext) {
+    let photo = MessageBody::Image {
+        media: media("m1", MediaKind::Thumbnail),
+        width: 800,
+        height: 600,
+        caption: None,
+        name: None,
+    };
+    for (body, placeholder) in [(photo, "Фото"), (MessageBody::Deleted, "Сообщение удалено")]
+    {
+        let mut summary = chat("g", ChatKind::Group, "Команда", Some(2));
+        summary.pinned_message = Some(PinnedMessage {
+            timestamp: ts(1),
+            preview: Some(MessagePreview {
+                author: Some("ALICE".into()),
+                text: body.preview_text(),
+                timestamp: ts(1),
+            }),
+        });
+        let (h, cx) = pin_started(cx, summary, vec![]);
+        h.feed(
+            cx,
+            [history(
+                "g",
+                vec![message("g", 1, "alice", false, body), text("g", 2)],
+                true,
+            )],
+        );
+        assert!(shown(cx, "pinned-message"), "{placeholder}");
+        assert!(shown(cx, "pinned-message-text"), "{placeholder}");
+        assert_eq!(pin_line(&h, cx, "g"), Some(format!("ALICE: {placeholder}")));
+    }
+}
+
+#[gpui::test]
+fn a_pin_without_a_resolved_text_shows_the_label_alone(cx: &mut TestAppContext) {
+    let mut summary = chat("g", ChatKind::Group, "Команда", Some(2));
+    summary.pinned_message = Some(PinnedMessage {
+        timestamp: ts(1),
+        preview: None,
+    });
+    let (h, cx) = pin_started(cx, summary, vec![]);
+    h.feed(cx, [chunk("g", 1..=2, true)]);
+    assert!(shown(cx, "pinned-message"));
+    assert!(!shown(cx, "pinned-message-text"));
+}
+
+#[gpui::test]
+fn the_bar_click_scrolls_to_a_loaded_message_and_otherwise_does_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 41..=100, false)]);
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(pin_preview(10, Some("ALICE"), "старое")),
+        )],
+    );
+    let offset = pin_offset(&h, cx);
+    h.commands();
+
+    // Older than the loaded history: no request, no loading state, no movement.
+    click(cx, "pinned-message");
+    cx.run_until_parked();
+    assert_eq!(pin_offset(&h, cx), offset);
+    assert!(h.commands().is_empty());
+    assert!(!loading_older(&h, cx, "g"));
+
+    // Loaded: the timeline goes to it (message 45 is the fifth item).
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(pin_preview(45, Some("ALICE"), "сообщение 45")),
+        )],
+    );
+    click(cx, "pinned-message");
+    cx.run_until_parked();
+    assert_eq!(h.list(cx).logical_scroll_top().item_ix, 4);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_launch_offline_shows_the_cached_bar_and_marker_with_the_offline_indicator(
+    cx: &mut TestAppContext,
+) {
+    let mut summary = chat("g", ChatKind::Group, "Команда", Some(2));
+    summary.pinned_message = Some(pin_preview(1, Some("ALICE"), "сообщение 1"));
+    let (h, cx) = harness_with(
+        cx,
+        vec![
+            ClientEvent::ChatsReplaced(vec![summary]),
+            ClientEvent::Connection(ConnectionState::Offline),
+        ],
+        |_, _| {},
+    );
+    assert!(shown(cx, "connection-indicator"));
+    assert!(!shown(cx, "pinned-message"), "no chat is open yet");
+
+    click(cx, row!("g"));
+    assert!(
+        shown(cx, "pinned-message") && shown(cx, "pinned-message-text"),
+        "the bar comes from the cached summary, before any history"
+    );
+    assert_eq!(pin_line(&h, cx, "g"), Some("ALICE: сообщение 1".into()));
+    h.feed(
+        cx,
+        [history(
+            "g",
+            vec![
+                important_message("g", 1, false, MessageBody::Text("сообщение 1".into())),
+                text("g", 2),
+            ],
+            true,
+        )],
+    );
+    assert!(shown(cx, msg!(1, "important")), "the cached flag is shown");
+    assert_eq!(
+        pin_line(&h, cx, "g"),
+        Some("ALICE: сообщение 1".into()),
+        "the cached text is kept"
+    );
+    assert!(!shown(cx, msg!(2, "important")));
+    assert!(shown(cx, "connection-indicator"), "still offline");
+    assert_eq!(h.commands(), [Command::OpenChat(chat_g())]);
+}
+
+#[gpui::test]
+fn the_marker_shows_on_incoming_and_own_messages_of_every_chat_kind_and_not_on_deleted(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(
+        cx,
+        [history(
+            "g",
+            vec![
+                important_message("g", 1, false, MessageBody::Text("чужое важное".into())),
+                important_message("g", 2, true, MessageBody::Text("моё важное".into())),
+                important_message("g", 3, false, MessageBody::Deleted),
+                text("g", 4),
+            ],
+            true,
+        )],
+    );
+    assert!(shown(cx, msg!(1, "important")), "incoming");
+    assert!(shown(cx, msg!(2, "important")), "own");
+    assert!(shown(cx, msg!(3)), "the deleted message is on screen");
+    assert!(!shown(cx, msg!(3, "important")), "but has no marker");
+    assert!(shown(cx, msg!(4)));
+    assert!(!shown(cx, msg!(4, "important")), "an ordinary message");
+
+    click(cx, row!("p"));
+    h.feed(
+        cx,
+        [history(
+            "p",
+            vec![
+                important_message("p", 11, false, MessageBody::Text("личное".into())),
+                important_message("p", 12, true, MessageBody::Text("моё личное".into())),
+            ],
+            true,
+        )],
+    );
+    assert!(shown(cx, msg!(11, "important")), "private chat, incoming");
+    assert!(shown(cx, msg!(12, "important")), "private chat, own");
+
+    click(cx, row!("ch"));
+    h.feed(
+        cx,
+        [history(
+            "ch",
+            vec![important_message(
+                "ch",
+                21,
+                false,
+                MessageBody::Text("новость".into()),
+            )],
+            true,
+        )],
+    );
+    assert!(shown(cx, msg!(21, "important")), "channel");
+}
+
+#[gpui::test]
+fn a_live_importance_change_updates_the_marker_in_place_without_scrolling(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    // Two short own messages next to each other: their bubbles are as wide as their footers, so a marker
+    // in the footer shows as a wider bubble (the debug map keeps the bounds of vanished elements).
+    open_with(
+        &h,
+        cx,
+        (41..=100)
+            .map(|i| match i {
+                89 | 90 => own("g", i, "а"),
+                _ => text("g", i),
+            })
+            .collect(),
+    );
+    scroll(cx, 200.);
+    assert!(shown(cx, msg!(89)) && shown(cx, msg!(90)));
+    let ordinary = pin_width(cx, msg!(89));
+    assert_eq!(pin_width(cx, msg!(90)), ordinary);
+    let offset = pin_offset(&h, cx);
+    assert!(offset.0 + 1 < h.list(cx).item_count(), "scrolled up");
+    let anchor = pin_anchor(&h, cx);
+    let row_top = y(cx, row!("g"));
+    let before = summary_in_store(&h, cx, "g");
+    let flag = |h: &Harness, cx: &mut VisualTestContext| {
+        h.store.read_with(cx, |s, _| {
+            s.timeline(&chat_g())
+                .unwrap()
+                .messages
+                .iter()
+                .find(|m| m.timestamp == ts(90))
+                .unwrap()
+                .important
+        })
+    };
+
+    // Marked as important from another client.
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(important_message(
+            "g",
+            90,
+            true,
+            MessageBody::Text("а".into()),
+        ))],
+    );
+    assert!(flag(&h, cx));
+    assert!(shown(cx, msg!(90, "important")));
+    assert!(
+        pin_width(cx, msg!(90)) > ordinary,
+        "the marker is in the footer"
+    );
+    assert!(!shown(cx, msg!(89, "important")));
+    assert_eq!(pin_offset(&h, cx), offset, "the view did not scroll");
+    assert_eq!(pin_anchor(&h, cx), anchor);
+
+    // The flag removed again.
+    h.feed(cx, [ClientEvent::MessageUpserted(own("g", 90, "а"))]);
+    assert!(!flag(&h, cx));
+    assert_eq!(pin_width(cx, msg!(90)), ordinary, "the marker is gone");
+    assert_eq!(pin_offset(&h, cx), offset);
+    assert_eq!(pin_anchor(&h, cx), anchor);
+
+    assert_eq!(y(cx, row!("g")), row_top);
+    assert_eq!(
+        summary_in_store(&h, cx, "g"),
+        before,
+        "the row is as it was"
+    );
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn pins_and_importance_are_display_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            text("g", 1),
+            important_message("g", 2, true, MessageBody::Text("важное".into())),
+            own("g", 3, "обычное"),
+            text("g", 4),
+        ],
+    );
+    h.feed(
+        cx,
+        [pin_changed(
+            "g",
+            Some(pin_preview(1, Some("ALICE"), "сообщение 1")),
+        )],
+    );
+    h.commands();
+
+    // The menu of a pinned or important message is the menu of any message of its kind: same entries.
+    right_click(cx, msg!(1));
+    let pinned_incoming = menu_height(cx);
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(4));
+    assert_eq!(menu_height(cx), pinned_incoming, "pinned, incoming");
+    assert!(shown(cx, "menu-reply") && shown(cx, "menu-copy"));
+    assert!(!shown(cx, "menu-edit") && !shown(cx, "menu-delete"));
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(2));
+    let important_own = menu_height(cx);
+    cx.simulate_keystrokes("escape");
+    right_click(cx, msg!(3));
+    assert_eq!(menu_height(cx), important_own, "important, own");
+    for item in ["menu-reply", "menu-copy", "menu-edit", "menu-delete"] {
+        assert!(shown(cx, item), "{item}");
+    }
+    for item in [
+        "menu-pin",
+        "menu-unpin",
+        "menu-pinned",
+        "menu-important",
+        "menu-unimportant",
+    ] {
+        assert!(!shown(cx, item), "{item}");
+    }
+    cx.simulate_keystrokes("escape");
+    assert!(!menu_is_open(&h, cx));
+
+    // The bar is only a link to the message: no control, no menu, no request.
+    click(cx, "pinned-message");
+    right_click(cx, "pinned-message");
+    assert!(!menu_is_open(&h, cx), "the bar has no menu");
+    for control in [
+        "pinned-message-unpin",
+        "pinned-message-close",
+        "pinned-message-menu",
+    ] {
+        assert!(!shown(cx, control), "{control}");
+    }
+    cx.run_until_parked();
+    assert!(h.commands().is_empty(), "nothing is sent for a pin");
+}
+
+#[gpui::test]
+fn a_cache_from_before_pins_and_importance_loads_without_bar_marker_or_error(
+    cx: &mut TestAppContext,
+) {
+    // The JSON of rows cached before the fields existed: the keys are not there at all.
+    let legacy_chat: ChatSummary = {
+        let mut json =
+            serde_json::to_value(chat("g", ChatKind::Group, "Команда", Some(1))).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("pinned_message");
+        fields.remove("pin_action_ts");
+        serde_json::from_value(json).unwrap()
+    };
+    let legacy_message: Message = {
+        let mut json = serde_json::to_value(text("g", 1)).unwrap();
+        json.as_object_mut().unwrap().remove("important");
+        serde_json::from_value(json).unwrap()
+    };
+    assert_eq!(legacy_chat.pinned_message, None);
+    assert_eq!(legacy_chat.pin_action_ts, None);
+    assert!(!legacy_message.important);
+
+    let (h, cx) = pin_started(cx, legacy_chat, vec![]);
+    h.feed(cx, [history("g", vec![legacy_message], true)]);
+    assert!(shown(cx, msg!(1)), "the history is shown");
+    assert!(!shown(cx, "pinned-message"));
+    assert!(!shown(cx, msg!(1, "important")));
+    assert_eq!(toast(&h, cx), None);
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn the_bar_line_names_the_author_outside_private_chats_and_is_one_line(_cx: &mut TestAppContext) {
+    use crate::desktop::pinned_message_text as line;
+    let by = |author: Option<&str>, text: &str| MessagePreview {
+        author: author.map(str::to_string),
+        text: text.into(),
+        timestamp: ts(1),
+    };
+    let said = by(Some("ALICE"), "привет");
+    assert_eq!(
+        line(ChatKind::Group, Some(&said)),
+        Some("ALICE: привет".into())
+    );
+    assert_eq!(
+        line(ChatKind::Channel, Some(&said)),
+        Some("ALICE: привет".into())
+    );
+    assert_eq!(
+        line(ChatKind::Private, Some(&said)),
+        Some("привет".into()),
+        "no author in a private chat"
+    );
+    assert_eq!(
+        line(ChatKind::Group, Some(&by(None, "привет"))),
+        Some("привет".into()),
+        "an unknown author is not named"
+    );
+    assert_eq!(
+        line(
+            ChatKind::Group,
+            Some(&by(Some("ALICE"), "раз\n\n  два   три\n"))
+        ),
+        Some("ALICE: раз два три".into())
+    );
+
+    // The placeholders of a message without text are the ones of the chat row.
+    let photo = MessageBody::Image {
+        media: media("m1", MediaKind::Thumbnail),
+        width: 800,
+        height: 600,
+        caption: None,
+        name: None,
+    };
+    let placeholder = |body: &MessageBody| by(Some("ALICE"), &body.preview_text());
+    assert_eq!(
+        line(ChatKind::Group, Some(&placeholder(&photo))),
+        Some("ALICE: Фото".into())
+    );
+    assert_eq!(
+        line(ChatKind::Private, Some(&placeholder(&MessageBody::Deleted))),
+        Some("Сообщение удалено".into())
+    );
+
+    // No text yet: nothing under the label.
+    assert_eq!(line(ChatKind::Group, None), None);
+    assert_eq!(line(ChatKind::Private, None), None);
 }

@@ -25,3 +25,5 @@ pub const MENU_SEPARATOR: u32 = 0x232f39;
 pub const MENU_ICON: u32 = 0x6c7883;
 pub const REACTION_CHIP: u32 = 0x203449;
 pub const REACTION_OWN: u32 = 0x4f95d6;
+/// The "⚡" important marker in a bubble footer.
+pub const IMPORTANT_MARK: u32 = 0xf2c14e;

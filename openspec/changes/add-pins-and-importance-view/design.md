@@ -38,6 +38,8 @@ Alternative rejected: keep `Pin` in `ChatChanged` and read the pin from the refe
 
 If chat-list entries (`history { Limit: 1, ChatDataFilter: {} }`) do not carry the pin but a single-chat read does, one variant is added: `ReadRequest::ChatInfo { chat }`, socket `history { ChatId, Limit: 0, ChatDataFilter: {} }` (the web client's `getChat`), parsed by the existing `parse_chat`. `ALLOWED_METHODS` does not change (method `history`); the `every_request` test and its exhaustive `match` gain the variant. The adapter calls it for the open chat. If list entries do carry the pin, this task is dropped and no read request is added.
 
+**Outcome (task 0.1, 2026-11-27):** list entries carry `PinnedMessageInfo` (and so do single-chat replies), so this task is dropped and no read request is added; research "Live observation".
+
 ### D3. Domain types (`chat-core`)
 
 ```rust
@@ -71,7 +73,7 @@ Backend::message_preview(&self, chat: &ChatId, timestamp: MessageTs)
 
 ### D6. Adapter (`desktop::yandex_backend`)
 
-`message()` copies `wire.important`. `summary()` maps `WireChat.pinned` to `pinned_message` with `preview: None` and `WireChat.pin_action_ts` to `ChatSummary.pin_action_ts` (also when there is no pin); `pinned_rank` stays `None` and is not this change's business. The live loop maps `PushEvent::PinChanged` to `LiveEvent::PinChanged` (a small pure function, tested like the reaction mapping; `at` is passed through) and `ChatChanged` keeps its refetch for the remaining kinds. `message_preview` is the one-message `History` read plus `Users` loading for the author's name (the same helper as the other reads); it goes through the read path, never `push`.
+`message()` copies `wire.important`. `summary()` maps `WireChat.pinned` to `pinned_message` with `preview: None` and `WireChat.pin_action_ts` to `ChatSummary.pin_action_ts` (also when there is no pin); `pinned_rank` stays `None` and is not this change's business. The live loop maps `PushEvent::PinChanged` to `LiveEvent::PinChanged` (a small pure function, tested like the reaction mapping; `at` is passed through) and `ChatChanged` keeps its refetch for the remaining kinds. `message_preview` calls `Client::history_page(chat, Some(ts.saturating_add(1)), 1)`, producing the existing `ReadRequest::History` with `limit: 1`, then loads the author's name through the shared `Users` helper. It returns only the row whose timestamp equals `ts`, or `Ok(None)` when absent. The explicit limit avoids fetching a normal history page for one preview; the method remains on the read path, never `push`. Ordinary `Client::history` keeps its configured page size; no read/write allow-list changes are needed.
 
 ### D7. UI (`desktop`)
 
