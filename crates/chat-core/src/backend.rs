@@ -222,6 +222,17 @@ pub trait Backend: Send + Sync + 'static {
         user: &UserId,
     ) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
 
+    /// Creates a group chat named `title` with the participants `users` (never the account
+    /// itself): one request, never retried. Returns the chat id when the reply names one. A
+    /// guard refusal (developer limit on writes) is `Failed(Rejected { permanent: true })` and
+    /// sends nothing. A participant the server could not add does not fail the call: the group
+    /// exists.
+    fn create_group_chat(
+        &self,
+        title: &str,
+        users: &[UserId],
+    ) -> impl Future<Output = Result<Option<ChatId>, CreateError>> + Send;
+
     /// The one-line preview of the message `(chat, timestamp)`, or `Ok(None)` when the server
     /// no longer has it. One read request, never a push; offline fails fast with `Network`.
     /// Nothing is persisted.

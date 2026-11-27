@@ -161,6 +161,31 @@ struct HistoryFetch {
     result: Result<HistoryChunk, BackendError>,
 }
 
+/// What a creation is for. It travels with its answers, so the engine can look for the person's
+/// private chat in the list afterwards.
+enum Creation {
+    Private(UserId),
+    Group { title: String, users: Vec<UserId> },
+}
+
+impl Creation {
+    /// The person of a private chat; a group has none (and no duplicate detection).
+    fn partner(&self) -> Option<&UserId> {
+        match self {
+            Self::Private(user) => Some(user),
+            Self::Group { .. } => None,
+        }
+    }
+
+    /// For the log: the kind only, never a person, title or chat id.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Private(_) => "private",
+            Self::Group { .. } => "group",
+        }
+    }
+}
+
 enum Input {
     Command(Command),
     CommandsClosed,
@@ -230,16 +255,16 @@ enum Input {
     },
     /// The answer to a `LoadProfile`.
     Profile(Result<Profile, BackendError>),
-    /// The answer to a `CreatePrivateChat` for `user`; `chats` is the list read right after it
-    /// (only when the chat may have been created).
+    /// The answer to a creation; `chats` is the list read right after it (only when the chat may
+    /// have been created).
     Created {
-        user: UserId,
+        creation: Creation,
         result: Result<Option<ChatId>, CreateError>,
         chats: Option<Result<Vec<ChatSummary>, BackendError>>,
     },
-    /// The list read that precedes a `CreatePrivateChat` for `user` after an unverified result.
+    /// The list read that precedes a creation after an unverified result.
     ListChecked {
-        user: UserId,
+        creation: Creation,
         chats: Result<Vec<ChatSummary>, BackendError>,
     },
 }
@@ -816,11 +841,11 @@ impl<B: Backend> Engine<B> {
             } => self.handle_reactors(chat, timestamp, request, result),
             Input::Profile(result) => self.handle_profile(result),
             Input::Created {
-                user,
+                creation,
                 result,
                 chats,
-            } => self.handle_created(user, result, chats),
-            Input::ListChecked { user, chats } => self.handle_list_checked(user, chats),
+            } => self.handle_created(creation, result, chats),
+            Input::ListChecked { creation, chats } => self.handle_list_checked(creation, chats),
             Input::Connected { .. }
             | Input::Retry(_)
             | Input::Live { .. }
@@ -903,7 +928,10 @@ impl<B: Backend> Engine<B> {
                 request,
             } => self.load_reactors(chat, timestamp, before, request),
             Command::LoadProfile => self.load_profile(),
-            Command::CreatePrivateChat { user } => self.create_private_chat(user),
+            Command::CreatePrivateChat { user } => self.create(Creation::Private(user)),
+            Command::CreateGroupChat { title, users } => {
+                self.create(Creation::Group { title, users })
+            }
         }
         true
     }
@@ -2269,12 +2297,12 @@ impl<B: Backend> Engine<B> {
 
     // -- chat creation --------------------------------------------------------------------
 
-    /// Starts a private chat with `user`. Attempted once, never queued, never retried, nothing
-    /// persisted: a second command while one runs is dropped, offline answers at once without a
-    /// request, and a chat the account already has is reported without one. After a creation whose
-    /// outcome could not be checked (`creation_unverified`) the list is read first, and nothing is sent
-    /// unless that read succeeds and does not show the chat.
-    fn create_private_chat(&mut self, user: UserId) {
+    /// Starts a creation, a private chat or a group. Attempted once, never queued, never retried,
+    /// nothing persisted: a second command while one runs is dropped, offline answers at once without a
+    /// request, and a private chat the account already has is reported without one (a group has no
+    /// such check). After a creation whose outcome could not be checked (`creation_unverified`) the
+    /// list is read first, and nothing is sent unless that read succeeds and does not show the chat.
+    fn create(&mut self, creation: Creation) {
         if self.creation_inflight {
             return;
         }
@@ -2284,7 +2312,7 @@ impl<B: Backend> Engine<B> {
                 unknown: false,
             });
         }
-        if let Some(chat) = self.private_chat_with(&user) {
+        if let Some(chat) = self.existing_chat(&creation) {
             return self.emit(ClientEvent::ChatCreated {
                 chat: Some(chat),
                 existing: true,
@@ -2292,14 +2320,14 @@ impl<B: Backend> Engine<B> {
         }
         self.creation_inflight = true;
         if !self.creation_unverified {
-            return self.send_creation(user);
+            return self.send_creation(creation);
         }
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
             post(
                 &inputs,
                 Input::ListChecked {
-                    user,
+                    creation,
                     chats: backend.chat_list().await,
                 },
             )
@@ -2307,10 +2335,13 @@ impl<B: Backend> Engine<B> {
     }
 
     /// Sends the creation request. Needs `creation_inflight` set.
-    fn send_creation(&self, user: UserId) {
+    fn send_creation(&self, creation: Creation) {
         let (backend, inputs) = (self.backend.clone(), self.inputs.clone());
         tokio::spawn(async move {
-            let result = backend.create_private_chat(&user).await;
+            let result = match &creation {
+                Creation::Private(user) => backend.create_private_chat(user).await,
+                Creation::Group { title, users } => backend.create_group_chat(title, users).await,
+            };
             // The list is read here, after anything that may have created the chat, and travels
             // with the answer, so the list event always comes before `ChatCreated`.
             let chats = match &result {
@@ -2320,7 +2351,7 @@ impl<B: Backend> Engine<B> {
             post(
                 &inputs,
                 Input::Created {
-                    user,
+                    creation,
                     result,
                     chats,
                 },
@@ -2329,8 +2360,13 @@ impl<B: Backend> Engine<B> {
     }
 
     /// The list read before a creation that follows an unverified one: when it fails, nothing is sent and
-    /// the check is still owed; when it shows the chat, that chat is opened; otherwise the creation goes out.
-    fn handle_list_checked(&mut self, user: UserId, chats: Result<Vec<ChatSummary>, BackendError>) {
+    /// the check is still owed; when it shows the private chat, that chat is opened; otherwise the creation
+    /// goes out.
+    fn handle_list_checked(
+        &mut self,
+        creation: Creation,
+        chats: Result<Vec<ChatSummary>, BackendError>,
+    ) {
         if !self.creation_inflight {
             return;
         }
@@ -2348,7 +2384,7 @@ impl<B: Backend> Engine<B> {
             });
         }
         self.creation_unverified = false;
-        if let Some(chat) = self.private_chat_with(&user) {
+        if let Some(chat) = self.existing_chat(&creation) {
             self.creation_inflight = false;
             tracing::info!("private chat found by the list check before a creation");
             return self.emit(ClientEvent::ChatCreated {
@@ -2356,18 +2392,19 @@ impl<B: Backend> Engine<B> {
                 existing: true,
             });
         }
-        self.send_creation(user);
+        self.send_creation(creation);
     }
 
     fn handle_created(
         &mut self,
-        user: UserId,
+        creation: Creation,
         result: Result<Option<ChatId>, CreateError>,
         chats: Option<Result<Vec<ChatSummary>, BackendError>>,
     ) {
         if !std::mem::take(&mut self.creation_inflight) {
             return;
         }
+        let kind = creation.kind();
         // Whether the list was read after the request: `handle_chats` ignores a failed read.
         let listed = chats.as_ref().is_some_and(|chats| chats.is_ok());
         if let Some(chats) = chats {
@@ -2378,9 +2415,10 @@ impl<B: Backend> Engine<B> {
         }
         match result {
             Ok(created) => {
-                // The reply's id, else the list entry of that person (the id may be missing).
-                let chat = created.or_else(|| self.private_chat_with(&user));
-                tracing::info!(listed = chat.is_some(), "private chat created");
+                // The reply's id, else the list entry of that person (the id may be missing; a
+                // group has no person to look for).
+                let chat = created.or_else(|| self.existing_chat(&creation));
+                tracing::info!(kind, listed = chat.is_some(), "chat created");
                 self.emit(ClientEvent::ChatCreated {
                     chat,
                     existing: false,
@@ -2388,24 +2426,24 @@ impl<B: Backend> Engine<B> {
             }
             Err(CreateError::Failed(BackendError::SessionExpired)) => self.expire(),
             Err(CreateError::Failed(error)) => {
-                tracing::warn!(kind = error_kind(&error), "private chat creation failed");
+                tracing::warn!(kind, error = error_kind(&error), "chat creation failed");
                 self.emit(ClientEvent::CreationFailed {
                     reason: read_failure_reason(error),
                     unknown: false,
                 });
             }
-            // Never retried here. The refreshed list may already hold the chat: then it is simply opened.
-            // Without a successful read the chat may exist unseen: the next attempt reads the list first.
-            Err(CreateError::Unknown(_)) => match self.private_chat_with(&user) {
+            // Never retried here. The refreshed list may already hold the private chat: then it is simply
+            // opened. Without a successful read the chat may exist unseen: the next attempt reads the list first.
+            Err(CreateError::Unknown(_)) => match self.existing_chat(&creation) {
                 Some(chat) => {
-                    tracing::info!("private chat found after an unknown result");
+                    tracing::info!(kind, "private chat found after an unknown result");
                     self.emit(ClientEvent::ChatCreated {
                         chat: Some(chat),
                         existing: true,
                     });
                 }
                 None if listed => {
-                    tracing::warn!("private chat creation outcome unknown");
+                    tracing::warn!(kind, "chat creation outcome unknown");
                     self.emit(ClientEvent::CreationFailed {
                         reason: CREATION_UNKNOWN_REASON.into(),
                         unknown: true,
@@ -2413,7 +2451,8 @@ impl<B: Backend> Engine<B> {
                 }
                 None => {
                     tracing::warn!(
-                        "private chat creation outcome unknown and the chat list could not be read"
+                        kind,
+                        "chat creation outcome unknown and the chat list could not be read"
                     );
                     self.creation_unverified = true;
                     self.emit(ClientEvent::CreationUnverified {
@@ -2424,8 +2463,9 @@ impl<B: Backend> Engine<B> {
         }
     }
 
-    /// The cached private chat whose other participant is `user`.
-    fn private_chat_with(&self, user: &UserId) -> Option<ChatId> {
+    /// The cached private chat of the person a private creation is for; none for a group.
+    fn existing_chat(&self, creation: &Creation) -> Option<ChatId> {
+        let user = creation.partner()?;
         self.db(self.cache.chats())?
             .into_iter()
             .find(|c| c.partner.as_ref() == Some(user))
@@ -3085,11 +3125,14 @@ mod tests {
         profile_calls: usize,
         /// When set, `profile` records its call, then waits here before answering.
         profile_gate: Option<Arc<tokio::sync::Notify>>,
-        /// Answers of `create_private_chat`, then `Ok(None)` (created, the reply names no chat).
+        /// Answers of `create_private_chat` and `create_group_chat`, then `Ok(None)` (created, the
+        /// reply names no chat).
         create_results: VecDeque<Result<Option<ChatId>, CreateError>>,
         /// Every `create_private_chat` call: the person.
         create_calls: Vec<UserId>,
-        /// When set, `create_private_chat` records its call, then waits here before answering.
+        /// Every `create_group_chat` call: the title and the participants.
+        group_calls: Vec<(String, Vec<UserId>)>,
+        /// When set, either creation records its call, then waits here before answering.
         create_gate: Option<Arc<tokio::sync::Notify>>,
         /// Failures of the next `chat_list` calls, one per call, then the list again.
         chat_list_errors: VecDeque<BackendError>,
@@ -3397,6 +3440,24 @@ mod tests {
             let (result, gate) = {
                 let mut s = self.state();
                 s.create_calls.push(user.clone());
+                (
+                    s.create_results.pop_front().unwrap_or(Ok(None)),
+                    s.create_gate.clone(),
+                )
+            };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            result
+        }
+        async fn create_group_chat(
+            &self,
+            title: &str,
+            users: &[UserId],
+        ) -> Result<Option<ChatId>, CreateError> {
+            let (result, gate) = {
+                let mut s = self.state();
+                s.group_calls.push((title.to_owned(), users.to_vec()));
                 (
                     s.create_results.pop_front().unwrap_or(Ok(None)),
                     s.create_gate.clone(),
@@ -8736,6 +8797,293 @@ mod tests {
         h.fake.state().chat_list_errors = VecDeque::from([BackendError::Network("down".into())]);
         h.client.send(create_with("u9"));
         h.wait_for("the second request", |s| s.create_calls.len() == 2);
+    }
+
+    // -- group creation -------------------------------------------------------------------
+
+    fn group_with(title: &str, users: &[&str]) -> Command {
+        Command::CreateGroupChat {
+            title: title.into(),
+            users: users.iter().map(|u| UserId((*u).into())).collect(),
+        }
+    }
+
+    fn team_call() -> (String, Vec<UserId>) {
+        (
+            "Team".into(),
+            vec![UserId("u1".into()), UserId("u2".into())],
+        )
+    }
+
+    #[test]
+    fn a_created_group_is_announced_with_the_replys_id_after_the_list_was_refreshed() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Ok(Some(id("g")))]),
+            50,
+        );
+        h.online();
+        h.fake.state().chats = vec![chat("g", Some(2), None)];
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("g")),
+                existing: false
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "g")),
+            "the list comes first: {seen:?}"
+        );
+        let state = h.fake.state();
+        assert_eq!(state.group_calls, [team_call()]);
+        assert!(state.create_calls.is_empty(), "no private creation");
+    }
+
+    #[test]
+    fn a_group_reply_without_an_id_names_no_chat_even_when_a_participant_has_a_private_chat() {
+        // The scripted answer is the default: created, the reply names no chat. A private chat with
+        // a participant is not the group: only a private creation resolves by person.
+        let h = start(|_, _| {}, 50);
+        h.online();
+        h.fake.state().chats = vec![private("p", "u1")];
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: None,
+                existing: false
+            })
+        );
+        assert_eq!(h.fake.state().group_calls.len(), 1);
+    }
+
+    #[test]
+    fn a_group_is_created_even_when_a_private_chat_with_its_participant_exists() {
+        let h = start(
+            |s, _| {
+                s.chats = vec![private("p", "u1")];
+                s.create_results = VecDeque::from([Ok(Some(id("g")))])
+            },
+            50,
+        );
+        h.online();
+        h.client.send(group_with("Team", &["u1"]));
+        let event = h.next("the outcome", is_creation_outcome);
+        assert_eq!(
+            event,
+            ClientEvent::ChatCreated {
+                chat: Some(id("g")),
+                existing: false
+            }
+        );
+        assert_eq!(
+            h.fake.state().group_calls.len(),
+            1,
+            "no duplicate detection"
+        );
+    }
+
+    #[test]
+    fn a_rejected_group_creation_carries_the_reason_and_neither_refreshes_nor_retries() {
+        let reason = "название занято";
+        let h = start(
+            |s, _| {
+                s.create_results =
+                    VecDeque::from([Err(CreateError::Failed(rejected(reason, true)))])
+            },
+            50,
+        );
+        h.online();
+        h.fake.state().chats = vec![chat("g", Some(2), None)];
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::CreationFailed {
+                reason: reason.into(),
+                unknown: false
+            })
+        );
+        h.quiet();
+        let later = h.drain();
+        assert!(
+            !seen.iter().chain(&later).any(|e| lists(e, "g")),
+            "nothing was created, so no refresh: {seen:?} {later:?}"
+        );
+        assert!(creation_events(&later).is_empty());
+        assert_eq!(h.fake.state().group_calls.len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_group_result_refreshes_the_list_says_so_and_never_retries() {
+        let h = start(
+            |s, _| s.create_results = VecDeque::from([Err(CreateError::Unknown("timeout".into()))]),
+            50,
+        );
+        h.online();
+        // A private chat with a participant is not the group: the result stays unknown.
+        h.fake.state().chats = vec![private("p", "u1")];
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::CreationFailed {
+                reason: CREATION_UNKNOWN_REASON.into(),
+                unknown: true
+            })
+        );
+        assert!(
+            seen[..seen.len() - 1].iter().any(|e| lists(e, "p")),
+            "the list was refreshed first: {seen:?}"
+        );
+        h.quiet();
+        assert!(creation_events(&h.drain()).is_empty());
+        assert_eq!(
+            h.fake.state().group_calls.len(),
+            1,
+            "the backend was called once and never again by itself"
+        );
+    }
+
+    #[test]
+    fn offline_a_group_creation_is_refused_at_once_without_a_request() {
+        let h = start(
+            |s, _| {
+                s.bootstrap_errors =
+                    std::iter::repeat_n(BackendError::Network("down".into()), 1000).collect()
+            },
+            50,
+        );
+        h.next("offline", |e| {
+            *e == ClientEvent::Connection(ConnectionState::Offline)
+        });
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let event = h.next("refusal", is_creation_outcome);
+        assert_eq!(
+            event,
+            ClientEvent::CreationFailed {
+                reason: OFFLINE_REASON.into(),
+                unknown: false
+            }
+        );
+        h.quiet();
+        assert!(h.fake.state().group_calls.is_empty());
+    }
+
+    #[test]
+    fn a_second_creation_of_either_kind_while_a_group_is_running_is_dropped() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let h = start(|s, _| s.create_gate = Some(gate.clone()), 50);
+        h.online();
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        h.wait_for("the first request", |s| s.group_calls.len() == 1);
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        h.client.send(group_with("Other", &["u3"]));
+        h.client.send(create_with("u9"));
+        h.quiet();
+        {
+            let state = h.fake.state();
+            assert_eq!(
+                state.group_calls.len(),
+                1,
+                "the duplicates never reached the backend"
+            );
+            assert!(state.create_calls.is_empty());
+        }
+        let seen = std::cell::RefCell::new(Vec::new());
+        h.open_gate(&gate, "the answer", || {
+            seen.borrow_mut().extend(h.drain());
+            !creation_events(&seen.borrow()).is_empty()
+        });
+        h.quiet();
+        seen.borrow_mut().extend(h.drain());
+        let seen = seen.into_inner();
+        assert_eq!(
+            creation_events(&seen).len(),
+            1,
+            "one answer for the one creation: {seen:?}"
+        );
+
+        // Once it has ended, a later creation is served.
+        h.client.send(group_with("Other", &["u3"]));
+        h.wait_for("the later request", |s| s.group_calls.len() == 2);
+    }
+
+    #[test]
+    fn session_expiry_during_a_group_creation_ends_the_session() {
+        let h = start(
+            |s, _| {
+                s.create_results =
+                    VecDeque::from([Err(CreateError::Failed(BackendError::SessionExpired))])
+            },
+            50,
+        );
+        h.online();
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        h.next("expired", |e| *e == ClientEvent::SessionExpired);
+        h.quiet();
+        let events = h.drain();
+        assert!(
+            creation_events(&events).is_empty(),
+            "expiry is not a creation failure: {events:?}"
+        );
+    }
+
+    #[test]
+    fn after_an_unverified_group_result_the_next_attempt_checks_the_list_first() {
+        let h = start(
+            |s, _| {
+                s.create_results = VecDeque::from([
+                    Err(CreateError::Unknown("timeout".into())),
+                    Ok(Some(id("g"))),
+                ])
+            },
+            50,
+        );
+        h.online();
+        // The refresh after the unknown result fails, and so does the check before the second attempt.
+        h.fake.state().chat_list_errors = VecDeque::from([
+            BackendError::Network("down".into()),
+            BackendError::Network("still down".into()),
+        ]);
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let event = h.next("unverified", is_creation_outcome);
+        assert_eq!(
+            event,
+            ClientEvent::CreationUnverified {
+                reason: CREATION_UNVERIFIED_REASON.into()
+            }
+        );
+
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let event = h.next("the check failed", is_creation_outcome);
+        assert_eq!(
+            event,
+            ClientEvent::CreationUnverified {
+                reason: LIST_CHECK_FAILED_REASON.into()
+            }
+        );
+        h.quiet();
+        assert_eq!(
+            h.fake.state().group_calls.len(),
+            1,
+            "no second request without a successful list check"
+        );
+
+        // The list is readable again: nothing in it identifies the group, so the creation goes out.
+        h.client.send(group_with("Team", &["u1", "u2"]));
+        let seen = h.until("the outcome", is_creation_outcome);
+        assert_eq!(
+            seen.last(),
+            Some(&ClientEvent::ChatCreated {
+                chat: Some(id("g")),
+                existing: false
+            })
+        );
+        assert_eq!(h.fake.state().group_calls.len(), 2);
     }
 
     /// Loopback echo server on a plain thread, so it does not depend on the runtime under test.

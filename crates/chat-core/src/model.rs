@@ -509,7 +509,7 @@ pub enum ClientEvent {
         reason: String,
         offline: bool,
     },
-    /// The chat the user asked for with `CreatePrivateChat`. `existing` is set when no request was
+    /// The chat the user asked for with `CreatePrivateChat` or `CreateGroupChat`. `existing` is set when no request was
     /// needed (the account already had the chat, or the refreshed list showed it after an unknown
     /// result); otherwise the server created it. The chat list was refreshed before this event, so
     /// `chat` is normally in the list already. `chat` is `None` when neither the reply nor the
@@ -518,7 +518,7 @@ pub enum ClientEvent {
         chat: Option<ChatId>,
         existing: bool,
     },
-    /// A `CreatePrivateChat` produced no chat. `unknown` is set when the request was sent and its
+    /// A `CreatePrivateChat` or `CreateGroupChat` produced no chat. `unknown` is set when the request was sent and its
     /// outcome is not known (the chat may exist; the list was refreshed, did not hold it, and nothing
     /// is retried); otherwise nothing was created and `reason` is the server's, or the offline text
     /// when nothing was sent.
@@ -526,11 +526,11 @@ pub enum ClientEvent {
         reason: String,
         unknown: bool,
     },
-    /// A `CreatePrivateChat` produced no chat and the chat list could not be read to check: either the
+    /// A creation produced no chat and the chat list could not be read to check: either the
     /// request was sent, its outcome is unknown and the refresh that should have shown whether the
     /// chat exists failed, or the list check that precedes a new attempt after such a result failed
     /// (then no request was sent). A chat may exist unseen. Until a read of the list succeeds, a new
-    /// `CreatePrivateChat` reads it first and sends nothing when that fails again.
+    /// creation reads it first and sends nothing when that fails again.
     CreationUnverified {
         reason: String,
     },
@@ -611,6 +611,13 @@ pub enum Command {
     /// creation runs at a time (a command meanwhile is dropped), it is never queued or retried.
     CreatePrivateChat {
         user: UserId,
+    },
+    /// Start a group chat named `title` with the participants `users` (never the account itself).
+    /// The reply and the rules are those of `CreatePrivateChat`, except that no existing chat is
+    /// looked for: a group is always created, so the UI must have shown the confirmation first.
+    CreateGroupChat {
+        title: String,
+        users: Vec<UserId>,
     },
 }
 

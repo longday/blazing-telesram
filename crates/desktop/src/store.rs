@@ -1238,15 +1238,38 @@ impl ChatStore {
 
     /// Asks the core to start a private chat with `user`. The state becomes `InFlight` at once; while
     /// one is running nothing is sent again (the core drops it too). The dialog must have shown the
-    /// confirmation first: this is the only call that creates a chat.
+    /// confirmation first: this and `create_group_chat` are the only calls that create a chat.
     pub fn create_private_chat(&mut self, user: UserId, cx: &mut Context<Self>) {
+        self.start_creation(
+            Command::CreatePrivateChat { user: user.clone() },
+            Some(user),
+            cx,
+        );
+    }
+
+    /// Asks the core to start a group chat named `title` with `users`, under the same rules as
+    /// `create_private_chat`. The caller has checked the title and the participants: the dialog
+    /// enables "Создать" only for a non-blank title and at least one other participant. A created
+    /// group is selected once the list holds the id the reply named; a reply without an id selects
+    /// nothing (there is no person to look for in the list).
+    pub fn create_group_chat(&mut self, title: String, users: Vec<UserId>, cx: &mut Context<Self>) {
+        self.start_creation(Command::CreateGroupChat { title, users }, None, cx);
+    }
+
+    /// `creating` is the person of a private creation, for a reply that names no chat.
+    fn start_creation(
+        &mut self,
+        command: Command,
+        creating: Option<UserId>,
+        cx: &mut Context<Self>,
+    ) {
         if self.creation == Some(CreationState::InFlight) {
             return;
         }
         self.creation = Some(CreationState::InFlight);
         self.pending_open = None;
-        self.creating = Some(user.clone());
-        self.send(Command::CreatePrivateChat { user });
+        self.creating = creating;
+        self.send(command);
         cx.emit(StoreEvent::Creation);
         cx.notify();
     }
@@ -3900,6 +3923,115 @@ mod tests {
                     }
                 ]
             );
+        }
+
+        fn group(rig: &Rig, cx: &mut TestAppContext, title: &str, users: &[&str]) {
+            rig.store.update(cx, |s, cx| {
+                s.create_group_chat(title.into(), users.iter().map(|u| user(u)).collect(), cx)
+            });
+        }
+
+        #[gpui::test]
+        fn a_group_goes_in_flight_sends_one_command_and_ignores_a_second_press_of_either_kind(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            group(&rig, cx, "Team", &["u1", "u2"]);
+            assert_eq!(rig.state(cx), Some(CreationState::InFlight));
+            assert_eq!(
+                rig.commands(),
+                [Command::CreateGroupChat {
+                    title: "Team".into(),
+                    users: vec![user("u1"), user("u2")]
+                }]
+            );
+            assert_eq!(rig.take_events(), [StoreEvent::Creation]);
+
+            group(&rig, cx, "Team", &["u1", "u2"]);
+            rig.create(cx, "u9");
+            assert!(rig.commands().is_empty(), "nothing is sent while one runs");
+            assert!(rig.take_events().is_empty());
+        }
+
+        #[gpui::test]
+        fn a_created_group_is_selected_once_the_list_holds_it(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            rig.list(cx, &["a"]);
+            group(&rig, cx, "Team", &["u1"]);
+            rig.commands();
+            rig.take_events();
+
+            rig.apply(cx, created("g", false));
+            assert_eq!(rig.state(cx), None);
+            assert_eq!(rig.selected(cx), None, "not in the list yet");
+
+            rig.apply(cx, ClientEvent::ChatUpdated(row("g")));
+            assert_eq!(rig.selected(cx), Some(chat("g")));
+            assert_eq!(rig.commands(), [Command::OpenChat(chat("g"))]);
+        }
+
+        #[gpui::test]
+        fn a_created_group_without_an_id_selects_nothing_not_even_a_private_chat(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            rig.list(cx, &["a"]);
+            // `row("p")` is a private chat with `u-p`, a person of the group.
+            group(&rig, cx, "Team", &["u-p", "u2"]);
+            rig.commands();
+            rig.take_events();
+            rig.apply(
+                cx,
+                ClientEvent::ChatCreated {
+                    chat: None,
+                    existing: false,
+                },
+            );
+            assert_eq!(rig.state(cx), None);
+            assert_eq!(
+                rig.take_events(),
+                [
+                    StoreEvent::Creation,
+                    StoreEvent::ChatCreated {
+                        chat: None,
+                        existing: false
+                    }
+                ]
+            );
+            rig.list(cx, &["a", "p"]);
+            assert_eq!(rig.selected(cx), None);
+            assert!(rig.commands().is_empty());
+        }
+
+        #[gpui::test]
+        fn a_group_failure_is_kept_until_dismissed_and_another_attempt_is_allowed(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            group(&rig, cx, "Team", &["u1"]);
+            rig.commands();
+            rig.take_events();
+            rig.apply(
+                cx,
+                ClientEvent::CreationFailed {
+                    reason: "нет прав".into(),
+                    unknown: false,
+                },
+            );
+            assert_eq!(
+                rig.state(cx),
+                Some(CreationState::Failed {
+                    reason: "нет прав".into(),
+                    unknown: false
+                })
+            );
+            assert_eq!(rig.take_events(), [StoreEvent::Creation]);
+            rig.dismiss(cx);
+            assert_eq!(rig.state(cx), None);
+
+            group(&rig, cx, "Team", &["u1"]);
+            assert_eq!(rig.state(cx), Some(CreationState::InFlight));
+            assert_eq!(rig.commands().len(), 1);
         }
 
         #[gpui::test]
