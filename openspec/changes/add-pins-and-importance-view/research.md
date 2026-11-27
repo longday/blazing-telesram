@@ -89,13 +89,29 @@ Composer toggle `SWITCH_IMPORTANT_MSG` and a message-menu entry (role right `mar
 | Chat header element (`chat-header`) is the place a bar goes under | `desktop.rs:1291` |
 | Reads allowed: `request_user, get_users_data, history, subscribe, search, whoami, get_chat_members`; writes: `Plain, SeenMarker, Typing, Reaction` | `request.rs:18`, `write.rs` |
 
-## Live observation: not done
+## Live observation
 
-Goal: confirm on the real account (reads only) (a) that chat-list entries carry `PinnedMessageInfo` / `PinnedMessageTimestamps` for chats with a pin, (b) the key and value of `IsImportant` in history rows, (c) the shape and timing of `Pin` pushes and of an importance change.
+### 0.1 (2026-11-27, read-only, inside `bt-vm`): done
 
-Attempt (2026-11-26): VM `bt-vm` started, sources synced to `~/bt/src-pins`, release `bt-probe` built, `chats` with `BT_LOG=yandex_proto::xiva=trace` (raw reply bodies) started. The connection timed out. Checks: Ethernet service in the VM is enabled; DNS answers; every TCP connection from the VM times out (`https://yandex.ru/chat`, `http://example.com`, a bare IP). The host has a full-tunnel VPN default route (`utun4`, `0/1` and `128.0/1`), which the VM's NAT does not traverse. The host network is not to be changed here, and host runs are forbidden, so no live read was made. The observations above are therefore tasks 0.1 and 0.2, and every decision that depends on them is an open question.
+Setup: `bt-probe` built in the VM from `ce2d7ab` (the integ head with PIN 5.2's `chats` output; the later integ head did not build), signed-in session in `~/bt/.runtime`, `BT_LOG=yandex_proto::xiva=trace`. `bt-probe chats` once, and `bt-probe history <chat>` once for each of the 116 chats (44 private, 70 groups, 2 channels); the raw reply frames were analysed inside the VM by a script that printed only key paths, value types, booleans, counts and array lengths. No name, guid, text or timestamp left the VM; nothing was written to the account.
 
-The repository holds no sample: no fixture, log or cache row contains `PinnedMessageInfo`, `PinnedMessageTimestamps`, `IsImportant` or a `Pin` push (grep over `crates/`, `.runtime/logs`).
+**Chat-list entries carry the pin.** The chat-list reply (`history` with `Limit: 1`, 116 entries) has the key `PinnedMessageInfo` (object) on 10 entries; the other 106 have no pin key at all.
+
+- `PinnedMessageInfo` is `{PinnedMessageTs: int, LastActionTsMcs: int}`: 9 entries have both, **1 entry has only `LastActionTsMcs`** (a pin that was removed: the unpin snapshot D1 predicted, the action time stays). No entry has an empty `PinnedMessageInfo`.
+- **`ChatInfo.PinnedMessageTimestamps` is on no chat-list entry** (`ChatInfo` exists on 72 entries, but never with that key), so the entry form is the scalar `PinnedMessageTs`: exactly one timestamp per chat (Q1). Whether a chat can hold several pins is still not shown by any source; the web client shows one.
+- `bt-probe chats` (PIN 5.2) printed `pinned=` on exactly 9 lines, matching the 9 entries with `PinnedMessageTs`.
+- The single-chat `history <chat>` replies (`Chats[0]`, 116 replies) carry `PinnedMessageInfo` on 10 chats as well (9 with `PinnedMessageTs`, 1 without): the same counts as the list (the two sets of chats were not compared one by one). So a chat-list refresh carries the pin of the chats that have one. An entry without `PinnedMessageInfo` establishes only that the server sent no pin metadata for that chat now, not that it never had a pin; a refresh does not drop a pin the server still has (D1's order rule by `LastActionTsMcs` stays needed against a refresh that lags a newer `Pin` push).
+- Pin events also appear in history as system rows: 3 `SystemMessage.ChatInfoDiff.PinnedMessageTimestamps` rows (array of 1 int each). Not used by this change.
+
+**Importance.** `Plain.IsImportant` is **`true` only**: of 3 104 `Plain` rows sampled (one history page per chat, up to 50 rows, 116 chats; older history was not read), 4 carry `IsImportant: true` (bool), the other 3 100 omit the key; `false` was never sent. So a missing key is the false form (the decoder of 1.1 already treats it so; synthetic `false` rows stay tolerated). The remaining 370 rows are system messages.
+
+**Consequences.** Task 1.3 (`ReadRequest::ChatInfo`) is dropped (design D2: "list entries do carry the pin"). Q1: one timestamp per entry, as decided. The `PinnedMessageTimestamps` array branch of D1 remains as a tolerant fallback and is unobserved on entries. Q4 (does a flag-only change set `LastEditTimestamp`) and Q5 (comparability of the `Pin` push timestamp with `LastActionTsMcs`) need 0.2 and are untouched.
+
+### 0.2: not done
+
+Needs the user at the web client; see below. Earlier attempt of 2026-11-26 (kept as history): the VM had no outbound network then (cause not determined; the host's full-tunnel VPN was suspected, not verified); the network was restored on 2026-11-27.
+
+The repository held no sample before 0.1: no fixture, log or cache row contained `PinnedMessageInfo`, `PinnedMessageTimestamps`, `IsImportant` or a `Pin` push. The fixtures stay synthetic (task 1.2/0.2).
 
 ## What would settle the open questions
 

@@ -38,6 +38,8 @@ Alternative rejected: keep `Pin` in `ChatChanged` and read the pin from the refe
 
 If chat-list entries (`history { Limit: 1, ChatDataFilter: {} }`) do not carry the pin but a single-chat read does, one variant is added: `ReadRequest::ChatInfo { chat }`, socket `history { ChatId, Limit: 0, ChatDataFilter: {} }` (the web client's `getChat`), parsed by the existing `parse_chat`. `ALLOWED_METHODS` does not change (method `history`); the `every_request` test and its exhaustive `match` gain the variant. The adapter calls it for the open chat. If list entries do carry the pin, this task is dropped and no read request is added.
 
+**Outcome (task 0.1, 2026-11-27):** list entries carry `PinnedMessageInfo` (and so do single-chat replies), so this task is dropped and no read request is added; research "Live observation".
+
 ### D3. Domain types (`chat-core`)
 
 ```rust
