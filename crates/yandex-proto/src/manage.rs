@@ -81,8 +81,9 @@ pub enum ManageError {
 }
 
 /// The id of the chat in the `data` of a successful mutation reply, if the reply names one.
-/// The shape is not confirmed against a live reply yet, so the common spots are tried in turn
-/// and anything else is "no id": a success without an id is still a success.
+/// Live shapes (tasks 5.1 and 6.2): `create_private_chat` answers `data.chat.chat_id`,
+/// `create_chat` answers the chat itself, `data.chat_id`. The other spots are tolerated and
+/// anything else is "no id": a success without an id is still a success.
 pub fn created_chat_id(data: &Json) -> Option<String> {
     ["/chat_id", "/chat/chat_id", "/chat/id", "/id"]
         .iter()
@@ -100,9 +101,10 @@ pub struct CreatedChat {
     pub refused: Vec<String>,
 }
 
-/// Tolerant reader of the `data` of a successful `create_chat`: `data.chat.chat_id` is the only
-/// field the web client relies on, `data.errors` is optional, an element without a string `code`
-/// counts as `unknown`, and a shape that is not an array is ignored.
+/// Tolerant reader of the `data` of a successful `create_chat`: live, `data.chat_id` is the id
+/// (the web bundle suggested `data.chat.chat_id`, which `created_chat_id` also accepts);
+/// `data.errors` is optional and not seen live, an element without a string `code` counts as
+/// `unknown`, and a shape that is not an array is ignored.
 pub fn parse_created_chat(data: &Json) -> CreatedChat {
     let refused = data
         .get("errors")
