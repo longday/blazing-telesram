@@ -19,12 +19,13 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use tracing::error;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use yandex_proto::bootstrap::{RegistryEndpoints, bootstrap};
-use yandex_proto::media::{MediaClient, MediaConfig, MediaTarget};
+use yandex_proto::media::{Exchange, MediaClient, MediaConfig, MediaTarget};
 use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEntity};
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
@@ -535,24 +536,31 @@ async fn me() -> Result<(), Failure> {
 
 /// Starts the client and waits until the push socket is subscribed, so requests do not fail offline.
 async fn connect(session: &Session, config: ClientConfig) -> Result<(Client, XivaEvents), Failure> {
+    let (client, events, subscription_id) = connect_silent(session, config).await?;
+    println!("connected, subscription-id: {subscription_id}");
+    Ok((client, events))
+}
+
+/// `connect` without the banner, for the research download whose output is restricted.
+async fn connect_silent(
+    session: &Session,
+    config: ClientConfig,
+) -> Result<(Client, XivaEvents, String), Failure> {
     let (client, mut events) = Client::start(session, config).map_err(fail)?;
     let wait = async {
         loop {
             match events.recv().await {
-                Some(XivaEvent::Connected { subscription_id }) => {
-                    println!("connected, subscription-id: {subscription_id}");
-                    return Ok(());
-                }
+                Some(XivaEvent::Connected { subscription_id }) => return Ok(subscription_id),
                 Some(XivaEvent::SessionExpired) => return Err(fail(ProtoError::SessionExpired)),
                 Some(_) => {}
                 None => return Err((1, "connection task stopped".to_owned())),
             }
         }
     };
-    tokio::time::timeout(CONNECT_TIMEOUT, wait)
+    let subscription_id = tokio::time::timeout(CONNECT_TIMEOUT, wait)
         .await
         .map_err(|_| (1, "timed out waiting for the push socket".to_owned()))??;
-    Ok((client, events))
+    Ok((client, events, subscription_id))
 }
 
 async fn chats() -> Result<(), Failure> {
@@ -1037,17 +1045,25 @@ fn host_and_path(url: &str) -> &str {
     rest.split(['?', '#']).next().unwrap_or(rest)
 }
 
+fn open_new(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 /// Creates `name` in `dir`; an existing entry of that name is an error and is left untouched.
 fn create_destination(dir: &Path, name: &str) -> Result<File, String> {
     let path = dir.join(name);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .map_err(|e| match e.kind() {
-            ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
-            kind => format!("cannot create {}: {kind}", path.display()),
-        })
+    open_new(&path).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => format!("refusing to overwrite {}", path.display()),
+        kind => format!("cannot create {}: {kind}", path.display()),
+    })
+}
+
+/// `create_destination` for a sample: the error names neither the directory nor the file.
+fn create_sample(dir: &Path, name: &str) -> Result<File, String> {
+    open_new(&dir.join(name)).map_err(|e| match e.kind() {
+        ErrorKind::AlreadyExists => "sample already exists".to_owned(),
+        kind => format!("cannot create the sample: {kind}"),
+    })
 }
 
 fn error_class(error: &ProtoError) -> &'static str {
@@ -1150,108 +1166,6 @@ fn sample_name(timestamp: i64, chosen: &Chosen<'_>, variant: UrlVariant) -> Stri
     }
 }
 
-/// SHA-256 (FIPS 180-4), kept here so the probe needs no new dependency.
-struct Sha256 {
-    state: [u32; 8],
-    block: [u8; 64],
-    filled: usize,
-    length: u64,
-}
-
-impl Sha256 {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    fn new() -> Self {
-        Self {
-            state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-                0x5be0cd19,
-            ],
-            block: [0; 64],
-            filled: 0,
-            length: 0,
-        }
-    }
-
-    fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
-        let mut w = [0u32; 64];
-        for (word, bytes) in w.iter_mut().zip(block.as_chunks::<4>().0) {
-            *word = u32::from_be_bytes(*bytes);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-        for (k, word) in Self::K.iter().zip(w) {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choose)
-                .wrapping_add(*k)
-                .wrapping_add(word);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (word, add) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *word = word.wrapping_add(add);
-        }
-    }
-
-    fn update(&mut self, mut data: &[u8]) {
-        self.length += data.len() as u64;
-        while !data.is_empty() {
-            let take = data.len().min(64 - self.filled);
-            self.block[self.filled..self.filled + take].copy_from_slice(&data[..take]);
-            self.filled += take;
-            data = &data[take..];
-            if self.filled == 64 {
-                Self::compress(&mut self.state, &self.block);
-                self.filled = 0;
-            }
-        }
-    }
-
-    /// The digest as 64 lower-case hex digits.
-    fn finish(mut self) -> String {
-        let bits = self.length * 8;
-        self.update(&[0x80]);
-        while self.filled != 56 {
-            self.update(&[0]);
-        }
-        self.update(&bits.to_be_bytes());
-        self.state
-            .iter()
-            .map(|word| format!("{word:08x}"))
-            .collect()
-    }
-}
-
 /// Writes through to `inner` and hashes exactly what `inner` accepted.
 struct Hashing<W> {
     inner: W,
@@ -1270,8 +1184,67 @@ impl<W: Write> Write for Hashing<W> {
     }
 }
 
+/// What `download --url` prints: exactly these fields, one per line, and nothing else.
+fn sample_report(exchange: &Exchange, sha256: Option<&str>) -> String {
+    let show = |value: Option<&str>| value.unwrap_or("-").to_owned();
+    let disposition = if exchange.has_content_disposition {
+        "present"
+    } else {
+        "absent"
+    };
+    format!(
+        "status: {}\nlanded: {}\ncontent-type: {}\ncontent-length: {}\naccept-ranges: {}\ncontent-disposition: {disposition}\nreceived: {} bytes\nsha256: {}\n",
+        exchange.status,
+        exchange.landed_host,
+        show(exchange.content_type.as_deref()),
+        or_dash(exchange.content_length),
+        show(exchange.accept_ranges.as_deref()),
+        exchange.received,
+        show(sha256),
+    )
+}
+
+/// One request for `target` whose body goes to `dir/name` (never over an existing file) and
+/// whose report goes to `report`. A non-2xx answer reads no body: the report is still written,
+/// the file is removed and the result is a failure. A failed transfer leaves no file.
+async fn save_sample(
+    media: &MediaClient,
+    target: &MediaTarget,
+    dir: &Path,
+    name: &str,
+    report: &mut dyn Write,
+) -> Result<(), Failure> {
+    let mut out = Hashing {
+        inner: create_sample(dir, name).map_err(|e| (1, e))?,
+        hash: Sha256::new(),
+    };
+    let result = media.download_exchange(target, &mut out).await;
+    let Hashing { inner, hash } = out;
+    drop(inner);
+    let exchange = result.map_err(|e| {
+        // A partial file under the final name would look like a finished download.
+        let _ = fs::remove_file(dir.join(name));
+        let class = error_class(&e);
+        (1, format!("download failed ({class}): {}", fail(e).1))
+    })?;
+    let succeeded = (200..300).contains(&exchange.status);
+    let digest = succeeded.then(|| format!("{:x}", hash.finalize()));
+    write!(report, "{}", sample_report(&exchange, digest.as_deref()))
+        .and_then(|()| report.flush())
+        .map_err(|e| (1, format!("cannot write the report: {}", e.kind())))?;
+    if succeeded {
+        return Ok(());
+    }
+    let _ = fs::remove_file(dir.join(name));
+    Err(match exchange.status {
+        401 => fail(ProtoError::SessionExpired),
+        status => (1, format!("status {status}: no body was read")),
+    })
+}
+
 /// `download --url`: one request for the chosen URL variant into the sample directory,
-/// reported as the research needs it and nothing more (no path, no name, no query, no body).
+/// reported as the research needs it and nothing more (no path, no name, no query, no body,
+/// no connection banner).
 async fn sample_download(
     chat: &str,
     timestamp: i64,
@@ -1289,50 +1262,13 @@ async fn sample_download(
     let config = ClientConfig::production();
     let media = MediaClient::new(config.media.clone(), &config.http, session.cookies.clone())
         .map_err(fail)?;
-    let (client, _events) = connect(&session, config).await?;
+    let (client, _events, _subscription) = connect_silent(&session, config).await?;
     let message = find_message(&client, chat, timestamp).await?;
     let chosen = select_file(&message.body, flags.item)
         .map_err(|e| (1, format!("message {timestamp}: {e}")))?;
     let target = variant.target(chosen.file.id.clone());
     let name = sample_name(timestamp, &chosen, variant);
-    let mut out = Hashing {
-        inner: create_destination(dir, &name).map_err(|e| (1, e))?,
-        hash: Sha256::new(),
-    };
-    let result = media.download_exchange(&target, &mut out).await;
-    let Hashing { inner, hash } = out;
-    drop(inner);
-    let exchange = result.map_err(|e| {
-        // A partial file under the final name would look like a finished download.
-        let _ = fs::remove_file(dir.join(&name));
-        let class = error_class(&e);
-        (1, format!("download failed ({class}): {}", fail(e).1))
-    })?;
-    let show = |value: Option<String>| value.unwrap_or_else(|| "-".to_owned());
-    println!("status: {}", exchange.status);
-    println!("landed: {}", exchange.landed_host);
-    println!("content-type: {}", show(exchange.content_type));
-    println!("content-length: {}", or_dash(exchange.content_length));
-    println!("accept-ranges: {}", show(exchange.accept_ranges));
-    println!(
-        "content-disposition: {}",
-        if exchange.has_content_disposition {
-            "present"
-        } else {
-            "absent"
-        }
-    );
-    println!("received: {} bytes", exchange.received);
-    if (200..300).contains(&exchange.status) {
-        println!("sha256: {}", hash.finish());
-        return Ok(());
-    }
-    println!("sha256: -");
-    let _ = fs::remove_file(dir.join(&name));
-    Err(match exchange.status {
-        401 => fail(ProtoError::SessionExpired),
-        status => (1, format!("status {status}: no body was read")),
-    })
+    save_sample(&media, &target, dir, &name, &mut std::io::stdout()).await
 }
 
 async fn listen(watch: Option<&str>) -> Result<(), Failure> {
@@ -2171,44 +2107,6 @@ mod download_tests {
     }
 
     #[test]
-    fn sha256_matches_the_published_vectors() {
-        let digest = |chunks: &[&[u8]]| {
-            let mut hash = Sha256::new();
-            for chunk in chunks {
-                hash.update(chunk);
-            }
-            hash.finish()
-        };
-        assert_eq!(
-            digest(&[]),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            digest(&[b"abc"]),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        // 56 bytes: the length field does not fit in the first block.
-        assert_eq!(
-            digest(&[b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"]),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-        // The same message split at odd places, across a block boundary.
-        assert_eq!(
-            digest(&[
-                b"abcdbcdecdefdefgefghfghighijh",
-                b"ijkijkljklmklmnlmnomnopnopq"
-            ]),
-            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
-        );
-        let chunk = [b'a'; 1000];
-        let million: Vec<&[u8]> = (0..1000).map(|_| chunk.as_slice()).collect();
-        assert_eq!(
-            digest(&million),
-            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
-        );
-    }
-
-    #[test]
     fn the_hashing_writer_hashes_what_it_wrote() {
         let mut out = Hashing {
             inner: Vec::new(),
@@ -2218,9 +2116,113 @@ mod download_tests {
         out.write_all(b"bc").unwrap();
         assert_eq!(out.inner, b"abc");
         assert_eq!(
-            out.hash.finish(),
+            format!("{:x}", out.hash.finalize()),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn an_existing_sample_is_refused_without_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("1-1-plain.ogg"), b"keep").unwrap();
+        let error = create_sample(dir.path(), "1-1-plain.ogg").unwrap_err();
+        assert_eq!(error, "sample already exists");
+        assert_eq!(
+            std::fs::read(dir.path().join("1-1-plain.ogg")).unwrap(),
+            b"keep"
+        );
+        let missing = create_sample(&dir.path().join("missing"), "x").unwrap_err();
+        assert!(
+            missing.starts_with("cannot create the sample: "),
+            "{missing}"
+        );
+        assert!(!missing.contains("missing"), "{missing}");
+    }
+
+    #[test]
+    fn the_report_has_exactly_the_research_fields() {
+        let exchange = Exchange {
+            status: 200,
+            landed_host: "storage.example".into(),
+            content_type: Some("audio/ogg".into()),
+            content_length: Some(6),
+            accept_ranges: None,
+            has_content_disposition: true,
+            received: 6,
+        };
+        assert_eq!(
+            sample_report(&exchange, Some("ab")),
+            "status: 200\nlanded: storage.example\ncontent-type: audio/ogg\ncontent-length: 6\naccept-ranges: -\ncontent-disposition: present\nreceived: 6 bytes\nsha256: ab\n"
+        );
+    }
+
+    /// Answers the i-th connection with `responses[i]`; returns the base URL.
+    fn serve_each(responses: Vec<String>) -> String {
+        use std::io::Read;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base
+    }
+
+    fn media_at(base: &str) -> MediaClient {
+        let config = MediaConfig {
+            files_base: base.into(),
+            avatars_base: base.into(),
+        };
+        MediaClient::new(config, &yandex_proto::HttpSettings::default(), vec![]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_sample_is_saved_and_reported_with_nothing_else() {
+        let base = serve_each(vec![
+            "HTTP/1.1 200 OK\r\ncontent-type: audio/ogg\r\naccept-ranges: bytes\r\ncontent-disposition: attachment; filename=\"secret-name.ogg\"\r\nset-cookie: s=secret\r\ncontent-length: 3\r\nconnection: close\r\n\r\nabc".into(),
+            "HTTP/1.1 403 Forbidden\r\ncontent-length: 11\r\nconnection: close\r\n\r\ndenied-BODY".into(),
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let media = media_at(&base);
+        let target = MediaTarget::Playback {
+            file_id: "disk/u".into(),
+        };
+        let mut report = Vec::new();
+        save_sample(&media, &target, dir.path(), "1-1-plain.ogg", &mut report)
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(report).unwrap(),
+            "status: 200\nlanded: 127.0.0.1\ncontent-type: audio/ogg\ncontent-length: 3\naccept-ranges: bytes\ncontent-disposition: present\nreceived: 3 bytes\nsha256: ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
+        );
+        assert_eq!(
+            std::fs::read(dir.path().join("1-1-plain.ogg")).unwrap(),
+            b"abc"
+        );
+
+        // A refusal: the report names the status, no body is kept, the exit is a failure.
+        let mut report = Vec::new();
+        let failure = save_sample(&media, &target, dir.path(), "1-1-stream", &mut report)
+            .await
+            .unwrap_err();
+        assert_eq!(failure, (1, "status 403: no body was read".to_owned()));
+        assert_eq!(
+            String::from_utf8(report).unwrap(),
+            "status: 403\nlanded: 127.0.0.1\ncontent-type: -\ncontent-length: 11\naccept-ranges: -\ncontent-disposition: absent\nreceived: 0 bytes\nsha256: -\n"
+        );
+        assert!(!dir.path().join("1-1-stream").exists());
+
+        // An existing sample stops the run before any request, naming neither dir nor file.
+        let mut report = Vec::new();
+        let failure = save_sample(&media, &target, dir.path(), "1-1-plain.ogg", &mut report)
+            .await
+            .unwrap_err();
+        assert_eq!(failure, (1, "sample already exists".to_owned()));
+        assert!(report.is_empty());
     }
 
     #[test]
