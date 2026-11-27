@@ -375,7 +375,10 @@ pub fn namespace_of(chat_id: &str) -> Option<u32> {
 ///
 /// A refusal carries its reason as `Details` (older replies) or as `ErrorInfo.Message` (what the
 /// server answers for `list_reactions`, observed live 2026-11-27); either one ends the error text
-/// as `status 4 ENTITY_NOT_FOUND: <reason>`, which [`refusal_reason`] reads back.
+/// as `status 4 ENTITY_NOT_FOUND: <reason>`, which [`refusal_reason`] reads back. The reason is
+/// the user's to see only where a caller maps it on purpose (the reactor list); every other
+/// consumer drops it with [`without_refusal_reason`] before it is shown or logged. An overload
+/// keeps only `Details`, as before.
 pub fn check_status(body: &Json) -> Result<(), ProtoError> {
     let Some(status) = body
         .get("Status")
@@ -395,19 +398,23 @@ pub fn check_status(body: &Json) -> Result<(), ProtoError> {
         5 => "OVERLOAD",
         _ => "unknown",
     };
-    let details = string(body, "Details")
-        .or_else(|| {
-            let message = present(body, "ErrorInfo").and_then(|i| string(i, "Message"))?;
-            Some(message.trim().to_owned()).filter(|m| !m.is_empty())
-        })
-        .map(|d| format!(": {d}"))
-        .unwrap_or_default();
-    // OVERLOAD clears by itself; everything else is a request the server will keep refusing.
-    Err(if status == 5 {
-        ProtoError::Network(format!("server overloaded{details}"))
-    } else {
-        ProtoError::Protocol(format!("status {status} {name}{details}"))
-    })
+    let details = |reason: Option<String>| reason.map(|d| format!(": {d}")).unwrap_or_default();
+    if status == 5 {
+        // OVERLOAD clears by itself.
+        return Err(ProtoError::Network(format!(
+            "server overloaded{}",
+            details(string(body, "Details"))
+        )));
+    }
+    let reason = string(body, "Details").or_else(|| {
+        let message = present(body, "ErrorInfo").and_then(|i| string(i, "Message"))?;
+        Some(message.trim().to_owned()).filter(|m| !m.is_empty())
+    });
+    // Everything else is a request the server will keep refusing.
+    Err(ProtoError::Protocol(format!(
+        "status {status} {name}{}",
+        details(reason)
+    )))
 }
 
 /// The server's reason in the text of a refused status (`status 4 ENTITY_NOT_FOUND: <reason>`),
@@ -1137,10 +1144,10 @@ mod tests {
                 Err(ProtoError::Protocol("status 4 ENTITY_NOT_FOUND".into()))
             );
         }
-        // Overload keeps its class and gains the reason too.
+        // Overload keeps its class and does not take `ErrorInfo`.
         assert_eq!(
             check_status(&json!({ "Status": 5, "ErrorInfo": { "Message": "busy" } })),
-            Err(ProtoError::Network("server overloaded: busy".into()))
+            Err(ProtoError::Network("server overloaded".into()))
         );
     }
 

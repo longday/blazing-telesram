@@ -58,11 +58,21 @@ struct Connection {
     me: String,
 }
 
+/// The one place a `ProtoError` becomes a `BackendError` for the engine, which logs and shows it:
+/// a refused status loses the server's reason here (code and name stay), so a reason reaches the
+/// log or the user only where a caller maps it on purpose (`reactors_error`).
 fn backend_error(error: ProtoError) -> BackendError {
     match error {
         ProtoError::SessionExpired => BackendError::SessionExpired,
         ProtoError::Network(e) => BackendError::Network(e),
-        ProtoError::Protocol(e) => BackendError::Protocol(e),
+        ProtoError::Protocol(e) => {
+            let kept = without_refusal_reason(&e).len();
+            BackendError::Protocol(if kept == e.len() {
+                e
+            } else {
+                e[..kept].to_owned()
+            })
+        }
         ProtoError::NotFound => BackendError::NotFound,
         ProtoError::Storage(e) => BackendError::Storage(e),
         ProtoError::Commit {
@@ -3236,6 +3246,76 @@ mod tests {
         assert_eq!(
             reactors_error(ProtoError::Network("down".into())),
             BackendError::Network("down".into())
+        );
+    }
+
+    /// A refusal's reason belongs to the reactor list alone: every other read fails with the
+    /// status code and name, so the engine's `%error` log lines and the failure text carry no
+    /// server text.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_outside_the_reactor_list_carries_no_server_reason() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for Sink {
+            type Writer = Self;
+            fn make_writer(&self) -> Self {
+                self.clone()
+            }
+        }
+        let sink = Sink::default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(sink.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .finish(),
+        );
+        let refusal = || serde_json::json!({ "ErrorInfo": { "Message": "server-secret-reason", "WorkerId": 1 }, "Status": 4 });
+        let (backend, _) =
+            backend_with_replies(None, vec![refusal(), refusal()], HashMap::new()).await;
+
+        let history = backend
+            .history(&ChatId("0/0/c".into()), None, 30)
+            .await
+            .unwrap_err();
+        let profile = backend.profile().await.unwrap_err();
+        for error in [history, profile] {
+            // What the engine's `tracing::warn!(%error, ..)` and the failure text print.
+            assert_eq!(
+                error.to_string(),
+                "protocol error: status 4 ENTITY_NOT_FOUND"
+            );
+        }
+        let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+        assert!(logged.contains("ENTITY_NOT_FOUND"), "{logged}");
+        assert!(!logged.contains("server-secret-reason"), "{logged}");
+    }
+
+    #[test]
+    fn backend_error_drops_only_the_refusal_reason() {
+        assert_eq!(
+            backend_error(ProtoError::Protocol(
+                "status 4 ENTITY_NOT_FOUND: secret".into()
+            )),
+            BackendError::Protocol("status 4 ENTITY_NOT_FOUND".into())
+        );
+        assert_eq!(
+            backend_error(ProtoError::Protocol("status 4 ENTITY_NOT_FOUND".into())),
+            BackendError::Protocol("status 4 ENTITY_NOT_FOUND".into())
+        );
+        assert_eq!(
+            backend_error(ProtoError::Protocol("push url: a: b".into())),
+            BackendError::Protocol("push url: a: b".into())
         );
     }
 }

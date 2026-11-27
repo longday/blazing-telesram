@@ -33,9 +33,6 @@ fn logged_error(error: &ProtoError) -> String {
         ProtoError::Protocol(text) => {
             ProtoError::Protocol(without_refusal_reason(text).into()).to_string()
         }
-        ProtoError::Network(text) if text.starts_with("server overloaded") => {
-            ProtoError::Network("server overloaded".into()).to_string()
-        }
         other => other.to_string(),
     }
 }
@@ -1571,7 +1568,8 @@ mod tests {
             errors[0].contains("ENTITY_NOT_FOUND: reason-of-refusal"),
             "{errors:?}"
         );
-        assert!(errors[1].contains("reason-of-overload"), "{errors:?}");
+        assert!(errors[1].contains("server overloaded"), "{errors:?}");
+        assert!(!errors[1].contains("reason-of-overload"), "{errors:?}");
 
         let text = capture.text();
         assert!(text.contains("ENTITY_NOT_FOUND"), "{text}");
