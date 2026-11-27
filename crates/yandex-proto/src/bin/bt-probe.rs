@@ -29,7 +29,9 @@ use yandex_proto::request::{MEMBERS_PAGE, REACTORS_PAGE, SEARCH_LIMIT, SearchEnt
 use yandex_proto::runtime::RuntimeDir;
 use yandex_proto::search::SearchSet;
 use yandex_proto::session::Session;
-use yandex_proto::wire::{Relation, WireBody, WireChat, WireFile, WireMessage};
+use yandex_proto::wire::{
+    Relation, WireBody, WireChat, WireFile, WireMessage, without_refusal_reason,
+};
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError};
@@ -192,9 +194,16 @@ fn block_on(future: impl Future<Output = Result<(), Failure>>) -> Result<(), Fai
         .block_on(future)
 }
 
+/// A failure as `main` logs it and the commands print it. A refused status keeps its code and
+/// name but not the server's reason (`ErrorInfo.Message`); the raw reply is at
+/// `BT_LOG=yandex_proto::xiva=trace` for a developer who wants it.
 fn fail(e: ProtoError) -> Failure {
     match e {
         ProtoError::SessionExpired => (1, "session expired: sign in again via ./run.sh".to_owned()),
+        ProtoError::Protocol(text) => (
+            1,
+            ProtoError::Protocol(without_refusal_reason(&text).into()).to_string(),
+        ),
         other => (1, other.to_string()),
     }
 }
@@ -1742,6 +1751,29 @@ mod download_tests {
         assert_eq!(error_class(&ProtoError::SessionExpired), "session-expired");
         assert_eq!(error_class(&ProtoError::Network("n".into())), "network");
         assert_eq!(error_class(&ProtoError::Protocol("p".into())), "protocol");
+    }
+
+    #[test]
+    fn a_refusal_fails_without_the_servers_reason() {
+        // The live `list_reactions` refusal of a channel: `ErrorInfo.Message`, no `Details`.
+        let refused = yandex_proto::wire::check_status(&serde_json::json!({
+            "ErrorInfo": { "Message": "server-secret-reason", "WorkerId": 1 },
+            "Status": 4
+        }))
+        .unwrap_err();
+        assert_eq!(
+            fail(refused.clone()),
+            (
+                1,
+                "unexpected server response: status 4 ENTITY_NOT_FOUND".to_owned()
+            )
+        );
+        // The download failure line embeds the same text.
+        assert!(!fail(refused).1.contains("server-secret-reason"));
+        assert_eq!(
+            fail(ProtoError::Protocol("search: no data".into())).1,
+            "unexpected server response: search: no data"
+        );
     }
 }
 

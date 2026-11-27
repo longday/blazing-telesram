@@ -754,6 +754,14 @@ fn live_reactors_empty_and_refused_replies() {
         err.to_string().contains("ENTITY_NOT_FOUND"),
         "a refused read is an error, not an empty page: {err}"
     );
+    // The reason is the server's `ErrorInfo.Message`, not lost with the missing `Details`.
+    let yandex_proto::error::ProtoError::Protocol(text) = &err else {
+        panic!("a refusal is a protocol error: {err}");
+    };
+    assert_eq!(
+        yandex_proto::wire::refusal_reason(text),
+        Some("reactions are anonymous")
+    );
 }
 
 /// The `whoami` reply of a real account (2026-11-24, placeholders): no status set, so

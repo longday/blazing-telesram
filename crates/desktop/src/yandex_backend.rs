@@ -17,7 +17,7 @@ use yandex_proto::session::Session;
 use yandex_proto::wire::{
     PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember,
     WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireReactorEntry,
-    WireReactors, WireSender, WireUser,
+    WireReactors, WireSender, WireUser, refusal_reason, without_refusal_reason,
 };
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
@@ -38,6 +38,8 @@ const MEMBER_PAGE_BOUND: usize = 20;
 const MEMBERS_REFUSED_CODE: &str = "no_permissions_for_this_chat_operation";
 /// Why a refused member list is not shown.
 const MEMBERS_UNAVAILABLE: &str = "список участников недоступен для этой учётной записи";
+/// Leads the server's own reason when it refuses a reactor list (the reason text is the server's).
+const REACTORS_REFUSED: &str = "Сервер отказал";
 
 pub struct YandexBackend {
     session: Session,
@@ -56,11 +58,21 @@ struct Connection {
     me: String,
 }
 
+/// The one place a `ProtoError` becomes a `BackendError` for the engine, which logs and shows it:
+/// a refused status loses the server's reason here (code and name stay), so a reason reaches the
+/// log or the user only where a caller maps it on purpose (`reactors_error`).
 fn backend_error(error: ProtoError) -> BackendError {
     match error {
         ProtoError::SessionExpired => BackendError::SessionExpired,
         ProtoError::Network(e) => BackendError::Network(e),
-        ProtoError::Protocol(e) => BackendError::Protocol(e),
+        ProtoError::Protocol(e) => {
+            let kept = without_refusal_reason(&e).len();
+            BackendError::Protocol(if kept == e.len() {
+                e
+            } else {
+                e[..kept].to_owned()
+            })
+        }
         ProtoError::NotFound => BackendError::NotFound,
         ProtoError::Storage(e) => BackendError::Storage(e),
         ProtoError::Commit {
@@ -595,7 +607,7 @@ impl Backend for YandexBackend {
         let wire = client
             .reactors(&chat.0, timestamp, before, limit)
             .await
-            .map_err(backend_error)?;
+            .map_err(reactors_error)?;
         // The entries name almost everyone; the user cache fills only the rows they left blank.
         let nameless = wire
             .entries
@@ -681,6 +693,26 @@ fn members_error(error: ProtoError) -> BackendError {
                 permanent: true,
             }
         }
+        other => backend_error(other),
+    }
+}
+
+/// A refused reactor list carries the server's reason (`ErrorInfo.Message`, e.g. "reactions are
+/// anonymous" for a channel message) and the status code and name, as a permanent rejection the
+/// list shows: «Сервер отказал: <reason> (status 4 ENTITY_NOT_FOUND)». A refusal without a reason
+/// and every other failure keep the ordinary mapping.
+fn reactors_error(error: ProtoError) -> BackendError {
+    match error {
+        ProtoError::Protocol(text) => match refusal_reason(&text) {
+            Some(reason) => BackendError::Rejected {
+                reason: format!(
+                    "{REACTORS_REFUSED}: {reason} ({})",
+                    without_refusal_reason(&text)
+                ),
+                permanent: true,
+            },
+            None => BackendError::Protocol(text),
+        },
         other => backend_error(other),
     }
 }
@@ -3585,5 +3617,130 @@ mod tests {
             backend.message_preview(&ChatId("0/0/c".into()), 1).await,
             Err(BackendError::Protocol(_))
         ));
+    }
+
+    /// The live channel refusal (2026-11-27): `Status` 4, `ErrorInfo.Message`, no `Details`.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_reactor_list_carries_the_servers_reason() {
+        let refusal = |message: &str| serde_json::json!({ "ErrorInfo": { "Message": message, "WorkerId": 137 }, "Status": 4 });
+        let (backend, _) = backend_with_replies(
+            None,
+            vec![
+                refusal("reactions are anonymous"),
+                serde_json::json!({ "Status": 4 }),
+            ],
+            HashMap::new(),
+        )
+        .await;
+        let chat = ChatId("0/0/channel".into());
+
+        assert_eq!(
+            backend.reactors(&chat, 111, None, 30).await,
+            Err(BackendError::Rejected {
+                reason: "Сервер отказал: reactions are anonymous (status 4 ENTITY_NOT_FOUND)"
+                    .into(),
+                permanent: true
+            })
+        );
+        // Without a reason the ordinary protocol failure stays.
+        assert!(matches!(
+            backend.reactors(&chat, 111, None, 30).await,
+            Err(BackendError::Protocol(m)) if m == "status 4 ENTITY_NOT_FOUND"
+        ));
+    }
+
+    #[test]
+    fn only_a_refusal_with_a_reason_becomes_a_rejection_of_the_list() {
+        assert_eq!(
+            reactors_error(ProtoError::Protocol(
+                "status 4 ENTITY_NOT_FOUND: message not found".into()
+            )),
+            BackendError::Rejected {
+                reason: "Сервер отказал: message not found (status 4 ENTITY_NOT_FOUND)".into(),
+                permanent: true
+            }
+        );
+        assert_eq!(
+            reactors_error(ProtoError::Protocol("UserReactions is not an array".into())),
+            BackendError::Protocol("UserReactions is not an array".into())
+        );
+        assert_eq!(
+            reactors_error(ProtoError::SessionExpired),
+            BackendError::SessionExpired
+        );
+        assert_eq!(
+            reactors_error(ProtoError::Network("down".into())),
+            BackendError::Network("down".into())
+        );
+    }
+
+    /// A refusal's reason belongs to the reactor list alone: every other read fails with the
+    /// status code and name, so the engine's `%error` log lines and the failure text carry no
+    /// server text.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_outside_the_reactor_list_carries_no_server_reason() {
+        use std::io::Write;
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for Sink {
+            type Writer = Self;
+            fn make_writer(&self) -> Self {
+                self.clone()
+            }
+        }
+        let sink = Sink::default();
+        let _guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(sink.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .with_ansi(false)
+                .finish(),
+        );
+        let refusal = || serde_json::json!({ "ErrorInfo": { "Message": "server-secret-reason", "WorkerId": 1 }, "Status": 4 });
+        let (backend, _) =
+            backend_with_replies(None, vec![refusal(), refusal()], HashMap::new()).await;
+
+        let history = backend
+            .history(&ChatId("0/0/c".into()), None, 30)
+            .await
+            .unwrap_err();
+        let profile = backend.profile().await.unwrap_err();
+        for error in [history, profile] {
+            // What the engine's `tracing::warn!(%error, ..)` and the failure text print.
+            assert_eq!(
+                error.to_string(),
+                "protocol error: status 4 ENTITY_NOT_FOUND"
+            );
+        }
+        let logged = String::from_utf8_lossy(&sink.0.lock().unwrap()).into_owned();
+        assert!(logged.contains("ENTITY_NOT_FOUND"), "{logged}");
+        assert!(!logged.contains("server-secret-reason"), "{logged}");
+    }
+
+    #[test]
+    fn backend_error_drops_only_the_refusal_reason() {
+        assert_eq!(
+            backend_error(ProtoError::Protocol(
+                "status 4 ENTITY_NOT_FOUND: secret".into()
+            )),
+            BackendError::Protocol("status 4 ENTITY_NOT_FOUND".into())
+        );
+        assert_eq!(
+            backend_error(ProtoError::Protocol("status 4 ENTITY_NOT_FOUND".into())),
+            BackendError::Protocol("status 4 ENTITY_NOT_FOUND".into())
+        );
+        assert_eq!(
+            backend_error(ProtoError::Protocol("push url: a: b".into())),
+            BackendError::Protocol("push url: a: b".into())
+        );
     }
 }

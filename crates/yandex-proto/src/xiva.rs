@@ -17,7 +17,7 @@ use crate::frame::{IncomingFrame, RequestFrame};
 use crate::net::{millis, redact_url};
 use crate::request::{ReadRequest, Route, SocketContext};
 use crate::session::{SessionCookie, cookie_header};
-use crate::wire::{PushEvent, check_status, decode_push};
+use crate::wire::{PushEvent, check_status, decode_push, without_refusal_reason};
 use crate::write::{Committed, WriteRequest, parse_commit};
 
 const TOPICS: &str = "version5*common+version5*main";
@@ -25,6 +25,17 @@ const TOPICS: &str = "version5*common+version5*main";
 const SUBSCRIBE_REFRESH: Duration = Duration::from_secs(30);
 /// Close reasons that mean the cookie session is dead (research §14.5).
 const AUTH_CLOSE_REASONS: [&str; 3] = ["cookie auth failed", "no credentials", "bad sign"];
+
+/// An error as the log shows it: a refused status keeps its code and name but not the server's
+/// reason (the caller's error keeps it).
+fn logged_error(error: &ProtoError) -> String {
+    match error {
+        ProtoError::Protocol(text) => {
+            ProtoError::Protocol(without_refusal_reason(text).into()).to_string()
+        }
+        other => other.to_string(),
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct XivaConfig {
@@ -722,7 +733,9 @@ impl<C: Connector> Actor<C> {
                 };
                 let rejected = matches!(result, Err(ProtoError::SessionExpired));
                 let elapsed_ms = millis(p.sent.elapsed());
-                let error = result.as_ref().err().map(tracing::field::display);
+                // The server's reason stays with the caller's error, not in the log.
+                let logged = result.as_ref().err().map(logged_error);
+                let error = logged.as_deref();
                 // Subscribe replies are per chat; their round is logged once.
                 if p.reply.is_some() {
                     debug!(req_id, method = %method, ok = error.is_none(), elapsed_ms, error, "socket reply");
@@ -730,8 +743,7 @@ impl<C: Connector> Actor<C> {
                     trace!(req_id, method = %method, ok = error.is_none(), elapsed_ms, error, "socket reply");
                 }
                 if let Some(round) = p.round {
-                    let failure = result.as_ref().err().map(ToString::to_string);
-                    rounds.record(round, failure.as_deref().map_or(Ok(()), Err));
+                    rounds.record(round, error.map_or(Ok(()), Err));
                 }
                 match p.reply {
                     Some(reply) => {
@@ -741,7 +753,7 @@ impl<C: Connector> Actor<C> {
                     None if rejected => {}
                     None => {
                         if let Err(e) = result {
-                            self.warning(format!("subscribe refused: {e}"));
+                            self.warning(format!("subscribe refused: {}", logged_error(&e)));
                         }
                     }
                 }
@@ -1553,6 +1565,45 @@ mod tests {
             round.contains("DEBUG") && round.contains("chats=2") && round.contains("ok=2"),
             "{round}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refusals_reason_reaches_the_caller_but_not_the_log() {
+        let capture = Capture::default();
+        let _guard = capture.install_at(tracing::Level::DEBUG);
+        let connector = FakeConnector::default();
+        let mut server = connector.accept();
+        let (handle, mut events) = start(&connector);
+        next(&mut events).await;
+        server.subscribed("sub-1");
+        next(&mut events).await;
+        let mut errors = Vec::new();
+        for (status, reason) in [(4, "reason-of-refusal"), (5, "reason-of-overload")] {
+            let h = handle.clone();
+            let task = tokio::spawn(async move { h.history("c1", None, 10).await });
+            let (req_id, _, body) = server.next_request().await;
+            server.reply(
+                req_id,
+                "history",
+                json!({
+                    "RequestId": body["RequestId"],
+                    "Status": status,
+                    "ErrorInfo": { "Message": reason, "WorkerId": 1 }
+                }),
+            );
+            errors.push(task.await.unwrap().unwrap_err().to_string());
+        }
+        assert!(
+            errors[0].contains("ENTITY_NOT_FOUND: reason-of-refusal"),
+            "{errors:?}"
+        );
+        assert!(errors[1].contains("server overloaded"), "{errors:?}");
+        assert!(!errors[1].contains("reason-of-overload"), "{errors:?}");
+
+        let text = capture.text();
+        assert!(text.contains("ENTITY_NOT_FOUND"), "{text}");
+        assert!(text.contains("server overloaded"), "{text}");
+        capture.assert_absent(&["reason-of-refusal", "reason-of-overload"]);
     }
 
     #[tokio::test(start_paused = true)]
