@@ -43,7 +43,7 @@ const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micr
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe react-self <micros> <code|remove> [--chat <self chat>]
        bt-probe typing-self [--chat <self chat>] | seen <chat> <micros> | typing <chat>
-       bt-probe download <chat> <micros> [--item N] [--to <dir>] [--url original|plain|stream]
+       bt-probe download <chat> <micros> [--item N] [--to <dir>] [--url original|plain]
        bt-probe search <query> [--entities messages,users,chats] [--limit <n>]
        bt-probe whoami | members <chat>
        bt-probe reactors <chat> <micros> [--before <micros>] [--limit <n>]
@@ -53,7 +53,7 @@ the *-self commands refuse any chat but the account's own self chat
 BT_WRITE_ONLY_CHAT limits every write command to the chat it names: a write to another chat, a set but empty value, and create-private / create-chat (a new chat is never the named one) are refused with exit code 2 before any connection or request
 download takes the file, voice message or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
-download --url is the playback research request: it asks for one URL variant (original: file_shortterm/{id}?attach=true, plain: file_shortterm/{id}, stream: video_streams/{id}), needs --to <dir> that already exists with mode 0700 (the sample directory: the bytes are message content, nothing else is saved under a name that shows them) and prints only status, landed host, content-type, content-length, accept-ranges, whether content-disposition is present, bytes received and sha256; a non-2xx answer reads no body, prints the same lines and exits 1
+download --url is the playback research request: it asks for one URL variant (original: file_shortterm/{id}?attach=true, plain: file_shortterm/{id}), needs --to <dir> that already exists with mode 0700 (the sample directory: the bytes are message content, nothing else is saved under a name that shows them) and prints only status, landed host, content-type, content-length, accept-ranges, whether content-disposition is present, bytes received and sha256; a non-2xx answer reads no body, prints the same lines and exits 1
 log filter: BT_LOG (default info), e.g. BT_LOG=yandex_proto=debug or BT_LOG=yandex_proto::xiva=trace
 search is read-only: per entity it prints total/limit/page/pages and the raw items, one JSON per line (the query is not echoed or logged above trace; items carry names and message text)
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
@@ -918,8 +918,6 @@ enum UrlVariant {
     Original,
     /// `MediaTarget::Playback`: the web client's `voicePlayUrl`.
     Plain,
-    /// `MediaTarget::VideoStream`: the web client's `videoStreamsUrl`.
-    Stream,
 }
 
 impl UrlVariant {
@@ -927,7 +925,6 @@ impl UrlVariant {
         match name {
             "original" => Some(Self::Original),
             "plain" => Some(Self::Plain),
-            "stream" => Some(Self::Stream),
             _ => None,
         }
     }
@@ -936,7 +933,6 @@ impl UrlVariant {
         match self {
             Self::Original => "original",
             Self::Plain => "plain",
-            Self::Stream => "stream",
         }
     }
 
@@ -944,7 +940,6 @@ impl UrlVariant {
         match self {
             Self::Original => MediaTarget::Original { file_id },
             Self::Plain => MediaTarget::Playback { file_id },
-            Self::Stream => MediaTarget::VideoStream { file_id },
         }
     }
 }
@@ -2035,11 +2030,10 @@ mod download_tests {
     }
 
     #[test]
-    fn the_url_flag_names_one_of_three_variants() {
+    fn the_url_flag_names_one_of_two_variants() {
         for (name, variant) in [
             ("original", UrlVariant::Original),
             ("plain", UrlVariant::Plain),
-            ("stream", UrlVariant::Stream),
         ] {
             assert_eq!(
                 download_flags(&["--url", name]),
@@ -2080,7 +2074,6 @@ mod download_tests {
         };
         assert!(url(UrlVariant::Original).ends_with("/file_shortterm/disk/0a1b-2c?attach=true"));
         assert!(url(UrlVariant::Plain).ends_with("/file_shortterm/disk/0a1b-2c"));
-        assert!(url(UrlVariant::Stream).ends_with("/video_streams/disk/0a1b-2c"));
     }
 
     #[test]
@@ -2207,7 +2200,7 @@ mod download_tests {
 
         // A refusal: the report names the status, no body is kept, the exit is a failure.
         let mut report = Vec::new();
-        let failure = save_sample(&media, &target, dir.path(), "1-1-stream", &mut report)
+        let failure = save_sample(&media, &target, dir.path(), "1-1-refused", &mut report)
             .await
             .unwrap_err();
         assert_eq!(failure, (1, "status 403: no body was read".to_owned()));
@@ -2215,7 +2208,7 @@ mod download_tests {
             String::from_utf8(report).unwrap(),
             "status: 403\nlanded: 127.0.0.1\ncontent-type: -\ncontent-length: 11\naccept-ranges: -\ncontent-disposition: absent\nreceived: 0 bytes\nsha256: -\n"
         );
-        assert!(!dir.path().join("1-1-stream").exists());
+        assert!(!dir.path().join("1-1-refused").exists());
 
         // An existing sample stops the run before any request, naming neither dir nor file.
         let mut report = Vec::new();
@@ -2263,8 +2256,8 @@ mod download_tests {
             "1700000000123456-1-plain.ogg"
         );
         assert_eq!(
-            name(Some("clip.MP4"), 2, UrlVariant::Stream),
-            "1700000000123456-2-stream.MP4"
+            name(Some("clip.MP4"), 2, UrlVariant::Original),
+            "1700000000123456-2-original.MP4"
         );
         for unusable in [
             Some("noextension"),
