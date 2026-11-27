@@ -143,6 +143,11 @@ Choosing play on a video card SHALL fetch a playback copy, showing the received 
 - **WHEN** a play is requested for it
 - **THEN** nothing is opened
 
+#### Scenario: Existing copy with an unrecognised extension
+- **GIVEN** a playback copy of the same file is already on disk under a name whose extension is outside the recognised list, or has none
+- **WHEN** the user chooses play on the video card
+- **THEN** that copy is not opened, the video is fetched as a new copy with a recognised extension and that copy is opened
+
 #### Scenario: Download is independent
 - **GIVEN** the user downloaded the same video earlier
 - **WHEN** the user chooses play
