@@ -110,6 +110,8 @@ struct Current {
     phase: VoicePhase,
     position: Duration,
     total: Option<Duration>,
+    /// A start that waits for the confirmation of a cancel in flight: the name to download under.
+    restart: Option<Option<String>>,
 }
 
 pub struct Player {
@@ -119,6 +121,8 @@ pub struct Player {
     current: Option<Current>,
     /// Bumped whenever the phase leaves or enters `Playing`; a timer tick of an older one is stale.
     generation: u64,
+    /// Playback copies whose `CancelDownload` was sent and not yet answered.
+    cancelling: Vec<MediaRef>,
     _store_events: Subscription,
 }
 
@@ -132,6 +136,7 @@ impl Player {
             output: None,
             current: None,
             generation: 0,
+            cancelling: Vec::new(),
             _store_events: subscription,
         }
     }
@@ -189,7 +194,18 @@ impl Player {
             return;
         };
         match current.phase {
-            VoicePhase::Loading => self.store.read(cx).cancel_download(&current.playback),
+            VoicePhase::Loading => {
+                let store = self.store.read(cx);
+                if matches!(
+                    store.download_state(&current.playback),
+                    Some(DownloadState::Running { .. })
+                ) {
+                    store.cancel_download(&current.playback);
+                    if !self.cancelling.contains(&current.playback) {
+                        self.cancelling.push(current.playback);
+                    }
+                }
+            }
             VoicePhase::Playing | VoicePhase::Paused => {
                 if let Some(output) = self.output.as_mut() {
                     output.stop();
@@ -213,6 +229,7 @@ impl Player {
             phase: VoicePhase::Loading,
             position: Duration::ZERO,
             total: None,
+            restart: None,
         });
         cx.notify();
         if !self.ensure_output(cx) {
@@ -227,11 +244,32 @@ impl Player {
             Some(path) => self.play_file(&path, cx),
             None => {
                 let name = name.map(str::to_owned);
-                self.store
-                    .update(cx, |s, cx| s.download(playback, name, cx));
-                self.settle_download(cx);
+                let cancel_out = self.cancelling.contains(&playback)
+                    && matches!(
+                        self.store.read(cx).download_state(&playback),
+                        Some(DownloadState::Running { .. })
+                    );
+                if cancel_out {
+                    // The store holds the cancelled transfer as running until the core confirms:
+                    // `download` would send nothing and the confirmation would clear this start.
+                    if let Some(current) = self.current.as_mut() {
+                        current.restart = Some(name);
+                    }
+                } else {
+                    self.request_download(name, cx);
+                }
             }
         }
+    }
+
+    /// Asks the store for the playback copy of the loading message under `name`.
+    fn request_download(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        let Some(playback) = self.current.as_ref().map(|c| c.playback.clone()) else {
+            return;
+        };
+        self.store
+            .update(cx, |s, cx| s.download(playback, name, cx));
+        self.settle_download(cx);
     }
 
     fn ensure_output(&mut self, cx: &App) -> bool {
@@ -255,12 +293,16 @@ impl Player {
                 let failure = PlayFailure::Download(*reason);
                 self.fail(failure, cx);
             }
-            // The transfer was cancelled (by us, or the store forgot it).
-            None => {
-                self.generation += 1;
-                self.current = None;
-                cx.notify();
-            }
+            // The transfer was cancelled (by us, or the store forgot it); a start that was waiting
+            // for the confirmation asks now.
+            None => match self.current.as_mut().and_then(|c| c.restart.take()) {
+                Some(name) => self.request_download(name, cx),
+                None => {
+                    self.generation += 1;
+                    self.current = None;
+                    cx.notify();
+                }
+            },
             Some(DownloadState::Running { .. }) => {}
         }
     }
@@ -368,6 +410,13 @@ impl Player {
     fn on_store_event(&mut self, event: &StoreEvent, cx: &mut Context<Self>) {
         match event {
             StoreEvent::Download(media) => {
+                let running = matches!(
+                    self.store.read(cx).download_state(media),
+                    Some(DownloadState::Running { .. })
+                );
+                if !running {
+                    self.cancelling.retain(|m| m != media);
+                }
                 let loading = self
                     .current
                     .as_ref()
@@ -377,7 +426,8 @@ impl Player {
                 }
             }
             StoreEvent::Session if self.store.read(cx).session() != SessionState::Active => {
-                self.stop(cx)
+                self.stop(cx);
+                self.cancelling.clear();
             }
             _ => {}
         }
@@ -860,6 +910,89 @@ mod tests {
         rig.toggle(cx, 2, "f2");
         assert_eq!(rig.commands(), [Command::CancelDownload(playback("f2"))]);
         assert_eq!(rig.phase(cx, 2), VoicePhase::Idle);
+    }
+
+    #[gpui::test]
+    fn playing_again_before_the_cancel_is_confirmed_waits_for_it(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.toggle(cx, 1, "f1");
+        rig.commands();
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.commands(), [Command::CancelDownload(playback("f1"))]);
+
+        // The store still holds the cancelled transfer as running: nothing can be asked yet.
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [], "no download while the cancel is out");
+
+        rig.apply(cx, ClientEvent::DownloadCancelled(playback("f1")));
+        assert_eq!(
+            rig.phase(cx, 1),
+            VoicePhase::Loading,
+            "the restart is not lost"
+        );
+        assert_eq!(
+            rig.commands(),
+            [Command::Download {
+                media: playback("f1"),
+                name: Some("v.ogg".into()),
+            }]
+        );
+        let path = rig.saved(cx, "f1");
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Playing);
+        assert_eq!(rig.fake.take_calls(), [Call::Open(path), Call::Play]);
+
+        // Another message of the same file, started after a stop: the same wait.
+        rig.player.update(cx, |p, cx| p.stop(cx));
+        rig.apply(
+            cx,
+            ClientEvent::DownloadProgress {
+                media: playback("f2"),
+                received: 1,
+                total: None,
+            },
+        );
+        rig.toggle(cx, 3, "f2");
+        rig.toggle(cx, 3, "f2");
+        rig.commands();
+        rig.toggle(cx, 4, "f2");
+        assert_eq!(rig.commands(), [], "still waiting for the confirmation");
+        rig.apply(cx, ClientEvent::DownloadCancelled(playback("f2")));
+        assert_eq!(rig.phase(cx, 4), VoicePhase::Loading);
+        assert_eq!(
+            rig.commands().len(),
+            1,
+            "one download for the message that waits"
+        );
+    }
+
+    #[gpui::test]
+    fn a_copy_that_arrives_instead_of_the_cancel_plays_the_waiting_message(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::new(cx);
+        rig.toggle(cx, 1, "f1");
+        rig.toggle(cx, 1, "f1");
+        rig.toggle(cx, 1, "f1");
+        rig.commands();
+
+        // The transfer finished before the cancel took effect.
+        let path = rig.saved(cx, "f1");
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Playing);
+        assert_eq!(rig.fake.take_calls(), [Call::Open(path), Call::Play]);
+        assert_eq!(rig.commands(), []);
+
+        // The cancel is settled for good: a later start downloads at once.
+        rig.player.update(cx, |p, cx| p.stop(cx));
+        rig.apply(
+            cx,
+            ClientEvent::DownloadFailed {
+                media: playback("f1"),
+                reason: DownloadFailure::Network,
+            },
+        );
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.commands().len(), 1);
     }
 
     #[gpui::test]
