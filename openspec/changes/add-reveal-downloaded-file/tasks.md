@@ -62,7 +62,7 @@ Overlap with the open changes (`DEPENDENCIES.md` rule 1): `store.rs` is held by 
   - Do: on `main`, in `bt-vm`: `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --all --check`, `cargo build --workspace --all-targets --locked` with zero warnings; `openspec validate add-reveal-downloaded-file --strict`.
   - Done when: all pass.
 
-- [ ] 5.2 Hand check in the VM **[live]**
+- [x] 5.2 Hand check in the VM **[live]**
   - Owns: nothing (findings are reported in the task result; no artifact is committed).
   - Depends on: 5.1; the VM's outbound network and a signed-in session in the VM's `~/bt/.runtime` (without them: report "blocked by environment", leave the box unchecked; it is not a gate for archiving, see 5.3). Its own `~/bt/src-reveal`, removed when done; the shared `~/bt/src` is not used. Live rule 5 of `DEPENDENCIES.md`: one live task at a time. A download is a read of the server and writes only to the VM's `~/Downloads`; no account write, `BT_WRITE_ONLY_CHAT` may stay set.
   - Do: run the app, download one file and one image original from a chat the account already has, choose «Показать в Finder» on the card and in the viewer (a Finder window shows the file selected), delete the file in Finder and choose it again (the card returns to «Скачать»), restart the app (no button until a new download). Remove the downloaded test files from the VM afterwards. Report only booleans, never file names.
