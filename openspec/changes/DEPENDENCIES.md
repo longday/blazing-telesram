@@ -25,19 +25,19 @@ Owner: Integrator. Updated: 2026-11-27. Three changes are open: **CM** `add-chat
 
 ## add-chat-members-and-creation (CM)
 
-Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1 and the review fixes (offline views, probe write guard). Open: the live gates 5.1, 5.3, 6.2 (approved by the user on 2026-11-27, run by `WebLive`) and what depends on them.
+Done: 0.1, 1.1, 1.2, 1.3, 2.1, 2.2, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 5.2, 6.1, 6.2 (live PASS, merged `17e336b`) and the review fixes (offline views, probe write guard). Open: 5.1 and 5.3 (blocked on the user: no target), 6.3, 6.4, 7.1.
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 5.1 | **approved by the user on 2026-11-27** (target admin@sgnl.pro), run by `WebLive`; not a file task; **[approval] [live]**: real private chat creation with `bt-probe create-private`; `BT_WRITE_ONLY_CHAT` unset | 2.2 | **[approval] [live]** |
-| 5.3 | **approved by the user on 2026-11-27**, run by `WebLive` after 5.1; 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
-| 6.2 | **approved by the user on 2026-11-27** (throwaway group, target admin@sgnl.pro), run by `WebLive`; **[approval] [live]**; live gate for 6.3, 6.4; `BT_WRITE_ONLY_CHAT` unset | 6.1 | **[approval] [live]** |
-| 6.3 | blocked-by CM 6.2 (live PASS); 3.3 is merged | 6.2, 3.3 | unit CM-G (with 6.4) |
-| 6.4 | blocked-by CM 6.3 (4.3 is merged) | 6.3, 4.3 | unit CM-G |
-| 6.F | conditional | 0.1 FAIL or 6.2 FAIL | removes group wording and code |
-| 7.1 | blocked-by CM 6.4 (or 6.F) | | |
+| 5.1 | **blocked on the user**: needs a target with an existing private chat; the web client cannot delete or recreate a private chat, so there is no target for a creation test; the shapes observed so far are in `design.md` "Observed shapes"; unticked; **[approval] [live]** | 2.2 | **[approval] [live]** |
+| 5.3 | **blocked on the user**, behind 5.1 (same target problem); 5.2 is done | 5.1, 5.2 | **[approval] [live]** |
+| 6.2 | **done** (live PASS, merged 2026-11-27 as part of `17e336b`): the group landed in «Внешние чаты» in the web client, and the spec has no organisation requirement; payload and reply shape in `design.md` "D4 outcome" and "Observed shapes"; live fixtures `live-create-chat.json`, `live-create-private.json` | 6.1 | `design.md`, `tasks.md`, fixtures, `wire_fixtures.rs` |
+| 6.3 | **ready** (6.2 PASS, 3.3 merged); starts when its files are free: PIN 2.4 holds chat-core `client.rs` | 6.2 (done), 3.3 | unit CM-G (with 6.4): `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs` |
+| 6.4 | blocked-by CM 6.3 (4.3 is merged) | 6.3, 4.3 | unit CM-G: `new_chat.rs`, `desktop.rs`, `tests.rs` |
+| 6.F | **does not run** (6.2 PASS) | | |
+| 7.1 | blocked-by CM 6.4 | 6.4 | any file named above (fixes only) |
 
-Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are first called by the dialog of 6.4). Files: `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`, `new_chat.rs`, `desktop.rs`, `tests.rs`. Gate: live PASS of 6.2. 6.3, 6.4 and 7.1 are not started and gated on approvals, so by rule 6 they lock none of these files: RL and PIN may use them now; if CM-G starts while an RL or PIN unit holds a file, it waits for that unit to merge.
+Unit **CM-G** = 6.3 + 6.4 (rule 3: the backend and store methods of 6.3 are first called by the dialog of 6.4). Files: `backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`, `new_chat.rs`, `desktop.rs`, `tests.rs`. The gate (live PASS of 6.2) is met. 6.3, 6.4 and 7.1 are not started, so by rule 6 they lock none of these files; when CM-G starts it waits for in-flight units that hold a file (now PIN 2.4 holds chat-core `client.rs`; PIN 3.3, if started first, would hold `backend.rs`, `client.rs`, `yandex_backend.rs`).
 
 ## add-reaction-list (RL)
 
@@ -53,19 +53,20 @@ Done: 1.1, 1.2, 1.3, 2.1 (RL-proto), 3.1 (live verification, merged `7d97260`), 
 
 ## add-pins-and-importance-view (PIN)
 
-Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`) and **the whole PIN-app unit** (1.2, 1.4, 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2; 1.3 dropped), merged into `main` as `270d503` on 2026-11-27 (`--no-ff` from `integ/pins-and-importance-view` `e4c2084`), plus 0.1 (`1dd26f2`) and 6.1. Checks on `main` `270d503` in `bt-vm`: `cargo fmt --all --check` green; `cargo build --workspace --all-targets --locked --offline` 0 warnings; `cargo test --workspace --locked --offline` 445 + 279 + 200 + 31 + 4 + 19 passed, 0 failed; `cargo clippy --workspace --all-targets --locked --offline` **10 warnings (the new baseline of `main`, was 11: the `model.rs:361` warning is gone)**: 2 deref (`chat-core/src/client.rs:4365`, `desktop/src/tests.rs:577`), 5 large size difference (`chat-core/src/client.rs:66` and `:164`, `yandex-proto/src/wire.rs:190` and `:295`, `xiva.rs:102`), 1 large `Err` (`yandex-proto/src/ws.rs:130`), 2 collapsible `if` (`desktop/src/desktop/composer.rs:612`, `desktop/src/yandex_backend.rs:354`); `openspec validate --all --strict` 16/16. Q1, Q2, Q3, Q5, Q6 were answered on 2026-11-26; only **Q4** is open (decided by observation in 0.2; it blocks 2.4 only). Open: 0.2 (live, the user), 2.4 (Q4), 3.3 (edit flag, Q6; its own unit after PIN-app, closes with the live check 6.2), 6.2 (live), 6.3 (archive).
+Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`) and **the whole PIN-app unit** (1.2, 1.4, 2.1-2.3, 3.1, 3.2, 4.1-4.4, 5.2; 1.3 dropped), merged into `main` as `270d503` on 2026-11-27 (`--no-ff` from `integ/pins-and-importance-view` `e4c2084`), plus 0.1 (`1dd26f2`) and 6.1. Checks on `main` `270d503` in `bt-vm`: `cargo fmt --all --check` green; `cargo build --workspace --all-targets --locked --offline` 0 warnings; `cargo test --workspace --locked --offline` 445 + 279 + 200 + 31 + 4 + 19 passed, 0 failed; `cargo clippy --workspace --all-targets --locked --offline` **10 warnings (the new baseline of `main`, was 11: the `model.rs:361` warning is gone)**: 2 deref (`chat-core/src/client.rs:4365`, `desktop/src/tests.rs:577`), 5 large size difference (`chat-core/src/client.rs:66` and `:164`, `yandex-proto/src/wire.rs:190` and `:295`, `xiva.rs:102`), 1 large `Err` (`yandex-proto/src/ws.rs:130`), 2 collapsible `if` (`desktop/src/desktop/composer.rs:612`, `desktop/src/yandex_backend.rs:354`); `openspec validate --all --strict` 16/16. All questions are answered (Q4 by 0.2 on 2026-11-27: B). Open: 0.2 in review (`pins/0.2`), 2.4 (in flight, `pins/2.4`), the wire `at` fix (pending), 3.3 (edit flag, Q6; its own unit after PIN-app, closes with the live check 6.2), 6.2 (live, no user needed), 6.3 (archive).
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | **done**, on `main` (integ merge `1dd26f2`); live observation recorded, 1.3 dropped | | `research.md` |
-| 0.2 | **in preparation** by `WebLive` on `pins/0.2`; needs the user at the web client; **[live]**; docs only (`research.md`) | 0.1 (done) | `research.md`; decides Q4 and checks the Q5 timestamps |
+| 0.2 | **done** on branch `pins/0.2` (`27b8dc3`), **in review**; docs only (`research.md`, `design.md`, `proposal.md`, `tasks.md`): the web client was the other party; answers Q4 = B (flag-only change sets `LastEditTimestamp`), Q5 = B (the comparable action time is `LastEditTimestamp`) | 0.1 (done) | `research.md` |
 | 1.2 | **done**, on `main` (integ merge `b48b666`) | 1.1 | `wire.rs`, `tests/wire_fixtures.rs`, `xiva.rs` |
 | 1.3 | **dropped**: chat-list entries carry `PinnedMessageTs`, so no `request.rs` change is needed (0.1) | 0.1 (done) | none |
 | 1.4 | **done**, on `main` (`aefa006`, with 3.2): `Client::history_page` | 1.2 | `yandex-proto/src/client.rs` |
 | 2.1 | **done**, on `main` (integ merge `06f58ba`) | 1.1 | `model.rs`, `fixtures.rs`, chat-core `client.rs`, `store.rs`, `tests.rs`, `yandex_backend.rs` |
 | 2.2 | **done**, on `main` (integ merge `285cd05`) | 2.1 (done) | `model.rs`, `backend.rs`, `cache.rs` (test) |
 | 2.3 | **done**, on `main` (integ merge `bbfc767`); holds no file any more | 2.2 (done) | chat-core `client.rs`, `fixtures.rs` |
-| 2.4 | blocked-by Q4 (0.2) | 0.2 | chat-core `client.rs` |
+| 2.4 | **needed** (0.2: Q4 = B, a flag-only change sets `LastEditTimestamp` and keeps `Version` 1, so the row would show «edited»); **in flight** on branch `pins/2.4` (worktree `../bt-pins-2.4`) | 0.2 (done) | chat-core `client.rs` |
+| 1.5 (new, `pins/0.2` calls it 1.4) | **pending**, not started: the wire `at` fix. `PushEvent::PinChanged.at` must come from `ServerMessageInfo.LastEditTimestamp` (fallback `Version`), not `ServerMessageInfo.Timestamp` (the pinned message's timestamp, absent on unpin); rebuild `research-push-pin*.json` as sanitised live captures; PIN 2.3 and 3.2 tests use the same `at` meaning. Not in `tasks.md` on `main` yet (it arrives with `pins/0.2`) | 0.2 (done), 1.2 | `wire.rs`, `tests/wire_fixtures.rs`, the push fixtures |
 | 3.1 | **done**, on `main` (integ merge `1444702`) | 1.1, 2.1 (done) | `yandex_backend.rs` (test hunks) |
 | 3.2 | **done**, on `main` (integ merge `e4c2084`; implementation `aefa006`, with 1.4) | 1.2, 1.4, 2.2, 3.1 | `yandex_backend.rs` |
 | 3.3 | open, ready (3.2 is on `main`); implementation is not blocked on the live check, the task closes after live 6.2 | 3.2 | `write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs` |
@@ -76,19 +77,19 @@ Done: 1.1 and 5.1 (on `main`; 5.1 is `7695968`) and **the whole PIN-app unit** (
 | 5.1 | **done**, on `main` (`7695968`) | 1.1 | `bt-probe.rs` |
 | 5.2 | **done**, on `main` (integ merge `ce2d7ab`) | 1.2 | `bt-probe.rs` |
 | 6.1 | **done** on `main` `270d503` (fmt green; build 0 warnings; tests 445 + 279 + 200 + 31 + 4 + 19 green; `openspec validate add-pins-and-importance-view --strict` valid); clippy: 10 pre-existing warnings, baseline per this file, accepted as "no new warnings over the baseline" by the main session on 2026-11-27 | PIN-app (merged) | build/test/lint matrix |
-| 6.2 | blocked-by 3.3, the user's approval of the target and a free live slot; **[approval] [live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
-| 6.3 | blocked-by what remains: 0.2 (live, the user), 2.4 (Q4, from 0.2; or its dropping), 3.3 (implementation, then live 6.2) and 6.2 (live, the user and a free live slot); then archive and sync the specs | 0.2, 2.4, 3.3, 6.2 | this file, archive |
+| 6.2 | blocked-by 3.3 and a free live slot (the user is no longer needed: the web client is the other party); **[live]**; one at a time (rule 5) | 3.3 | live check; `BT_WRITE_ONLY_CHAT` set; the only importance frame is the edit's `IsImportant: true` (Q6) |
+| 6.3 | blocked-by 2.4, the wire `at` fix, 3.3 and 6.2: archive after they close; sync the specs | 2.4, `at` fix, 3.3, 6.2 | this file, archive |
 
-Merge note (2026-11-27): PIN-app was merged into `main` as `270d503` (`--no-ff` from `integ/pins-and-importance-view` `e4c2084`). The only conflict was `crates/desktop/src/tests.rs` (REV 4.1's section and PIN 4.4's section appended at the same place); both sets are kept whole (REV first, PIN after). REV 4.1 has no `Message { .. }` literal, so no `important: false` was needed there; `store.rs` and `timeline.rs` merged without conflict. `integ/pins-and-importance-view` is kept for the `pins/0.2` branch of `WebLive` (based on integ `1dd26f2`); delete it after `pins/0.2` is merged (docs only, `research.md`).
+Merge note (2026-11-27): PIN-app was merged into `main` as `270d503` (`--no-ff` from `integ/pins-and-importance-view` `e4c2084`). The only conflict was `crates/desktop/src/tests.rs` (REV 4.1's section and PIN 4.4's section appended at the same place); both sets are kept whole (REV first, PIN after). REV 4.1 has no `Message { .. }` literal, so no `important: false` was needed there; `store.rs` and `timeline.rs` merged without conflict. `integ/pins-and-importance-view` is kept for the `pins/0.2` branch (based on integ `1dd26f2`); delete it after `pins/0.2` is merged (docs only). **Numbering clash to fix when `pins/0.2` merges:** it adds a task "1.4" (the wire `at` fix) to PIN `tasks.md`, but `1.4` on `main` is the done `Client::history_page` task; renumber the new one to 1.5 in `pins/0.2` before merging.
 
 ## Ready now
 
-- Startable without the user, no unmet dependency, pairwise disjoint files (rule 1): **PIN 3.3** implementation (`write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs`; not blocked, but it closes only after live 6.2, so it is a code task with a live gate, not mechanical). PIN-app is on `main`; PIN 2.4 waits for Q4 (0.2), 6.2 for 3.3 and the user, 6.3 for everything.
+- Startable without the user, no unmet dependency (rule 1 conflicts listed): **CM 6.3** (`backend.rs`, `model.rs`, chat-core `client.rs`, `store.rs`, `yandex_backend.rs`; CM 6.2 is done) is startable, but it overlaps **PIN 3.3** (`write.rs`, `backend.rs`, `client.rs`, `yandex_backend.rs`, `bt-probe.rs`) on `backend.rs`, `client.rs`, `yandex_backend.rs`, and **PIN 2.4** (`client.rs`, branch `pins/2.4` in flight) on `client.rs`: only one of CM 6.3 and PIN 3.3 may start, the other waits until the first merges (rule 1; neither is a merge unit with the other). CM 6.4 follows 6.3 (`new_chat.rs`, `desktop.rs`, `tests.rs`; no overlap with PIN 3.3). PIN: 2.4 (in flight on `pins/2.4`), the wire `at` fix (new, see the PIN table; `wire.rs`, `tests/wire_fixtures.rs`), 3.3.
 - RL: 8.0 (refusal reason) is implemented on `reactors/refusal` and in review; the review requires a fix first (a leak in `bt-probe`), so it is not mergeable yet; RL 8.2 is a live read, startable after the current live task finishes (rule 5); RL 8.3 (archive) waits for 8.2 and 8.0.
-- CM: 5.1, 5.3 and 6.2 are approved and run by `WebLive` (live, rule 5: nobody else starts a live task meanwhile; worktree `cm/live`); CM 7.1 needs 6.4 (or 6.F); the archive step needs 5.1, 5.3 and 6.2.
+- CM: 6.2 is done; 5.1 and 5.3 are blocked on the user (target); 6.F does not run (6.2 PASS); 7.1 needs 6.4.
 
 ## Needs the user
 
-- Approval of the target: **given** on 2026-11-27 for CM 5.1, 5.3 and 6.2 (real chat and group creation; target admin@sgnl.pro); `WebLive` runs them, so 6.3, 6.4, 7.1 stay blocked on its PASS.
-- PIN 0.2 (awaits the user; `WebLive` prepares it on `pins/0.2`) and 6.2: the user performs pins, importance marks and an own-message mark in the web client on a disposable self-chat message and approves the target (the agent sends only the edit of 6.2, under `BT_WRITE_ONLY_CHAT`).
+- Approval of the target: CM 6.2 is done (2026-11-27). **CM 5.1 and 5.3 need the user**: they need a target with an existing private chat (the web client cannot delete or recreate a private chat, so a creation test has no target without one); the user names the target or decides to close CM without them.
+- PIN 0.2 is done (the web client was the other party, no user action needed) and, per the main session, **PIN 6.2 no longer needs the user**: the web client is the other party. The only write stays the edit of the app account's own message under `BT_WRITE_ONLY_CHAT`.
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, `add-reaction-list/research.md`); RL 8.2 and PIN 0.1 are no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
