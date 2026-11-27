@@ -48,12 +48,9 @@ pub enum MediaTarget {
     Thumbnail { file_id: String },
     /// `FileInfo.Id2` of a file or image message: the original, streamed by `download`.
     Original { file_id: String },
-    /// `FileInfo.Id2` of a voice message: `file_shortterm/{id}` with no query, the web
-    /// client's `voicePlayUrl`.
+    /// `FileInfo.Id2` of a voice or video message: `file_shortterm/{id}` with no query, the
+    /// web client's `voicePlayUrl`; the same bytes as `Original`.
     Playback { file_id: String },
-    /// `FileInfo.Id2` of a video message: `video_streams/{id}`, the web client's
-    /// `videoStreamsUrl`.
-    VideoStream { file_id: String },
 }
 
 /// One path segment of an id: refuses anything that could change the URL structure.
@@ -91,11 +88,6 @@ impl MediaTarget {
             )),
             Self::Playback { file_id } => Ok(format!(
                 "{}/file_shortterm/{}",
-                config.files_base,
-                safe_path(file_id)?
-            )),
-            Self::VideoStream { file_id } => Ok(format!(
-                "{}/video_streams/{}",
                 config.files_base,
                 safe_path(file_id)?
             )),
@@ -831,33 +823,21 @@ mod tests {
         assert!(!err.to_string().contains("secret-name"), "{err}");
     }
 
-    // ---- playback and video stream targets, the research exchange ----
-
-    fn playback_and_stream(id: &str) -> [MediaTarget; 2] {
-        [
-            MediaTarget::Playback { file_id: id.into() },
-            MediaTarget::VideoStream { file_id: id.into() },
-        ]
-    }
+    // ---- the playback target, the research exchange ----
 
     #[test]
-    fn playback_is_the_plain_url_and_the_video_stream_its_own_path() {
-        let [playback, stream] = playback_and_stream("bucket/0a1b-2c");
+    fn playback_is_the_plain_url_with_no_query() {
+        let playback = MediaTarget::Playback {
+            file_id: "bucket/0a1b-2c".into(),
+        };
         assert_eq!(
             playback.url(&prod()).unwrap(),
             "https://files.messenger.yandex.ru/file_shortterm/bucket/0a1b-2c"
         );
-        assert_eq!(
-            stream.url(&prod()).unwrap(),
-            "https://files.messenger.yandex.ru/video_streams/bucket/0a1b-2c"
-        );
-        for target in [playback, stream] {
-            assert!(!target.url(&prod()).unwrap().contains('?'), "{target:?}");
-        }
     }
 
     #[test]
-    fn every_id_segment_is_checked_for_playback_and_the_video_stream() {
+    fn every_id_segment_is_checked_for_playback() {
         for id in [
             "",
             "a//b",
@@ -876,9 +856,8 @@ mod tests {
             "a\nb",
             "é/b",
         ] {
-            for target in playback_and_stream(id) {
-                assert!(target.url(&prod()).is_err(), "{target:?}");
-            }
+            let target = MediaTarget::Playback { file_id: id.into() };
+            assert!(target.url(&prod()).is_err(), "{target:?}");
         }
     }
 
@@ -929,11 +908,11 @@ mod tests {
             Some("HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n".into()),
         ]);
         let c = client_with(&base, Duration::from_secs(5), vec![]);
-        let stream = MediaTarget::VideoStream {
+        let target = MediaTarget::Playback {
             file_id: "b/u".into(),
         };
         let mut out = Vec::new();
-        let refused = c.download_exchange(&stream, &mut out).await.unwrap();
+        let refused = c.download_exchange(&target, &mut out).await.unwrap();
         assert_eq!(
             (
                 refused.status,
@@ -943,7 +922,7 @@ mod tests {
             (403, 0, false)
         );
         assert!(out.is_empty());
-        let open = c.download_exchange(&stream, &mut out).await.unwrap();
+        let open = c.download_exchange(&target, &mut out).await.unwrap();
         assert_eq!(
             (
                 open.status,
