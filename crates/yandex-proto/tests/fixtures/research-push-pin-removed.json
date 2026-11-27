@@ -1,15 +1,15 @@
 {
-  "_provenance": "Sanitised shape of the live `Pin` push observed in research 0.2 (2026-11-27): unpin. Rebuilt from the recorded shape because the raw capture was not stored; ids and timestamps are placeholders, no message text, no tokens. No Pin.Timestamp and no ServerMessageInfo.Timestamp; the action time is LastEditTimestamp (= Version).",
+  "_provenance": "Live capture, 2026-11-27 (UTC), same session as research-push-pin.json: unpin. Sanitised: chat id and sender guid replaced by placeholders; no message text, no tokens; all keys and the timestamps (microseconds) are verbatim. No Pin.Timestamp and no ServerMessageInfo.Timestamp; the action time is LastEditTimestamp (= Version).",
   "ClientMessage": {
     "Pin": {
-      "ChatId": "0/0/00000003-0000-4000-8000-000000000003"
+      "ChatId": "00000001-0000-4000-8000-000000000001_00000002-0000-4000-8000-000000000002"
     }
   },
   "ServerMessageInfo": {
     "From": {
-      "Guid": "00000007-0000-4000-8000-000000000007"
+      "Guid": "00000001-0000-4000-8000-000000000001"
     },
-    "LastEditTimestamp": 1795172999000001,
-    "Version": 1795172999000001
+    "LastEditTimestamp": 1795801115044038,
+    "Version": 1795801115044038
   }
 }

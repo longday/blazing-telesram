@@ -1,17 +1,17 @@
 {
-  "_provenance": "Sanitised shape of the live `Pin` push observed in research 0.2 (2026-11-27): pin of message A in a private chat. Rebuilt from the recorded shape because the raw capture was not stored; ids, names and timestamps are placeholders, no message text, no tokens. ServerMessageInfo.Timestamp is the pinned message's own timestamp; the action time is LastEditTimestamp (= Version).",
+  "_provenance": "Live capture, 2026-11-27 (UTC), `bt-probe listen --watch <private chat>` at BT_LOG=yandex_proto::xiva=trace, event `delivery`: a web-client account pinned its message A in a private chat with the app account (nothing was written from the app account). Sanitised: chat id and sender guid replaced by placeholders; the frame has no message text, no tokens; all keys and the timestamps (microseconds) are verbatim. ServerMessageInfo.Timestamp is the pinned message's own timestamp (A); the action time is LastEditTimestamp (= Version).",
   "ClientMessage": {
     "Pin": {
-      "ChatId": "0/0/00000003-0000-4000-8000-000000000003",
-      "Timestamp": 1795070677887127
+      "ChatId": "00000001-0000-4000-8000-000000000001_00000002-0000-4000-8000-000000000002",
+      "Timestamp": 1795800545954038
     }
   },
   "ServerMessageInfo": {
     "From": {
-      "Guid": "00000007-0000-4000-8000-000000000007"
+      "Guid": "00000001-0000-4000-8000-000000000001"
     },
-    "Timestamp": 1795070677887127,
-    "LastEditTimestamp": 1795172185683559,
-    "Version": 1795172185683559
+    "LastEditTimestamp": 1795800682870038,
+    "Timestamp": 1795800545954038,
+    "Version": 1795800682870038
   }
 }
