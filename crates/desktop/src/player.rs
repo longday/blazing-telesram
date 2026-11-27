@@ -149,7 +149,8 @@ impl Player {
 
     /// The click on a bubble's control. `Idle` and `Failed` start (a failure's retry), `Loading`
     /// cancels the transfer, `Playing` pauses, `Paused` resumes. Starting stops any other message
-    /// first. `original` is the message's file (kind `File`); its playback copy is fetched under
+    /// first, except that a message still waiting for the same file takes over its transfer.
+    /// `original` is the message's file (kind `File`); its playback copy is fetched under
     /// `name`.
     pub fn toggle_voice(
         &mut self,
@@ -167,8 +168,18 @@ impl Player {
             Some(VoicePhase::Paused) => return self.resume(cx),
             Some(VoicePhase::Idle | VoicePhase::Failed(_)) | None => {}
         }
+        // Another message of the same file (a forward) that is waiting for the copy takes over the
+        // transfer: cancelling it would clear the new message when `DownloadCancelled` arrives.
+        let playback = original.playback();
+        if let Some(current) = (self.current.as_mut())
+            .filter(|c| c.phase == VoicePhase::Loading && c.playback == playback)
+        {
+            current.key = key;
+            cx.notify();
+            return;
+        }
         self.stop(cx);
-        self.start(key, original.playback(), name, cx);
+        self.start(key, playback, name, cx);
     }
 
     /// Back to `Idle`, position 0, for whatever is loading, playing or paused (or failed).
@@ -817,6 +828,38 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[gpui::test]
+    fn a_message_of_the_same_file_takes_over_the_pending_load(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.commands().len(), 1);
+
+        // Two messages, one media id: the transfer is handed over, not cancelled and restarted.
+        rig.toggle(cx, 2, "f1");
+        assert_eq!(rig.view(cx, 1), VoiceView::default());
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [], "no cancel, no second download");
+
+        let path = rig.saved(cx, "f1");
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Playing);
+        assert_eq!(
+            rig.view(cx, 1),
+            VoiceView::default(),
+            "the first stays idle"
+        );
+        assert_eq!(rig.fake.take_calls(), [Call::Open(path), Call::Play]);
+
+        // The new owner cancels like any loading message.
+        rig.player.update(cx, |p, cx| p.stop(cx));
+        rig.toggle(cx, 1, "f2");
+        rig.commands();
+        rig.toggle(cx, 2, "f2");
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Loading);
+        rig.toggle(cx, 2, "f2");
+        assert_eq!(rig.commands(), [Command::CancelDownload(playback("f2"))]);
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Idle);
     }
 
     #[gpui::test]
