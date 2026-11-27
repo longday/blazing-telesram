@@ -251,8 +251,8 @@ pub enum MessageBody {
         #[serde(default)]
         waveform: Option<Vec<u8>>,
     },
-    /// A video file. `media` is the original (kind `File`); the size is zero and `duration_ms`
-    /// is `None` when the server sent no preview hint.
+    /// A video file. `media` is the original (kind `File`); `width` and `height` are zero and
+    /// `duration_ms` is `None` when the server sent no preview hint.
     Video {
         media: MediaRef,
         name: String,
