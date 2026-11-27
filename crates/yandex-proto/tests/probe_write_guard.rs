@@ -164,11 +164,12 @@ fn self_writes_to_a_chat_the_limit_does_not_name_are_refused_before_any_connecti
     if !sandbox_ready() {
         return;
     }
-    let commands: [&[&str]; 6] = [
+    let commands: [&[&str]; 7] = [
         &["react-self", "5", "100101"],
         &["react-self", "5", "remove"],
         &["send-self", "hello"],
         &["edit-self", "5", "hello"],
+        &["edit-self", "5", "hello", "--important"],
         &["delete-self", "5"],
         &["typing-self"],
     ];

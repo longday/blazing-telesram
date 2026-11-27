@@ -465,10 +465,14 @@ impl Backend for YandexBackend {
         timestamp: MessageTs,
         text: &str,
         reply_to: Option<&ReplyTarget>,
+        important: bool,
     ) -> Result<(), BackendError> {
-        self.push(chat, edit_request(chat, timestamp, text, reply_to))
-            .await
-            .map(drop)
+        self.push(
+            chat,
+            edit_request(chat, timestamp, text, reply_to, important),
+        )
+        .await
+        .map(drop)
     }
 
     async fn delete(&self, chat: &ChatId, timestamp: MessageTs) -> Result<(), BackendError> {
@@ -943,18 +947,21 @@ fn reply_ref(target: &ReplyTarget) -> ReplyRef {
     }
 }
 
-/// An edit rewrites the whole message, so a reply repeats its target.
+/// An edit rewrites the whole message, so a reply repeats its target and an important message
+/// its flag.
 fn edit_request(
     chat: &ChatId,
     timestamp: MessageTs,
     text: &str,
     reply_to: Option<&ReplyTarget>,
+    important: bool,
 ) -> WriteRequest {
     WriteRequest::Edit {
         chat: chat.0.clone(),
         timestamp,
         text: text.to_owned(),
         reply: reply_to.map(reply_ref),
+        important,
     }
 }
 
@@ -1776,7 +1783,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_repeats_the_reply_target_and_a_plain_edit_has_none() {
+    fn edit_repeats_the_reply_target_and_the_flag_and_a_plain_edit_has_none() {
         let chat = ChatId("0/0/a".into());
         let target = ReplyTarget {
             timestamp: 7,
@@ -1784,7 +1791,7 @@ mod tests {
             text: "orig".into(),
         };
         assert_eq!(
-            edit_request(&chat, 9, "new", Some(&target)),
+            edit_request(&chat, 9, "new", Some(&target), false),
             WriteRequest::Edit {
                 chat: "0/0/a".into(),
                 timestamp: 9,
@@ -1793,15 +1800,27 @@ mod tests {
                     timestamp: 7,
                     quote: "orig".into()
                 }),
+                important: false,
             }
         );
         assert_eq!(
-            edit_request(&chat, 9, "new", None),
+            edit_request(&chat, 9, "new", None, false),
             WriteRequest::Edit {
                 chat: "0/0/a".into(),
                 timestamp: 9,
                 text: "new".into(),
-                reply: None
+                reply: None,
+                important: false,
+            }
+        );
+        assert_eq!(
+            edit_request(&chat, 9, "new", None, true),
+            WriteRequest::Edit {
+                chat: "0/0/a".into(),
+                timestamp: 9,
+                text: "new".into(),
+                reply: None,
+                important: true,
             }
         );
     }
