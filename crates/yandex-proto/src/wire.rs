@@ -372,6 +372,10 @@ pub fn namespace_of(chat_id: &str) -> Option<u32> {
 }
 
 /// Application-layer status of a reply (`ResponseStatus`): absent or 0 is success.
+///
+/// A refusal carries its reason as `Details` (older replies) or as `ErrorInfo.Message` (what the
+/// server answers for `list_reactions`, observed live 2026-11-27); either one ends the error text
+/// as `status 4 ENTITY_NOT_FOUND: <reason>`, which [`refusal_reason`] reads back.
 pub fn check_status(body: &Json) -> Result<(), ProtoError> {
     let Some(status) = body
         .get("Status")
@@ -392,6 +396,10 @@ pub fn check_status(body: &Json) -> Result<(), ProtoError> {
         _ => "unknown",
     };
     let details = string(body, "Details")
+        .or_else(|| {
+            let message = present(body, "ErrorInfo").and_then(|i| string(i, "Message"))?;
+            Some(message.trim().to_owned()).filter(|m| !m.is_empty())
+        })
         .map(|d| format!(": {d}"))
         .unwrap_or_default();
     // OVERLOAD clears by itself; everything else is a request the server will keep refusing.
@@ -400,6 +408,25 @@ pub fn check_status(body: &Json) -> Result<(), ProtoError> {
     } else {
         ProtoError::Protocol(format!("status {status} {name}{details}"))
     })
+}
+
+/// The server's reason in the text of a refused status (`status 4 ENTITY_NOT_FOUND: <reason>`),
+/// `None` for any other text and for a refusal that came without a reason.
+pub fn refusal_reason(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix("status ")?;
+    let (status, rest) = rest.split_once(' ')?;
+    status.parse::<i64>().ok()?;
+    let (_name, reason) = rest.split_once(": ")?;
+    Some(reason).filter(|r| !r.is_empty())
+}
+
+/// A refused status's text without the server's reason (`status 4 ENTITY_NOT_FOUND`), for logs;
+/// any other text is returned unchanged.
+pub fn without_refusal_reason(text: &str) -> &str {
+    match refusal_reason(text) {
+        Some(reason) => &text[..text.len() - reason.len() - ": ".len()],
+        None => text,
+    }
 }
 
 fn sender(info: &Json) -> Option<WireSender> {
@@ -1079,6 +1106,65 @@ mod tests {
             check_status(&json!({ "Status": 5 })),
             Err(ProtoError::Network(_))
         ));
+    }
+
+    #[test]
+    fn a_refusal_carries_the_servers_error_info_message() {
+        // The live `list_reactions` refusal for a channel: no `Details`, an `ErrorInfo` object.
+        let live = json!({
+            "ErrorInfo": { "Message": " reactions are anonymous ", "WorkerId": 137 },
+            "Status": 4
+        });
+        assert_eq!(
+            check_status(&live),
+            Err(ProtoError::Protocol(
+                "status 4 ENTITY_NOT_FOUND: reactions are anonymous".into()
+            ))
+        );
+        // `Details` wins when both are there; a blank or missing message adds nothing.
+        let both = json!({ "Status": 4, "Details": "d", "ErrorInfo": { "Message": "m" } });
+        assert_eq!(
+            check_status(&both),
+            Err(ProtoError::Protocol("status 4 ENTITY_NOT_FOUND: d".into()))
+        );
+        for info in [
+            json!({ "Message": "  " }),
+            json!({ "WorkerId": 1 }),
+            json!("x"),
+        ] {
+            assert_eq!(
+                check_status(&json!({ "Status": 4, "ErrorInfo": info })),
+                Err(ProtoError::Protocol("status 4 ENTITY_NOT_FOUND".into()))
+            );
+        }
+        // Overload keeps its class and gains the reason too.
+        assert_eq!(
+            check_status(&json!({ "Status": 5, "ErrorInfo": { "Message": "busy" } })),
+            Err(ProtoError::Network("server overloaded: busy".into()))
+        );
+    }
+
+    #[test]
+    fn the_refusal_reason_is_read_back_from_the_error_text() {
+        let text = |body| match check_status(&body) {
+            Err(ProtoError::Protocol(t)) => t,
+            other => panic!("not a protocol refusal: {other:?}"),
+        };
+        let live = text(json!({ "Status": 4, "ErrorInfo": { "Message": "message: not found" } }));
+        assert_eq!(refusal_reason(&live), Some("message: not found"));
+        assert_eq!(
+            refusal_reason(&text(json!({ "Status": 9, "Details": "odd" }))),
+            Some("odd")
+        );
+        // No reason, and texts that are not a refused status, give none.
+        assert_eq!(refusal_reason(&text(json!({ "Status": 4 }))), None);
+        assert_eq!(refusal_reason("get_chat_members failed: bad_request"), None);
+        assert_eq!(refusal_reason("status x NAME: why"), None);
+        assert_eq!(refusal_reason("status 4 NAME: "), None);
+        // The log form drops the reason and nothing else.
+        assert_eq!(without_refusal_reason(&live), "status 4 ENTITY_NOT_FOUND");
+        assert_eq!(without_refusal_reason("status 4 NAME"), "status 4 NAME");
+        assert_eq!(without_refusal_reason("bad: reply"), "bad: reply");
     }
 
     #[test]

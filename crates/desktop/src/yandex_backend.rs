@@ -17,7 +17,7 @@ use yandex_proto::session::Session;
 use yandex_proto::wire::{
     PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember,
     WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireReactorEntry,
-    WireReactors, WireSender, WireUser,
+    WireReactors, WireSender, WireUser, refusal_reason,
 };
 use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
@@ -38,6 +38,8 @@ const MEMBER_PAGE_BOUND: usize = 20;
 const MEMBERS_REFUSED_CODE: &str = "no_permissions_for_this_chat_operation";
 /// Why a refused member list is not shown.
 const MEMBERS_UNAVAILABLE: &str = "список участников недоступен для этой учётной записи";
+/// Leads the server's own reason when it refuses a reactor list (the reason text is the server's).
+const REACTORS_REFUSED: &str = "Сервер отказал";
 
 pub struct YandexBackend {
     session: Session,
@@ -592,7 +594,7 @@ impl Backend for YandexBackend {
         let wire = client
             .reactors(&chat.0, timestamp, before, limit)
             .await
-            .map_err(backend_error)?;
+            .map_err(reactors_error)?;
         // The entries name almost everyone; the user cache fills only the rows they left blank.
         let nameless = wire
             .entries
@@ -653,6 +655,22 @@ fn members_error(error: ProtoError) -> BackendError {
                 permanent: true,
             }
         }
+        other => backend_error(other),
+    }
+}
+
+/// A refused reactor list carries the server's reason (`ErrorInfo.Message`, e.g. "reactions are
+/// anonymous" for a channel message) as a permanent rejection the list shows. A refusal without a
+/// reason and every other failure keep the ordinary mapping.
+fn reactors_error(error: ProtoError) -> BackendError {
+    match error {
+        ProtoError::Protocol(text) => match refusal_reason(&text) {
+            Some(reason) => BackendError::Rejected {
+                reason: format!("{REACTORS_REFUSED}: {reason}"),
+                permanent: true,
+            },
+            None => BackendError::Protocol(text),
+        },
         other => backend_error(other),
     }
 }
@@ -3160,5 +3178,59 @@ mod tests {
                 .await,
             Err(BackendError::Protocol(_))
         ));
+    }
+
+    /// The live channel refusal (2026-11-27): `Status` 4, `ErrorInfo.Message`, no `Details`.
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_reactor_list_carries_the_servers_reason() {
+        let refusal = |message: &str| serde_json::json!({ "ErrorInfo": { "Message": message, "WorkerId": 137 }, "Status": 4 });
+        let (backend, _) = backend_with_replies(
+            None,
+            vec![
+                refusal("reactions are anonymous"),
+                serde_json::json!({ "Status": 4 }),
+            ],
+            HashMap::new(),
+        )
+        .await;
+        let chat = ChatId("0/0/channel".into());
+
+        assert_eq!(
+            backend.reactors(&chat, 111, None, 30).await,
+            Err(BackendError::Rejected {
+                reason: "Сервер отказал: reactions are anonymous".into(),
+                permanent: true
+            })
+        );
+        // Without a reason the ordinary protocol failure stays.
+        assert!(matches!(
+            backend.reactors(&chat, 111, None, 30).await,
+            Err(BackendError::Protocol(m)) if m == "status 4 ENTITY_NOT_FOUND"
+        ));
+    }
+
+    #[test]
+    fn only_a_refusal_with_a_reason_becomes_a_rejection_of_the_list() {
+        assert_eq!(
+            reactors_error(ProtoError::Protocol(
+                "status 4 ENTITY_NOT_FOUND: message not found".into()
+            )),
+            BackendError::Rejected {
+                reason: "Сервер отказал: message not found".into(),
+                permanent: true
+            }
+        );
+        assert_eq!(
+            reactors_error(ProtoError::Protocol("UserReactions is not an array".into())),
+            BackendError::Protocol("UserReactions is not an array".into())
+        );
+        assert_eq!(
+            reactors_error(ProtoError::SessionExpired),
+            BackendError::SessionExpired
+        );
+        assert_eq!(
+            reactors_error(ProtoError::Network("down".into())),
+            BackendError::Network("down".into())
+        );
     }
 }
