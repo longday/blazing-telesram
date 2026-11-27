@@ -148,7 +148,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Do: on `main` after both units, `cargo test --workspace --locked`, `cargo clippy --workspace --all-targets --locked`, `cargo fmt --all --check`, `cargo build --workspace --all-targets --locked` with zero warnings, all inside `bt-vm`; `openspec validate add-reaction-list --strict`.
   - Done when: all pass.
 
-- [ ] 8.2 Live check of the app, read-only
+- [x] 8.2 Live check of the app, read-only (done 2026-11-27: findings in `research.md` "App check", no contradiction, a channel shows «Сервер отказал: reactions are anonymous (status 4 ENTITY_NOT_FOUND)» with a retry)
   - Owns: `research.md` (append "App check").
   - Depends on: 3.1, 6.1-6.7, 8.1; the VM network.
   - Do: with `BT_WRITE_ONLY_CHAT` set to the self chat (so any accidental write is refused), run the app in `bt-vm`: open the list of the disposable self-chat message and of a multi-reactor message (Q6), check names, emoji, times, the own marker, "N из M" if applicable, the offline state with the network off (restored right after, in the same command by a trap), and that no reaction changed (the message's chips and version before and after). Screenshots stay in `.runtime/vm/` (not committed).
