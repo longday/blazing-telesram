@@ -274,6 +274,21 @@ impl Desktop {
         cx.notify();
     }
 
+    /// The account changed: what the composer holds (text, reply or edit target, a pending save)
+    /// belongs to the previous account. It is dropped unsaved, so no draft of it reaches the new
+    /// account's cache, and the chat the composer followed is left without a save.
+    pub(super) fn discard_composer(&mut self, cx: &mut Context<Self>) {
+        self.compose.draft_timer = None;
+        self.compose.editing = None;
+        self.compose.reply = None;
+        self.compose.chat = None;
+        self.compose.marked.clear();
+        self.compose
+            .input
+            .update(cx, |input, cx| input.set_text("", cx));
+        cx.notify();
+    }
+
     pub(super) fn composer_event(&mut self, event: InputEvent, cx: &mut Context<Self>) {
         if self.blocked(cx) {
             return;

@@ -165,6 +165,7 @@ impl Desktop {
                         this.stop_gone_voice(chat, change, cx);
                     }
                     StoreEvent::Drafts => this.restore_late_draft(cx),
+                    StoreEvent::Account => this.discard_composer(cx),
                     StoreEvent::Connection => {
                         this.resume_search(cx);
                         this.resume_reads(cx);

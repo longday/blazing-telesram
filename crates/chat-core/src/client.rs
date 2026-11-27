@@ -355,6 +355,10 @@ struct Engine<B> {
     downloads: HashMap<MediaRef, Transfer>,
     /// Generation of the next `Transfer`; lets a late result tell its own transfer from a newer one.
     download_seq: u64,
+    /// The newest cancelled transfer of each file: results of it or of an older one are dropped.
+    cancelled_downloads: HashMap<MediaRef, u64>,
+    /// Transfers numbered up to this belong to a previous account or a signed-out session.
+    download_floor: u64,
     download_slots: Arc<Semaphore>,
     /// Running or waiting playback copies use their own slots, so they never queue behind saved originals.
     playback_slots: Arc<Semaphore>,
@@ -843,6 +847,8 @@ impl<B: Backend> Engine<B> {
             media_slots: Arc::new(Semaphore::new(MEDIA_SLOTS)),
             downloads: HashMap::new(),
             download_seq: 0,
+            cancelled_downloads: HashMap::new(),
+            download_floor: 0,
             download_slots: Arc::new(Semaphore::new(DOWNLOAD_SLOTS)),
             playback_slots: Arc::new(Semaphore::new(PLAYBACK_SLOTS)),
             outbox: Vec::new(),
@@ -1211,6 +1217,8 @@ impl<B: Backend> Engine<B> {
         self.read_marks.clear();
         self.read_deferred.clear();
         self.typing_sent.clear();
+        self.void_transfers();
+        self.emit(ClientEvent::AccountSwitched);
         self.emit_drafts();
     }
 
@@ -1221,7 +1229,7 @@ impl<B: Backend> Engine<B> {
         self.phase = Phase::Expired;
         tracing::info!("signing out");
         self.epoch += 1;
-        self.abort_downloads();
+        self.void_transfers();
         remove_ignoring_missing(fs::remove_file(&self.config.session_file));
         // Release the database file before deleting it.
         self.cache = Cache::open_in_memory().expect("in-memory sqlite always opens");
@@ -3134,6 +3142,7 @@ impl<B: Backend> Engine<B> {
         if let Some(transfer) = self.downloads.remove(media) {
             // The task's `Partial` removes the unfinished file when the aborted future drops.
             transfer.handle.abort();
+            self.cancelled_downloads.insert(media.clone(), transfer.seq);
             self.emit(ClientEvent::DownloadCancelled(media.clone()));
         }
     }
@@ -3143,6 +3152,15 @@ impl<B: Backend> Engine<B> {
         for (_, transfer) in self.downloads.drain() {
             transfer.handle.abort();
         }
+    }
+
+    /// The account or session the transfers belong to is over for good (a switch of the account,
+    /// a sign-out): they stop, and every result of them is dropped from now on, whatever its kind.
+    /// Unlike an expiry, which a login of the same account resumes, nothing here is reported.
+    fn void_transfers(&mut self) {
+        self.abort_downloads();
+        self.download_floor = self.download_seq;
+        self.cancelled_downloads.clear();
     }
 
     fn handle_download_progress(
@@ -3171,13 +3189,39 @@ impl<B: Backend> Engine<B> {
         seq: u64,
         result: Result<(PathBuf, u64), DownloadError>,
     ) {
+        // Everything numbered up to the floor belongs to an account that is gone: its result,
+        // a session expiry included, says nothing about the current one.
+        if seq <= self.download_floor {
+            return;
+        }
+        // A session-level failure is not about this transfer, so a cancelled or superseded
+        // transfer does not hide it.
+        if matches!(
+            result,
+            Err(DownloadError::Backend(BackendError::SessionExpired))
+        ) {
+            return self.expire();
+        }
+        // A cancelled transfer is over once `DownloadCancelled` went out: a result of it that was
+        // already queued is not reported, so it cannot overwrite the state of a newer transfer of
+        // the same file (or, with none yet, show a result after the cancel).
+        if self
+            .cancelled_downloads
+            .get(&media)
+            .is_some_and(|cancelled| seq <= *cancelled)
+        {
+            return;
+        }
         match self.downloads.get(&media) {
-            // A newer transfer of the same file owns the state now; this one was cancelled meanwhile.
+            // A newer transfer of the same file owns the state now.
             Some(transfer) if transfer.seq != seq => return,
             Some(_) => {
                 self.downloads.remove(&media);
+                // Results reach the engine in the order they were posted, so once the newest
+                // transfer settled no queued result of an older one can follow.
+                self.cancelled_downloads.remove(&media);
             }
-            // Cancelled, but the result was already on its way: reported as it happened.
+            // Aborted by expiry: reported as it happened.
             None => {}
         }
         let reason = match result {
@@ -7554,6 +7598,221 @@ mod tests {
             e,
             ClientEvent::Downloaded { .. } | ClientEvent::DownloadFailed { .. }
         )));
+    }
+
+    /// The order the desktop player meets: the cancel is acknowledged, a result of the cancelled
+    /// transfer that was already queued arrives, then the result of the new transfer.
+    #[test]
+    fn a_late_result_of_a_cancelled_transfer_is_dropped() {
+        let (events, event_rx) = async_channel::unbounded();
+        let (inputs, _input_rx) = async_channel::unbounded();
+        let dir = tempfile::tempdir().unwrap();
+        let config = ClientConfig::new(dir.path(), dir.path().join("session.json"), account());
+        let mut engine = Engine::new(
+            Arc::new(Fake::default()),
+            config,
+            events,
+            inputs,
+            Cache::open_in_memory().unwrap(),
+        );
+        engine.phase = Phase::Online;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _guard = rt.enter();
+        let media = original("b/1");
+        let transfer = |seq| Transfer {
+            seq,
+            handle: tokio::spawn(std::future::pending::<()>()),
+        };
+        let drain = || std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
+        let network = || {
+            Err(DownloadError::Backend(BackendError::Network(
+                "reset".into(),
+            )))
+        };
+        let saved = || Ok((dir.path().join("x.pdf"), 5));
+
+        engine.downloads.insert(media.clone(), transfer(1));
+        engine.cancel_download(&media);
+        assert_eq!(drain(), [ClientEvent::DownloadCancelled(media.clone())]);
+
+        // Late results of the cancelled transfer, with no newer transfer yet: nothing is reported.
+        engine.handle_download_result(media.clone(), 1, network());
+        engine.handle_download_result(media.clone(), 1, saved());
+        assert_eq!(drain(), []);
+
+        // The new transfer is its own: its result is reported, a second late one is still dropped.
+        engine.downloads.insert(media.clone(), transfer(2));
+        engine.handle_download_result(media.clone(), 1, network());
+        assert_eq!(drain(), []);
+        assert!(
+            engine.downloads.contains_key(&media),
+            "the new transfer still runs"
+        );
+        engine.handle_download_result(media.clone(), 2, saved());
+        assert_eq!(
+            drain(),
+            [ClientEvent::Downloaded {
+                media: media.clone(),
+                path: dir.path().join("x.pdf"),
+            }]
+        );
+        assert!(
+            engine.cancelled_downloads.is_empty(),
+            "the settled transfer ends the memory of the cancelled one"
+        );
+
+        // Cancelling the second one drops its results too, and an unrelated file is not affected.
+        engine.downloads.insert(media.clone(), transfer(3));
+        engine.cancel_download(&media);
+        drain();
+        engine.handle_download_result(media.clone(), 3, saved());
+        engine.handle_download_result(original("b/2"), 1, saved());
+        assert_eq!(drain().len(), 1, "only the other file's result");
+    }
+
+    /// An engine with no backend traffic, a runtime for placeholder transfers and a way to read
+    /// what it emitted.
+    struct Bare {
+        engine: Engine<Fake>,
+        events: async_channel::Receiver<ClientEvent>,
+        dir: tempfile::TempDir,
+        rt: tokio::runtime::Runtime,
+    }
+
+    impl Bare {
+        fn new() -> Self {
+            let (events, event_rx) = async_channel::unbounded();
+            let (inputs, _input_rx) = async_channel::unbounded();
+            let dir = tempfile::tempdir().unwrap();
+            let config = ClientConfig::new(dir.path(), dir.path().join("session.json"), account());
+            let mut engine = Engine::new(
+                Arc::new(Fake::default()),
+                config,
+                events,
+                inputs,
+                Cache::open_in_memory().unwrap(),
+            );
+            engine.phase = Phase::Online;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            Self {
+                engine,
+                events: event_rx,
+                dir,
+                rt,
+            }
+        }
+
+        /// Starts a transfer of `media` the way `start_download` numbers it, without any traffic.
+        fn transfer(&mut self, media: &MediaRef) -> u64 {
+            self.engine.download_seq += 1;
+            let seq = self.engine.download_seq;
+            let handle = self.rt.spawn(std::future::pending::<()>());
+            self.engine
+                .downloads
+                .insert(media.clone(), Transfer { seq, handle });
+            seq
+        }
+
+        fn drain(&self) -> Vec<ClientEvent> {
+            std::iter::from_fn(|| self.events.try_recv().ok()).collect()
+        }
+    }
+
+    fn expired() -> Result<(PathBuf, u64), DownloadError> {
+        Err(DownloadError::Backend(BackendError::SessionExpired))
+    }
+
+    #[test]
+    fn a_session_expiry_of_a_cancelled_transfer_still_ends_the_session() {
+        let mut bare = Bare::new();
+        let media = original("b/1");
+        let seq = bare.transfer(&media);
+        bare.engine.cancel_download(&media);
+        bare.drain();
+
+        bare.engine.handle_download_result(media, seq, expired());
+        assert!(bare.engine.phase == Phase::Expired);
+        assert_eq!(bare.drain(), [ClientEvent::SessionExpired]);
+    }
+
+    #[test]
+    fn results_of_the_previous_account_are_dropped_before_anything_else() {
+        let mut bare = Bare::new();
+        let media = original("b/1");
+        let other = original("b/2");
+        let cancelled = bare.transfer(&media);
+        bare.engine.cancel_download(&media);
+        let running = bare.transfer(&other);
+        bare.drain();
+
+        bare.engine.switch_account(UserId("other".into()));
+        assert!(
+            bare.engine.cancelled_downloads.is_empty(),
+            "nothing outlives the account"
+        );
+        assert!(bare.engine.downloads.is_empty());
+        bare.drain();
+
+        // Late results of account A: the cancelled transfer's, and the one running at the switch.
+        let saved = Ok((bare.dir.path().join("x.pdf"), 5));
+        bare.engine
+            .handle_download_result(media.clone(), cancelled, saved);
+        bare.engine
+            .handle_download_result(media.clone(), cancelled, expired());
+        bare.engine
+            .handle_download_result(other.clone(), running, expired());
+        assert_eq!(bare.drain(), []);
+        assert!(
+            bare.engine.phase == Phase::Online,
+            "account B stays signed in"
+        );
+
+        // A transfer of account B is numbered above the floor and is reported.
+        let fresh = bare.transfer(&media);
+        assert!(fresh > cancelled && fresh > running);
+        let saved = Ok((bare.dir.path().join("y.pdf"), 5));
+        bare.engine
+            .handle_download_result(media.clone(), fresh, saved);
+        assert_eq!(
+            bare.drain(),
+            [ClientEvent::Downloaded {
+                media,
+                path: bare.dir.path().join("y.pdf"),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_cancelled_file_is_remembered_only_until_a_newer_transfer_settles() {
+        let mut bare = Bare::new();
+        let media = original("b/1");
+        let first = bare.transfer(&media);
+        bare.engine.cancel_download(&media);
+        assert_eq!(bare.engine.cancelled_downloads.get(&media), Some(&first));
+        let second = bare.transfer(&media);
+        bare.drain();
+        bare.engine.handle_download_result(
+            media.clone(),
+            second,
+            Ok((bare.dir.path().join("x.pdf"), 5)),
+        );
+        assert!(bare.engine.cancelled_downloads.is_empty());
+
+        // Signing out ends every transfer for good, and with it the memory of the cancelled ones.
+        let third = bare.transfer(&media);
+        bare.engine.cancel_download(&media);
+        bare.engine.sign_out();
+        assert!(bare.engine.cancelled_downloads.is_empty());
+        bare.drain();
+        bare.engine
+            .handle_download_result(media, third, Ok((bare.dir.path().join("z.pdf"), 5)));
+        assert_eq!(bare.drain(), [], "no result is reported after the sign-out");
     }
 
     #[test]

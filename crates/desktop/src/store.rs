@@ -251,6 +251,9 @@ pub enum StoreEvent {
     Reveal(PathBuf),
     Connection,
     Session,
+    /// The account behind the session changed; `forget_account` ran. Whatever played for the
+    /// previous account must stop.
+    Account,
     /// The persisted drafts arrived.
     Drafts,
     /// An edit or deletion did not happen.
@@ -368,6 +371,30 @@ impl ChatStore {
         }
     }
 
+    /// Drops everything held of the account that was shown: the chat list, timelines, files,
+    /// transfers and every open read.
+    fn forget_account(&mut self) {
+        self.chats.clear();
+        self.chats_loaded = false;
+        self.selected = None;
+        self.timelines.clear();
+        self.media.clear();
+        self.media_requested.clear();
+        self.downloads.clear();
+        self.search = None;
+        self.members.clear();
+        self.members_stale.clear();
+        self.profile = None;
+        self.profile_stale = false;
+        self.reactors = None;
+        self.cancel_refresh();
+        self.creation = None;
+        self.creating = None;
+        self.pending_open = None;
+        self.drafts.clear();
+        self.typing.clear();
+    }
+
     pub fn apply(&mut self, event: ClientEvent, cx: &mut Context<Self>) {
         match event {
             ClientEvent::ChatsReplaced(chats) => {
@@ -443,27 +470,13 @@ impl ChatStore {
                 cx.emit(StoreEvent::Session);
             }
             ClientEvent::SignedOut => {
-                self.chats.clear();
-                self.chats_loaded = false;
-                self.selected = None;
-                self.timelines.clear();
-                self.media.clear();
-                self.media_requested.clear();
-                self.downloads.clear();
-                self.search = None;
-                self.members.clear();
-                self.members_stale.clear();
-                self.profile = None;
-                self.profile_stale = false;
-                self.reactors = None;
-                self.cancel_refresh();
-                self.creation = None;
-                self.creating = None;
-                self.pending_open = None;
-                self.drafts.clear();
-                self.typing.clear();
+                self.forget_account();
                 self.session = SessionState::SignedOut;
                 cx.emit(StoreEvent::Session);
+            }
+            ClientEvent::AccountSwitched => {
+                self.forget_account();
+                cx.emit(StoreEvent::Account);
             }
             ClientEvent::Drafts(drafts) => {
                 self.drafts = drafts.into_iter().map(|d| (d.chat.clone(), d)).collect();
@@ -4717,6 +4730,32 @@ mod tests {
             rig.apply(cx, ClientEvent::SignedOut);
             rig.store
                 .read_with(cx, |s, _| assert_eq!(s.download_state(&playback), None));
+        }
+
+        #[gpui::test]
+        fn another_account_voids_the_old_ones_state_and_keeps_the_session(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            let playback = media("v1", MediaKind::File).playback();
+            rig.history(cx, vec![message(1, MessageBody::Text("a".into()))]);
+            rig.store
+                .update(cx, |s, cx| s.download(playback.clone(), None, cx));
+            rig.store.read_with(cx, |s, _| {
+                assert_eq!(s.selected(), Some(&chat()));
+                assert!(s.timeline(&chat()).is_some());
+            });
+
+            rig.apply(cx, ClientEvent::AccountSwitched);
+            rig.store.read_with(cx, |s, _| {
+                assert_eq!(
+                    s.selected(),
+                    None,
+                    "a same-id chat of the new account is a new open"
+                );
+                assert!(s.timeline(&chat()).is_none());
+                assert_eq!(s.download_state(&playback), None);
+                assert_eq!(s.session(), SessionState::Active);
+                assert_eq!(s.connection(), ConnectionState::Online);
+            });
         }
     }
 }

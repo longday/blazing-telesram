@@ -8,6 +8,7 @@
 use crate::store::{ChatStore, DownloadState, SessionState, StoreEvent};
 use bt_chat_core::model::{ChatId, DownloadFailure, MediaRef, MessageTs};
 use gpui::{App, Context, Entity, Global, Subscription};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -92,8 +93,8 @@ pub fn failure_label(failure: PlayFailure) -> &'static str {
     }
 }
 
-/// What a bubble shows. `total` is the length of the opened file, `None` until the file is open
-/// (the bubble then shows the duration the message carries) and after the playback ended.
+/// What a bubble shows. `total` is the length of the file as last opened for this message, `None`
+/// until it was opened (the bubble then shows the duration the message carries).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VoiceView {
     pub phase: VoicePhase,
@@ -123,6 +124,8 @@ pub struct Player {
     generation: u64,
     /// Playback copies whose `CancelDownload` was sent and not yet answered.
     cancelling: Vec<MediaRef>,
+    /// The length of the file the last time each message's file was opened.
+    measured: HashMap<VoiceKey, Duration>,
     _store_events: Subscription,
 }
 
@@ -137,18 +140,25 @@ impl Player {
             current: None,
             generation: 0,
             cancelling: Vec::new(),
+            measured: HashMap::new(),
             _store_events: subscription,
         }
     }
 
+    /// A message that is not the active one is `Idle` at 0, with the length measured the last time
+    /// its file was opened (so the bubble keeps it after the end, a stop or another message).
     pub fn voice(&self, key: &VoiceKey) -> VoiceView {
+        let measured = self.measured.get(key).copied();
         match &self.current {
             Some(c) if &c.key == key => VoiceView {
                 phase: c.phase,
                 position: c.position,
-                total: c.total,
+                total: c.total.or(measured),
             },
-            _ => VoiceView::default(),
+            _ => VoiceView {
+                total: measured,
+                ..VoiceView::default()
+            },
         }
     }
 
@@ -328,6 +338,7 @@ impl Player {
             current.phase = VoicePhase::Playing;
             current.position = Duration::ZERO;
             current.total = Some(total);
+            self.measured.insert(current.key.clone(), total);
         }
         self.start_timer(cx);
         cx.notify();
@@ -412,6 +423,14 @@ impl Player {
         true
     }
 
+    /// Stops and drops what was learned of the messages shown so far (the end of a session or a
+    /// switch of the account).
+    fn forget(&mut self, cx: &mut Context<Self>) {
+        self.stop(cx);
+        self.cancelling.clear();
+        self.measured.clear();
+    }
+
     fn on_store_event(&mut self, event: &StoreEvent, cx: &mut Context<Self>) {
         match event {
             StoreEvent::Download(media) => {
@@ -431,9 +450,10 @@ impl Player {
                 }
             }
             StoreEvent::Session if self.store.read(cx).session() != SessionState::Active => {
-                self.stop(cx);
-                self.cancelling.clear();
+                self.forget(cx)
             }
+            // Another account: its voice messages are gone, so is what the player knew of them.
+            StoreEvent::Account => self.forget(cx),
             _ => {}
         }
     }
@@ -718,6 +738,14 @@ mod tests {
         }
     }
 
+    /// Idle at 0 after the file was opened: the length the fake measured (10 s) is kept.
+    fn idle_after_open() -> VoiceView {
+        VoiceView {
+            total: Some(SECS(10)),
+            ..VoiceView::default()
+        }
+    }
+
     /// Lets `millis` of the test clock pass and runs what became due.
     fn wait(cx: &mut TestAppContext, millis: u64) {
         cx.executor().advance_clock(Duration::from_millis(millis));
@@ -856,11 +884,7 @@ mod tests {
         let second = rig.saved(cx, "f2");
 
         rig.toggle(cx, 2, "f2");
-        assert_eq!(
-            rig.view(cx, 1),
-            VoiceView::default(),
-            "the first is idle at 0"
-        );
+        assert_eq!(rig.view(cx, 1), idle_after_open(), "the first is idle at 0");
         assert_eq!(rig.phase(cx, 2), VoicePhase::Playing);
         assert_eq!(
             rig.fake.take_calls(),
@@ -1001,6 +1025,72 @@ mod tests {
     }
 
     #[gpui::test]
+    fn the_measured_length_outlives_the_end_a_stop_and_another_message(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        let idle = |total| VoiceView {
+            phase: VoicePhase::Idle,
+            position: Duration::ZERO,
+            total,
+        };
+        assert_eq!(
+            rig.view(cx, 1),
+            idle(None),
+            "unknown until the file is opened"
+        );
+
+        rig.fake.open_returns(Ok(SECS(37)));
+        rig.playing(cx, 1, "f1");
+        rig.fake.finish();
+        wait(cx, 200);
+        assert_eq!(
+            rig.view(cx, 1),
+            idle(Some(SECS(37))),
+            "kept after the natural end"
+        );
+
+        // Loading again shows it too, and a stop keeps it; another message is not affected.
+        rig.fake.open_returns(Ok(SECS(5)));
+        rig.saved(cx, "f2");
+        rig.toggle(cx, 2, "f2");
+        assert_eq!(rig.view(cx, 2).total, Some(SECS(5)));
+        assert_eq!(rig.view(cx, 1), idle(Some(SECS(37))));
+        rig.player.update(cx, |p, cx| p.stop(cx));
+        assert_eq!(rig.view(cx, 2), idle(Some(SECS(5))));
+        assert_eq!(rig.view(cx, 3), idle(None));
+    }
+
+    #[gpui::test]
+    fn another_account_stops_the_sound_and_clears_what_the_player_knew(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.playing(cx, 1, "f1");
+        rig.apply(cx, ClientEvent::AccountSwitched);
+        assert_eq!(rig.view(cx, 1), VoiceView::default(), "idle and no length");
+        assert_eq!(rig.fake.take_calls(), [Call::Stop]);
+        let reads = rig.fake.position_reads();
+        wait(cx, 1_000);
+        assert_eq!(rig.fake.position_reads(), reads, "the timer ended");
+
+        // A load in flight, and a cancel that was never confirmed: nothing is carried over.
+        rig.toggle(cx, 2, "f2");
+        rig.toggle(cx, 2, "f2");
+        rig.toggle(cx, 2, "f2");
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Loading);
+        rig.commands();
+        rig.apply(cx, ClientEvent::AccountSwitched);
+        assert_eq!(rig.view(cx, 2), VoiceView::default());
+        rig.toggle(cx, 2, "f2");
+        assert_eq!(rig.phase(cx, 2), VoicePhase::Loading);
+        assert_eq!(
+            rig.commands(),
+            [Command::Download {
+                media: playback("f2"),
+                name: Some("v.ogg".into()),
+            }],
+            "a start after the switch asks at once, no cancel is awaited"
+        );
+    }
+
+    #[gpui::test]
     fn the_end_returns_to_idle_and_replays_from_the_start(cx: &mut TestAppContext) {
         let rig = Rig::new(cx);
         let path = rig.playing(cx, 1, "f1");
@@ -1008,7 +1098,7 @@ mod tests {
         wait(cx, 200);
         rig.fake.finish();
         wait(cx, 200);
-        assert_eq!(rig.view(cx, 1), VoiceView::default());
+        assert_eq!(rig.view(cx, 1), idle_after_open());
         assert_eq!(rig.fake.take_calls(), [Call::Stop]);
 
         let reads = rig.fake.position_reads();
@@ -1166,7 +1256,7 @@ mod tests {
         rig.fake.set_position(SECS(4));
         wait(cx, 200);
         rig.player.update(cx, |p, cx| p.stop(cx));
-        assert_eq!(rig.view(cx, 1), VoiceView::default());
+        assert_eq!(rig.view(cx, 1), idle_after_open());
         assert_eq!(rig.fake.take_calls(), [Call::Stop]);
 
         let reads = rig.fake.position_reads();
