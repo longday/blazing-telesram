@@ -1437,6 +1437,8 @@ impl Desktop {
         let empty = timeline.is_some_and(|t| t.loaded && t.messages.is_empty());
         let loading_older = timeline.is_some_and(|t| t.loading_older);
 
+        #[cfg(test)]
+        BAR_LINE.with(|shaped| shaped.borrow_mut().take());
         // Author only outside private chats; no preview yet leaves the label alone.
         let pinned_bar = summary.and_then(|c| {
             let pinned = c.pinned_message.as_ref()?;
@@ -1464,13 +1466,15 @@ impl Desktop {
                     )
                     .when_some(line, |d, text| {
                         d.child(
+                            // No `min_w_0` here: `truncate` already clips the line at the bar's width, and with
+                            // `min_w_0` taffy first measures the text at an available width of 0, which gpui
+                            // keeps for a text that does not wrap: the line then paints as a bare "…".
                             div()
                                 .debug_selector(|| "pinned-message-text".into())
-                                .min_w_0()
                                 .truncate()
                                 .text_size(px(13.))
                                 .text_color(rgb(MUTED))
-                                .child(text),
+                                .child(bar_line(text)),
                         )
                     }),
             )
@@ -1628,6 +1632,22 @@ fn connection_text(state: ConnectionState) -> Option<&'static str> {
         ConnectionState::Connecting => Some("Подключение…"),
         ConnectionState::Offline => Some("Нет сети · переподключение…"),
     }
+}
+
+/// The one text line of the pinned-message bar. In tests it also remembers gpui's layout of the line, so
+/// a test can read the text that was shaped for painting (`BAR_LINE`), not only that the line exists.
+fn bar_line(text: String) -> StyledText {
+    let line = StyledText::new(text);
+    #[cfg(test)]
+    BAR_LINE.with(|shaped| *shaped.borrow_mut() = Some(line.layout().clone()));
+    line
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The layout of the bar's line from the latest pane render that had one; cleared at the start of every render.
+    pub(crate) static BAR_LINE: std::cell::RefCell<Option<TextLayout>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The line of the pinned-message bar under its label: the author only outside private chats, then the

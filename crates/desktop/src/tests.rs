@@ -8871,6 +8871,96 @@ fn a_pin_without_a_resolved_text_shows_the_label_alone(cx: &mut TestAppContext) 
     assert!(!shown(cx, "pinned-message-text"));
 }
 
+/// What gpui shaped for the bar's line in the latest frame, the text that is painted; `None` without a line.
+fn pin_shaped_text() -> Option<String> {
+    crate::desktop::BAR_LINE.with(|line| line.borrow().as_ref().map(|line| line.text()))
+}
+
+const PIN_WINDOWS: [(f32, f32); 2] = [(1200., 1400.), (850., 560.)];
+
+/// The text of a pin that is longer than any line of the bar, at either window size.
+const PIN_LONG: &str = "очень длинный текст закреплённого сообщения, который не помещается в одну строку окна даже на большой ширине, и ещё много слов подряд, чтобы точно хватило на любую ширину окна приложения";
+
+/// Opens `kind` at `window` with a pin that has no text yet, then a `Pin` push brings the text: the live path
+/// of the 6.2 check (the message is in the cache, no `history` follows). Returns the painted text of the bar.
+fn pin_text_after_push(
+    cx: &mut TestAppContext,
+    window: (f32, f32),
+    kind: ChatKind,
+    author: Option<&str>,
+    body: &str,
+) -> String {
+    let mut summary = chat("g", kind, "Чат", Some(2));
+    summary.pinned_message = Some(PinnedMessage {
+        timestamp: ts(1),
+        preview: None,
+    });
+    let (h, cx) = pin_started(cx, summary, vec![]);
+    cx.simulate_resize(size(px(window.0), px(window.1)));
+    h.feed(cx, [chunk("g", 1..=2, true)]);
+    assert!(shown(cx, "pinned-message") && !shown(cx, "pinned-message-text"));
+    assert_eq!(pin_shaped_text(), None, "the label alone has no line");
+
+    h.feed(cx, [pin_changed("g", Some(pin_preview(1, author, body)))]);
+    assert!(shown(cx, "pinned-message-text"));
+    let (bar, line) = (
+        pin_width(cx, "pinned-message"),
+        pin_width(cx, "pinned-message-text"),
+    );
+    assert_eq!(
+        line,
+        bar - 32.,
+        "the line takes the bar's width inside its padding"
+    );
+    pin_shaped_text().expect("the line was laid out")
+}
+
+#[gpui::test]
+fn the_bar_paints_the_pinned_text_not_an_ellipsis_at_every_window_size(cx: &mut TestAppContext) {
+    for window in PIN_WINDOWS {
+        // The private chat of the live check: no author.
+        assert_eq!(
+            pin_text_after_push(cx, window, ChatKind::Private, None, "bt pin test"),
+            "bt pin test",
+            "{window:?}"
+        );
+        // The author's name leads outside private chats.
+        assert_eq!(
+            pin_text_after_push(cx, window, ChatKind::Group, Some("ALICE"), "bt pin test"),
+            "ALICE: bt pin test",
+            "{window:?}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_pinned_text_too_long_for_the_bar_still_starts_with_its_own_words(cx: &mut TestAppContext) {
+    for window in PIN_WINDOWS {
+        let shaped = pin_text_after_push(cx, window, ChatKind::Group, Some("ALICE"), PIN_LONG);
+        assert!(
+            shaped.starts_with("ALICE: очень длинный текст закреплённого"),
+            "{window:?}: {shaped}"
+        );
+    }
+}
+
+#[gpui::test]
+fn a_cached_pin_paints_its_text_on_open_and_after_a_resize(cx: &mut TestAppContext) {
+    let mut summary = chat("g", ChatKind::Group, "Команда", Some(2));
+    summary.pinned_message = Some(pin_preview(1, Some("ALICE"), "сообщение 1"));
+    let (h, cx) = pin_started(cx, summary, vec![]);
+    assert_eq!(pin_shaped_text().as_deref(), Some("ALICE: сообщение 1"));
+    for window in PIN_WINDOWS.into_iter().rev().chain(PIN_WINDOWS) {
+        cx.simulate_resize(size(px(window.0), px(window.1)));
+        h.feed(cx, [chunk("g", 1..=2, true)]);
+        assert_eq!(
+            pin_shaped_text().as_deref(),
+            Some("ALICE: сообщение 1"),
+            "{window:?}"
+        );
+    }
+}
+
 #[gpui::test]
 fn the_bar_click_scrolls_to_a_loaded_message_and_otherwise_does_nothing(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
