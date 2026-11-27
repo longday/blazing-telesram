@@ -4,14 +4,14 @@ use crate::desktop::Desktop;
 use crate::format::{
     Clock, avatar_color, clock_time, day_key, day_label, duration_label, fit_thumbnail, human_size,
 };
-use crate::player::{Player, VoiceKey, VoicePhase, VoiceView, failure_label};
-use crate::store::ChatStore;
+use crate::player::{PlayFailure, Player, VoiceKey, VoicePhase, VoiceView, failure_label};
+use crate::store::{ChatStore, DownloadState};
 use crate::theme::*;
 use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
 use crate::widgets::avatar;
 use bt_chat_core::model::{
-    ChatId, ChatKind, ConnectionState, Delivery, GalleryItem, MediaRef, Message, MessageBody,
-    MessageTs, ReplyQuote,
+    ChatId, ChatKind, ConnectionState, Delivery, DownloadFailure, GalleryItem, MediaRef, Message,
+    MessageBody, MessageTs, ReplyQuote,
 };
 use bt_chat_core::reactions::{NEUTRAL_GLYPH, ReactionCount, emoji};
 use gpui::{prelude::*, *};
@@ -34,10 +34,11 @@ const VOICE_GAP: f32 = 10.;
 const VOICE_BAR_W: f32 = 3.;
 const VOICE_BAR_PITCH: f32 = 6.;
 const VOICE_BARS_W: f32 = VOICE_BARS as f32 * VOICE_BAR_PITCH;
-/// The slot of the time label, also the room of a failure text: two short lines wrap inside it.
-const VOICE_TIME_W: f32 = 92.;
-/// Fixed width of a voice bubble's content, so it never changes size between states.
-const VOICE_W: f32 = VOICE_CIRCLE + VOICE_GAP + VOICE_BARS_W + VOICE_GAP + VOICE_TIME_W;
+/// Fixed width of a voice bubble's content (design D7), so it never changes size between states.
+const VOICE_W: f32 = 300.;
+/// The slot of the time label: what is left of the content after the circle, its gap and the bars. A
+/// failure text takes its place and wraps inside it in two short lines.
+const VOICE_TIME_W: f32 = VOICE_W - VOICE_CIRCLE - VOICE_GAP - VOICE_BARS_W;
 /// Bar height range in px; a message without a waveform shows `VOICE_BAR_FLAT` bars.
 const VOICE_BAR_MIN: f32 = 4.;
 const VOICE_BAR_MAX: f32 = 26.;
@@ -654,6 +655,27 @@ fn voice_face(view: &VoiceView, wire_ms: Option<u64>) -> VoiceFace {
     }
 }
 
+/// Offline and with no saved playback copy, play cannot work: the bubble says so before the click
+/// instead of after it. A copy that is already saved plays offline as it does online.
+fn play_unavailable(online: bool, copy_saved: bool) -> bool {
+    !online && !copy_saved
+}
+
+/// `voice_face`, except that an idle bubble whose play is unavailable shows the offline text in place
+/// of the duration. Loading, playing, paused and failed bubbles show their own state.
+fn voice_face_with(view: &VoiceView, wire_ms: Option<u64>, unavailable: bool) -> VoiceFace {
+    if unavailable && view.phase == VoicePhase::Idle {
+        let offline = PlayFailure::Download(DownloadFailure::Offline);
+        return VoiceFace {
+            glyph: "▶",
+            label: failure_label(offline).to_owned(),
+            failed: true,
+            lit: 0,
+        };
+    }
+    voice_face(view, wire_ms)
+}
+
 /// The total the bubble shows: the length the message carries until the file is open, then the file's
 /// own length, except that a difference of up to a second keeps the first figure so the label does not
 /// flicker when the file opens (design D6).
@@ -704,11 +726,18 @@ fn bar_heights(waveform: Option<&[u8]>) -> [f32; VOICE_BARS] {
     })
 }
 
+/// Only a message the server has gets a player: a voice message still in the outbox (or refused) has
+/// no file to fetch, so its bubble is inert (design D7).
+fn voice_has_player(m: &Message) -> bool {
+    matches!(m.body, MessageBody::Voice { .. }) && m.delivery == Delivery::Sent
+}
+
 /// The voice bubble of design D7: a circle that plays and pauses, the waveform with the played part
 /// lit, the time (or the failure text), and below it the Download action row of the original. Every
 /// slot has a fixed size, so the bubble is the same size in every state. Debug selectors:
 /// `msg-{ts}-voice` (the bubble), `-voice-toggle` (the circle), `-voice-bars`, `-voice-time`, and the
-/// action row's own. The circle's element id is `voice-toggle-{ts}`.
+/// action row's own. The circle's element id is `voice-toggle-{ts}`. Without `voice_has_player` the
+/// circle is dimmed, does nothing, and the action row is left out.
 fn voice_bubble(
     ctx: &RowContext,
     store: &ChatStore,
@@ -718,13 +747,24 @@ fn voice_bubble(
 ) -> Div {
     let (media, duration_ms, name, waveform) = voice;
     let ts = m.timestamp;
+    let playable = voice_has_player(m);
     let key = VoiceKey {
         chat: ctx.chat.clone(),
         timestamp: ts,
     };
-    let face = voice_face(&ctx.player.read(cx).voice(&key), duration_ms);
     let original = media.original();
     let online = store.connection() == ConnectionState::Online;
+    let copy_saved = matches!(
+        store.download_state(&original.playback()),
+        Some(DownloadState::Saved(_))
+    );
+    let unavailable = playable && play_unavailable(online, copy_saved);
+    let view = if playable {
+        ctx.player.read(cx).voice(&key)
+    } else {
+        VoiceView::default()
+    };
+    let face = voice_face_with(&view, duration_ms, unavailable);
     let line = action_line(store.download_state(&original), online);
     let toggle = {
         let (player, original, name) = (
@@ -760,21 +800,26 @@ fn voice_bubble(
                 .h(px(VOICE_CIRCLE))
                 .flex()
                 .items_center()
-                .gap(px(VOICE_GAP))
                 .child(
                     div()
                         .id(SharedString::from(format!("voice-toggle-{ts}")))
                         .debug_selector(move || format!("msg-{ts}-voice-toggle"))
                         .size(px(VOICE_CIRCLE))
+                        .mr(px(VOICE_GAP))
                         .flex_none()
                         .rounded_full()
-                        .bg(rgb(BADGE))
+                        .bg(rgb(if playable && !unavailable {
+                            BADGE
+                        } else {
+                            BADGE_MUTED
+                        }))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_size(px(16.))
-                        .cursor_pointer()
-                        .on_click(toggle)
+                        .when(playable && !unavailable, |d| {
+                            d.cursor_pointer().on_click(toggle)
+                        })
                         .child(face.glyph),
                 )
                 .child(
@@ -797,18 +842,20 @@ fn voice_bubble(
                         .overflow_hidden()
                         .flex()
                         .items_center()
-                        .text_size(px(if face.failed { 11. } else { 12. }))
+                        .text_size(px(if face.failed { 10. } else { 12. }))
                         .text_color(rgb(MUTED))
                         .child(div().max_w(px(VOICE_TIME_W)).child(face.label)),
                 ),
         )
-        .child(action_row(
-            ctx,
-            ts,
-            original,
-            name.unwrap_or(VOICE_NAME),
-            line,
-        ))
+        .when(playable, |d| {
+            d.child(action_row(
+                ctx,
+                ts,
+                original,
+                name.unwrap_or(VOICE_NAME),
+                line,
+            ))
+        })
 }
 
 /// Status text and the button of a file card. The row has one height in every state, so the message
@@ -887,11 +934,15 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
 mod tests {
     use super::{
         CONTENT_W, VOICE_BAR_FLAT, VOICE_BAR_MAX, VOICE_BAR_MIN, VOICE_BARS, VOICE_BARS_W,
-        VOICE_CIRCLE, VOICE_W, VoiceFace, WAVEFORM_MAX_LEVEL, bar_heights, lit_bars,
-        resample_waveform, shown_total_ms, shows_important_marker, voice_face,
+        VOICE_CIRCLE, VOICE_GAP, VOICE_TIME_W, VOICE_W, VoiceFace, WAVEFORM_MAX_LEVEL, bar_heights,
+        lit_bars, play_unavailable, resample_waveform, shown_total_ms, shows_important_marker,
+        voice_face, voice_face_with, voice_has_player,
     };
     use crate::player::{PlayFailure, VoicePhase, VoiceView};
-    use bt_chat_core::model::{ChatId, Delivery, DownloadFailure, Message, MessageBody, UserId};
+    use bt_chat_core::model::{
+        ChatId, Delivery, DownloadFailure, MediaKind, MediaRef, Message, MessageBody, PayloadId,
+        UserId,
+    };
     use std::time::Duration;
 
     fn message(body: MessageBody, important: bool) -> Message {
@@ -1003,11 +1054,47 @@ mod tests {
     }
 
     #[test]
-    fn the_bubble_geometry_adds_up_to_its_fixed_width() {
-        assert_eq!(VOICE_W, 320.);
+    fn the_bubble_geometry_is_the_300_px_of_the_design() {
+        assert_eq!(VOICE_W, 300.);
         assert_eq!(VOICE_BARS_W, 168.);
+        // The circle, its 10 px gap, the 28 bars and the time slot fill the content exactly.
+        assert_eq!(
+            VOICE_CIRCLE + VOICE_GAP + VOICE_BARS_W + VOICE_TIME_W,
+            VOICE_W
+        );
+        assert_eq!(VOICE_GAP, 10.);
+        const { assert!(VOICE_TIME_W > 0.) };
         const { assert!(VOICE_W <= CONTENT_W) };
         const { assert!(VOICE_BAR_MAX <= VOICE_CIRCLE) };
+    }
+
+    #[test]
+    fn only_a_sent_voice_message_gets_a_player() {
+        let voice = || MessageBody::Voice {
+            media: MediaRef {
+                id: "b/1".into(),
+                kind: MediaKind::File,
+            },
+            duration_ms: Some(5_000),
+            size: 9,
+            name: None,
+            waveform: None,
+        };
+        let mut m = message(voice(), false);
+        assert!(voice_has_player(&m));
+        m.delivery = Delivery::Pending(PayloadId("p".into()));
+        assert!(!voice_has_player(&m));
+        m.delivery = Delivery::Failed {
+            payload: PayloadId("p".into()),
+            reason: "no".into(),
+        };
+        assert!(!voice_has_player(&m));
+        // A deleted body is not a voice body, so it never has one either.
+        assert!(!voice_has_player(&message(MessageBody::Deleted, false)));
+        assert!(!voice_has_player(&message(
+            MessageBody::Text("hi".into()),
+            false
+        )));
     }
 
     #[test]
@@ -1087,6 +1174,37 @@ mod tests {
             assert_eq!(
                 (face.glyph, face.label.as_str(), face.failed, face.lit),
                 ("▶", text, true, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn play_is_unavailable_only_offline_without_a_saved_copy() {
+        assert!(play_unavailable(false, false));
+        assert!(!play_unavailable(false, true));
+        assert!(!play_unavailable(true, false));
+        assert!(!play_unavailable(true, true));
+    }
+
+    #[test]
+    fn an_idle_bubble_says_offline_before_the_click_when_play_is_unavailable() {
+        let idle = view(VoicePhase::Idle, 0, None);
+        let face = voice_face_with(&idle, Some(14_000), true);
+        assert_eq!(
+            (face.glyph, face.label.as_str(), face.failed, face.lit),
+            ("▶", "Нет сети", true, 0)
+        );
+        // Available: the duration, exactly as `voice_face`.
+        assert_eq!(
+            voice_face_with(&idle, Some(14_000), false),
+            voice_face(&idle, Some(14_000))
+        );
+        // A bubble that is playing or paused (it has its copy) keeps its own state.
+        for phase in [VoicePhase::Playing, VoicePhase::Paused, VoicePhase::Loading] {
+            let state = view(phase, 3_000, Some(14_000));
+            assert_eq!(
+                voice_face_with(&state, Some(14_000), true),
+                voice_face(&state, Some(14_000))
             );
         }
     }
