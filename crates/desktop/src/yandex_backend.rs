@@ -2150,6 +2150,7 @@ mod tests {
                 WireBody::Voice {
                     file: file(None),
                     duration: Some(2),
+                    waveform: None,
                 },
                 "[Голосовое сообщение]",
             ),
