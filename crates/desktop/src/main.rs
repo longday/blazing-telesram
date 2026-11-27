@@ -5,6 +5,7 @@ mod input;
 mod logging;
 mod login;
 mod new_chat;
+mod player;
 mod profile;
 mod reactors;
 mod search_results;
