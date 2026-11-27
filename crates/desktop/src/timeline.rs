@@ -661,6 +661,16 @@ fn play_unavailable(online: bool, copy_saved: bool) -> bool {
     !online && !copy_saved
 }
 
+/// Whether the circle reacts to a click. Offline without a copy only a start (from `Idle` or `Failed`)
+/// is unavailable; the cancel of a load that began before the connection dropped, and pause and resume,
+/// always work. Pure, so the mapping is testable without a window.
+fn circle_enabled(phase: VoicePhase, unavailable: bool) -> bool {
+    match phase {
+        VoicePhase::Idle | VoicePhase::Failed(_) => !unavailable,
+        VoicePhase::Loading | VoicePhase::Playing | VoicePhase::Paused => true,
+    }
+}
+
 /// `voice_face`, except that an idle bubble whose play is unavailable shows the offline text in place
 /// of the duration. Loading, playing, paused and failed bubbles show their own state.
 fn voice_face_with(view: &VoiceView, wire_ms: Option<u64>, unavailable: bool) -> VoiceFace {
@@ -765,6 +775,7 @@ fn voice_bubble(
         VoiceView::default()
     };
     let face = voice_face_with(&view, duration_ms, unavailable);
+    let enabled = playable && circle_enabled(view.phase, unavailable);
     let line = action_line(store.download_state(&original), online);
     let toggle = {
         let (player, original, name) = (
@@ -808,18 +819,12 @@ fn voice_bubble(
                         .mr(px(VOICE_GAP))
                         .flex_none()
                         .rounded_full()
-                        .bg(rgb(if playable && !unavailable {
-                            BADGE
-                        } else {
-                            BADGE_MUTED
-                        }))
+                        .bg(rgb(if enabled { BADGE } else { BADGE_MUTED }))
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_size(px(16.))
-                        .when(playable && !unavailable, |d| {
-                            d.cursor_pointer().on_click(toggle)
-                        })
+                        .when(enabled, |d| d.cursor_pointer().on_click(toggle))
                         .child(face.glyph),
                 )
                 .child(
@@ -935,8 +940,8 @@ mod tests {
     use super::{
         CONTENT_W, VOICE_BAR_FLAT, VOICE_BAR_MAX, VOICE_BAR_MIN, VOICE_BARS, VOICE_BARS_W,
         VOICE_CIRCLE, VOICE_GAP, VOICE_TIME_W, VOICE_W, VoiceFace, WAVEFORM_MAX_LEVEL, bar_heights,
-        lit_bars, play_unavailable, resample_waveform, shown_total_ms, shows_important_marker,
-        voice_face, voice_face_with, voice_has_player,
+        circle_enabled, lit_bars, play_unavailable, resample_waveform, shown_total_ms,
+        shows_important_marker, voice_face, voice_face_with, voice_has_player,
     };
     use crate::player::{PlayFailure, VoicePhase, VoiceView};
     use bt_chat_core::model::{
@@ -1184,6 +1189,19 @@ mod tests {
         assert!(!play_unavailable(false, true));
         assert!(!play_unavailable(true, false));
         assert!(!play_unavailable(true, true));
+    }
+
+    #[test]
+    fn offline_without_a_copy_blocks_only_starting_not_cancel_pause_or_resume() {
+        let failed = VoicePhase::Failed(PlayFailure::Unsupported);
+        for phase in [VoicePhase::Idle, failed] {
+            assert!(!circle_enabled(phase, true));
+            assert!(circle_enabled(phase, false));
+        }
+        for phase in [VoicePhase::Loading, VoicePhase::Playing, VoicePhase::Paused] {
+            assert!(circle_enabled(phase, true), "{phase:?} offline");
+            assert!(circle_enabled(phase, false), "{phase:?} online");
+        }
     }
 
     #[test]
