@@ -9,7 +9,7 @@ Voice messages and videos already arrive in history, and the client cannot use t
 ## What Changes
 
 - **Voice messages become a player in the bubble**, as the mockup draws it (`docs/mockups/1-main.svg`): a round play/pause control, a waveform-style progress track, the time. Playback starts only on a click; the audio is fetched at that click, never before; one voice message plays at a time; it stops on leaving the chat, on sign-out and when the message disappears. Duration is shown from history; progress follows the position.
-- **Video attachments** (a `MiscFile` that carries a video preview hint and has a recognised video extension) get a video card with a play control, the duration and the size. Play fetches a **playback copy** with visible progress and cancel, then hands it to the **system player** (QuickTime or the user's default) through `gpui`'s `open_with_system`. The client does not decode or draw video itself (alternatives recorded in `design.md` D8).
+- **Video attachments** (a `MiscFile` whose name has a recognised video extension, `mp4` or `mov`; the server's video preview hint is optional and only supplies the duration) get a video card with a play control, the duration when known and the size. Play fetches a **playback copy** with visible progress and cancel, then hands it to the **system player** (QuickTime or the user's default) through `gpui`'s `open_with_system`. The client does not decode or draw video itself (alternatives recorded in `design.md` D8).
 - **A playback copy** is a separate local file in the account's media area (never the Downloads folder), fetched through the existing download transfer machinery under a new media kind `Playback`, removed at app start and at sign-out. It is not a download: no «Сохранено», no «Показать в Finder».
 - **Voice and video keep the normal Download action** (`attachment-download`): the same one-line action row as a file card under the player, so the user can still save the original. Play and Download are independent.
 - `yandex-proto`: decode the voice waveform and the video preview hint; new media targets for the playback URL; `bt-probe download` accepts voice and video messages (needed by the research tasks).
@@ -30,12 +30,12 @@ Voice messages and videos already arrive in history, and the client cannot use t
 
 ## Impact
 
-- `crates/yandex-proto`: `wire.rs` (`WireBody::Voice.waveform`, new `WireBody::Video`), `media.rs` (`MediaTarget::Playback`; `VideoStream` only if research keeps it), `bin/bt-probe.rs` (`download` for voice/video, `--url`), `tests/wire_fixtures.rs` and fixtures (sanitised live captures).
+- `crates/yandex-proto`: `wire.rs` (`WireBody::Voice.waveform`, new `WireBody::Video`), `media.rs` (`MediaTarget::Playback`; `VideoStream` is deleted in task 1.2, research R2 showed it is an HLS manifest), `bin/bt-probe.rs` (`download` for voice/video, `--url`), `tests/wire_fixtures.rs` and fixtures (sanitised live captures).
 - `crates/chat-core`: `model.rs` (`MediaKind::Playback`, `MediaRef::playback`, `MessageBody::{Voice, Video}`, `preview_text`), `client.rs` (playback destination, slots, wipe at start), `cache.rs` (`kind_name` arm only), `fixtures.rs`.
 - `crates/desktop`: new `player.rs` (trait, state machine, fake for tests, `Player` entity), new `audio.rs` (the real backend), `yandex_backend.rs` (mapping, `download_target`), `store.rs` (`want_media` ignores `Playback`), `timeline.rs` (bubble, card), `desktop.rs` (owns the `Player`, stops it on chat switch and deletion), `main.rs` (backend registration, the `open_with_system` call), `format.rs`, `theme.rs` (only if a colour is missing), `tests.rs`, `Cargo.toml`/`Cargo.lock`.
-- New dependency: one audio crate set (the default is `objc2-avf-audio` with `objc2-foundation` features at versions compatible with the pinned `objc2 =0.6.5`); its licence is checked by research task R5 and recorded in `THIRD_PARTY.md` only if it needs a note. The icons are text glyphs, no Telegram graphics, so the `openspec/config.yaml` relicense-to-GPL trigger (Telegram Desktop graphics) is not hit; that trigger is unrelated to the licence of an audio crate.
+- New dependency: one crate, `objc2-avf-audio =0.3.2` (the `AVAudioFile` + `AVAudioEngine` + `AVAudioPlayerNode` path, chosen in `design.md` D5 after research R4/R5; `objc2`, `objc2-foundation` and `block2` are already in the tree); its licence (Zlib OR Apache-2.0 OR MIT) needs no `THIRD_PARTY.md` note. The icons are text glyphs, no Telegram graphics, so the `openspec/config.yaml` relicense-to-GPL trigger (Telegram Desktop graphics) is not hit; that trigger is unrelated to the licence of an audio crate.
 - Coordination: `DEPENDENCIES.md` rule 1; this change touches `store.rs`, `timeline.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `yandex_backend.rs`, `client.rs`, `model.rs`, `wire.rs`, `bt-probe.rs` like the other open changes; no unmerged task holds them at the time of writing (CM and PIN have only live tasks left), the order is in `tasks.md`.
-- Risks: the protocol is unofficial and the audio format and the duration unit are unobserved (research); audio output cannot be heard in the VM (a limit of the hand check); a playback copy of a large video occupies disk until the next start (accepted, D3); the system player is outside the app's control (D8).
+- Risks: the protocol is unofficial (the research results are the record of what was observed); audio output cannot be heard in the VM (a limit of the hand check); only one account's voice messages were observed (all Ogg Opus); a playback copy of a large video occupies disk until the next start (accepted, D3); the system player is outside the app's control (D8).
 
 ## Non-goals
 
@@ -48,7 +48,7 @@ Voice messages and videos already arrive in history, and the client cannot use t
 
 ## Open questions
 
-None needs the user. What is unknown is unknown about the server and the platform, and research tasks R1-R6 answer it read-only; every one has a stated default in `research.md` ("What each unknown decides") and a decision rule in `design.md`.
+None needs the user. The research tasks R1-R7 are done and closed (task 0.8): their answers are in `research.md` and written into `design.md` D2, D4, D5 and D8.
 
 ## Decisions taken without asking
 

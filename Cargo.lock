@@ -669,12 +669,15 @@ name = "blazing-telesram"
 version = "0.1.0"
 dependencies = [
  "async-channel 2.5.0",
+ "block2",
  "bt-chat-core",
  "cookie",
  "futures",
  "gpui",
  "objc2",
  "objc2-app-kit",
+ "objc2-avf-audio",
+ "objc2-foundation",
  "serde_json",
  "tempfile",
  "tokio",
@@ -4292,6 +4295,18 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "objc2-quartz-core",
+]
+
+[[package]]
+name = "objc2-avf-audio"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
+dependencies = [
+ "bitflags 2.13.2",
+ "block2",
+ "objc2",
+ "objc2-foundation",
 ]
 
 [[package]]
@@ -8549,6 +8564,7 @@ checksum = "7a5a4b21e1a62b67a2970e6831bc091d7b87e119e7f9791aef9702e3bef04448"
 name = "yandex-proto"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "futures",
  "reqwest",
  "rmpv",

@@ -89,6 +89,7 @@ pub(crate) fn kind_name(kind: MediaKind) -> &'static str {
         MediaKind::Avatar => "avatar",
         MediaKind::Thumbnail => "thumbnail",
         MediaKind::File => "file",
+        MediaKind::Playback => "playback",
     }
 }
 

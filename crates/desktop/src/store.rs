@@ -89,7 +89,8 @@ pub enum TimelineChange {
     Status,
 }
 
-/// Where a download of an original stands, keyed by the original's `MediaRef` (kind `File`).
+/// Where a download stands, keyed by the `MediaRef` of the original (kind `File`) or of its private
+/// playback copy (kind `Playback`); the two are independent entries.
 /// No entry means "not started" (or cancelled).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DownloadState {
@@ -250,6 +251,9 @@ pub enum StoreEvent {
     Reveal(PathBuf),
     Connection,
     Session,
+    /// The account behind the session changed; `forget_account` ran. Whatever played for the
+    /// previous account must stop.
+    Account,
     /// The persisted drafts arrived.
     Drafts,
     /// An edit or deletion did not happen.
@@ -367,6 +371,30 @@ impl ChatStore {
         }
     }
 
+    /// Drops everything held of the account that was shown: the chat list, timelines, files,
+    /// transfers and every open read.
+    fn forget_account(&mut self) {
+        self.chats.clear();
+        self.chats_loaded = false;
+        self.selected = None;
+        self.timelines.clear();
+        self.media.clear();
+        self.media_requested.clear();
+        self.downloads.clear();
+        self.search = None;
+        self.members.clear();
+        self.members_stale.clear();
+        self.profile = None;
+        self.profile_stale = false;
+        self.reactors = None;
+        self.cancel_refresh();
+        self.creation = None;
+        self.creating = None;
+        self.pending_open = None;
+        self.drafts.clear();
+        self.typing.clear();
+    }
+
     pub fn apply(&mut self, event: ClientEvent, cx: &mut Context<Self>) {
         match event {
             ClientEvent::ChatsReplaced(chats) => {
@@ -442,27 +470,13 @@ impl ChatStore {
                 cx.emit(StoreEvent::Session);
             }
             ClientEvent::SignedOut => {
-                self.chats.clear();
-                self.chats_loaded = false;
-                self.selected = None;
-                self.timelines.clear();
-                self.media.clear();
-                self.media_requested.clear();
-                self.downloads.clear();
-                self.search = None;
-                self.members.clear();
-                self.members_stale.clear();
-                self.profile = None;
-                self.profile_stale = false;
-                self.reactors = None;
-                self.cancel_refresh();
-                self.creation = None;
-                self.creating = None;
-                self.pending_open = None;
-                self.drafts.clear();
-                self.typing.clear();
+                self.forget_account();
                 self.session = SessionState::SignedOut;
                 cx.emit(StoreEvent::Session);
+            }
+            ClientEvent::AccountSwitched => {
+                self.forget_account();
+                cx.emit(StoreEvent::Account);
             }
             ClientEvent::Drafts(drafts) => {
                 self.drafts = drafts.into_iter().map(|d| (d.chat.clone(), d)).collect();
@@ -765,7 +779,7 @@ impl ChatStore {
         self.media.get(media).map(PathBuf::as_path)
     }
 
-    /// Starts saving the original `original` (kind `File`) under `name`. The card shows `Running` at once;
+    /// Starts saving `original` (kind `File`, or `Playback` for the private copy) under `name`. The card shows `Running` at once;
     /// when the connection is not online nothing is sent and the state is `Failed(Offline)`. A download
     /// already running for the same file is not started twice.
     pub fn download(&mut self, original: MediaRef, name: Option<String>, cx: &mut Context<Self>) {
@@ -1422,10 +1436,13 @@ impl ChatStore {
         let _ = self.commands.try_send(command);
     }
 
-    /// Asks the core for avatars and image thumbnails once each. Files are never downloaded.
+    /// Asks the core for avatars and image thumbnails once each. Files and playback copies are never
+    /// downloaded here.
     fn want_media(&mut self, media: Option<&MediaRef>) {
         let Some(media) = media else { return };
-        if media.kind == MediaKind::File || self.media.contains_key(media) {
+        if matches!(media.kind, MediaKind::File | MediaKind::Playback)
+            || self.media.contains_key(media)
+        {
             return;
         }
         if self.media_requested.insert(media.clone()) {
@@ -4559,6 +4576,186 @@ mod tests {
                 None,
                 "a list without the pin removes it"
             );
+        }
+    }
+
+    mod media {
+        use super::*;
+        use gpui::{AppContext, Entity, TestAppContext};
+
+        struct Rig {
+            store: Entity<ChatStore>,
+            _client: Sender<ClientEvent>,
+            commands: Receiver<Command>,
+        }
+
+        impl Rig {
+            /// Chat `c` is open and its history empty; the commands of the setup are drained.
+            fn new(cx: &mut TestAppContext) -> Self {
+                let (client, event_rx) = async_channel::unbounded();
+                let (command_tx, commands) = async_channel::unbounded();
+                let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+                let rig = Self {
+                    store,
+                    _client: client,
+                    commands,
+                };
+                rig.apply(cx, ClientEvent::Connection(ConnectionState::Online));
+                rig.store.update(cx, |s, cx| s.select(chat(), cx));
+                rig.commands();
+                rig
+            }
+
+            fn apply(&self, cx: &mut TestAppContext, event: ClientEvent) {
+                self.store.update(cx, |s, cx| s.apply(event, cx));
+            }
+
+            fn history(&self, cx: &mut TestAppContext, messages: Vec<Message>) {
+                self.apply(
+                    cx,
+                    ClientEvent::History(HistoryChunk {
+                        chat: chat(),
+                        messages,
+                        reached_start: true,
+                        replaces: None,
+                        payloads: vec![],
+                    }),
+                );
+            }
+
+            fn commands(&self) -> Vec<Command> {
+                std::iter::from_fn(|| self.commands.try_recv().ok()).collect()
+            }
+        }
+
+        fn chat() -> ChatId {
+            ChatId("c".into())
+        }
+
+        fn media(id: &str, kind: MediaKind) -> MediaRef {
+            MediaRef {
+                id: id.into(),
+                kind,
+            }
+        }
+
+        fn message(ts: i64, body: MessageBody) -> Message {
+            Message {
+                chat: chat(),
+                timestamp: ts,
+                author: UserId("u".into()),
+                author_name: None,
+                author_avatar: None,
+                outgoing: false,
+                body,
+                edited: false,
+                reply_to: None,
+                forwarded_from: None,
+                delivery: Delivery::Sent,
+                reactions: Default::default(),
+                important: false,
+            }
+        }
+
+        fn voice(ts: i64, id: &str) -> Message {
+            message(
+                ts,
+                MessageBody::Voice {
+                    media: media(id, MediaKind::File),
+                    duration_ms: Some(5_000),
+                    size: 9,
+                    name: None,
+                    waveform: Some(vec![1, 2, 3]),
+                },
+            )
+        }
+
+        #[gpui::test]
+        fn a_voice_message_requests_nothing_however_often_its_history_arrives(
+            cx: &mut TestAppContext,
+        ) {
+            let rig = Rig::new(cx);
+            rig.history(cx, vec![voice(1, "v1"), voice(2, "v2")]);
+            rig.history(cx, vec![voice(1, "v1"), voice(2, "v2")]);
+            assert_eq!(
+                rig.commands(),
+                [],
+                "no preview, no original, no playback copy"
+            );
+        }
+
+        #[gpui::test]
+        fn a_playback_ref_is_never_fetched_but_a_thumbnail_still_is(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            let playback = media("v1", MediaKind::File).playback();
+            let thumbnail = media("i1", MediaKind::Thumbnail);
+
+            rig.store.update(cx, |s, _| {
+                s.want_media(Some(&playback));
+                s.want_media(Some(&media("v1", MediaKind::File)));
+                s.want_media(Some(&thumbnail));
+                s.want_media(Some(&thumbnail));
+            });
+            assert_eq!(rig.commands(), [Command::FetchMedia(thumbnail)]);
+            assert!(
+                rig.store
+                    .read_with(cx, |s, _| !s.media_requested.contains(&playback))
+            );
+        }
+
+        #[gpui::test]
+        fn a_playback_download_is_its_own_entry_and_signing_out_clears_it(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            let original = media("v1", MediaKind::File);
+            let playback = original.playback();
+
+            rig.store.update(cx, |s, cx| {
+                s.download(playback.clone(), Some("a.ogg".into()), cx)
+            });
+            assert_eq!(
+                rig.commands(),
+                [Command::Download {
+                    media: playback.clone(),
+                    name: Some("a.ogg".into())
+                }]
+            );
+            rig.store.read_with(cx, |s, _| {
+                assert!(matches!(
+                    s.download_state(&playback),
+                    Some(DownloadState::Running { .. })
+                ));
+                assert_eq!(s.download_state(&original), None);
+            });
+
+            rig.apply(cx, ClientEvent::SignedOut);
+            rig.store
+                .read_with(cx, |s, _| assert_eq!(s.download_state(&playback), None));
+        }
+
+        #[gpui::test]
+        fn another_account_voids_the_old_ones_state_and_keeps_the_session(cx: &mut TestAppContext) {
+            let rig = Rig::new(cx);
+            let playback = media("v1", MediaKind::File).playback();
+            rig.history(cx, vec![message(1, MessageBody::Text("a".into()))]);
+            rig.store
+                .update(cx, |s, cx| s.download(playback.clone(), None, cx));
+            rig.store.read_with(cx, |s, _| {
+                assert_eq!(s.selected(), Some(&chat()));
+                assert!(s.timeline(&chat()).is_some());
+            });
+
+            rig.apply(cx, ClientEvent::AccountSwitched);
+            rig.store.read_with(cx, |s, _| {
+                assert_eq!(
+                    s.selected(),
+                    None,
+                    "a same-id chat of the new account is a new open"
+                );
+                assert!(s.timeline(&chat()).is_none());
+                assert_eq!(s.download_state(&playback), None);
+                assert_eq!(s.session(), SessionState::Active);
+                assert_eq!(s.connection(), ConnectionState::Online);
+            });
         }
     }
 }

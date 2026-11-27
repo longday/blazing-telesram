@@ -1,3 +1,4 @@
+mod audio;
 mod desktop;
 mod format;
 mod info_panel;
@@ -5,6 +6,7 @@ mod input;
 mod logging;
 mod login;
 mod new_chat;
+mod player;
 mod profile;
 mod reactors;
 mod search_results;
@@ -52,6 +54,8 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.set_global(log);
         cx.set_global(WriteOnly(write_only));
+        // Before any window: the player reads it when the first voice message is clicked.
+        cx.set_global(player::AudioFactory(audio::output));
         input::bind(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-f", Search, Some("BlazingTelesram")),

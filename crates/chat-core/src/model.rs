@@ -28,6 +28,8 @@ pub enum MediaKind {
     Avatar,
     Thumbnail,
     File,
+    /// A playback copy of an original; `MediaRef.id` is the original's id.
+    Playback,
 }
 
 /// Remote media reference; the client downloads it into the runtime cache on demand.
@@ -44,6 +46,15 @@ impl MediaRef {
         MediaRef {
             id: self.id.clone(),
             kind: MediaKind::File,
+        }
+    }
+
+    /// The handle of a private playback copy of the original: same id, kind `Playback`.
+    /// Played from a file in the playback directory, never saved to Downloads.
+    pub fn playback(&self) -> MediaRef {
+        MediaRef {
+            id: self.id.clone(),
+            kind: MediaKind::Playback,
         }
     }
 }
@@ -228,6 +239,18 @@ pub enum MessageBody {
         name: String,
         size: u64,
     },
+    /// A voice message. `media` is the original (kind `File`); `duration_ms` is `None` when
+    /// the server sent none, `waveform` holds one byte per bar when it sent one.
+    Voice {
+        media: MediaRef,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        size: u64,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        waveform: Option<Vec<u8>>,
+    },
     Deleted,
     /// A message type this client cannot render yet; holds the server type name.
     Unsupported(String),
@@ -264,6 +287,7 @@ impl MessageBody {
                 caption.clone().unwrap_or_else(|| "Фото".into())
             }
             MessageBody::File { name, .. } => name.clone(),
+            MessageBody::Voice { .. } => "Голосовое сообщение".into(),
             MessageBody::Deleted => "Сообщение удалено".into(),
             MessageBody::Unsupported(kind) => format!("[{kind}]"),
         }
@@ -424,6 +448,10 @@ pub enum ClientEvent {
     Connection(ConnectionState),
     SessionExpired,
     SignedOut,
+    /// The server reported another account than the stored session claimed. Everything the UI
+    /// holds of the previous account (chats, timelines, files, running transfers) is void; the
+    /// chat list of the new account and its drafts follow.
+    AccountSwitched,
     /// Persisted drafts, once at startup.
     Drafts(Vec<Draft>),
     /// The pending message `payload` was settled; drop it before the server copy arrives as
@@ -680,6 +708,22 @@ mod tests {
     }
 
     #[test]
+    fn playback_keeps_the_id_and_switches_to_the_playback_kind() {
+        let original = thumb("b/1").original();
+        let playback = original.playback();
+        assert_eq!(
+            playback,
+            MediaRef {
+                id: "b/1".into(),
+                kind: MediaKind::Playback
+            }
+        );
+        assert_ne!(playback, original);
+        assert_eq!(playback.original(), original);
+        assert!(voice().gallery_items().is_empty());
+    }
+
+    #[test]
     fn gallery_items_lists_the_pictures_of_a_body_in_order() {
         assert_eq!(image().gallery_items(), [item("b/1", Some("a.jpg"))]);
         let gallery = MessageBody::Gallery {
@@ -719,6 +763,48 @@ mod tests {
             panic!("image")
         };
         assert_eq!((name, width), (None, 4));
+    }
+
+    fn voice() -> MessageBody {
+        MessageBody::Voice {
+            media: thumb("b/4").original(),
+            duration_ms: Some(12_000),
+            size: 4_000,
+            name: Some("v.ogg".into()),
+            waveform: Some(vec![0, 7, 255]),
+        }
+    }
+
+    #[test]
+    fn a_voice_survives_a_json_round_trip() {
+        let bare = MessageBody::Voice {
+            media: thumb("b/4").original(),
+            duration_ms: None,
+            size: 0,
+            name: None,
+            waveform: None,
+        };
+        for body in [voice(), bare] {
+            let json = serde_json::to_string(&body).unwrap();
+            assert_eq!(serde_json::from_str::<MessageBody>(&json).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn a_voice_without_the_optional_fields_still_decodes() {
+        let old = r#"{"Voice":{"media":{"id":"b/4","kind":"File"},"size":9}}"#;
+        let MessageBody::Voice {
+            media,
+            duration_ms,
+            size,
+            name,
+            waveform,
+        } = serde_json::from_str(old).unwrap()
+        else {
+            panic!("voice")
+        };
+        assert_eq!(media, thumb("b/4").original());
+        assert_eq!((duration_ms, size, name, waveform), (None, 9, None, None));
     }
 
     #[test]
@@ -829,6 +915,14 @@ mod tests {
             MessageBody::Unsupported("Poll".into()).preview_text(),
             "[Poll]"
         );
+        let voice = MessageBody::Voice {
+            media: media().original(),
+            duration_ms: Some(5_000),
+            size: 4_000,
+            name: Some("voice.ogg".into()),
+            waveform: None,
+        };
+        assert_eq!(voice.preview_text(), "Голосовое сообщение");
     }
 
     #[test]

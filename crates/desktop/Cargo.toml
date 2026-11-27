@@ -6,6 +6,7 @@ license = "MIT AND Apache-2.0"
 
 [dependencies]
 async-channel = "=2.5.0"
+block2 = "=0.6.2"
 bt-chat-core = { path = "../chat-core" }
 cookie = "=0.18.2"
 # Compile Metal shaders at runtime: building them ahead of time needs full Xcode.
@@ -13,6 +14,9 @@ gpui = { version = "=0.2.2", features = ["runtime_shaders"] }
 objc2 = "=0.6.5"
 # gpui 0.2.2 exposes only full display bounds; the initial window must fit the area left by the menu bar and Dock.
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSResponder", "NSScreen", "NSWindow", "objc2-core-foundation"] }
+# Voice playback (src/audio.rs): AVAudioFile + AVAudioEngine + AVAudioPlayerNode; AVAudioPlayer fails on web-recorded Ogg Opus.
+objc2-avf-audio = { version = "=0.3.2", default-features = false, features = ["std", "block2", "AVAudioEngine", "AVAudioFile", "AVAudioFormat", "AVAudioMixerNode", "AVAudioNode", "AVAudioPlayerNode", "AVAudioTime", "AVAudioTypes"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSURL"] }
 tokio = { version = "=1.54.1", features = ["rt", "time", "sync"] }
 unicode-segmentation = "=1.13.3"
 tracing = "=0.1.44"

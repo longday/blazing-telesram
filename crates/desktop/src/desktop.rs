@@ -7,6 +7,7 @@ use crate::info_panel;
 use crate::input::{InputEvent, TextInput};
 use crate::logging::{LogBuffer, LogLine};
 use crate::new_chat::{self, Mode, NewChat};
+use crate::player::Player;
 use crate::profile;
 use crate::reactors;
 use crate::search_results::{self, SearchView, StatusLine};
@@ -19,8 +20,8 @@ use crate::timeline::{self, RowBounds, RowContext};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
 use bt_chat_core::model::{
-    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessagePreview,
-    MessageTs, UserId,
+    ChatId, ChatKind, ChatSummary, ConnectionState, Delivery, GalleryItem, MessageBody,
+    MessagePreview, MessageTs, UserId,
 };
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
@@ -93,6 +94,7 @@ fn search_query(content: &str) -> Option<&str> {
 
 pub struct Desktop {
     pub(crate) store: Entity<ChatStore>,
+    pub(crate) player: Entity<Player>,
     clock: Clock,
     pub(crate) search: Entity<TextInput>,
     search_input: SearchInput,
@@ -128,6 +130,7 @@ impl Desktop {
     ) -> Self {
         let search = cx.new(|cx| TextInput::single_line("Поиск", cx));
         let compose = Compose::new(cx);
+        let player = cx.new(|cx| Player::new(store.clone(), cx));
         let subscriptions = vec![
             cx.observe(&search, |this, _, cx| {
                 this.search_changed(cx);
@@ -139,8 +142,13 @@ impl Desktop {
                 window,
                 |this, _, event: &InputEvent, _, cx| this.composer_event(*event, cx),
             ),
+            cx.observe(&player, |_, _, cx| cx.notify()),
             cx.observe_in(&store, window, |this, _, window, cx| {
+                let before = this.open.as_ref().map(|o| o.chat.clone());
                 this.sync_open(window, cx);
+                if this.open.as_ref().map(|o| &o.chat) != before.as_ref() {
+                    this.player.update(cx, |player, cx| player.stop(cx));
+                }
                 this.sync_viewer(cx);
                 this.sync_info();
                 this.sync_profile(cx);
@@ -153,9 +161,11 @@ impl Desktop {
                 window,
                 |this, _, event: &StoreEvent, _, cx| match event {
                     StoreEvent::Timeline { chat, change } => {
-                        this.apply_timeline_change(chat, change, cx)
+                        this.apply_timeline_change(chat, change, cx);
+                        this.stop_gone_voice(chat, change, cx);
                     }
                     StoreEvent::Drafts => this.restore_late_draft(cx),
+                    StoreEvent::Account => this.discard_composer(cx),
                     StoreEvent::Connection => {
                         this.resume_search(cx);
                         this.resume_reads(cx);
@@ -201,6 +211,7 @@ impl Desktop {
             log: None,
             covered: false,
             focus,
+            player,
             _subscriptions: subscriptions,
         }
     }
@@ -1024,6 +1035,31 @@ impl Desktop {
         cx.notify();
     }
 
+    /// The sound never outlives its bubble: stops the player when the message it plays is no longer
+    /// in the timeline of `chat` or has turned into the deleted placeholder.
+    fn stop_gone_voice(&mut self, chat: &ChatId, change: &TimelineChange, cx: &mut Context<Self>) {
+        if matches!(change, TimelineChange::Status) {
+            return;
+        }
+        let Some(key) = self
+            .player
+            .read(cx)
+            .active()
+            .filter(|key| &key.chat == chat)
+            .cloned()
+        else {
+            return;
+        };
+        let present = self.store.read(cx).timeline(chat).is_some_and(|t| {
+            t.messages
+                .binary_search_by_key(&key.timestamp, |m| m.timestamp)
+                .is_ok_and(|i| !matches!(t.messages[i].body, MessageBody::Deleted))
+        });
+        if !present {
+            self.player.update(cx, |player, cx| player.stop(cx));
+        }
+    }
+
     /// Click on the pinned-message bar: scrolls the open chat to the pinned message when it is
     /// loaded, and does nothing otherwise (no request, no loading state, no error).
     pub(crate) fn scroll_to_pinned(&mut self, cx: &mut Context<Self>) {
@@ -1487,6 +1523,7 @@ impl Desktop {
         } else {
             let ctx = RowContext {
                 store: self.store.clone(),
+                player: self.player.clone(),
                 desktop: cx.weak_entity(),
                 chat: selected.clone(),
                 clock: self.clock,
