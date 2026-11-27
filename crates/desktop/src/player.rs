@@ -1181,7 +1181,9 @@ mod tests {
     #[gpui::test]
     fn active_names_the_message_that_is_not_idle(cx: &mut TestAppContext) {
         let rig = Rig::new(cx);
-        let active = |rig: &Rig, cx: &mut TestAppContext| rig.player.read_with(cx, |p, _| p.active().cloned());
+        let active = |rig: &Rig, cx: &mut TestAppContext| {
+            rig.player.read_with(cx, |p, _| p.active().cloned())
+        };
         assert_eq!(active(&rig, cx), None);
         rig.toggle(cx, 1, "f1");
         assert_eq!(active(&rig, cx), Some(key(1)), "loading counts");
