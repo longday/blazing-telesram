@@ -181,9 +181,11 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Done when: these tests exist and pass.
 
 
-## 3. Message selection (unit TS-M; starts after TS-Q is on `main`)
+## 3. Message selection (unit TS-M; starts after TS-A is on `main`)
 
-- [ ] 3.1 `Pick` and the message set (D1, D11)
+Order swap, the main session's decision: TS-M runs before TS-Q because the quote research (0.7) stalls on `bt-probe.rs`; "Merge units" allows it (no task of TS-M reads a TS-Q result), and TS-Q then rebases onto TS-M.
+
+- [x] 3.1 `Pick` and the message set (D1, D11)
   - Owns: `crates/desktop/src/selection.rs`.
   - Depends on: TS-A merged.
   - Do: `MessageSet` (toggle, range from the last toggled, select all eligible, `eligible(&Message)`: sent and not deleted, `all_deletable(&[&Message])`: own and sent), `Pick` (None, Text, Messages), `extract_messages` (D7 for sets).

@@ -3,6 +3,7 @@
 use super::{AccountMenu, Desktop, OpenTimeline, SIDEBAR_WIDTH, overlay};
 use crate::format::one_line;
 use crate::input::{InputEvent, TextInput};
+use crate::selection::copy_text;
 use crate::theme::*;
 use crate::widgets::{Icon, button, icon};
 use bt_chat_core::model::{ChatId, Delivery, Draft, Message, MessageBody, MessageTs, ReplyTarget};
@@ -138,17 +139,6 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
         actions.push(MenuAction::Delete);
     }
     actions
-}
-
-fn copy_text(m: &Message) -> Option<&str> {
-    match &m.body {
-        MessageBody::Text(text) => Some(text),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            caption.as_deref()
-        }
-        MessageBody::File { name, .. } | MessageBody::Video { name, .. } => Some(name),
-        MessageBody::Voice { .. } | MessageBody::Deleted | MessageBody::Unsupported(_) => None,
-    }
 }
 
 /// «Кто отреагировал» is offered for a sent, non-deleted message with at least one reaction
