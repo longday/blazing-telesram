@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal merged, no code started). **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Four changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal merged, no code started), **UC** `add-user-profile-card` (proposal on `propose/usercard`, not merged, no code started). **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -21,7 +21,7 @@ Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it.
 3. **Zero build warnings** (`cargo build --workspace --all-targets`; no CI and no `-D warnings`, but `main` builds with 0 warnings). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. A unit therefore contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used.
 4. **Cargo, `bt-probe` and the app run only in the Tart VM `bt-vm`, never on the host** (rule `containers.md`). Procedure: sync the tree to test into `~/bt/src-<name>` (tracked and untracked, no ignored files; `~/bt/src` is shared, so concurrent agents use their own directory), put `$HOME/.cargo/bin` in `PATH` (`tart exec` lacks it), build and run there; `.runtime` for live runs is the VM's `~/bt/.runtime`. Remove the `~/bt/src-<name>` directory when the task is done. `git` and `openspec` on the host are fine. How to start the VM and the full workflow: [docs/vm.md](../../docs/vm.md).
-5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user); NB 0.2 (live part, reads only), 0.3 (optional, needs-user), 7.2 (needs-user; reads only). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**. NB 0.1 needs no account (VM scratch crate) and takes no live slot.
+5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user); NB 0.2 (live part, reads only), 0.3 (optional, needs-user), 7.2 (needs-user; reads only); UC 0.2, 7.2 (reads only, no user). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**. NB 0.1 needs no account (VM scratch crate) and takes no live slot; UC 0.3 needs no account (static reading) and takes none.
 6. **A task that is not started locks nothing.** Rule 1 holds files only for started, unmerged tasks. Tasks gated on approvals, live runs or open questions (for example CM 5.1, 5.3) hold no file until the moment they start; whoever starts a file first keeps it until its unit merges, the other waits.
 
 ## add-chat-members-and-creation (CM)
@@ -158,6 +158,42 @@ File ownership (rule 1): `store.rs` (1.1, then 1.2); chat-core `model.rs` and `c
 
 Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -> 3.1 / 4.1 -> 6.1) can start at once and merges first; NB-N after NB-B and 0.4; 7.1 per unit; 7.2 when the user provides the sender; 7.3 last. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-notifications-and-badge --strict`.
 
+## add-user-profile-card (UC)
+
+Proposal on branch `propose/usercard` (2026-11-28, docs only: `openspec/changes/add-user-profile-card/**` and this file; **not merged**, no code started; `openspec validate add-user-profile-card --strict`). A read-only card of any person, opened from a group-chat timeline avatar or author name, an info-panel member row and the private-chat header avatar; shows name, avatar, status text (if research allows), position, department, email, nickname; actions «Написать» (the existing `chat-creation` flow), «Копировать почту», «Копировать ID»; memory only, no value in logs, no presence, no phone. Data: `get_users_data` (+ `whoami { Guid }` for the status if R1 Q2 allows), **both already on the allowlist: no new wire method unless R1 Q4 finds a needed read** (outcome G2). New capability `user-card` only; no delta to `chat-members` (its change CM is being archived) or `message-history`, so the archive order against CM does not matter. «Написать» for a person with no private chat reaches CM's `create_private_chat`, which is live-unverified (CM 5.1/5.3); UC adds no write and does not wait for it.
+
+**Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds):
+
+- **UC** (card) = 1.1, 2.1, 3.1, 4.1, 5.1, 5.3, 5.4, 6.1 on **`integ/add-user-profile-card`**, started **after 0.4**; merges first. 5.3 (panel row) and 5.4 (header avatar) are the first callers of `Desktop::open_user_card`, so they belong to the unit.
+- **UC-T** (timeline click targets) = 5.2, 6.2 after UC is on `main`: adds no symbol, holds `timeline.rs` for one small task.
+- Research 0.1 (probe), 0.2 (live), 0.3 (static) and 0.4 (closing) merge as docs plus the probe change; **`research.md` has one writer (0.4)**: 0.2 writes `research-r1.md`, 0.3 `research-r2.md`.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | open: `bt-probe user-keys` (key paths and value kinds only, never a value) | NB 0.2 merged, or this task first | `yandex-proto/src/bin/bt-probe.rs` |
+| 0.2 | open, **[live]** reads only: Q1-Q3, Q5-Q9 (shapes of another user's record, `whoami { Guid: other }`, unknown guid) | 0.1, a free live slot | `research-r1.md` (new) |
+| 0.3 | open, **[static]**: Q4 (what the web client calls to open a person's card; any method outside the allowlist?) | none | `research-r2.md` (new) |
+| 0.4 | open: close the research; fix or drop card lines no record carries, decide D2b (status) and D2c (new read method) | 0.2, 0.3 | `design.md`, `tasks.md`, `research.md`, specs, `proposal.md` |
+| 1.1 | open, UC: `parse_user_card`, `Client::user_card` (and `user_status` if D2b), live-shape fixture | 0.4 | `yandex-proto/src/wire.rs`, `tests/wire_fixtures.rs`, `tests/fixtures/live-user-record.json`, `yandex-proto/src/client.rs` |
+| 2.1 | open, UC: `UserCard`, `Command::LoadUserCard`, `ClientEvent::UserCard*`, `Backend::user_card`, engine, every `Backend` fake | 0.4 | chat-core `model.rs`, `backend.rs`, `client.rs`, `fixtures.rs` (**overlaps NB-N 1.2**: `model.rs`, `client.rs`; first starter holds) |
+| 3.1 | open, UC: adapter mapping, no log of values, `users` map untouched | 1.1, 2.1 | `yandex_backend.rs` |
+| 4.1 | open, UC: store state, stale-after-reconnect, clear on sign-out | 2.1 | `store.rs` (**overlaps NB-N 1.2**) |
+| 5.1 | open, UC: `user_card.rs` view, `Desktop` open/close/retry/copy/write, `Escape` arm | 4.1 | `user_card.rs` (new), `desktop.rs` (**overlaps NB-N 4.2**), `desktop/composer.rs`, `main.rs` (module line) |
+| 5.3 | open, UC: info panel row click | 5.1 | `info_panel.rs` |
+| 5.4 | open, UC: private-chat header avatar | 5.1 (merged into integ: same file `desktop.rs`) | `desktop.rs` |
+| 5.2 | open, UC-T: timeline avatar and author-name click targets | UC on `main` | `timeline.rs` (**overlaps `add-text-selection-and-quotes`**: proposal on `propose/select`, will own `timeline.rs`; first starter holds, the other waits, rule 1/6) |
+| 6.1 | open, UC: `// ---- user card (UC 6.1) ----` in `tests.rs` | 5.1, 5.3, 5.4 | `tests.rs` (**overlaps NB-N 6.2**) |
+| 6.2 | open, UC-T: `// ---- user card from the timeline (UC 6.2) ----` | 5.2, 6.1 | `tests.rs` |
+| 7.1 | open: final run per unit in `bt-vm`; `request.rs`/`write.rs`/`manage.rs` diff empty unless G2 | the unit | build/test/lint matrix |
+| 7.2 | open, **[live]** reads only: hand check in the VM (three entry points, copy, «Написать» on an existing chat, no values in the log); needs no second person | 7.1 | none (checks only) |
+| 7.3 | open: this file, archive (`user-card` main spec created) | everything above | this file, archive |
+
+File ownership (rule 1): `bin/bt-probe.rs` (0.1; **NB 0.2 holds it first or after**, serialise); `research-r1.md` (0.2), `research-r2.md` (0.3), `research.md`/`design.md`/`tasks.md`/specs (0.4); proto `wire.rs`, `tests/wire_fixtures.rs`, the fixture, `client.rs` (1.1); chat-core `model.rs`, `backend.rs`, `client.rs`, `fixtures.rs` (2.1); `yandex_backend.rs` (3.1); `store.rs` (4.1); `user_card.rs`, `desktop.rs`, `desktop/composer.rs`, `main.rs` (5.1, then 5.4 for `desktop.rs`); `info_panel.rs` (5.3); `timeline.rs` (5.2); `tests.rs` (6.1, then 6.2).
+
+**Overlaps with other open work** (decision for the integrator): (1) **`add-text-selection-and-quotes`** (`propose/select`): will edit `timeline.rs` (bubble text, mouse handling). UC-T 5.2 touches only the avatar element and the author-name label; it waits for any select task holding `timeline.rs`, and the select change is told that the author-name label is a click target that its text selection must not capture. (2) **`add-notifications-and-badge` NB-N** (1.2, 2.2, 4.2, 6.2): both add variants to `ClientEvent`, `Command` or `StoreEvent` and sections to `tests.rs`; edits are additive on both sides and the second to merge rebases on `main` and finds every `match` with `lsp` references. UC does not touch `alerts.rs`, `dock.rs`, `notifier.rs` or any NB file outside the five above.
+
+Order: 0.1 and 0.3 in parallel (0.3 needs no account), 0.2 after 0.1 in a free live slot, 0.4; then UC (1.1 and 2.1 in parallel, 3.1, 4.1, 5.1, then 5.3 and 5.4 in parallel (different files), 6.1), then UC-T (5.2, 6.2); 7.1 per unit; 7.2; 7.3. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-user-profile-card --strict`.
+
 ## Ready now
 
 - **Nothing is startable without the user** in CM or PIN. PIN 6.2 part 1 (strip/marker in the admin chat) is done and merged (`3233c95`), together with the 4.5 fix; the branches `pins/6.2`, `pins/bar-preview` and their worktrees are removed. PIN 3.3 code, PIN 1.5 and PIN 4.5 are on `main` (`a395100`, `db5950c`, `3233c95`). What is left for PIN (6.2 self-chat UI path with the live re-check of 4.5, 6.2 Q6, closing 3.3, then 6.3 archive) needs the user's web session of the app account.
@@ -165,6 +201,7 @@ Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -
 - CM: CM-G (6.3 + 6.4) and 7.1 are on `main` (`942a109`, `18141dc`); only 5.1 and 5.3 are open, both blocked on the user (a target with no existing private chat), and they alone block the CM archive; 6.F does not run (6.2 PASS).
 - **MP: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`); PB-V `6287bea` and PB-W `19f2223` are on `main`, the gate is recorded under 6.1. Nothing is left open for MP; the follow-ups (playback copies keyed by `Id2` only) are not tasks.
 - **NB: nothing is startable without the user except the code.** NB 0.1 (VM scratch research), NB 0.2 (live reads) and the whole NB-B unit (1.1, 2.1, 3.1, 4.1, 6.1) can start at once; NB-N waits for NB-B and 0.4.
+- **UC: startable now without the user** once the proposal is merged: 0.3 (static) at once; 0.1 once NB 0.2 has merged or by taking `bt-probe.rs` first; 0.2 in a free live slot after 0.1; everything else waits for 0.4.
 
 ## Needs the user
 
@@ -172,4 +209,5 @@ Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -
 - PIN 0.2 is done (the web client was the other party, no user action needed). **PIN 6.2 part 1 (bar and marker in the admin chat) is done** (2026-11-27, merged `3233c95`; deviation: the private admin chat, not the self chat). **PIN 6.2 remainder needs the user**: (a) the self-chat UI path, i.e. the bar and marker in the self chat, with a live look at the 4.5 fix (the pinned text under the label, not "…"); (b) **Q6**: an edit authored by the app account is required, and `bt-probe edit-self` refuses any chat but the self chat, so the user marks a message of the self chat as important in a web session **of the app account** (the web client of `admin@sgnl.pro` cannot, it is another account); then `edit-self <ts> <text>` with and without `--important` and `history` (task 6.2 text; `research.md` 0.2 note on Q6). Closing 3.3 and the 6.3 archive wait for it.
 - **MP needs no user** and is archived. The **R1 fallback** (the admin web client sending a sample, a write by another account) was not needed: 0.1 found the samples.
 - **NB needs the user** for 7.2 (and the optional 0.3): a person other than the app account who sends incoming messages (or the main session's decision to use the web client of the second account, as PIN 0.2 and RL 8.2 did), a chat the user mutes in their own web session, and a live slot. Open design questions for the user: do muted chats count in the badge (default no), is the message text shown in the notification (default yes).
+- **UC needs no user** (reads only, no second person, no write approval). Decisions the owner may want to flip, all with a default in `proposal.md`: the whole private-chat header opening the card (default: avatar only), one position/department for people with several employments, email shown on the card (default yes, as in member lists).
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, recorded in the archived `add-reaction-list/research.md`); PIN 0.1 is no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
