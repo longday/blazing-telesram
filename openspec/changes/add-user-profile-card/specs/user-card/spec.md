@@ -7,7 +7,7 @@ Lets the user see who another person is: a read-only card with the name, avatar 
 ## ADDED Requirements
 
 ### Requirement: Open the card from a person
-The client SHALL open the card of a person when the user clicks that person's avatar or author name on a message in a group chat's timeline, the avatar or name part of the person's row in the chat info panel, or the avatar in the header of a private chat whose chat list entry names that person as the partner. A click that opens the card SHALL cause no other action, and in message selection mode a click on a message's avatar or author name SHALL toggle the message and open no card.
+The client SHALL open the card of a person when the user clicks that person's avatar or author name on a message in a group chat's timeline, the avatar or name part of the person's row in the chat info panel, or the avatar in the header of a private chat whose chat list entry names that person as the partner. A click that opens the card SHALL cause no other action. In message selection mode, and on a Cmd+click, the row's own behaviour wins and no card opens.
 
 #### Scenario: Timeline avatar
 - **WHEN** the user clicks the avatar next to a message of another person in a group chat
@@ -21,6 +21,11 @@ The client SHALL open the card of a person when the user clicks that person's av
 - **GIVEN** the message selection mode of `add-text-selection-and-quotes` is on
 - **WHEN** the user clicks the avatar or the author name of a message
 - **THEN** the message is toggled as by any click on its row and no card opens
+
+#### Scenario: Cmd+click with selection mode off
+- **GIVEN** the message selection mode is off
+- **WHEN** the user Cmd+clicks (the platform's primary modifier) the avatar or the author name of a sent message
+- **THEN** the mode starts with that message selected, as for a Cmd+click anywhere on the row, and no card opens
 
 #### Scenario: Member row
 - **WHEN** the user clicks the avatar or the name in a person's row of the info panel
