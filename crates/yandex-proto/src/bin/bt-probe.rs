@@ -7,9 +7,13 @@
 //! request, never its query. `reactors` lists who reacted to one message (a read, covered by no
 //! write guard). `create-private` and `create-chat` are the commands that change the
 //! account outside the self chat, and they send nothing without `--confirm-create`.
-//! Every command that sends a write (`send-self`, `edit-self`, `delete-self`, `react-self`,
-//! `typing-self`, `seen`, `typing`, `create-private`, `create-chat`) obeys `BT_WRITE_ONLY_CHAT` like
-//! the desktop app: set, it limits writes to the chat it names, and it refuses every creation.
+//! Every command that sends a write (`send-self`, `send-reply`, `edit-self`, `delete-self`,
+//! `react-self`, `typing-self`, `seen`, `typing`, `create-private`, `create-chat`) obeys
+//! `BT_WRITE_ONLY_CHAT` like the desktop app: set, it limits writes to the chat it names, and it
+//! refuses every creation. `send-reply` is stricter: it refuses unless the variable is set and
+//! names its `<chat>`, and its `--quote` goes out verbatim, uncut, so it can exceed the 200
+//! characters the app sends; it exists for the live check of the quote limit, and only the private
+//! chat of that check is meant.
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
 use std::collections::BTreeMap;
@@ -40,6 +44,7 @@ use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError
 
 const USAGE: &str = "usage: bt-probe me | chats [--keys] | history <chat> [--before <micros>] | listen [--watch <chat>]
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
+       bt-probe send-reply <chat> <text> --reply <micros> [--quote <text>]
        bt-probe edit-self <micros> <text> [--reply <micros>] [--important] [--chat <self chat>]
        bt-probe delete-self <micros> [--chat <self chat>]
        bt-probe react-self <micros> <code|remove> [--chat <self chat>]
@@ -52,6 +57,7 @@ const USAGE: &str = "usage: bt-probe me | chats [--keys] | history <chat> [--bef
        bt-probe create-chat <title> <guid>... --confirm-create
 the *-self commands refuse any chat but the account's own self chat
 BT_WRITE_ONLY_CHAT limits every write command to the chat it names: a write to another chat, a set but empty value, and create-private / create-chat (a new chat is never the named one) are refused with exit code 2 before any connection or request
+send-reply sends a text reply to the message <micros> of <chat> and is a write guarded by BT_WRITE_ONLY_CHAT: it is refused with exit code 2 unless the variable is set and equals <chat> (the chat is required and never defaulted). The quote is --quote or, without it, the whole original as the app sends it (cut to 200 characters); --quote is sent verbatim, may exceed 200 characters and need not be a substring of the original, so only the private chat of the live check is meant for it
 download takes the file, voice message or the N-th (from 1) image of the message with that timestamp, saves it
 into <dir> (default: the current directory) and refuses to overwrite an existing file
 download --url is the playback research request: it asks for one URL variant (original: file_shortterm/{id}?attach=true, plain: file_shortterm/{id}), needs --to <dir> that already exists with mode 0700 (the sample directory: the bytes are message content, nothing else is saved under a name that shows them) and prints only status, landed host, content-type, content-length, accept-ranges, whether content-disposition is present, bytes received and sha256; a non-2xx answer reads no body, prints the same lines and exits 1
@@ -105,6 +111,10 @@ fn main() -> ExitCode {
         ["listen", "--watch", chat] => block_on(listen(Some(chat))),
         ["send-self", text, flags @ ..] => match send_flags(flags) {
             Some(flags) => block_on(send_self(text, flags)),
+            None => return usage(),
+        },
+        ["send-reply", chat, text, flags @ ..] => match reply_args(flags) {
+            Some(flags) => block_on(send_reply(chat, text, flags)),
             None => return usage(),
         },
         ["edit-self", ts, text, flags @ ..] => match (ts.parse(), edit_flags(flags)) {
@@ -287,6 +297,29 @@ fn send_flags<'a>(mut flags: &[&'a str]) -> Option<SendFlags<'a>> {
     flags.is_empty().then_some(parsed)
 }
 
+/// The flags of `send-reply`: the message to reply to (required) and a quote sent verbatim.
+#[derive(Debug, PartialEq, Eq)]
+struct ReplyArgs<'a> {
+    reply: i64,
+    quote: Option<&'a str>,
+}
+
+fn reply_args<'a>(mut flags: &[&'a str]) -> Option<ReplyArgs<'a>> {
+    let (mut reply, mut quote) = (None, None);
+    while let [name, value, rest @ ..] = flags {
+        match *name {
+            "--reply" if reply.is_none() => reply = Some(value.parse().ok()?),
+            "--quote" if quote.is_none() => quote = Some(*value),
+            _ => return None,
+        }
+        flags = rest;
+    }
+    match (flags.is_empty(), reply) {
+        (true, Some(reply)) => Some(ReplyArgs { reply, quote }),
+        _ => None,
+    }
+}
+
 /// The flags of `edit-self`: those of a send minus the payload id, and `--important`. Without
 /// `--reply` an edit repeats the reply the message already has; `--reply` re-attaches one to a
 /// message that lost it.
@@ -352,6 +385,41 @@ async fn send_self(text: &str, flags: SendFlags<'_>) -> Result<(), Failure> {
         payload_id,
         text: text.to_owned(),
         reply,
+    };
+    print_committed(&client.push(request).await.map_err(fail)?);
+    Ok(())
+}
+
+/// A reply in `chat`, a write that only goes out when `BT_WRITE_ONLY_CHAT` names exactly `chat`.
+/// Without `--quote` the quote is the whole original, cut like the app cuts it; with it the quote
+/// is encoded as given, through the one uncut entry point of `write.rs`.
+async fn send_reply(chat: &str, text: &str, flags: ReplyArgs<'_>) -> Result<(), Failure> {
+    let allowed = write_only()?;
+    reply_guard(allowed.as_deref(), chat).map_err(|e| (2, e))?;
+    let session = load_session()?;
+    let (client, _events) = connect(&session, ClientConfig::production()).await?;
+    let payload_id = uuid::Uuid::new_v4().to_string();
+    println!("payload: {payload_id}");
+    let (chat, text) = (chat.to_owned(), text.to_owned());
+    let request = match flags.quote {
+        None => WriteRequest::SendText {
+            chat: chat.clone(),
+            payload_id,
+            text,
+            reply: Some(reply_ref(&client, &chat, flags.reply).await?),
+        },
+        Some(quote) => {
+            find_message(&client, &chat, flags.reply).await?;
+            WriteRequest::SendTextUncutQuote {
+                chat,
+                payload_id,
+                text,
+                reply: ReplyRef {
+                    timestamp: flags.reply,
+                    quote: quote.to_owned(),
+                },
+            }
+        }
     };
     print_committed(&client.push(request).await.map_err(fail)?);
     Ok(())
@@ -508,6 +576,17 @@ fn chat_write_guard(allowed: Option<&str>, chat: &str) -> Result<(), String> {
             "refusing a write to {chat}: {WRITE_ONLY_VAR} limits writes to {allowed}; nothing was sent"
         )),
         _ => Ok(()),
+    }
+}
+
+/// `send-reply` writes only when a limit is set and names its chat: unlike the other writes, an
+/// unset `BT_WRITE_ONLY_CHAT` does not lift the guard.
+fn reply_guard(allowed: Option<&str>, chat: &str) -> Result<(), String> {
+    match allowed {
+        None => Err(format!(
+            "refusing a write to {chat}: send-reply needs {WRITE_ONLY_VAR} set to that chat, and it is not set; nothing was sent"
+        )),
+        allowed => chat_write_guard(allowed, chat),
     }
 }
 
@@ -1695,6 +1774,47 @@ mod tests {
     }
 
     #[test]
+    fn send_reply_takes_a_required_reply_and_an_optional_quote() {
+        assert_eq!(
+            reply_args(&["--reply", "17"]),
+            Some(ReplyArgs {
+                reply: 17,
+                quote: None
+            })
+        );
+        assert_eq!(
+            reply_args(&["--quote", " a\nb ", "--reply", "17"]),
+            Some(ReplyArgs {
+                reply: 17,
+                quote: Some(" a\nb ")
+            })
+        );
+        for bad in [
+            &[][..],
+            &["--quote", "q"],
+            &["--reply"],
+            &["--reply", "x"],
+            &["--reply", "1", "--quote"],
+            &["--reply", "1", "--reply", "2"],
+            &["--reply", "1", "--quote", "a", "--quote", "b"],
+            &["--reply", "1", "--chat", "c"],
+            &["--reply", "1", "stray"],
+        ] {
+            assert_eq!(reply_args(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn send_reply_is_listed_in_the_usage_as_a_guarded_write() {
+        assert!(
+            USAGE.contains("bt-probe send-reply <chat> <text> --reply <micros> [--quote <text>]")
+        );
+        assert!(USAGE.contains("send-reply sends a text reply"));
+        assert!(USAGE.contains("unless the variable is set and equals <chat>"));
+        assert!(USAGE.contains("may exceed 200 characters"));
+    }
+
+    #[test]
     fn react_self_takes_a_positive_code_or_remove() {
         assert_eq!(
             reaction_change("100101"),
@@ -2029,6 +2149,21 @@ mod tests {
                 && error.contains("nothing was sent"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn send_reply_writes_only_to_the_chat_the_limit_names() {
+        let chat = "0/0/private-chat";
+        assert_eq!(reply_guard(Some(chat), chat), Ok(()));
+        for allowed in [Some("0/0/some-group"), Some(GUID), None] {
+            let error = reply_guard(allowed, chat).unwrap_err();
+            assert!(
+                error.contains("BT_WRITE_ONLY_CHAT")
+                    && error.contains(chat)
+                    && error.contains("nothing was sent"),
+                "{allowed:?}: {error}"
+            );
+        }
     }
 
     #[test]
