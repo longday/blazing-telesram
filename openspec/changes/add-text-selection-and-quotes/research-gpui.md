@@ -19,6 +19,9 @@ Evidence for the mechanisms of `design.md` D3 and D5, points (a)-(g) of `researc
 - Limits: the VM display is 1440x900 at scale 1 (points = pixels); no Retina scale factor, no physical mouse (so no
   OS-computed double click, see (f)), a virtual GPU (timings in (g) are CPU-side numbers of a VM, not of the host).
   The screen is shared with other agents, so GUI runs were short bursts.
+- A **second scratch crate** (same VM directory, rebuilt and deleted again) answered a review of the first version of
+  this report: it shapes samples through gpui's real text system with the same runs `with_highlights` builds, sweeps
+  the pointer over layouts in a real window and in the test platform, and draws the same selection three ways.
 
 ## Summary
 
@@ -26,7 +29,7 @@ Evidence for the mechanisms of `design.md` D3 and D5, points (a)-(g) of `researc
 | --- | --- | --- |
 | (a) drag leaves row/list/window | Element handlers stop; **window-level handlers registered in a `canvas` paint keep firing everywhere**, also outside the window and for the up | Capture confirmed; **register always**, not only while `drag` is `Some` |
 | (b) registry order | Order is `pre-prepaint`, renders, row prepaints, `pre-paint`, row paints, `post-paint`; clear in the pre-list **prepaint**, fill from row paint or prepaint, never from the render closure; previous frame's rows are still there until cleared | Confirmed with three refinements; frame stamp not needed |
-| (c) `with_highlights` | No seams at wraps, run boundaries or emoji; full line-height band; **a cut inside a grapheme cluster changes shaping and wrapping** | Snap every range to grapheme boundaries is mandatory, not cosmetic |
+| (c) selection background | The background of `with_highlights` is seam-free, **but it splits the text runs, and with three runs (before, selected, after) shaping changes**: Arabic ligatures break (visible), widths move by up to 8.6 px (Arabic) and 0.07-0.73 px (Cyrillic); a cut inside a ZWJ/flag cluster also moves wraps | **D3 changes: paint the selection as rectangles behind an unchanged `StyledText`; do not use `with_highlights` for it** |
 | (d) re-render on selection change | Visible rows are re-rendered, heights never changed (0 `HEIGHT CHANGED` in all runs) | Confirmed |
 | (e) `.cursor(IBeam)` | Works; reverts to the arrow outside the element, also during a drag | Use `Window::set_window_cursor_style` while dragging |
 | (f) `click_count` | Real events: 1/2/3 verbatim from `NSEvent`; test context: helpers give 1, `simulate_event` with a hand-built event gives 2/3 | Confirmed |
@@ -100,19 +103,53 @@ pre-canvas prepaint -> render x N -> row prepaint x 9 -> pre-canvas paint -> row
 - **Empty lines and `\n` are not painted**: the empty paragraph of the `\n` row has a 21 px gap in the highlight, and the
   newline itself has no visible mark. Selecting across a paragraph break therefore looks like two separated blocks
   (accepted by D3, noted for 1.x tests that look at the highlight).
-- **Emoji / clusters.** `StyledText::with_highlights` only needs sorted, non-overlapping ranges, and a background-only
-  split does not change the font run (`shape_text` merges consecutive runs with the same font), so wrapping is normally
-  unchanged. A wrap-invariance check shaped the 60 rows with a highlight over many `(a, b)` ranges and compared line
-  breaks and height with the unhighlighted shaping:
-  - cuts at every **char** boundary: 16 807 shapings, **6 differ** (all in the emoji row, and every one has a cut inside
-    a ZWJ sequence or a flag, e.g. the middle of the family emoji);
-  - cuts at **grapheme** boundaries only (`unicode-segmentation`): 16 797 shapings, **0 differ**.
-  A highlight split inside a cluster re-shapes it (a different glyph and width), which can move a wrap boundary and so a
-  row height. D3's snap of every range end to a grapheme boundary is required for that reason, and `range_in` must
-  never produce a zero-length range.
-- Line-height clipping: the quad is `line_height` tall, the 15 px glyphs (Cyrillic, Latin, colour emoji) are fully
-  inside it. `paint_line_background` ignores a style run that covers only part of a glyph (a ligature) `[INFERENCE from
-  source, not tested]`. Scale 2 (Retina) was not tested; at 21 px lines the bands are on whole pixels at scale 1.
+- **`with_highlights` changes shaping (this corrects the first version of this report, which said it did not).**
+  `shape_text` starts a new font run whenever the decoration (the background) changes, also when the font is the same
+  (`text_system.rs` `shape_text`, the `decoration_changed` test), and the macOS backend inserts a ZWNJ between font runs
+  of the same font so that CoreText does not ligate across the boundary (`platform/mac/text_system.rs`
+  `layout_line`, `needs_zwnj`). A selection gives up to three runs, `[before][selected][after]`. Observed in the
+  real macOS shaper (`.SystemUIFont` 15 px, unwrapped), runs `[0,a) [a,b) [b,len)` with a background on the middle one,
+  glyph indices and x positions plus the width compared with the single-run shaping, over **all** `(a, b)` pairs on
+  char boundaries (`differing / pairs`, pairs whose both ends are on grapheme boundaries):
+
+  | Sample | differing / pairs | Examples (width change) |
+  | --- | --- | --- |
+  | Arabic «لالا» | 3 / 9 | +0.09 px, +5.0 px |
+  | Arabic words «مرحبا بالعالم» | 40 / 90 | -0.69 px ... +8.6 px |
+  | Arabic «لا لا الله» | 24 / 54 | +0.07 px ... +6.8 px |
+  | Cyrillic «Привет, мир» | 12 / 65 | +0.07 px ... +0.73 px |
+  | Arabic «لا», Latin «office fi ffl fl», U+FB01/FB02, Hangul, Thai, Devanagari, «é», ZWJ emoji | 0 | none |
+
+  With only **two** runs (one cut) nothing differed in any sample, so a selection that touches the start or the end of
+  the text is harmless and one in the middle is not `[INFERENCE from the source: the ZWNJ is appended after the text of
+  the later run, so with two runs it lands at the end of the string]`. With three runs, a cut **inside** a grapheme
+  cluster changes the shaping far more (pairs with at least one end inside a cluster: ZWJ family emoji 21 of 39 differ,
+  by up to 63 px; Thai 12 of 27; Devanagari 8 of 30).
+  On screen the same text with the same selection through `with_highlights` shows the «لا» ligature **split into two
+  letters**, while the unselected copy and the rectangle variant below keep it whole.
+  The first version's wrap check (16 807 highlighted shapings of the 60 rows; 6 differed, all with a cut inside a ZWJ
+  sequence or flag; 0 with grapheme-boundary cuts) compared only line breaks and height on Cyrillic, Latin and emoji,
+  so it could not see the sub-pixel width shifts above (or a script with ligatures): its "0" does not prove that shaping
+  is unchanged. Text that moves by up to 0.73 px while a selection is dragged is also a visible jitter, and a shift
+  can move a wrap boundary `[INFERENCE: not observed]`.
+- **Conclusion and mechanism: the selection must not touch the text runs.** Paint selection rectangles **behind** the
+  unchanged `StyledText`: a zero-size `.absolute()` `canvas` placed **before** the `StyledText` in the bubble; its paint
+  closure reads the layout of the text (all prepaints of the frame are done before any paint, so the bounds are set),
+  and per visual line fills `window.paint_quad(fill(rect, SELECTION))`. The rectangles come from the layout: the visual
+  lines start at `0` and at the glyph index of every `wrap_boundaries` entry of `line_layout_for_index(0)`; for a range
+  `[a, b)` clipped to a line `[s, e)` the rect spans `x_for_index(a) - x_for_index(s)` to `x_for_index(b) - x_for_index(s)`
+  (the line's `width` when `b` is the end of the last line), `line_height` tall at `y = k * line_height` (integer line
+  height keeps the bands abutting). Observed in the spike: the three variants side by side (with_highlights, rectangles,
+  none): the rectangle variant has exactly the line breaks and glyph positions of the unselected text, its bands cover
+  the wrapped lines like the gpui highlight, and the whole-row rectangles of the sweeps match the line widths. The
+  registry of (b) can be filled by the same canvas (its paint closure also sees the prepainted layout).
+  Limits: tested on a single paragraph; several paragraphs (`\n`) need `line_layout_for_index` per paragraph and the
+  paragraph's y from `position_for_index` `[INFERENCE, not run]`. **Right-to-left text is not supported for partial
+  ranges:** the glyph indices of an Arabic run descend with x (`مرحبا`: 8, 6, 6, 4, 2, 0 from left to right) and
+  `x_for_index` assumes logical order equals visual order, so partial rectangles (and carets, see below) are wrong; a
+  selection of the whole text is right. Devanagari glyphs are also reordered (indices 0, 18, 9, 21).
+- Line height: the bands are `line_height` tall, the 15 px glyphs (Cyrillic, Latin, colour emoji) are fully inside.
+  Scale 2 (Retina) and a fractional line height were not tested `[INFERENCE: whole pixels at 21 px, scale 1]`.
 
 ## (d) A selection change re-renders measured rows
 
@@ -142,9 +179,12 @@ dropped it when the button was released (arrow again). Use it for D5.
 - Test context: `simulate_mouse_down`, `simulate_mouse_up` and `simulate_click` hard-code `click_count: 1`. A hand-built
   `vcx.simulate_event(MouseDownEvent { click_count: 2 | 3, .. })` (and the matching `MouseUpEvent`) reaches the handler
   with 2 and 3 (observed). Tests of double and triple click use `simulate_event`.
-- In the test context the real text system is used (a 3-line bubble measured 420x75), `index_for_position` hit-testing
-  works (a click 30 px into a bubble gave caret offset 2), window-level handlers receive moves and the up at points
-  outside the window (-50, 5000) and (9000, -50), and the drag ended on that up.
+- In the test context hit-testing and wrapping work, window-level handlers receive moves and the up at points outside
+  the window (-50, 5000) and (9000, -50), and the drag ended on that up (a click 30 px into a bubble gave caret offset
+  2). **The test platform's text system is a mock, not CoreText** (an earlier version of this report said the real one
+  was used): every character advances 9 px (the glyph lists of «Alpha...» are `(0, 0.0), (1, 9.0), (2, 18.0)...`), an
+  Arabic pair is two glyphs, the ZWJ family emoji is a glyph per code point. Tests that depend on real shaping
+  (ligatures, kerning, clusters) cannot run in `#[gpui::test]`.
 
 ## (g) 120 `cx.notify()` per second, 60 rows
 
@@ -173,45 +213,63 @@ paint (CPU side, no presentation), the render closure time, and `ps` CPU time. R
 re-created every frame. The registry of (b) (filled from paint or prepaint, cleared every frame) contains only
 prepainted layouts, so `index_for_position` never panicked for it in any frame of any run.
 
-## Caret placement: two findings the design did not list
+## Caret placement: findings the design did not list
 
 1. `index_for_position` returns the glyph that **contains** the point, i.e. the start of its cluster, so the right half
    of a letter puts the caret **before** it (three clicks across the family emoji at 303, 309 and 316 px all gave
-   offset 51). A text-field
-   caret needs the nearest boundary. `WrappedLineLayout::closest_index_for_position` exists but `TextLayout` does not
-   expose it. The naive midpoint rule below was **checked in the GUI only on single visual lines** (family emoji bytes
-   51..76 gave 51 then 76 across the glyph; flag 89..97 gave 89 then 97; Latin text advanced one offset per letter as the
-   pointer moved in 3 px steps; no wrapped line start or end was clicked):
-   take `i` from `index_for_position` (`Ok(i)`), `start` = the grapheme boundary at or before `i`, `next` = the following
-   grapheme boundary (or `len`), `p0 = position_for_index(start)`, `p1 = position_for_index(next)` (absolute
-   coordinates), and pick `next` when `pos.x >= (p0.x + p1.x) / 2`.
-   **Soft-wrap boundaries break the naive rule** (from the source, `line_layout.rs` `position_for_index`: an index equal
-   to a wrap boundary resolves to the END of the previous visual line, not the start of the next one):
-   - the last glyph of a visual line: `next` is the wrap boundary, so `p1` is that line's end, same `y` as `p0`: the
-     rule is right;
-   - the **first glyph of a wrapped visual line**: `start` is the wrap boundary, so `p0` is the end of the *previous*
-     line (large `x`, smaller `y`) while `p1` is on the current line; the average is wrong and the right half of that
-     glyph stays at `start`;
-   - fix: when `p1.y > p0.y` (so `start` is a wrap start), use `tl.bounds().left()` as `x0` instead of `p0.x` (text is
-     left-aligned in the bubble).
-   `[INFERENCE: this fix and the wrap-start analysis come from the source and were NOT run, the scratch crate no
-   longer exists]`. Task 1.x must cover it with a test: click the left and right half of (1) the first glyph of a
-   wrapped line, (2) the last glyph of a wrapped line, (3) the first glyph after a `\n`, in the GUI or with
-   `simulate_mouse_down` and a `debug_bounds` rect. `Err(i)` is already a line start or end.
-2. Offsets across paragraph breaks are right: the first glyph of the paragraph after `\n` gave its byte offset, a click on
+   offset 51). A text-field caret needs the nearest boundary. `WrappedLineLayout::closest_index_for_position` exists but
+   `TextLayout` does not expose it. The rule that worked (pointer swept over the layouts in 0.5 px steps, in the real
+   shaper and in the test platform):
+   - `i` from `index_for_position` (`Ok(i)`; `Err(i)` is already a line start or end);
+   - **candidates** = the grapheme boundaries of the text that are also **glyph (shaping cluster) starts** of the layout
+     (`line_layout_for_index(0)` -> `unwrapped_layout.runs[].glyphs[].index`), plus `len`; `start` = the largest
+     candidate `<= i`, `next` = the smallest candidate `> i`;
+   - `p0 = position_for_index(start)`, `p1 = position_for_index(next)` (absolute coordinates); **if `p1.y > p0.y`, `start`
+     is the first glyph of a wrapped line and `position_for_index(start)` is the END of the previous visual line** (an
+     index equal to a wrap boundary resolves to the earlier line, `line_layout.rs` `position_for_index`), so use
+     `x0 = tl.bounds().left()` instead of `p0.x`; for the last glyph of a line `next` is the wrap boundary and `p1` is that
+     line's end, which is right;
+   - pick `next` when `pos.x >= (x0 + p1.x) / 2`, else `start`.
+2. What the sweeps showed (real shaper unless noted):
+   - **Wrap starts:** the rule without the `x0` fix switched to the next caret only at about the full glyph width
+     (x = 9.0, 8.5, 4.0, 9.0, 8.0 on the five wrapped lines of the Latin sample, 9.0, 9.0, 9.0, 8.5 on the four of the
+     Cyrillic one; the 4.0 is a narrow first glyph), i.e. the right half of the first glyph of a wrapped line kept the
+     caret before it. With the fix the switch is at the midpoint (4.5, 4.5, 2.0, 4.5, 4.0 and 4.5, 4.5, 4.5, 4.5) and in
+     the test platform 4.5 on all 7 wrapped lines (the rule without the fix: 9.0 on all 7).
+   - **Ligature «لا»** (one glyph, indices 0 and 2 are graphemes, 2 is inside the glyph): the grapheme-boundary-only rule
+     produced offset 2 for x in 4.5..8.5, a caret in the middle of the ligature; the glyph-cluster rule produced only
+     the cluster boundaries (0 and 4). The same for «لالا» (2 inside the first ligature vs 4 and 8). For the **left-to-right**
+     samples (Latin, Cyrillic, «é», the ZWJ family emoji, Thai, Devanagari) both rules gave the same carets, so the
+     glyph filter only matters where graphemes are finer than clusters.
+   - **Right-to-left:** in Arabic the carets are reversed (offsets decrease from the left edge; `Err` at the right edge
+     gives `len` although that edge is the logical start). Both rules are wrong for RTL; see (c).
+   - Combining marks and the ZWJ emoji are one glyph per grapheme here, so one caret stop; a click across the family
+     emoji gave 51 then 76 (GUI), flags 89 then 97.
+3. Offsets across paragraph breaks are right: the first glyph of the paragraph after `\n` gave its byte offset, a click on
    the empty line gave the offset of that empty line (between the two `\n`), and a click right of a line's end gave the
    end of that line.
+
+Tests the implementation (1.3) must carry: (i) the rule as a pure function over a plain line model (glyph starts with x,
+wrap starts, grapheme boundaries), unit-tested without gpui, including a line whose first glyph is a wrap start, a
+cluster with an inner grapheme boundary (the ligature case) and a line end; (ii) a `#[gpui::test]` with the mock text
+system for the wrap starts (left and right half of the first and the last glyph of a wrapped line, the first glyph after
+`\n`); (iii) because the test platform cannot shape a ligature, a **manual VM GUI check** on the real shaper
+(sweep over «لا», «e` + U+0301», the family emoji) with the expected carets from above.
 
 ## Decisions for D3 and D5 (to be folded into `design.md` by task 0.7)
 
 - **Registry (D3): confirmed**, with: clear in the pre-list canvas **prepaint** (not paint), fill from a zero-size
-  canvas after the `StyledText` (never the render closure), frame stamp dropped.
+  canvas next to the `StyledText` (after it, or before it when that canvas also paints the selection; never the render
+  closure), frame stamp dropped.
 - **Drag capture (D3): confirmed with a change.** Window-level `window.on_mouse_event` handlers for `MouseMoveEvent` and
   `MouseUpEvent` in a `canvas` after the list, **registered on every frame** and checking `drag` inside (not "while
   `drag` is `Some`"). Element handlers are not enough; `on_mouse_up_out` on the rows is a possible backup, not needed.
 - **D5 autoscroll:** one timer drives the scroll with a speed from elapsed time; macOS also repeats the last move every
   16 ms (no use of it needed). Hold the I-beam with `Window::set_window_cursor_style` while dragging.
-- **Selection ranges:** every highlight range starts and ends on a grapheme boundary; no zero-length ranges.
-- **Caret from a point:** the midpoint rule with the wrap-start fix above (untested at wraps, see that section), not
-  the bare `index_for_position`.
-- **Tests:** double and triple click through `simulate_event` with a hand-built `MouseDownEvent { click_count }`.
+- **Selection painting (D3): changed.** Rectangles behind the unchanged `StyledText` (see (c)); `with_highlights` is not
+  used for the selection, so the text never reshapes while selecting. Ranges snap to grapheme boundaries (and to glyph
+  clusters) for carets, copy and word/paragraph units, no longer for shaping. RTL partial selection is not supported.
+- **Caret from a point:** the glyph-cluster midpoint rule with the wrap-start fix (checked in the real shaper and the
+  test platform), not the bare `index_for_position` and not the grapheme-only midpoint.
+- **Tests:** double and triple click through `simulate_event` with a hand-built `MouseDownEvent { click_count }`; the
+  caret tests listed under "Caret placement".
