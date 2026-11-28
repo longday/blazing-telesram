@@ -39,7 +39,8 @@ const ORIGIN_SERVICE_ID: u32 = 27;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplyRef {
     pub timestamp: i64,
-    /// Text of the original; cut to [`QUOTE_MAX_CHARS`] when encoded.
+    /// Text of the original; cut to [`QUOTE_MAX_CHARS`] when encoded, except by
+    /// [`WriteRequest::SendTextUncutQuote`].
     pub quote: String,
 }
 
@@ -61,6 +62,15 @@ pub enum WriteRequest {
         payload_id: String,
         text: String,
         reply: Option<ReplyRef>,
+    },
+    /// A reply whose quote is encoded **as given**, not cut to [`QUOTE_MAX_CHARS`]: the one
+    /// entry point that lets `bt-probe send-reply --quote` measure the server's own limit. Only
+    /// that command builds it; the app's send and edit path keep the cut of [`Self::SendText`].
+    SendTextUncutQuote {
+        chat: String,
+        payload_id: String,
+        text: String,
+        reply: ReplyRef,
     },
     /// Rewrites the whole `Plain`, so a reply must be repeated or the server drops its quote. An
     /// important message repeats `IsImportant: true` too (the key is sent only when set).
@@ -92,6 +102,7 @@ pub enum WriteRequest {
     },
 }
 
+/// The quote as the app sends it: the first [`QUOTE_MAX_CHARS`] characters, never cut inside one.
 fn quote(text: &str) -> &str {
     match text.char_indices().nth(QUOTE_MAX_CHARS) {
         Some((end, _)) => &text[..end],
@@ -100,10 +111,10 @@ fn quote(text: &str) -> &str {
 }
 
 /// Reply refs and quote of a `Plain` (a reply is a forward with a quote); the original is in the
-/// same chat.
-fn add_reply(plain: &mut Value, chat: &str, reply: &ReplyRef) {
+/// same chat. `quote` is written as given: the caller decides whether it was cut.
+fn add_reply(plain: &mut Value, chat: &str, reply: &ReplyRef, quote: &str) {
     plain["ForwardedMessageRefs"] = json!([{ "ChatId": chat, "Timestamp": reply.timestamp }]);
-    plain["ForwardedMessageStyles"] = json!([{ "Quote": quote(&reply.quote) }]);
+    plain["ForwardedMessageStyles"] = json!([{ "Quote": quote }]);
 }
 
 impl WriteRequest {
@@ -114,7 +125,7 @@ impl WriteRequest {
     /// Short name for logs; never the content.
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::SendText { .. } => "send",
+            Self::SendText { .. } | Self::SendTextUncutQuote { .. } => "send",
             Self::Edit { .. } => "edit",
             Self::Delete { .. } => "delete",
             Self::Seen { .. } => "seen",
@@ -134,8 +145,18 @@ impl WriteRequest {
             } => {
                 let mut plain = json!({ "ChatId": chat, "PayloadId": payload_id, "Text": { "MessageText": text } });
                 if let Some(reply) = reply {
-                    add_reply(&mut plain, chat, reply);
+                    add_reply(&mut plain, chat, reply, quote(&reply.quote));
                 }
+                json!({ "Plain": plain })
+            }
+            Self::SendTextUncutQuote {
+                chat,
+                payload_id,
+                text,
+                reply,
+            } => {
+                let mut plain = json!({ "ChatId": chat, "PayloadId": payload_id, "Text": { "MessageText": text } });
+                add_reply(&mut plain, chat, reply, &reply.quote);
                 json!({ "Plain": plain })
             }
             Self::Edit {
@@ -147,7 +168,7 @@ impl WriteRequest {
             } => {
                 let mut plain = json!({ "ChatId": chat, "Timestamp": timestamp, "Text": { "MessageText": text } });
                 if let Some(reply) = reply {
-                    add_reply(&mut plain, chat, reply);
+                    add_reply(&mut plain, chat, reply, quote(&reply.quote));
                 }
                 if *important {
                     plain["IsImportant"] = json!(true);
@@ -310,6 +331,15 @@ mod tests {
                     quote: "orig".into(),
                 }),
             },
+            WriteRequest::SendTextUncutQuote {
+                chat: CHAT.into(),
+                payload_id: "p-3".into(),
+                text: "re".into(),
+                reply: ReplyRef {
+                    timestamp: 1_784_117_592_261_029,
+                    quote: "orig".into(),
+                },
+            },
             WriteRequest::Edit {
                 chat: CHAT.into(),
                 timestamp: 5,
@@ -358,6 +388,7 @@ mod tests {
         for request in &all {
             match request {
                 WriteRequest::SendText { .. }
+                | WriteRequest::SendTextUncutQuote { .. }
                 | WriteRequest::Edit { .. }
                 | WriteRequest::Delete { .. }
                 | WriteRequest::Seen { .. }
@@ -455,6 +486,83 @@ mod tests {
         assert_eq!(sent, long.chars().take(200).collect::<String>());
         assert_eq!(quote("short"), "short");
         assert_eq!(quote(&"a".repeat(200)).len(), 200);
+    }
+
+    /// The JSON body of the frame as it goes out: the real encoder, then the real decoder.
+    fn wire_body(request: &WriteRequest) -> Value {
+        let bytes = frame(request).encode();
+        match crate::frame::IncomingFrame::decode(&bytes).unwrap() {
+            crate::frame::IncomingFrame::Reply { method, body, .. } => {
+                assert_eq!(method, "push");
+                body
+            }
+            other => panic!("not a data frame: {other:?}"),
+        }
+    }
+
+    fn wire_quote(request: &WriteRequest) -> String {
+        wire_body(request)["ClientMessage"]["Plain"]["ForwardedMessageStyles"][0]["Quote"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    fn reply_with(quote: &str, uncut: bool) -> WriteRequest {
+        let (chat, payload_id, text) = (CHAT.to_owned(), "p".to_owned(), "t".to_owned());
+        let reply = ReplyRef {
+            timestamp: 1,
+            quote: quote.to_owned(),
+        };
+        if uncut {
+            WriteRequest::SendTextUncutQuote {
+                chat,
+                payload_id,
+                text,
+                reply,
+            }
+        } else {
+            WriteRequest::SendText {
+                chat,
+                payload_id,
+                text,
+                reply: Some(reply),
+            }
+        }
+    }
+
+    #[test]
+    fn an_uncut_quote_of_250_characters_reaches_the_wire_whole() {
+        let long = "я".repeat(250);
+        let body = wire_body(&reply_with(&long, true));
+        let styles = &body["ClientMessage"]["Plain"]["ForwardedMessageStyles"];
+        assert_eq!(styles.as_array().unwrap().len(), 1);
+        let sent = styles[0]["Quote"].as_str().unwrap();
+        assert_eq!(sent.chars().count(), 250);
+        assert_eq!(sent, long);
+        // The ordinary path still cuts the very same text to 200 characters.
+        assert_eq!(
+            wire_quote(&reply_with(&long, false)),
+            long.chars().take(QUOTE_MAX_CHARS).collect::<String>()
+        );
+    }
+
+    #[test]
+    fn an_uncut_reply_differs_from_an_ordinary_one_only_in_the_quote_length() {
+        for quote in ["", "orig", "x\n y ", &"a".repeat(QUOTE_MAX_CHARS)] {
+            assert_eq!(
+                frame(&reply_with(quote, true)),
+                frame(&reply_with(quote, false))
+            );
+        }
+        let long = "b".repeat(QUOTE_MAX_CHARS + 1);
+        let (mut uncut, mut cut) = (
+            wire_body(&reply_with(&long, true)),
+            wire_body(&reply_with(&long, false)),
+        );
+        uncut["ClientMessage"]["Plain"]["ForwardedMessageStyles"] = Value::Null;
+        cut["ClientMessage"]["Plain"]["ForwardedMessageStyles"] = Value::Null;
+        assert_eq!(uncut, cut);
+        assert_eq!(reply_with(&long, true).kind(), "send");
     }
 
     #[test]
