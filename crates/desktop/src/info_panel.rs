@@ -5,6 +5,7 @@
 //! `groups` and `departments` entries have no modelled shape (design D6) and the panel never invents them.
 
 use crate::desktop::Desktop;
+use crate::new_chat::Candidate;
 use crate::store::{ChatStore, MembersState};
 use crate::theme::*;
 use crate::widgets::{avatar, button};
@@ -79,7 +80,11 @@ fn member_row(store: &ChatStore, member: &Member, cx: &Context<Desktop>) -> Div 
     let admin_tag = format!("{tag}-admin");
     let write_tag = format!("{tag}-write");
     let row_tag = tag.clone();
-    let user = member.user.clone();
+    let person = Candidate {
+        user: member.user.clone(),
+        name: name.clone(),
+        avatar: member.avatar.clone(),
+    };
     div()
         .debug_selector(move || row_tag)
         .h(px(ROW_HEIGHT))
@@ -121,7 +126,7 @@ fn member_row(store: &ChatStore, member: &Member, cx: &Context<Desktop>) -> Div 
                     .text_size(px(12.))
                     .text_color(rgb(ACCENT))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_new_chat(Some(user.clone()), cx)
+                        this.open_new_chat(Some(person.clone()), cx)
                     })),
             )
         })
