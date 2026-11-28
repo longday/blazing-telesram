@@ -129,7 +129,7 @@ Proposal merged into `main` as `b0fcdbc` (2026-11-28, `--no-ff` from `propose/no
 
 **Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds):
 
-- **NB-B** (badge) = 1.1, 2.1, 3.1, 4.1, 6.1 on **`integ/add-notifications-and-badge`**; needs no research outcome; merges into `main` **first**.
+- **NB-B** (badge) = 1.1, 2.1, 3.1, 4.1, 6.1 on **`integ/add-notifications-and-badge`**; needs no research outcome; merges into `main` **first**. **Merged into `main` as `b81508a`** (2026-11-28, `--no-ff` from the integration branch `a5a8de6`; `nb/6.1` `6db58db` merged into it with `nb/b` `32e2c16` inside; whole-unit review `ReviewNbBUnit` approved; `git merge-tree` clean; `git diff a5a8de6 b81508a` touches only `DEPENDENCIES.md`: the merge result equals the integration tree; 8 files, +942/-6; no `allow(...)` line added). **Gate on integ `a5a8de6`** (task 7.1, Integrator, VM `~/bt/src-IntegrateRev`, `--locked --offline`): `cargo fmt --all --check` OK; `cargo build --workspace --all-targets` 0 warnings; `cargo test --workspace` green, **639 + 327 + 220 + 43 + 4 + 23** (desktop, chat-core, yandex-proto lib, bt-probe, `probe_write_guard`, `wire_fixtures`), 0 failed; `cargo clippy --workspace --all-targets` **10 warnings, the baseline, same places** (`wire.rs` 211 and 316, `xiva.rs:113`, `ws.rs:130`, `client.rs` 72, 195 and the test at 4812, `composer.rs:629`, `yandex_backend.rs:389`, `tests.rs:601`; only the `tests.rs` line moved); `openspec validate --all --strict` 18/18. **Gate rerun on the resulting `main` `b81508a`** (same VM directory, removed afterwards): fmt OK; build 0 warnings; tests **639 + 327 + 220 + 43 + 4 + 23** green, 0 failed; clippy 10, the same places; validate 18/18. `nb/b` and `nb/6.1` and their worktrees are removed; the integration branch `integ/add-notifications-and-badge` and its worktree `bt-nb-integ` are kept until Main decides (NB-N has no unit branch in this file).
 - **NB-N** (notifications) = 1.2, 2.2, 4.2, 5.1, 5.2 (only for R1 outcome 2), 6.2, started **after NB-B is on `main` and after 0.4** (it extends `store.rs`, `alerts.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`, and adds chat-core `model.rs` and `client.rs`: the new `ClientEvent::Incoming` and the recovery hold). If R1 ends in outcome 3 (no API works), NB-N does not run and the badge unit alone is delivered.
 - Research 0.1, 0.2 (its `bt-probe.rs` code and live run), 0.3, 0.4 merge as docs plus the `bt-probe.rs` change of 0.2. **`research.md` has one writer (0.4)**: 0.1 writes `research-r1.md`, 0.2 and then 0.3 write `research-r2.md`, so 0.1 and 0.2 do not share a file and can run in parallel.
 
@@ -139,18 +139,18 @@ Proposal merged into `main` as `b0fcdbc` (2026-11-28, `--no-ff` from `propose/no
 | 0.2 | open: R2, `bt-probe chats` prints `muted`, `chats --keys`, live count of mute keys and `IsSilent` / `NotificationBehaviour` values; **[live]**, reads only | 0.1 not required; a free live slot | `yandex-proto/src/bin/bt-probe.rs`, `research-r2.md` (new) |
 | 0.3 | open, **optional, non-gating, [live] [needs-user]**: mute-change push, first-message-of-a-new-chat push order, replay of missed messages after a reconnect | 0.2, the user as the second party | `research-r2.md` (after 0.2) |
 | 0.4 | open: copy the answers into `research.md` and `design.md`, fix the dependent tasks | 0.1, 0.2 (0.3 if run) | `research.md`, `design.md`, `tasks.md`, specs |
-| 1.1 | open, NB-B: `badge_total`, `ChatStore::badge_count` | none | `store.rs` |
+| 1.1 | **done**, on `main` with NB-B (`b81508a`): `badge_total`, `ChatStore::badge_count` | none | `store.rs` |
 | 1.2 | open, NB-N: `ClientEvent::Incoming` (chat-core `model.rs`, `client.rs`, with the recovery hold after `Reconnected`) and `StoreEvent::Incoming` (`store.rs`) | NB-B merged | `crates/chat-core/src/model.rs`, `crates/chat-core/src/client.rs`, `store.rs` |
-| 2.1 | open, NB-B: `alerts.rs` badge half (`DockBadge`, `AlertsFactory`, `Alerts`, `badge_label`, fake) | 1.1 | `alerts.rs`, `main.rs` (module line) |
+| 2.1 | **done**, on `main` with NB-B (`b81508a`): `alerts.rs` badge half (`DockBadge`, `AlertsFactory`, `Alerts`, `badge_label`, fake) | 1.1 | `alerts.rs`, `main.rs` (module line) |
 | 2.2 | open, NB-N: `Notifier`, `notification_for`, `decide`, dedupe, `pending` chat, withdraw, permission, click event | 0.4, 1.2, NB-B merged | `alerts.rs`, `main.rs` (registration) |
-| 3.1 | open, NB-B: `dock.rs` over `NSDockTile`, `objc2-app-kit` features, factory registered | 2.1 | `dock.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
-| 4.1 | open, NB-B: `Desktop` owns `Alerts` | 2.1 | `desktop.rs` |
+| 3.1 | **done**, on `main` with NB-B (`b81508a`): `dock.rs` over `NSDockTile`, `objc2-app-kit` features, factory registered | 2.1 | `dock.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
+| 4.1 | **done**, on `main` with NB-B (`b81508a`): `Desktop` owns `Alerts` | 2.1 | `desktop.rs` |
 | 4.2 | open, NB-N: forward `Incoming` with the window state, click opens the chat | 1.2, 2.2, 4.1 | `desktop.rs` |
 | 5.1 | open, NB-N: `notifier.rs` over `UNUserNotificationCenter`, delegate, new crate | 0.4, 2.2 | `notifier.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
 | 5.2 | open, NB-N, **only for R1 outcome 2**: `scripts/bundle.sh`, `run.sh`, docs | 0.4, 5.1 | `scripts/bundle.sh`, `run.sh`, `docs/vm.md`, `README.md` |
-| 6.1 | open, NB-B: badge section of `tests.rs` | 2.1, 4.1 | `tests.rs` |
+| 6.1 | **done**, on `main` with NB-B (`b81508a`): badge section of `tests.rs` | 2.1, 4.1 | `tests.rs` |
 | 6.2 | open, NB-N: notification section of `tests.rs` | 4.2, 6.1 | `tests.rs` |
-| 7.1 | open: final run per unit in `bt-vm` | the unit | build/test/lint matrix |
+| 7.1 | **NB-B part done** (gate on `a5a8de6` and on `main` `b81508a`, see above); open for NB-N: final run per unit in `bt-vm` | the unit | build/test/lint matrix |
 | 7.2 | open, **[live] [needs-user]**: hand check in the VM (permission, badge, banner, muted chat, click, withdraw, backlog, log has no text) | 7.1, a sender other than the app account, a muted chat | none (checks only) |
 | 7.3 | open: this file, specs sync (`dock-badge`, `incoming-notifications` created), archive | everything above | this file, archive |
 
