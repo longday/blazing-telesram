@@ -87,7 +87,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: a fixed `ts` and clock; midnight and year boundaries; no author.
   - Done when: these tests exist.
 
-- [ ] 1.3 Selectable text in the timeline (D3)
+- [x] 1.3 Selectable text in the timeline (D3)
   - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
   - Depends on: 1.1, 0.1.
   - Do: replace `text_block` (body and captions of image and gallery) by `selectable_text`: `StyledText` with `with_highlights` from `range_in`, selector `msg-{ts}-text`, `CursorStyle::IBeam`; `TextLayouts` registry and `picking: Entity<PickState>` in `RowContext`; mouse down (Left) computes the caret from the layout (`Ok`/`Err` both, grapheme-snapped, never on an unmeasured layout) and calls `Desktop::text_down(chat, ts, offset, click_count, shift)`; the quote, author, time, chips and cards stay unselectable; a theme constant `SELECTION` for the highlight. The text div's width rules and the line height stay unchanged (the highlight changes no height).

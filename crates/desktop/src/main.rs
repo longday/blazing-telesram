@@ -16,6 +16,7 @@ mod selection;
 mod store;
 #[cfg(test)]
 mod tests;
+mod text_lines;
 mod theme;
 mod timeline;
 mod viewer;

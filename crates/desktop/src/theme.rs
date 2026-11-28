@@ -27,3 +27,5 @@ pub const REACTION_CHIP: u32 = 0x203449;
 pub const REACTION_OWN: u32 = 0x4f95d6;
 /// The "⚡" important marker in a bubble footer.
 pub const IMPORTANT_MARK: u32 = 0xf2c14e;
+/// The highlight of selected message text, as RGBA for `rgba()`: the accent at 35 % over a bubble.
+pub const SELECTION: u32 = 0x6ab2f259;
