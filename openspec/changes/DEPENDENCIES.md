@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal only, no code started). **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal merged, no code started). **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -125,7 +125,7 @@ Decision record (main session, 2026-11-28, from R1; written into `design.md` by 
 
 ## add-notifications-and-badge (NB)
 
-Proposal on branch `propose/notify` (not merged; docs only: `openspec/changes/add-notifications-and-badge/**` and this file). Roadmap item 7, read-only part: macOS notifications for incoming messages and a Dock badge with the unread count. Settings and themes are out of scope. Decisions: the badge counts unmuted unread messages; "incoming" is derived in `store.rs` from the chat list's own update (no `chat-core` / `yandex-proto` change); the policy is in `alerts.rs` behind two traits and a global factory (the `AudioFactory` pattern); the platform API (`UNUserNotificationCenter` through the one new crate `objc2-user-notifications =0.3.2`, bundle identity risk) is chosen by research R1 with a written fallback rule. Nothing in flight holds `store.rs`, `desktop.rs`, `main.rs`, `tests.rs` (MP and RL are archived).
+Proposal merged into `main` as `b0fcdbc` (2026-11-28, `--no-ff` from `propose/notify` `12b3cc8`, proposal review `ReviewNbProposal` approved; `git merge-tree` clean; docs only: `openspec/changes/add-notifications-and-badge/**` and this file; `openspec validate --all --strict` 18/18); the branch and its worktree are removed. Integration branch **`integ/add-notifications-and-badge`** created off `b0fcdbc`, pushed, worktree `../bt-nb-integ`. Roadmap item 7, read-only part: macOS notifications for incoming messages and a Dock badge with the unread count. Settings and themes are out of scope. Decisions: the badge counts unmuted unread messages; "incoming" is derived in `store.rs` from the chat list's own update (no `chat-core` / `yandex-proto` change); the policy is in `alerts.rs` behind two traits and a global factory (the `AudioFactory` pattern); the platform API (`UNUserNotificationCenter` through the one new crate `objc2-user-notifications =0.3.2`, bundle identity risk) is chosen by research R1 with a written fallback rule. Nothing in flight holds `store.rs`, `desktop.rs`, `main.rs`, `tests.rs` (MP and RL are archived).
 
 **Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds):
 
