@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Two changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`. **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Three changes are open: **CM** `add-chat-members-and-creation`, **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal only, no code started). **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -21,7 +21,7 @@ Owner: Integrator. Updated: 2026-11-28. Two changes are open: **CM** `add-chat-m
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it.
 3. **Zero build warnings** (`cargo build --workspace --all-targets`; no CI and no `-D warnings`, but `main` builds with 0 warnings). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. A unit therefore contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used.
 4. **Cargo, `bt-probe` and the app run only in the Tart VM `bt-vm`, never on the host** (rule `containers.md`). Procedure: sync the tree to test into `~/bt/src-<name>` (tracked and untracked, no ignored files; `~/bt/src` is shared, so concurrent agents use their own directory), put `$HOME/.cargo/bin` in `PATH` (`tart exec` lacks it), build and run there; `.runtime` for live runs is the VM's `~/bt/.runtime`. Remove the `~/bt/src-<name>` directory when the task is done. `git` and `openspec` on the host are fine. How to start the VM and the full workflow: [docs/vm.md](../../docs/vm.md).
-5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**.
+5. **Live-account tasks share one session and run one at a time**: CM 5.1, 5.3, 6.2; PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user); NB 0.2 (live part, reads only), 0.3 (optional, needs-user), 7.2 (needs-user; reads only). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**. NB 0.1 needs no account (VM scratch crate) and takes no live slot.
 6. **A task that is not started locks nothing.** Rule 1 holds files only for started, unmerged tasks. Tasks gated on approvals, live runs or open questions (for example CM 5.1, 5.3) hold no file until the moment they start; whoever starts a file first keeps it until its unit merges, the other waits.
 
 ## add-chat-members-and-creation (CM)
@@ -123,16 +123,53 @@ Order (all done): research 0.1-0.8, PB-V on `main` as `6287bea`, PB-W on `main` 
 
 Decision record (main session, 2026-11-28, from R1; written into `design.md` by 0.8): **a video is a `MiscFile` whose file name has a whitelisted extension (D8: `mp4`, `mov`)**; `PreviewHint.VideoPreview` is optional and is used only for the dimensions and the duration when present (only 11 of 94 video-extension files carry it, so a hint-only rule would miss 88 % of them); `Voice.Duration` is milliseconds (R3 confirmed). Tasks 1.3, 3.2, 5.4 are rewritten for an optional hint.
 
+## add-notifications-and-badge (NB)
+
+Proposal on branch `propose/notify` (not merged; docs only: `openspec/changes/add-notifications-and-badge/**` and this file). Roadmap item 7, read-only part: macOS notifications for incoming messages and a Dock badge with the unread count. Settings and themes are out of scope. Decisions: the badge counts unmuted unread messages; "incoming" is derived in `store.rs` from the chat list's own update (no `chat-core` / `yandex-proto` change); the policy is in `alerts.rs` behind two traits and a global factory (the `AudioFactory` pattern); the platform API (`UNUserNotificationCenter` through the one new crate `objc2-user-notifications =0.3.2`, bundle identity risk) is chosen by research R1 with a written fallback rule. Nothing in flight holds `store.rs`, `desktop.rs`, `main.rs`, `tests.rs` (MP and RL are archived).
+
+**Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds):
+
+- **NB-B** (badge) = 1.1, 2.1, 3.1, 4.1, 6.1 on **`integ/add-notifications-and-badge`**; needs no research outcome; merges into `main` **first**.
+- **NB-N** (notifications) = 1.2, 2.2, 4.2, 5.1, 5.2 (only for R1 outcome 2), 6.2, started **after NB-B is on `main` and after 0.4** (it extends `store.rs`, `alerts.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`). If R1 ends in outcome 3 (no API works), NB-N does not run and the badge unit alone is delivered.
+- Research 0.1, 0.2 (its `bt-probe.rs` code and live run), 0.3, 0.4 merge as docs (`research.md`, `design.md`, `tasks.md`) plus the `bt-probe.rs` change of 0.2.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | open: R1, notification centre and Dock badge in a bare binary and in a minimal bundle (VM scratch crate, no account); decides the platform API, whether 5.2 exists, the cargo feature lists | VM network | `research.md` |
+| 0.2 | open: R2, `bt-probe chats` prints `muted`, `chats --keys`, live count of mute keys and `IsSilent` / `NotificationBehaviour` values; **[live]**, reads only | 0.1 not required; a free live slot | `yandex-proto/src/bin/bt-probe.rs`, `research.md` |
+| 0.3 | open, **optional, non-gating, [live] [needs-user]**: mute-change push and first-message-of-a-new-chat push order | 0.2, the user as the second party | `research.md` |
+| 0.4 | open: close the research into `design.md` and fix the dependent tasks | 0.1, 0.2 (0.3 if run) | `design.md`, `tasks.md`, `research.md`, specs |
+| 1.1 | open, NB-B: `badge_total`, `ChatStore::badge_count` | none | `store.rs` |
+| 1.2 | open, NB-N: `StoreEvent::Incoming`, `is_incoming` | NB-B merged | `store.rs` |
+| 2.1 | open, NB-B: `alerts.rs` badge half (`DockBadge`, `AlertsFactory`, `Alerts`, `badge_label`, fake) | 1.1 | `alerts.rs`, `main.rs` (module line) |
+| 2.2 | open, NB-N: `Notifier`, `notification_for`, `decide`, dedupe, withdraw, permission, click event | 0.4, 1.2, NB-B merged | `alerts.rs`, `main.rs` (registration) |
+| 3.1 | open, NB-B: `dock.rs` over `NSDockTile`, `objc2-app-kit` features, factory registered | 2.1 | `dock.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
+| 4.1 | open, NB-B: `Desktop` owns `Alerts` | 2.1 | `desktop.rs` |
+| 4.2 | open, NB-N: forward `Incoming` with the window state, click opens the chat | 1.2, 2.2, 4.1 | `desktop.rs` |
+| 5.1 | open, NB-N: `notifier.rs` over `UNUserNotificationCenter`, delegate, new crate | 0.4, 2.2 | `notifier.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
+| 5.2 | open, NB-N, **only for R1 outcome 2**: `scripts/bundle.sh`, `run.sh`, docs | 0.4, 5.1 | `scripts/bundle.sh`, `run.sh`, `docs/vm.md`, `README.md` |
+| 6.1 | open, NB-B: badge section of `tests.rs` | 2.1, 4.1 | `tests.rs` |
+| 6.2 | open, NB-N: notification section of `tests.rs` | 4.2, 6.1 | `tests.rs` |
+| 7.1 | open: final run per unit in `bt-vm` | the unit | build/test/lint matrix |
+| 7.2 | open, **[live] [needs-user]**: hand check in the VM (permission, badge, banner, muted chat, click, withdraw, backlog, log has no text) | 7.1, a sender other than the app account, a muted chat | none (checks only) |
+| 7.3 | open: this file, specs sync (`dock-badge`, `incoming-notifications` created), archive | everything above | this file, archive |
+
+File ownership (rule 1): `store.rs` (1.1, then 1.2); `alerts.rs` (2.1, then 2.2); `desktop.rs` (4.1, then 4.2); `tests.rs` (6.1, then 6.2); `main.rs` (2.1 module line, 3.1 module and registration, then 2.2 / 5.1; serialise); `crates/desktop/Cargo.toml` and `Cargo.lock` (3.1, then 5.1); `dock.rs` (3.1); `notifier.rs` (5.1); `scripts/bundle.sh`, `run.sh`, `docs/vm.md`, `README.md` (5.2); `bin/bt-probe.rs` (0.2); `research.md` (0.1, 0.2, 0.3, 0.4 one at a time); `design.md`, `tasks.md` and the specs (0.4).
+
+Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -> 3.1 / 4.1 -> 6.1) can start at once and merges first; NB-N after NB-B and 0.4; 7.1 per unit; 7.2 when the user provides the sender; 7.3 last. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-notifications-and-badge --strict`.
+
 ## Ready now
 
 - **Nothing is startable without the user** in CM or PIN. PIN 6.2 part 1 (strip/marker in the admin chat) is done and merged (`3233c95`), together with the 4.5 fix; the branches `pins/6.2`, `pins/bar-preview` and their worktrees are removed. PIN 3.3 code, PIN 1.5 and PIN 4.5 are on `main` (`a395100`, `db5950c`, `3233c95`). What is left for PIN (6.2 self-chat UI path with the live re-check of 4.5, 6.2 Q6, closing 3.3, then 6.3 archive) needs the user's web session of the app account.
 - RL: archived (2026-11-28); nothing is left open.
 - CM: CM-G (6.3 + 6.4) and 7.1 are on `main` (`942a109`, `18141dc`); only 5.1 and 5.3 are open, both blocked on the user (a target with no existing private chat), and they alone block the CM archive; 6.F does not run (6.2 PASS).
 - **MP: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`); PB-V `6287bea` and PB-W `19f2223` are on `main`, the gate is recorded under 6.1. Nothing is left open for MP; the follow-ups (playback copies keyed by `Id2` only) are not tasks.
+- **NB: nothing is startable without the user except the code.** NB 0.1 (VM scratch research), NB 0.2 (live reads) and the whole NB-B unit (1.1, 2.1, 3.1, 4.1, 6.1) can start at once; NB-N waits for NB-B and 0.4.
 
 ## Needs the user
 
 - Approval of the target: CM 6.2 is done (2026-11-27). **CM 5.1 and 5.3 need the user**: they need a target with **no** existing private chat with the app account (a target that already has one only returns or opens that chat, which is not a creation, and the web client cannot delete a private chat to free the existing target); the user names such a target (a person the app account has never chatted with) or decides to close CM without them. Do not repeat the run against the existing target.
 - PIN 0.2 is done (the web client was the other party, no user action needed). **PIN 6.2 part 1 (bar and marker in the admin chat) is done** (2026-11-27, merged `3233c95`; deviation: the private admin chat, not the self chat). **PIN 6.2 remainder needs the user**: (a) the self-chat UI path, i.e. the bar and marker in the self chat, with a live look at the 4.5 fix (the pinned text under the label, not "…"); (b) **Q6**: an edit authored by the app account is required, and `bt-probe edit-self` refuses any chat but the self chat, so the user marks a message of the self chat as important in a web session **of the app account** (the web client of `admin@sgnl.pro` cannot, it is another account); then `edit-self <ts> <text>` with and without `--important` and `history` (task 6.2 text; `research.md` 0.2 note on Q6). Closing 3.3 and the 6.3 archive wait for it.
 - **MP needs no user** and is archived. The **R1 fallback** (the admin web client sending a sample, a write by another account) was not needed: 0.1 found the samples.
+- **NB needs the user** for 7.2 (and the optional 0.3): a person other than the app account who sends incoming messages (or the main session's decision to use the web client of the second account, as PIN 0.2 and RL 8.2 did), a chat the user mutes in their own web session, and a live slot. Open design questions for the user: do muted chats count in the badge (default no), is the message text shown in the notification (default yes).
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, recorded in the archived `add-reaction-list/research.md`); PIN 0.1 is no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
