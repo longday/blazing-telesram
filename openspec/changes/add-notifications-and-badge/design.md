@@ -1,0 +1,162 @@
+# Design
+
+## Context
+
+`proposal.md` states the motivation, `research.md` the unknowns and the facts. Code this change extends (read on 2026-11-28):
+
+- `yandex-proto/src/wire.rs`: `WireChat { unread, muted, last_message, .. }`; `unread` = `LastSeqNo - LastSeenByMeSeqNo` clamped at 0, `muted` = the chat entry's `Muted` bool, absent = false (`parse_chat`). `PushEvent::{MessageUpserted, ChatChanged, ..}`.
+- `desktop/src/yandex_backend.rs`: `subscribe` forwards `PushEvent::MessageUpserted` as `LiveEvent::MessageUpserted` and answers `PushEvent::ChatChanged` by re-reading the chat list and forwarding that chat's entry as `LiveEvent::ChatChanged(summary)`; `summary()` maps `muted`.
+- `chat-core/src/client.rs`: `handle_live` (`LiveEvent::MessageUpserted`) reads the message cache (`cached`), writes the message, emits `ClientEvent::MessageUpserted` and then `update_preview`, which for a message that is not outgoing, not older than the row's last message and not the same as it **adds one to `unread`**, replaces `last_message` and emits `ClientEvent::ChatUpdated`; it returns without an event when the chat is not in the cache, and a row that a list refresh already brought up to date (same last timestamp) is not bumped. `LiveEvent::ChatChanged` emits `ChatUpdated` with the server's authoritative row. A seen marker, state sync, clear-history and approval pushes decode to `PushEvent::ChatChanged` (`wire.rs`), which the backend answers with a list read, so they reach the core as `ChatUpdated` carrying server-side `unread`. `LiveEvent::Reconnected` (the push connection came back by itself) runs `become_online(true)`: the phase is `Online` and the connection state `Online` at once, the chat-list reload is posted and lands later in `handle_chats` as `ChatsReplaced`, and `spawn_catch_up` reloads cached chats' newest history; a full retry after an error instead runs `handle_connected`, which loads the list **before** the push pump starts. The start-up cache and the first list are `ChatsReplaced`. Marking read emits `ChatUpdated` with `unread` 0.
+- `desktop/src/store.rs`: `ChatStore.chats: HashMap<ChatId, ChatSummary>`, `apply` (`ChatsReplaced` and `ChatUpdated` both emit `StoreEvent::Chats`), `chat(&id)`, `selected()`, `select`, `forget_account` (sign-out and account switch). `StoreEvent` is the app's one change channel; `player.rs` subscribes to it directly.
+- `desktop/src/desktop.rs` + `desktop/composer.rs`: `observe_window_activation`; `check_read` marks the open chat read only when `window.is_window_active()` and nothing covers the chat; the test harness has `cx.deactivate_window()` and `activate(cx)`.
+- `desktop/src/main.rs`: `open_chat_window` creates the store and the window, subscribes to the store for sign-in return and reveal; `cx.on_window_closed` quits when the last window closes; globals such as `player::AudioFactory` are registered before the window (`audio.rs`, the pattern this change copies).
+- `desktop/Cargo.toml`: `objc2 =0.6.5`, `objc2-foundation =0.3.2`, `block2 =0.6.2`, `objc2-app-kit =0.3.2` with `std, NSResponder, NSScreen, NSWindow, objc2-core-foundation`, `objc2-avf-audio =0.3.2`; `Cargo.lock` has no `objc2-user-notifications`. `objc2-app-kit 0.3.2` has `NSDockTile::{badgeLabel, setBadgeLabel}` and `NSApplication::dockTile` behind the feature `NSDockTile`.
+
+## Goals / Non-Goals
+
+**Goals:** the Dock badge and the notification of the proposal, each testable without the platform; the platform code in two small files that nothing else touches; the policy (what notifies, what does not) in one pure place with a table of tests; one small, explicit core event for "a message arrived" so that no notification depends on how the unread counter happens to move; the contracts below fixed so core, store, policy, platform, wiring and tests can be written in parallel.
+
+**Non-Goals:** the proposal's non-goals.
+
+## Decisions
+
+### D1. Shape of the change
+
+Three seams, each testable alone: **facts** (the core's arrival event, forwarded by the store, and the store's badge total: pure over `ChatSummary` / `MessagePreview`), **policy** (`alerts.rs`: given the facts and the window state, what to show; an entity that owns the state "what is delivered" and "what the badge shows"), **platform** (`dock.rs`, `notifier.rs`: traits implemented over `NSDockTile` and `UNUserNotificationCenter`; the only files with `unsafe` and objc2 code). The policy talks to the platform through two small traits and a global factory, exactly as `Player` talks to `AudioOutput` through `AudioFactory` (`add-media-playback` D5): the real factory is registered in `main.rs`, the test harness registers a scripted fake, no factory means no alerts.
+
+### D2. The badge
+
+- **Count** = the sum over `ChatStore.chats` of `unread` for every chat with `muted == false`. It is what the chat list shows, so it needs no request and cannot drift from the list. Messages, not chats: a chat with 120 unread messages weighs 120, as the row's counter says.
+- **Muted chats are not counted** (veto-able, proposal question 1): a user who muted a chat asked not to be disturbed by it, and the muted counter in the row is already drawn in a quieter style (`chat-list`, "Muted chat"). The rule is one `filter(|c| !c.muted)` in one pure function, `badge_total(chats)`.
+- **Label** (`badge_label(total) -> Option<String>`): `None` at 0 (the badge is removed), the decimal number up to 999, `"999+"` above.
+- **When it is recomputed**: on `StoreEvent::Chats` (covers `ChatsReplaced` and `ChatUpdated`: a push, a read here, a read elsewhere, a reconnect), `StoreEvent::Session` and `StoreEvent::Account` (the store forgets the chats at sign-out and account switch). The result is compared with the last label handed to the platform and handed over only when it differs.
+- **Cleared** on the events above (an empty store gives 0) and when the `Alerts` entity is dropped (`Drop` hands `None` to the platform): the window closing on sign-out or expiry drops its `Desktop` and with it the entity, so the badge never outlives the window. A quit clears the Dock badge by itself; task 7.2 checks that on the real system.
+- **No authorization needed** is [INFERENCE]: `NSDockTile.badgeLabel` is an app-owned label that does not go through the notification centre. R1 measures whether the label is shown when notifications are refused or undetermined; if it is not, the badge is documented as following the system's "Badge app icon" switch and nothing else changes.
+
+### D3. Platform API and identity, chosen by a rule from R1
+
+```rust
+// desktop/src/alerts.rs (contracts; the real ones are in dock.rs and notifier.rs)
+pub trait DockBadge { fn set(&mut self, label: Option<&str>); }
+
+pub struct Notification { pub chat: ChatId, pub id: String /* chat:timestamp */, pub title: String, pub body: String }
+pub enum Permission { Undetermined, Granted, Denied }
+pub trait Notifier {
+    fn request_permission(&mut self);                 // once; the answer arrives through `permission()`
+    fn permission(&self) -> Permission;
+    fn show(&mut self, notification: Notification);
+    fn withdraw(&mut self, chat: &ChatId);            // every delivered notification of this chat
+    fn withdraw_all(&mut self);
+    fn clicks(&self) -> async_channel::Receiver<ChatId>;
+}
+pub struct AlertsFactory(pub fn() -> Platform);       // a gpui Global
+pub struct Platform { pub badge: Box<dyn DockBadge>, pub notifier: Option<Box<dyn Notifier>> }
+```
+
+`notifier: None` is the honest "this process cannot show notifications" (below); the badge never depends on it. Unit NB-B ships `Platform` with the `badge` field only; unit NB-N adds `notifier` (task 2.2).
+
+**Candidates.**
+
+| | API | New code and deps | Click comes back to the process | Needs |
+|---|---|---|---|---|
+| **N-A** | `UNUserNotificationCenter` through `objc2-user-notifications =0.3.2` (`default-features = false`, features `std`, `block2`, `bitflags` and the `UN*` modules actually used; R1 lists them) | **1 new crate** (Zlib OR Apache-2.0 OR MIT; the objc2 family is in the tree; `bitflags 2.13.2` is in the lock) | yes: the delegate's `didReceiveNotificationResponse`, called on a non-main thread, so the chat id goes through an `async_channel` the foreground executor drains | a bundle identifier; **[INFERENCE, R1 measures it]** `+currentNotificationCenter` raises an exception in a process without one, i.e. a bare `cargo run` binary |
+| N-B | `NSUserNotificationCenter` (deprecated since macOS 11) through `objc2-foundation`'s `NSUserNotification` | no new crate | yes (activation delegate) | possibly a bundle identifier too; deprecated, may vanish; kept only as the reserve if N-A fails in a bundle |
+| N-C | `osascript -e 'display notification'` | none | **no** | nothing, but it shows under "Script Editor", has no click, needs the text escaped into AppleScript (injection) and spawns a process per message: rejected, it cannot meet the click requirement |
+
+**Rule.** Pick the smallest candidate that, in the VM, (1) delivers a notification with a title and a body under the app's own name, (2) reports the click with the chat identifier back to the process, and (3) does not change how the app is launched. Outcomes of R1 for N-A:
+
+1. **Works from the bare binary** (the identity is not required, or `bundleIdentifier` is non-nil by itself): N-A, no packaging, `notifier` is always `Some`.
+2. **Needs a bundle, and works from a minimal ad-hoc-signed `.app`** (`Info.plist` with `CFBundleIdentifier` and `CFBundleExecutable`, the binary copied in): N-A, and task 5.2 ships the wrapper (a script that builds the bundle under `target/` and a `run.sh` that launches it), so that the daily way of running the app has notifications. `notifier::create()` first reads `NSBundle.mainBundle.bundleIdentifier()` and returns `None` when it is nil, **before** any `UNUserNotificationCenter` call, so a bare `cargo run` binary keeps the badge, does not crash, and logs one `info` line ("notifications unavailable: not running from an application bundle"; no content).
+3. **Works in neither** (signing, entitlement, or the VM refuses): N-B is measured the same way; if it fails too, the research ends with "none", `notifier` stays `None` everywhere, the change ships the badge only (unit NB-B), and the main session decides about the rest. No code path for N-A is merged in that case.
+
+R1 also records, for the chosen candidate: the permission prompt and what `getNotificationSettings` reports before and after; whether a notification is shown while the app is frontmost (a foreground app needs the delegate's `willPresentNotification` to ask for a banner, so the real notifier asks for banner and sound there and the policy, not the system, decides what is shown); that the delegate must be installed before the first request and is held only weakly by the centre (the notifier keeps the delegate object alive); what `removeDeliveredNotifications` does.
+
+**Threading.** `NSDockTile` and `NSApplication` are main-thread: `dock.rs` takes a `MainThreadMarker` (`MainThreadMarker::new()` succeeds in gpui callbacks) and `DockBadge::set` is only called from entity updates on the main thread. The notification centre's completion handlers and delegate callbacks come from system threads: they hold nothing but an `async_channel::Sender` (which is `Send`) and a small atomic for the permission.
+
+### D4. What an incoming message is: a live arrival the core reports, not an unread delta
+
+The unread counter is the wrong trigger: the server's list rows carry their own count, so one update can lower it and raise it at once. Example: a chat shows 5 unread, another client reads four, and a new message arrives; the list now says 2 (or 1, if the push order is seen marker, list read, then the message), the preview timestamp is newer, and "the count rose" is false; and if the list read lands first, `update_preview` later sees the same last timestamp and does not bump. A notification must follow the message, not the counter.
+
+**`ClientEvent::Incoming { chat: ChatId, preview: MessagePreview }`** (`chat-core/src/model.rs`), emitted by `handle_live` in the `LiveEvent::MessageUpserted` arm, after `update_preview`, when all of these hold:
+
+1. the message is not outgoing (`!message.outgoing`; the echo of an own send, from this client or another, is outgoing), its body is not `Deleted`, and it is **not an edit push** (`!message.edited`: `wire.rs` sets it from `LastEditTimestamp > 0`, so an edit, and a flag-only change such as a pin or importance mark, are never arrivals; the server stamps `LastEditTimestamp` only after the first change, so a fresh message has it unset);
+2. the message was **not in the message cache** (`cached` is `None`, already read at the top of the arm): a re-announcement and a message that catch-up or a history page already stored are not arrivals. The cache alone is **not enough**: it holds messages only for chats that were opened or caught up, while a list refresh only stores the chat's summary (`replace_chats`, `upsert_chat`), so an edit of the newest message in an unopened chat has `cached == None`, an equal timestamp and often `unread > 0`, and would pass items 2 and 3; item 1's `edited` is what excludes it;
+3. it is **not older than the chat row's last message** when the chat is cached (`last > message.timestamp` is false; equal is allowed, because a list refresh may have brought the row up to date first, which is exactly the order that `update_preview` cannot see);
+4. the **recovery hold** is off (next paragraph).
+
+`preview` is `message_preview_of(message)` (author, text, timestamp), which D5 already wants. The core does not look at `unread` or `muted`. `store.rs` maps it to `StoreEvent::Incoming { chat, preview }` after the `ChatUpdated` of the same message (the arm order puts it last), and does nothing else with it. `Alerts` then reads the chat's row (`store.chat(&chat)`) for the title, kind, `muted` and `unread`.
+
+**Recovery hold (explicit boundary).** After `LiveEvent::Reconnected` the core is `Online` at once while the chat list reloads later, so seen-marker and state pushes, and pushes of the offline period, can arrive first. The hold is tied to **the latest reload**, not to "a reload": the core keeps `reload_token: u64` and `incoming_hold: bool`. `become_online(true)` (the `Reconnected` path only; `handle_connected` loads the list before the pump starts, so it has no gap) increments the token, sets the hold, and passes the token to the reload it posts: `Input::Chats` gains the token (`Input::Chats { token, result }`; its only two sites are `client.rs` `become_online` and the `handle_chats` dispatch). `handle_chats` applies every answer as today (a late answer of an earlier reload still replaces the list, which is the existing behaviour), but **releases the hold only when `token == reload_token`**, answered or failed. So `Reconnected A`, `Reconnected B`, answer of A leaves the hold on until B answers; answers arriving in the order B, A release it at B and A changes nothing about it. `connection_lost` and `switch_account` clear the hold and bump the token, so an answer still in flight from before can never release a later hold (a later `Reconnected` sets it again with a newer token). While the hold is set the arm still stores the message and updates the row, preview and unread as today, and emits `MessageUpserted` / `ChatUpdated`; only `Incoming` is not emitted. Each reload's call always ends (answer or error), so the latest token always releases the hold. **Residual, measured by R3 (c)**: if the server replays missed messages as pushes, one for a chat that has cached history can still arrive after the list settled and before `spawn_catch_up` stored it; if R3 (c) shows replays, task 0.4 extends the hold to "latest list reload settled and `history_out` back at 0" (the counter exists, `begin_snapshots`). Without evidence of replays this stays as written.
+
+**The chat the list does not know yet** (a first message from someone new): `update_preview` returns early, so the row is missing when `Incoming` arrives. `Alerts` keeps at most one `pending` preview per chat for such an arrival, completes it when a `StoreEvent::Chats` brings the row in (and the rest of the policy then applies), and drops all pending on `Session`, `Account` and `Connection` (any reconnect or disconnect), so nothing outlives the situation it was recorded in. Whether the server follows a first message with a `ChatChanged` push is R3 (b); if it does not, the scenario is dropped by 0.4 and `pending` is not written.
+
+**Duplicates**: a message announced twice finds itself in the cache the second time (item 2). `Alerts` still remembers the newest timestamp notified per chat and drops anything not newer, a second guard that costs one map entry.
+
+**Already read elsewhere**: when the row's `unread` is 0 as the message is announced (a seen marker and a list read landed first), the user has seen it in another client; `decide` skips it (D6).
+
+Rejected: deriving from the chat list's update (`ChatUpdated` with `unread` up and a newer preview): it drops the case above (count down or equal, timestamp newer) and cannot tell a first announcement from a list refresh that raced ahead; deriving from `ClientEvent::MessageUpserted` in the store: it also fires for edits, own sends and echoes, and the store cannot tell an edit of the newest message from its arrival, because it has no message cache. The cost of the chosen way is one variant and one block in `chat-core` (`client.rs` is large, but the change is one arm and one flag).
+
+### D5. The notification's content and privacy
+
+- `Notification.title` = `ChatSummary.title`. `body` = `MessagePreview.text` of the event (`MessageBody::preview_text`: the text, «Фото», «Голосовое сообщение», «Видео», a file name, `[kind]` for an unsupported body) with every run of whitespace, line breaks included, collapsed to one space, trimmed, cut to **140 grapheme clusters** (`unicode-segmentation` is already a dependency) with «…» appended when cut; in a group or channel (`ChatKind` other than private) prefixed with `"{author}: "` when `MessagePreview.author` is `Some`. An empty body after trimming reads «Новое сообщение».
+- `id` = `"{chat id}:{timestamp}"`; the platform's thread identifier is the chat id, so macOS groups a chat's notifications; the user info carries the chat id and nothing else.
+- **Sound**: the system's default notification sound (`UNNotificationSound.defaultSound`); no sound file of ours (Telegram Desktop sounds would trigger the licence rule of `openspec/config.yaml`). The user can turn it off in System Settings > Notifications. A setting is a non-goal.
+- **Privacy**: the text is the same text the chat row shows on screen, and a notification is how a messenger works; the system hides previews on a locked screen if the user says so. The chat title, author and text go only to the notification centre. `alerts.rs` and `notifier.rs` log at most `notification shown` / `notification skipped (muted | open chat | denied)` with no content at `debug`; the permission outcome at `info`. The user-info payload is the chat id only, and nothing is persisted by the app. Showing and removing notifications send no request.
+
+### D6. Focus rules
+
+`Alerts::incoming(chat, preview, window_key: bool, open: Option<&ChatId>, ..)`, called by `Desktop` from its `subscribe_in` closure, which has the `Window` (`window.is_window_active()`; `Alerts` holds no window handle, so it never updates a window while one is being updated). The decision, in one pure function `decide(...) -> Skip | Show`, in this order:
+
+1. the chat is muted: skip (`muted`);
+2. the row's `unread` is 0: skip (`already read`, D4);
+3. `window_key && open == Some(chat)`: skip (`open chat`): the user is looking at it and `check_read` reads it;
+4. the permission is `Denied` or the notifier is absent: skip (`denied`); `Undetermined` queues nothing and skips, since the prompt is asked at window open and its answer normally precedes any message;
+5. the preview's timestamp is not newer than the newest already notified for the chat: skip (`duplicate`);
+6. otherwise show.
+
+No test of the scroll position: an open chat in the key window that the user has scrolled up in does not notify (the unread counter and the badge still tell). A dialog or the log view covering the chat does not change the rule. Both are accepted simplifications; a finer rule is a follow-up.
+
+### D7. Click: open the chat
+
+The notifier's delegate pushes the chat id from the user info into the `clicks()` channel. `Alerts` runs one foreground task that drains it and emits `AlertsEvent::Open(ChatId)`; `Desktop` subscribes: it calls `store.select(chat)` when `store.chat(&chat)` is `Some` (the existing selection path runs: `Command::OpenChat`, the newest chunk, timeline, composer, `check_read`; **this ordinary open is the only request a click causes**, as for a click in the chat list; selecting the already open chat sends nothing), then `window.activate_window()` and `cx.activate(true)`; for a chat that is not in the list it only activates. This mirrors `PlayerEvent::OpenExternal`: platform call at the edge, an event the tests can assert (`Desktop` is asserted by the store's selection and the harness window state, not by a platform call). The click does not mark anything read and sends no marker itself: `check_read` does that when the window is key and the newest message is visible.
+
+### D8. Retiring notifications
+
+`Alerts` keeps `delivered: HashSet<ChatId>` (chats with a notification it showed) and the newest notified timestamp per chat. On every `StoreEvent::Chats`, for each chat in `delivered` whose row is gone or has `unread == 0`: `notifier.withdraw(chat)` and forget it. On `StoreEvent::Session` or `Account` (sign-out, expiry, switch): `withdraw_all()` and clear both maps. `Drop` also calls `withdraw_all()`.
+
+### D9. Permission
+
+`Alerts::new` calls `request_permission()` once when it is created (the chat window just opened). The notifier asks for the alert and sound authorizations, and for the badge authorization only if R1 shows that the Dock label needs it (D2); the answer is read back through `permission()`. A refusal is silent: the policy skips, the badge still works (D2, R1). There is no in-app "enable notifications" prompt (setting, out of scope).
+
+### D10. What is deliberately not built, and why
+
+- **Dock bounce, our own sounds, notification actions, a setting for any of it**: each is additive; none was asked for ("notifications for incoming messages + Dock badge").
+- **A notification for the backlog**: after a night offline a burst of banners helps nobody; the badge carries the number.
+- **`IsSilent` / `NotificationBehaviour` per message**: ignored today by the decoder (`PLAIN_META_KEYS`, `MODIFIERS`); R2 records what real values mean. Using them would add a field to `Message` and every `Message { .. }` literal in the tests; it is a follow-up, not a task here.
+- **Withdrawing on window activation alone**: only a falling unread counter retires a notification, which is what "read" means everywhere else.
+
+### D11. Tests strategy
+
+- **Pure, in the module** (no window): `badge_total` (muted excluded, empty, overflow of `u32` sums), `badge_label` (0, 1, 999, 1000, `u32::MAX`), the core's arrival predicate (`is_arrival`: outgoing, deleted, cached, older, equal timestamp, newer, uncached chat, hold on), `notification_for` (private and group, author absent, whitespace collapse, 139/140/141 graphemes, an emoji cluster at the cut, empty text, a file name, a voice), `decide` (the table of D6: muted x unread 0 x key window x open chat x permission x duplicate), the user-info codec of the chat id (`notifier.rs`, the part without UN).
+- **Core** (`client.rs` tests, scripted backend as the neighbours): a pushed message of someone else in a cached chat emits `Incoming` once after `ChatUpdated`; the same push again (cached) does not; an edit does not, **including an edit of the chat's newest message when the chat row is cached but no message of that chat is** (equal timestamp, `edited` set, `unread > 0`; the regression of the review); a flag-only change (pin, importance) does not; an own echo does not; an older message does not; a push for an unknown chat emits it; after `LiveEvent::Reconnected` and **before the reload answers**, a seen-marker `ChatChanged`, a state refresh and a message push emit no `Incoming` but do emit `MessageUpserted` / `ChatUpdated`; after the reload answers (`ChatsReplaced`) the next push emits it; a failed reload also ends the hold; **overlapping reloads: `Reconnected A`, `Reconnected B`, then the answer of A (late, held by a gated backend call) leaves the hold on (a push still emits no `Incoming`), then the answer of B releases it; and the reverse order (B answers first, A later) releases at B and A changes nothing**; `connection_lost` and `switch_account` clear it, and an answer of a reload started before them does not release a later hold; the five-unread case of D4 (list says 2, message newer) emits it; list read first (same last timestamp, unread 0) then the push still emits `Incoming` (decide skips it later). Event order test: `Reconnected`, `ChatChanged` (list read lands), message push, then `handle_chats`.
+- **Store**: `ClientEvent::Incoming` becomes `StoreEvent::Incoming` once and changes nothing else (no chat row, no `unread`); `ChatsReplaced` and `ChatUpdated` never emit it; sign-out empties the badge total.
+- **Headless gpui with a scripted fake** (`tests.rs`, the harness registers the fake `AlertsFactory` like `AudioFactory`): the badge sequence over a scripted run (arrive, read, muted arrive, reconnect reload, sign-out); the notification matrix with `cx.deactivate_window()` / `activate`; the recovery order (`Connection` back, `ChatUpdated` backlog, no `Incoming` from the core, nothing shown, badge moves); a click opens the chat and activates the window; a click for a vanished chat changes nothing; withdraw on read and on sign-out; permission asked exactly once at window open; denied or absent notifier shows nothing and the badge still moves; the commands sent are only the existing `MarkRead` rule, and on a click the one `OpenChat` of `select` (a click on the already open chat sends none); showing, withdrawing and the permission request send none.
+- **Platform code** (`dock.rs`, `notifier.rs`): no mock of AppKit or UserNotifications. What has no platform dependency is unit-tested (label strings, the user-info codec, `create()` returning `None` without a bundle identifier through a small seam). The rest is exercised by R1's scratch run and by task 7.2 in the VM.
+- **Wire**: no fixture changes unless R2 finds a mute form the decoder does not read (then one more `wire.rs` task is added by 0.4, with a live-capture fixture as in `add-pins-and-importance-view`).
+- Everything that cargo runs runs in `bt-vm` (rule 4).
+
+### D12. Order and merge units (`DEPENDENCIES.md` rules 1-3)
+
+- Research 0.x first (0.1 and 0.2 are independent and write separate result files; 0.3 is optional and non-gating; 0.4 closes). Only 5.1 and 5.2 (and the exact feature lists of 3.1) wait for R1; everything else is codable now against the contracts of D2-D9.
+- **NB-B** (badge) = 1.1, 2.1, 3.1, 4.1, 6.1 on `integ/add-notifications-and-badge`: `badge_count` is first called by `Alerts`, `Alerts` is created by `Desktop` and fed a real `DockBadge` by `main.rs`; none of it can reach `main` alone without a `dead_code` warning or a stub (rule 3). It merges first and needs no R1 outcome.
+- **NB-N** (notifications) = 1.2, 2.2, 4.2, 5.1, 5.2 (only for R1 outcome 2), 6.2, started after NB-B is on `main` (it extends `store.rs`, `alerts.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`, which NB-B holds, and adds the chat-core files `model.rs` and `client.rs`), and after 0.4.
+- `Cargo.lock` gains one package, `objc2-user-notifications`, generated once without `--locked` (VM network works); the dependency and `notifier.rs` land in one commit (cargo's `unused_dependencies`, rule 3).
+
+## Risks / Trade-offs
+
+- **Bundle identity** is the dominant risk and is measured first (R1, D3). Residual: a bundle that works in the VM may behave differently on the user's Mac with notification settings the VM never had; task 7.2 is run in the VM and the first run on the user's Mac is reported as an unverified limit.
+- **`Muted` is known from a placeholder fixture only** (R2). If the live key differs, the badge and the policy would count a muted chat; the fix is in `wire.rs` (a decode task added by 0.4), not here.
+- **A mute changed in another client** reaches the cache only with the next list entry for that chat (a `ChatChanged` push or a reconnect reload), if the server pushes it at all (R3). Until then a chat muted elsewhere can still notify, and a chat unmuted elsewhere stays silent. Accepted; the stale window is the one `chat-list` already has for the muted marker.
+- **A live message lost to the recovery hold**: a message that truly arrives live in the second or so between `Reconnected` and the answer of the list reload does not notify (its unread and the badge still count it). Accepted: indistinguishable from the offline backlog without replay evidence (R3 c).
+- **Banner and prompt are visible only in the VM's GUI** (screenshots through `.runtime/vm/shot.sh`, which show chat text and are deleted after; booleans are recorded). Audible sound is not verifiable (as in `add-media-playback`).
+- **Unofficial protocol**: `Muted`, `LastSeqNo` and the push order can change; research results are the record of what was observed.
