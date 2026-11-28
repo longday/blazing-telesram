@@ -286,7 +286,7 @@ Proposal on `propose/port` (docs only: `openspec/changes/add-cross-platform-supp
 | 8.2 | open: final runs per unit (macOS, Linux VM, Windows cross-check) | the unit | none |
 | 8.3 | open, **[needs-user]**: hand checks on a real Windows and a real Linux desktop | XP-S, XP-P, XP-W, 8.1 | `research.md` |
 | 8.4 | open: this file, specs sync, archive | everything above, the NB archive | this file, archive |
-| 8.5 | open: preflight in `run-linux.sh` (`pkg-config` modules, install line, no cargo when missing) | `docs/readme` merged to `main`, 0.1, 8.1 | `run-linux.sh` (one hunk) |
+| 8.5 | open: preflight in `run-linux.sh` (`pkg-config` modules and the Vulkan loader/driver; install line, no cargo when missing; GPUI fails before any app handler, so the script is the owner) | `docs/readme` merged to `main`, 0.1, 0.5, 8.1 | `run-linux.sh` (one hunk) |
 
 File ownership (rule 1): see `tasks.md` "File ownership" (`main.rs` is serialised 2.1, 2.3, 2.6, 3.1, 3.2, 3.3, 4.2, 5.1, then 6.0 to 7.1, and against TS 1.1/1.6, NB-N 2.2/5.1). Overlaps: NB-N (`client.rs`, `alerts.rs`, `main.rs`, `Cargo.toml`, `Cargo.lock`, `desktop.rs`, `tests.rs`); TS (`main.rs`, `format.rs`, `timeline.rs`, `desktop.rs`, `tests.rs`, `client.rs`, `bt-probe.rs`; it already binds `secondary-c`/`secondary-a` and tests `Modifiers::secondary()`, so it needs no change; its bindings move into `keys.rs` when XP 2.1 lands after it); `add-user-profile-card` (proposal in review: `client.rs`, `bt-probe.rs`, `desktop.rs`, `main.rs`, `tests.rs`); the README/run-scripts agents (untouched except 8.5's one hunk of `run-linux.sh`, after `docs/readme` merges).
 

@@ -184,10 +184,15 @@ When something the client needs from the system is missing (the web view runtime
 - **WHEN** the Linux run script is started
 - **THEN** the terminal shows the install line for the missing packages, the script exits with a non-zero status, and neither the build nor the client is started
 
-#### Scenario: No graphics driver on Linux
-- **GIVEN** no Vulkan driver is installed
+#### Scenario: No Vulkan driver on Linux
+- **GIVEN** no Vulkan loader or driver is installed
+- **WHEN** the Linux run script is started
+- **THEN** the terminal shows the install line for the Vulkan packages, the script exits with a non-zero status, and neither the build nor the client is started
+
+#### Scenario: Vulkan driver installed but unusable
+- **GIVEN** a Vulkan driver is installed but no device works
 - **WHEN** the client starts
-- **THEN** the terminal shows one line naming the package to install
+- **THEN** it exits with the graphics library's own message on the terminal and opens no window; the run script cannot detect this case
 
 ### Requirement: macOS behaviour is unchanged
 Adding support for Linux and Windows SHALL NOT change what the client does on macOS: its shortcuts, labels, window, sign-in view, audio, Dock badge and storage behave as before.
