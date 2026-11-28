@@ -1,5 +1,6 @@
 //! Headless UI tests: the real `ChatStore` and `Desktop` driven through channels, inspected via debug bounds.
 
+use crate::alerts::fake as alerts_fake;
 use crate::desktop::{
     AccountMenu, Desktop, Dismiss, Preview, Search, ToggleLog, ViewerNext, ViewerPrev, chat_preview,
 };
@@ -139,6 +140,8 @@ struct Harness {
     desktop: Entity<Desktop>,
     /// The script of the registered audio output.
     fake: Fake,
+    /// The script of the registered Dock badge.
+    alerts: alerts_fake::Fake,
 }
 
 fn harness(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
@@ -157,8 +160,22 @@ fn harness_with(
     events: Vec<ClientEvent>,
     setup: impl FnOnce(&mut Desktop, &mut Context<Desktop>) + 'static,
 ) -> (Harness, &mut VisualTestContext) {
+    build_harness(cx, events, setup, true)
+}
+
+/// `alerts_registered` false leaves the app without an `AlertsFactory`.
+fn build_harness(
+    cx: &mut TestAppContext,
+    events: Vec<ClientEvent>,
+    setup: impl FnOnce(&mut Desktop, &mut Context<Desktop>) + 'static,
+    alerts_registered: bool,
+) -> (Harness, &mut VisualTestContext) {
     let fake = fake::reset();
     cx.update(fake::install);
+    let alerts = alerts_fake::reset();
+    if alerts_registered {
+        cx.update(alerts_fake::install);
+    }
     cx.update(|cx| {
         if !cx.has_global::<KeysBound>() {
             crate::input::bind(cx);
@@ -193,6 +210,7 @@ fn harness_with(
             store,
             desktop,
             fake,
+            alerts,
         },
         vcx,
     )
@@ -11216,4 +11234,341 @@ fn a_lost_voice_copy_offline_is_unavailable_at_render_not_after_a_click(cx: &mut
     assert_eq!(h.commands(), []);
     assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
     assert_eq!(h.fake.created(), 0);
+}
+
+// ---- dock badge (NB 6.1) ----
+
+fn badge_row(id: &str, unread: u32, muted: bool) -> ChatSummary {
+    let mut row = chat(id, ChatKind::Private, &format!("Чат {id}"), None);
+    row.unread = unread;
+    row.muted = muted;
+    row
+}
+
+fn badge_list(rows: Vec<ChatSummary>) -> ClientEvent {
+    ClientEvent::ChatsReplaced(rows)
+}
+
+fn badge_label(label: &str) -> Option<String> {
+    Some(label.into())
+}
+
+#[gpui::test]
+fn a_chat_list_sets_the_label_of_the_unmuted_total(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    assert_eq!(h.alerts.created(), 1, "one platform for the window");
+    assert_eq!(h.alerts.take_calls(), [], "no chats, no call");
+
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 3, false),
+            badge_row("b", 4, false),
+            badge_row("m", 120, true),
+        ])],
+    );
+    assert_eq!(
+        h.alerts.take_calls(),
+        [badge_label("7")],
+        "the muted chat is left out"
+    );
+    assert!(shown(cx, row!("a")), "the list renders");
+}
+
+#[gpui::test]
+fn a_list_already_in_the_store_sets_the_label_when_the_window_opens(cx: &mut TestAppContext) {
+    let (h, _cx) = harness_with(
+        cx,
+        vec![badge_list(vec![
+            badge_row("a", 2, false),
+            badge_row("m", 9, true),
+        ])],
+        |_, _| {},
+    );
+    assert_eq!(h.alerts.created(), 1);
+    assert_eq!(h.alerts.take_calls(), [badge_label("2")]);
+}
+
+#[gpui::test]
+fn a_push_into_a_chat_that_is_not_open_raises_the_label_by_one(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("g", 0, false),
+            badge_row("p", 2, false),
+        ])],
+    );
+    click(cx, row!("g"));
+    h.commands();
+    assert_eq!(h.alerts.take_calls(), [badge_label("2")]);
+
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("p", 3, false))]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [badge_label("3")],
+        "one call, by one"
+    );
+}
+
+#[gpui::test]
+fn reading_the_open_chat_in_the_active_window_clears_the_label(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("g", 3, false),
+            badge_row("p", 0, false),
+        ])],
+    );
+    assert_eq!(h.alerts.take_calls(), [badge_label("3")]);
+
+    activate(cx);
+    click(cx, row!("g"));
+    assert_eq!(h.commands(), [Command::OpenChat(chat_g())]);
+    h.feed(cx, [chunk("g", 1..=3, true)]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [],
+        "the label waits for the row's counter, not for the read marker"
+    );
+
+    // The core answers the marker with the row at 0.
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("g", 0, false))]);
+    assert_eq!(h.alerts.take_calls(), [None]);
+    assert_eq!(
+        h.commands(),
+        [Command::MarkRead {
+            chat: chat_g(),
+            timestamp: ts(3)
+        }],
+        "the only command the badge's chat produced is the read marker"
+    );
+}
+
+#[gpui::test]
+fn a_counter_lowered_elsewhere_lowers_the_label(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 5, false),
+            badge_row("b", 1, false),
+        ])],
+    );
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("a", 2, false))]);
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("b", 0, false))]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [badge_label("6"), badge_label("3"), badge_label("2")]
+    );
+}
+
+#[gpui::test]
+fn a_muted_arrival_does_not_call_and_muting_lowers_the_label(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 2, false),
+            badge_row("m", 0, true),
+        ])],
+    );
+    assert_eq!(h.alerts.take_calls(), [badge_label("2")]);
+
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("m", 1, true))]);
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("m", 2, true))]);
+    assert_eq!(h.alerts.take_calls(), [], "no call for a muted chat");
+    assert_eq!(
+        h.store.read_with(cx, |s, _| s.badge_count()),
+        2,
+        "the counter of the muted row grew without reaching the badge"
+    );
+
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("a", 2, true))]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [None],
+        "muting a chat takes its count out"
+    );
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("m", 2, false))]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [badge_label("2")],
+        "unmuting puts it in"
+    );
+}
+
+#[gpui::test]
+fn a_reconnect_reload_sets_the_new_total(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [badge_list(vec![badge_row("a", 2, false)])]);
+    assert_eq!(h.alerts.take_calls(), [badge_label("2")]);
+
+    h.feed(
+        cx,
+        [
+            ClientEvent::Connection(ConnectionState::Offline),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+    );
+    assert_eq!(
+        h.alerts.take_calls(),
+        [],
+        "a connection change alone moves nothing"
+    );
+
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 5, false),
+            badge_row("b", 3, false),
+        ])],
+    );
+    assert_eq!(h.alerts.take_calls(), [badge_label("8")]);
+
+    // The same total again is not handed over again.
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 1, false),
+            badge_row("b", 7, false),
+        ])],
+    );
+    assert_eq!(h.alerts.take_calls(), []);
+}
+
+#[gpui::test]
+fn sign_out_and_an_account_switch_clear_the_label(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [badge_list(vec![badge_row("a", 7, false)])]);
+    h.feed(cx, [ClientEvent::SignedOut]);
+    assert_eq!(h.alerts.take_calls(), [badge_label("7"), None]);
+
+    h.feed(cx, [badge_list(vec![badge_row("a", 4, false)])]);
+    h.feed(cx, [ClientEvent::AccountSwitched]);
+    assert_eq!(h.alerts.take_calls(), [badge_label("4"), None]);
+}
+
+#[gpui::test]
+fn closing_the_window_clears_the_label(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [badge_list(vec![badge_row("a", 5, false)])]);
+    assert_eq!(h.alerts.take_calls(), [badge_label("5")]);
+
+    let Harness {
+        desktop,
+        store,
+        alerts,
+        events,
+        ..
+    } = h;
+    cx.update(|window, _| window.remove_window());
+    drop(desktop);
+    cx.run_until_parked();
+    // The window's entities are released at the next effect cycle; any app update runs it.
+    store.update(cx, |_, _| {});
+    assert_eq!(alerts.take_calls(), [None], "the badge is cleared once");
+
+    // The store outlives the window and no longer reaches the badge.
+    events
+        .try_send(badge_list(vec![badge_row("a", 9, false)]))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(store.read_with(cx, |s, _| s.badge_count()), 9);
+    assert_eq!(alerts.take_calls(), []);
+}
+
+#[gpui::test]
+fn a_large_total_reads_999_plus_and_the_cap_is_not_called_again(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 500, false),
+            badge_row("b", 500, false),
+            badge_row("c", 500, false),
+        ])],
+    );
+    assert_eq!(h.alerts.take_calls(), [badge_label("999+")]);
+
+    // 1001 is still above the cap: the label is the same and nothing is handed over.
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("c", 1, false))]);
+    assert_eq!(h.alerts.take_calls(), []);
+
+    // 999 reads as the number.
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("b", 498, false))]);
+    assert_eq!(h.alerts.take_calls(), [badge_label("999")]);
+}
+
+#[gpui::test]
+fn no_badge_change_sends_a_command(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("a", 2, false),
+            badge_row("m", 1, true),
+        ])],
+    );
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("a", 3, false))]);
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("m", 2, true))]);
+    h.feed(cx, [ClientEvent::ChatUpdated(badge_row("a", 1, false))]);
+    h.feed(
+        cx,
+        [
+            ClientEvent::Connection(ConnectionState::Offline),
+            ClientEvent::Connection(ConnectionState::Online),
+            badge_list(vec![badge_row("a", 1500, false)]),
+        ],
+    );
+    h.feed(cx, [ClientEvent::SignedOut]);
+    h.feed(cx, [badge_list(vec![badge_row("a", 4, false)])]);
+    h.feed(cx, [ClientEvent::AccountSwitched]);
+    assert_eq!(
+        h.alerts.take_calls(),
+        [
+            badge_label("2"),
+            badge_label("3"),
+            badge_label("1"),
+            badge_label("999+"),
+            None,
+            badge_label("4"),
+            None,
+        ],
+        "the script moved the badge"
+    );
+    assert_eq!(h.commands(), [], "and asked the core for nothing");
+}
+
+#[gpui::test]
+fn without_a_factory_nothing_is_called_and_the_window_renders(cx: &mut TestAppContext) {
+    let (h, cx) = build_harness(cx, vec![], |_, _| {}, false);
+    h.feed(
+        cx,
+        [badge_list(vec![
+            badge_row("g", 7, false),
+            badge_row("p", 0, false),
+        ])],
+    );
+    assert!(shown(cx, row!("g")), "the window renders");
+    h.feed(cx, [ClientEvent::SignedOut]);
+    assert_eq!(h.alerts.created(), 0, "no platform is made");
+    assert_eq!(h.alerts.take_calls(), []);
+
+    let Harness {
+        desktop,
+        store,
+        alerts,
+        ..
+    } = h;
+    cx.update(|window, _| window.remove_window());
+    drop(desktop);
+    cx.run_until_parked();
+    store.update(cx, |_, _| {});
+    assert_eq!(
+        alerts.take_calls(),
+        [],
+        "closing the window calls nothing either"
+    );
 }

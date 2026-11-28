@@ -285,6 +285,14 @@ pub enum StoreEvent {
     },
 }
 
+/// The total of the unread counters of the chats that are not muted, as the chat list shows them
+/// (the Dock badge, design D2). Muted chats are left out; the sum saturates.
+pub fn badge_total(chats: &HashMap<ChatId, ChatSummary>) -> u32 {
+    (chats.values())
+        .filter(|chat| !chat.muted)
+        .fold(0, |sum, chat| sum.saturating_add(chat.unread))
+}
+
 pub struct ChatStore {
     commands: Sender<Command>,
     chats: HashMap<ChatId, ChatSummary>,
@@ -765,6 +773,11 @@ impl ChatStore {
 
     pub fn chat_count(&self) -> usize {
         self.chats.len()
+    }
+
+    /// `badge_total` of the chats held now.
+    pub fn badge_count(&self) -> u32 {
+        badge_total(&self.chats)
     }
 
     pub fn selected(&self) -> Option<&ChatId> {
@@ -4783,6 +4796,134 @@ mod tests {
                 assert_eq!(s.session(), SessionState::Active);
                 assert_eq!(s.connection(), ConnectionState::Online);
             });
+        }
+    }
+
+    mod badge {
+        use super::*;
+        use gpui::{AppContext, Entity, TestAppContext};
+
+        fn row(tag: &str, unread: u32, muted: bool) -> ChatSummary {
+            ChatSummary {
+                id: ChatId(tag.into()),
+                kind: ChatKind::Private,
+                title: format!("chat {tag}"),
+                avatar: None,
+                last_message: None,
+                unread,
+                muted,
+                pinned_rank: None,
+                partner: None,
+                pinned_message: None,
+                pin_action_ts: None,
+            }
+        }
+
+        fn map(rows: Vec<ChatSummary>) -> HashMap<ChatId, ChatSummary> {
+            rows.into_iter().map(|c| (c.id.clone(), c)).collect()
+        }
+
+        #[test]
+        fn no_chats_total_zero() {
+            assert_eq!(badge_total(&HashMap::new()), 0);
+        }
+
+        #[test]
+        fn one_unmuted_chat() {
+            assert_eq!(badge_total(&map(vec![row("a", 3, false)])), 3);
+        }
+
+        #[test]
+        fn muted_chats_are_left_out() {
+            let chats = map(vec![row("a", 120, true), row("b", 2, false)]);
+            assert_eq!(badge_total(&chats), 2);
+            assert_eq!(badge_total(&map(vec![row("a", 9, true)])), 0);
+        }
+
+        #[test]
+        fn two_chats_add_up() {
+            assert_eq!(
+                badge_total(&map(vec![row("a", 3, false), row("b", 4, false)])),
+                7
+            );
+        }
+
+        #[test]
+        fn a_sum_above_the_range_saturates() {
+            let chats = map(vec![row("a", u32::MAX, false), row("b", 5, false)]);
+            assert_eq!(badge_total(&chats), u32::MAX);
+        }
+
+        fn store(cx: &mut TestAppContext) -> (Entity<ChatStore>, Sender<ClientEvent>) {
+            let (client, event_rx) = async_channel::unbounded();
+            let (command_tx, _commands) = async_channel::unbounded();
+            (
+                cx.new(|cx| ChatStore::new(event_rx, command_tx, cx)),
+                client,
+            )
+        }
+
+        fn count(store: &Entity<ChatStore>, cx: &mut TestAppContext) -> u32 {
+            store.read_with(cx, |s, _| s.badge_count())
+        }
+
+        fn apply(store: &Entity<ChatStore>, cx: &mut TestAppContext, event: ClientEvent) {
+            store.update(cx, |s, cx| s.apply(event, cx));
+        }
+
+        #[gpui::test]
+        fn the_count_follows_the_list_and_its_updates(cx: &mut TestAppContext) {
+            let (store, _client) = store(cx);
+            assert_eq!(count(&store, cx), 0);
+
+            let list = vec![row("a", 3, false), row("b", 4, false), row("m", 50, true)];
+            apply(&store, cx, ClientEvent::ChatsReplaced(list));
+            assert_eq!(count(&store, cx), 7);
+
+            // A counter that rises.
+            apply(&store, cx, ClientEvent::ChatUpdated(row("a", 4, false)));
+            assert_eq!(count(&store, cx), 8);
+
+            // The chat is muted: its counter leaves the total.
+            apply(&store, cx, ClientEvent::ChatUpdated(row("b", 4, true)));
+            assert_eq!(count(&store, cx), 4);
+
+            // Unmuted again: it counts again.
+            apply(&store, cx, ClientEvent::ChatUpdated(row("b", 4, false)));
+            assert_eq!(count(&store, cx), 8);
+
+            // A read.
+            apply(&store, cx, ClientEvent::ChatUpdated(row("a", 0, false)));
+            assert_eq!(count(&store, cx), 4);
+
+            // A reload replaces the list.
+            apply(
+                &store,
+                cx,
+                ClientEvent::ChatsReplaced(vec![row("c", 1, false)]),
+            );
+            assert_eq!(count(&store, cx), 1);
+        }
+
+        #[gpui::test]
+        fn sign_out_and_account_switch_empty_the_count(cx: &mut TestAppContext) {
+            let (store, _client) = store(cx);
+            apply(
+                &store,
+                cx,
+                ClientEvent::ChatsReplaced(vec![row("a", 7, false)]),
+            );
+            assert_eq!(count(&store, cx), 7);
+            apply(&store, cx, ClientEvent::SignedOut);
+            assert_eq!(count(&store, cx), 0);
+
+            apply(
+                &store,
+                cx,
+                ClientEvent::ChatsReplaced(vec![row("a", 7, false)]),
+            );
+            apply(&store, cx, ClientEvent::AccountSwitched);
+            assert_eq!(count(&store, cx), 0);
         }
     }
 }
