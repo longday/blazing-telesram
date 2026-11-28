@@ -206,7 +206,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: transitions; entering clears a text selection; `copy_marked` text; `request_delete_marked` refuses when a foreign message is marked; the bar's enabled flags for the mixed and the all-own sets.
   - Done when: these tests exist.
 
-- [ ] 3.4 Rows in the mode (D11)
+- [x] 3.4 Rows in the mode (D11)
   - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
   - Depends on: 3.1.
   - Do: while the mode is on: a 28 px gutter with ○ / ✓ (text glyphs), a row tint, a transparent full-row layer that turns every left click into `toggle_message(ts, shift)` and starts no text drag; a primary-modifier click (`event.modifiers.secondary()`: Cmd on macOS, Ctrl on Linux and Windows) on an eligible bubble outside the mode calls `enter_mode`; selectors `msg-{ts}-check`, `msg-{ts}-marked`; new theme colours for the check and the tint; no change to a row's height or to rows outside the mode.
