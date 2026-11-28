@@ -220,10 +220,23 @@ prepainted layouts, so `index_for_position` never panicked for it in any frame o
    offset 51). A text-field caret needs the nearest boundary. `WrappedLineLayout::closest_index_for_position` exists but
    `TextLayout` does not expose it. The rule that worked (pointer swept over the layouts in 0.5 px steps, in the real
    shaper and in the test platform):
-   - `i` from `index_for_position` (`Ok(i)`; `Err(i)` is already a line start or end);
-   - **candidates** = the grapheme boundaries of the text that are also **glyph (shaping cluster) starts** of the layout
-     (`line_layout_for_index(0)` -> `unwrapped_layout.runs[].glyphs[].index`), plus `len`; `start` = the largest
-     candidate `<= i`, `next` = the smallest candidate `> i`;
+   - `i` from `index_for_position` (`Ok(i)`; `Err(i)` is already a line start or end, return it as is). `i` is a
+     **global** byte offset, but `TextLayout::line_layout_for_index(ix)` returns the layout of the **one paragraph**
+     (a `\n`-separated line, `elements/text.rs` `line_layout_for_index`: it walks `lines` with `line_start_ix` and
+     returns `line.layout` of the paragraph containing `ix`) and the glyph indices inside it are **paragraph-local**
+     (`position_for_index` subtracts `line_start_ix`, `ix_within_line = index - line_start_ix`). So work **per
+     paragraph**: split the text on `\n`, `base_k` = the sum of `len + 1` of the paragraphs before `k`; the paragraph of
+     `i` is the one with `base_k <= i <= base_k + len_k` (an index equal to the end of a paragraph belongs to that
+     paragraph, as in gpui), and its layout is `line_layout_for_index(base_k)`;
+   - **candidates of paragraph `k`** = `base_k + glyph.index` for the glyph starts of that layout
+     (`unwrapped_layout.runs[].glyphs[].index`) that are also grapheme boundaries, plus `base_k` and the explicit
+     end `base_k + len_k` (the position before the `\n`; the `\n` is not a glyph and `base_{k+1}` belongs to the next
+     paragraph, never to this paragraph's candidates, so the wrap-start fix below cannot fire across a `\n`). An empty
+     paragraph has the single candidate `base_k`. `start` = the largest candidate `<= i`, `next` = the smallest
+     candidate `> i`; if `i` is already the last candidate (the end of the paragraph) return it. Without the base and the
+     per-paragraph walk the glyph indices of the second paragraph collide with those of the first
+     `[INFERENCE from the source: the rule was run on single-paragraph layouts only; the multi-paragraph rule has
+     not been run, only the offsets of index_for_position across paragraphs, item 3]`);
    - `p0 = position_for_index(start)`, `p1 = position_for_index(next)` (absolute coordinates); **if `p1.y > p0.y`, `start`
      is the first glyph of a wrapped line and `position_for_index(start)` is the END of the previous visual line** (an
      index equal to a wrap boundary resolves to the earlier line, `line_layout.rs` `position_for_index`), so use
@@ -251,7 +264,9 @@ prepainted layouts, so `index_for_position` never panicked for it in any frame o
 
 Tests the implementation (1.3) must carry: (i) the rule as a pure function over a plain line model (glyph starts with x,
 wrap starts, grapheme boundaries), unit-tested without gpui, including a line whose first glyph is a wrap start, a
-cluster with an inner grapheme boundary (the ligature case) and a line end; (ii) a `#[gpui::test]` with the mock text
+cluster with an inner grapheme boundary (the ligature case) and a line end, and a multi-paragraph text (`a\nbc`: the
+offsets of the second paragraph carry its base, never collide with the first paragraph's glyph indices, and the end of
+paragraph one and the start of paragraph two are distinct stops); (ii) a `#[gpui::test]` with the mock text
 system for the wrap starts (left and right half of the first and the last glyph of a wrapped line, the first glyph after
 `\n`); (iii) because the test platform cannot shape a ligature, a **manual VM GUI check** on the real shaper
 (sweep over «لا», «e` + U+0301», the family emoji) with the expected carets from above.
