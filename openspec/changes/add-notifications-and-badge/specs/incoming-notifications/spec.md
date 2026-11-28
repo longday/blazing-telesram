@@ -7,7 +7,7 @@ Tells the user through a macOS notification when a message from someone else arr
 ## ADDED Requirements
 
 ### Requirement: Notification for an incoming message
-A message from another person that arrives while the client is connected, in a chat that is not muted, SHALL show a system notification, unless one of the exclusions of the next two requirements applies. When one update raises a chat's unread count by more than one message, one notification for the newest SHALL be shown, not one per message.
+A message from another person that arrives live while the client is connected, in a chat that is not muted, SHALL show a system notification, unless one of the exclusions of the next requirements applies. Every such message notifies once: several messages in a row show several notifications, which the system groups by chat.
 
 #### Scenario: Private chat
 - **GIVEN** the window is in the background
@@ -35,7 +35,7 @@ The notification SHALL be titled with the chat's name and its text SHALL be the 
 - **THEN** the notification shows its first 140 characters followed by «…», on one line
 
 ### Requirement: What never notifies
-No notification SHALL be shown for: a message of the user's own account, including one sent from another client; an edit of a message; a deletion; a reaction; a typing indicator; a pin change; a muted chat; a message that was already in the chat list when the client started or that a reconnect or a refresh of the chat list brings in; a message in an older position than the chat's newest one.
+No notification SHALL be shown for: a message of the user's own account, including one sent from another client; an edit of a message; a deletion; a reaction; a typing indicator; a pin change; a muted chat; a message in an older position than the chat's newest one; a message whose chat already reads zero unread when the message is announced (it was seen in another client first).
 
 #### Scenario: Own message from another device
 - **WHEN** the user sends a message to a chat from the web client
@@ -50,10 +50,35 @@ No notification SHALL be shown for: a message of the user's own account, includi
 - **WHEN** another person sends a message in it
 - **THEN** no notification is shown and its unread counter still grows
 
+### Requirement: Only an arrival notifies
+A change of a chat's unread counter, or any refresh of the chat list, SHALL NOT by itself produce a notification: only the live arrival of a message does, whatever the counter does at the same time.
+
+#### Scenario: A seen marker and a new message together
+- **GIVEN** a chat holds 5 unread messages
+- **WHEN** another client reads four of them and one new message arrives from the other person
+- **THEN** one notification is shown for the new message, whatever the unread counter does
+
+#### Scenario: Seen in another client first
+- **GIVEN** a chat holds 1 unread message
+- **WHEN** another client reads it and the chat list says 0 unread, and then the message itself arrives
+- **THEN** no notification is shown
+
+#### Scenario: Chat list refresh without an arrival
+- **WHEN** a refresh of the chat list raises the unread counter of a chat and no message arrives live
+- **THEN** no notification is shown
+
+### Requirement: Backlog and recovery
+No notification SHALL be shown for a message the client learns of through the start-up cache, a chat-list load, or the catch-up of a chat's history after a reconnect. After a reconnect, no notification SHALL be shown until the chat-list reload that follows it has settled (answered or failed), because messages from the offline period may be announced before it; a message that arrives live after that point notifies as usual.
+
 #### Scenario: Backlog after a reconnect
 - **GIVEN** messages arrived in several chats while the client was offline
 - **WHEN** the connection returns and the chat list is reloaded
 - **THEN** no notification is shown for them
+
+#### Scenario: Pushes before the reload settles
+- **GIVEN** the connection has just returned and the chat-list reload has not answered
+- **WHEN** a seen-marker or state push, or a message push for the offline period, arrives
+- **THEN** no notification is shown, and the chat rows and the badge still follow the data as it arrives
 
 #### Scenario: Start of the app
 - **GIVEN** chats with unread messages
@@ -140,13 +165,20 @@ The client SHALL ask the system for permission to show notifications once, when 
 - **THEN** no notification is shown, no error is shown, and the badge and the unread counter still change
 
 ### Requirement: Privacy of notifications
-A notification's text, a chat's name and an author's name SHALL go only to the system's notification centre. They SHALL NOT be written to any log at `debug` or above, to a file, or to the notification's own payload beyond the chat identifier needed to open the chat on a click. Showing a notification SHALL NOT send anything to the server and SHALL NOT mark anything as read.
+A notification's text, a chat's name and an author's name SHALL go only to the system's notification centre. They SHALL NOT be written to any log at `debug` or above, to a file, or to the notification's own payload beyond the chat identifier needed to open the chat on a click.
 
 #### Scenario: Debug log
 - **GIVEN** `BT_LOG=debug`
 - **WHEN** notifications are shown
 - **THEN** the log shows at most that a notification was shown or skipped, and contains no message text, chat name or author name
 
-#### Scenario: No write
-- **WHEN** a notification is shown, chosen or removed
+### Requirement: Notifications add no writes
+Showing, grouping or removing a notification SHALL send nothing to the server and SHALL NOT mark anything as read. Choosing a notification SHALL run only the path that choosing the chat in the chat list runs (one open-chat command and the history load it starts) and nothing else: it SHALL NOT send a read marker, a draft, or any other write because of the click.
+
+#### Scenario: Shown and removed
+- **WHEN** a notification is shown, grouped or removed
 - **THEN** no request is made because of it
+
+#### Scenario: Click opens through the ordinary path
+- **WHEN** the user chooses a notification of a chat that is not open
+- **THEN** the same open-chat request the chat list sends is made, the chat's newest messages load, and no read marker is sent until the window is the key window and the newest message is visible
