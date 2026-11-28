@@ -230,12 +230,7 @@ fn load_session() -> Result<Session, Failure> {
     let dir = RuntimeDir::from_env().map_err(|e| (2, e.to_string()))?;
     Session::load(&dir)
         .map_err(|e| (1, e.to_string()))?
-        .ok_or_else(|| {
-            (
-                1,
-                "no stored session: sign in first in the app".to_owned(),
-            )
-        })
+        .ok_or_else(|| (1, "no stored session: sign in first in the app".to_owned()))
 }
 
 /// The account's chat with itself: `<guid>_<guid>`.
