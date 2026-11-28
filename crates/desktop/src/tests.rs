@@ -12286,3 +12286,549 @@ fn a_dialog_over_the_chat_drops_the_selection(cx: &mut TestAppContext) {
     assert!(h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
     assert!(!has_selection(&h, cx), "the confirmation covers the chat");
 }
+
+// ---- message selection (TS 3.7) ----
+//
+// Message mode is entered by the menu's «Выбрать» or by a click with the primary modifier (built by hand:
+// `simulate_click` takes the modifiers, but a press and a release keep the gesture in one place).
+
+fn marked(h: &Harness, cx: &mut VisualTestContext) -> Option<Vec<MessageTs>> {
+    h.desktop.read_with(cx, |d, cx| d.marked_messages(cx))
+}
+
+fn in_mode(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, cx| d.in_mode(cx))
+}
+
+/// What the bar shows: the count and whether «Скопировать» and «Удалить» are enabled.
+fn bar(h: &Harness, cx: &mut VisualTestContext) -> Option<(usize, bool, bool)> {
+    h.desktop.read_with(cx, |d, cx| {
+        d.bar_state(cx).map(|b| (b.count, b.can_copy, b.can_delete))
+    })
+}
+
+fn click_with(cx: &mut VisualTestContext, selector: &'static str, modifiers: Modifiers) {
+    let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    press(cx, b.center(), 1, modifiers);
+    release(cx, b.center());
+}
+
+fn primary_click(cx: &mut VisualTestContext, selector: &'static str) {
+    click_with(cx, selector, Modifiers::secondary_key());
+}
+
+fn shift_click(cx: &mut VisualTestContext, selector: &'static str) {
+    click_with(cx, selector, Modifiers::shift());
+}
+
+fn deleted_commands(h: &Harness) -> Vec<MessageTs> {
+    h.commands()
+        .into_iter()
+        .filter_map(|c| match c {
+            Command::Delete { timestamp, .. } => Some(timestamp),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn a_primary_modifier_click_on_a_sent_message_enters_the_mode_with_it(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "hello"),
+            own("g", 2, "mine"),
+            pending("g", 3, "p3", "queued"),
+        ],
+    );
+    click(cx, msg!(1));
+    assert!(!in_mode(&h, cx), "a plain click does not enter");
+    primary_click(cx, msg!(3));
+    assert!(!in_mode(&h, cx), "a pending message cannot be marked");
+
+    primary_click(cx, msg!(1));
+    assert_eq!(marked(&h, cx), Some(vec![1]));
+    assert!(shown(cx, "selection-bar"));
+    assert!(shown(cx, msg!(1, "check")) && shown(cx, msg!(1, "marked")));
+    assert!(shown(cx, msg!(2, "check")) && !shown(cx, msg!(2, "marked")));
+    assert!(
+        !has_selection(&h, cx),
+        "no text selection comes with the mode"
+    );
+    assert!(h.commands().is_empty(), "entering sends nothing");
+}
+
+#[gpui::test]
+fn the_menu_entry_enters_the_mode_and_a_primary_click_on_text_starts_no_drag(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second")],
+    );
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    assert!(has_selection(&h, cx));
+    right_click(cx, msg!(2));
+    assert!(!has_selection(&h, cx));
+    click(cx, "menu-select");
+    assert_eq!(marked(&h, cx), Some(vec![2]));
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+
+    cx.simulate_keystrokes("escape");
+    assert!(!in_mode(&h, cx));
+    let at = glyph_at(cx, msg!(1, "text"), 3., 0);
+    press(cx, at, 1, Modifiers::secondary_key());
+    assert!(
+        !dragging(&h, cx),
+        "the modifier makes the press the bubble's"
+    );
+    release(cx, at);
+    assert_eq!(marked(&h, cx), Some(vec![1]));
+}
+
+#[gpui::test]
+fn clicks_toggle_marks_and_the_last_one_off_leaves_the_mode(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "one"),
+            plain(2, "two"),
+            voice_note(3),
+            plain(4, "four"),
+        ],
+    );
+    primary_click(cx, msg!(1));
+    click(cx, msg!(3));
+    assert_eq!(marked(&h, cx), Some(vec![1, 3]));
+    click(cx, msg!(1));
+    assert_eq!(marked(&h, cx), Some(vec![3]));
+    assert!(!shown(cx, msg!(2, "marked")));
+    click(cx, msg!(3));
+    assert!(!in_mode(&h, cx), "the last one off leaves the mode");
+    assert!(!has_selection(&h, cx) && !dragging(&h, cx));
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn a_click_on_the_text_marks_and_never_selects_text(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second")],
+    );
+    primary_click(cx, msg!(1));
+    let at = glyph_at(cx, msg!(2, "text"), 3., 0);
+    press(cx, at, 1, Modifiers::none());
+    assert!(!dragging(&h, cx));
+    let to = glyph_at(cx, msg!(2, "text"), 5., 0);
+    move_to(cx, to);
+    release(cx, at);
+    assert_eq!(marked(&h, cx), Some(vec![1, 2]));
+    assert!(!has_selection(&h, cx));
+    // The second press of a double click is one more mark, not a word.
+    let on = glyph_at(cx, msg!(1, "text"), 8., 0);
+    press(cx, on, 2, Modifiers::none());
+    release(cx, on);
+    assert!(!has_selection(&h, cx));
+    assert_eq!(marked(&h, cx), Some(vec![2]));
+}
+
+#[gpui::test]
+fn shift_click_marks_the_range_over_the_messages_that_cannot_be_marked(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "one"),
+            plain(2, "two"),
+            pending("g", 3, "p3", "queued"),
+            plain(4, "four"),
+            plain(5, "five"),
+        ],
+    );
+    primary_click(cx, msg!(1));
+    shift_click(cx, msg!(4));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 4]));
+    shift_click(cx, msg!(5));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 4, 5]));
+    click(cx, msg!(3));
+    assert_eq!(
+        marked(&h, cx),
+        Some(vec![1, 2, 4, 5]),
+        "a pending message does nothing"
+    );
+}
+
+#[gpui::test]
+fn a_click_on_a_picture_or_a_reaction_chip_marks_and_opens_and_sends_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "text"),
+            pictures(2),
+            reacted(3, &[(LIKE, 3)], None),
+        ],
+    );
+    primary_click(cx, msg!(1));
+    h.commands();
+    click(cx, CELLS[0]);
+    assert_eq!(marked(&h, cx), Some(vec![1, 2]));
+    assert_eq!(viewer_at(&h, cx), None, "the picture does not open");
+    click(cx, msg!(3, "reaction-100102"));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 3]));
+    assert!(
+        h.commands().is_empty(),
+        "no reaction, no download, nothing for the core"
+    );
+    assert_eq!(reactions_in_store(&h, cx, 3).mine, None);
+}
+
+#[gpui::test]
+fn a_primary_click_on_a_picture_enters_the_mode_and_opens_no_viewer(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "text"), pictures(2)]);
+    primary_click(cx, CELLS[1]);
+    assert_eq!(marked(&h, cx), Some(vec![2]));
+    assert_eq!(viewer_at(&h, cx), None);
+}
+
+#[gpui::test]
+fn a_right_click_does_nothing_in_the_mode(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "one"), plain(2, "two")]);
+    primary_click(cx, msg!(1));
+    right_click(cx, msg!(2));
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+    assert_eq!(marked(&h, cx), Some(vec![1]));
+}
+
+#[gpui::test]
+fn select_all_marks_the_eligible_messages_and_a_chat_switch_leaves(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "one"),
+            pending("g", 2, "p2", "queued"),
+            failed("g", 3, "p3", "refused", "нет"),
+            voice_note(4),
+            plain(5, "five"),
+        ],
+    );
+    primary_click(cx, msg!(1));
+    cx.simulate_keystrokes("secondary-a");
+    assert_eq!(marked(&h, cx), Some(vec![1, 4, 5]));
+    assert_eq!(bar(&h, cx).map(|b| b.0), Some(3));
+    assert!(!has_selection(&h, cx), "no text selected by it");
+
+    click(cx, row!("p"));
+    assert!(!in_mode(&h, cx), "a chat switch leaves the mode");
+    click(cx, row!("g"));
+    assert!(!in_mode(&h, cx), "it does not come back with the chat");
+    assert!(
+        h.commands()
+            .iter()
+            .all(|c| !matches!(c, Command::Delete { .. }))
+    );
+}
+
+#[gpui::test]
+fn the_bar_counts_the_marks_and_disables_what_the_set_does_not_allow(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            own("g", 1, "mine"),
+            plain(2, "theirs"),
+            voice_note(3),
+            own("g", 4, "also mine"),
+        ],
+    );
+    primary_click(cx, msg!(1));
+    assert_eq!(bar(&h, cx), Some((1, true, true)));
+    for part in [
+        "selection-bar",
+        "selection-count",
+        "selection-copy",
+        "selection-delete",
+        "selection-cancel",
+    ] {
+        assert!(shown(cx, part), "{part} is on screen");
+    }
+    click(cx, msg!(4));
+    assert_eq!(bar(&h, cx), Some((2, true, true)));
+    click(cx, msg!(2));
+    assert_eq!(
+        bar(&h, cx),
+        Some((3, true, false)),
+        "a foreign message forbids the delete"
+    );
+    click(cx, "selection-delete");
+    assert!(
+        !h.desktop.read_with(cx, |d, _| d.delete_is_pending()),
+        "the disabled button does nothing"
+    );
+    click(cx, msg!(3));
+    click(cx, msg!(1));
+    click(cx, msg!(4));
+    click(cx, msg!(2));
+    assert_eq!(
+        bar(&h, cx),
+        Some((1, false, false)),
+        "a lone voice message: nothing to copy, not the user's"
+    );
+    click(cx, "selection-copy");
+    assert_eq!(clipboard(cx), None, "the disabled copy writes nothing");
+    assert!(in_mode(&h, cx));
+}
+
+#[gpui::test]
+fn the_copy_button_puts_the_marked_text_on_the_clipboard_and_keeps_the_mode(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "first words"),
+            voice_note(2),
+            plain(3, "skipped"),
+            plain(4, "last line\nsecond"),
+        ],
+    );
+    primary_click(cx, msg!(4));
+    click(cx, msg!(1));
+    click(cx, msg!(2));
+    click(cx, "selection-copy");
+    assert_eq!(
+        clipboard(cx),
+        Some(format!(
+            "{}\nfirst words\n\n{}\nlast line\nsecond",
+            header(1),
+            header(4)
+        )),
+        "a header per message in timeline order, the voice message adds nothing"
+    );
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 4]), "the mode stays");
+
+    click(cx, msg!(1));
+    click(cx, msg!(2));
+    click(cx, "selection-copy");
+    assert_eq!(
+        clipboard(cx),
+        Some("last line\nsecond".into()),
+        "one is bare"
+    );
+
+    cx.simulate_keystrokes("secondary-a");
+    cx.simulate_keystrokes("secondary-c");
+    assert!(
+        clipboard(cx).is_some_and(|text| text.contains(&header(3))),
+        "Cmd+C copies the marked messages too"
+    );
+    assert!(h.commands().is_empty());
+}
+
+#[gpui::test]
+fn the_composer_and_its_draft_survive_the_mode_and_escape_leaves_it_before_the_panel(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    go_online(&h, cx);
+    open_with(&h, cx, vec![plain(1, "one"), plain(2, "two")]);
+    cx.simulate_input("черновик");
+    click(cx, "chat-header");
+    assert!(info_open(&h, cx));
+    primary_click(cx, msg!(1));
+    assert!(in_mode(&h, cx));
+
+    cx.simulate_keystrokes("escape");
+    assert!(!in_mode(&h, cx), "the mode first");
+    assert!(info_open(&h, cx), "then the panel");
+    assert_eq!(composer_text(&h, cx), "черновик", "the draft is intact");
+    assert!(!has_selection(&h, cx));
+    cx.simulate_keystrokes("escape");
+    assert!(!info_open(&h, cx));
+
+    primary_click(cx, msg!(2));
+    click(cx, "selection-cancel");
+    assert!(!in_mode(&h, cx), "the cross leaves the mode");
+    assert_eq!(composer_text(&h, cx), "черновик");
+}
+
+#[gpui::test]
+fn the_menu_offers_select_for_sent_messages_only(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut gone = own("g", 4, "gone");
+    gone.body = MessageBody::Deleted;
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "sent"),
+            pending("g", 2, "p2", "queued"),
+            failed("g", 3, "p3", "refused", "нет"),
+            gone,
+        ],
+    );
+    // The entries of the menus that open for a pending, a failed and a deleted message: a menu entry is
+    // never removed from the debug map once painted, so these come before the sent message's menu.
+    for i in [msg!(2), msg!(3), msg!(4)] {
+        right_click(cx, i);
+        cx.simulate_keystrokes("escape");
+    }
+    assert!(!shown(cx, "menu-select"));
+    primary_click(cx, msg!(2));
+    primary_click(cx, msg!(3));
+    primary_click(cx, msg!(4));
+    assert!(
+        !in_mode(&h, cx),
+        "the modifier click cannot enter on them either"
+    );
+
+    right_click(cx, msg!(1));
+    assert!(shown(cx, "menu-select"));
+}
+
+#[gpui::test]
+fn deleting_three_own_messages_sends_three_deletes_in_order_and_one_refusal_leaves_its_message(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            own("g", 1, "first"),
+            own("g", 2, "second"),
+            own("g", 3, "third"),
+            plain(4, "theirs"),
+        ],
+    );
+    primary_click(cx, msg!(3));
+    shift_click(cx, msg!(1));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 3]));
+    click(cx, "selection-delete");
+    assert!(shown(cx, "delete-dialog"));
+    assert!(h.commands().is_empty(), "confirmation first");
+
+    // Cancelling keeps the marks.
+    click(cx, "cancel-delete");
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 3]));
+    assert!(h.commands().is_empty());
+    // So does Escape on the dialog.
+    click(cx, "selection-delete");
+    cx.simulate_keystrokes("escape");
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+    assert_eq!(marked(&h, cx), Some(vec![1, 2, 3]));
+
+    click(cx, "selection-delete");
+    click(cx, "confirm-delete");
+    assert_eq!(
+        h.commands(),
+        [1, 2, 3].map(|i| Command::Delete {
+            chat: chat_g(),
+            timestamp: ts(i),
+        })
+    );
+    assert!(!in_mode(&h, cx), "confirming closes the mode");
+    assert!(!h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+
+    // The server deletes two and refuses one: that message stays, the reason shows.
+    h.feed(
+        cx,
+        [
+            ClientEvent::MessageDeleted {
+                chat: chat_g(),
+                timestamp: ts(1),
+            },
+            ClientEvent::ActionFailed {
+                chat: chat_g(),
+                reason: "слишком поздно".into(),
+            },
+            ClientEvent::MessageDeleted {
+                chat: chat_g(),
+                timestamp: ts(3),
+            },
+        ],
+    );
+    assert!(shown(cx, msg!(1, "deleted")) && shown(cx, msg!(3, "deleted")));
+    assert!(!shown(cx, msg!(2, "deleted")));
+    let second = h.store.read_with(cx, |s, _| {
+        s.timeline(&chat_g())
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.timestamp == ts(2))
+            .map(|m| m.body.clone())
+    });
+    assert_eq!(second, Some(MessageBody::Text("second".into())));
+    assert!(shown(cx, "toast"));
+}
+
+#[gpui::test]
+fn a_single_message_set_asks_the_single_question_and_the_menu_delete_is_unchanged(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 1, "mine"), own("g", 2, "also")]);
+    primary_click(cx, msg!(1));
+    click(cx, "selection-delete");
+    click(cx, "confirm-delete");
+    assert_eq!(deleted_commands(&h), [ts(1)]);
+    assert!(!in_mode(&h, cx));
+
+    right_click(cx, msg!(2));
+    click(cx, "menu-delete");
+    click(cx, "confirm-delete");
+    assert_eq!(deleted_commands(&h), [ts(2)]);
+}
+
+#[gpui::test]
+fn entering_the_mode_changes_neither_the_wrapping_nor_the_height_of_a_row(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    cx.simulate_resize(size(px(850.), px(1400.)));
+    let long = "очень длинное сообщение которое переносится на несколько строк ".repeat(5);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "short"),
+            plain(2, &long),
+            own("g", 3, &long),
+            plain(4, "short"),
+        ],
+    );
+    let sizes = |cx: &mut VisualTestContext| {
+        [msg!(1), msg!(2), msg!(3), msg!(4)].map(|selector| {
+            bounds(cx, selector)
+                .unwrap_or_else(|| panic!("{selector} is not on screen"))
+                .size
+        })
+    };
+    let before = sizes(cx);
+    assert!(
+        before[1].height > before[0].height * 2.0,
+        "the long messages wrap"
+    );
+
+    primary_click(cx, msg!(1));
+    assert!(in_mode(&h, cx));
+    assert_eq!(sizes(cx), before, "the mode keeps every bubble's size");
+}

@@ -4,7 +4,7 @@
 //! the viewport and older history loading above. Offsets are bytes on grapheme boundaries. The messages
 //! are always the loaded vector of the open chat, oldest first.
 
-use bt_chat_core::model::{Message, MessageBody, MessageTs};
+use bt_chat_core::model::{Delivery, Message, MessageBody, MessageTs};
 use std::ops::Range;
 use std::sync::Arc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -299,6 +299,172 @@ pub fn extract_text(
             .map(|(m, text)| format!("{}\n{text}", header(m)))
             .collect::<Vec<_>>()
             .join("\n\n")
+    };
+    if text.contains("\r\n") {
+        text.replace("\r\n", "\n")
+    } else {
+        text
+    }
+}
+
+/// The text of a message as Copy takes it: the text or the caption, the file name of a file or a video;
+/// nothing for a voice message, a deleted placeholder and an unsupported type.
+pub fn copy_text(m: &Message) -> Option<&str> {
+    match &m.body {
+        MessageBody::Text(text) => Some(text),
+        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
+            caption.as_deref()
+        }
+        MessageBody::File { name, .. } | MessageBody::Video { name, .. } => Some(name),
+        MessageBody::Voice { .. } | MessageBody::Deleted | MessageBody::Unsupported(_) => None,
+    }
+}
+
+/// A message the user can act on (D11): sent, not pending or failed, and not a deleted placeholder.
+pub fn eligible(m: &Message) -> bool {
+    m.delivery == Delivery::Sent && !matches!(m.body, MessageBody::Deleted)
+}
+
+/// Whether every one of `messages` is the user's own eligible message, which a batch delete needs.
+/// False for no messages.
+pub fn all_deletable(messages: &[&Message]) -> bool {
+    !messages.is_empty() && messages.iter().all(|m| m.outgoing && eligible(m))
+}
+
+/// The messages marked in message mode (D11): sorted unique timestamps of eligible messages, and the one
+/// toggled last, which a Shift click ranges from.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MessageSet {
+    marked: Vec<MessageTs>,
+    last: Option<MessageTs>,
+}
+
+impl MessageSet {
+    /// A set with message `ts` marked; `None` when it is not loaded or not eligible.
+    pub fn new(messages: &[Message], ts: MessageTs) -> Option<Self> {
+        let mut set = Self::default();
+        set.toggle(messages, ts).then_some(set)
+    }
+
+    pub fn contains(&self, ts: MessageTs) -> bool {
+        self.marked.binary_search(&ts).is_ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.marked.is_empty()
+    }
+
+    /// Marks `ts` if it is not marked and unmarks it if it is, and makes it the message a Shift click
+    /// ranges from. Returns false (and changes nothing) for a message that is not loaded or not eligible.
+    pub fn toggle(&mut self, messages: &[Message], ts: MessageTs) -> bool {
+        if !index_of(messages, ts).is_some_and(|ix| eligible(&messages[ix])) {
+            return false;
+        }
+        match self.marked.binary_search(&ts) {
+            Ok(ix) => {
+                self.marked.remove(ix);
+            }
+            Err(ix) => self.marked.insert(ix, ts),
+        }
+        self.last = Some(ts);
+        true
+    }
+
+    /// Marks every eligible message from the one toggled last to `ts`, both included, in either
+    /// direction; the ineligible ones between are skipped. `ts` becomes the message to range from. With
+    /// no earlier toggle, or one that is no longer loaded, it marks `ts` alone. Returns whether the set
+    /// changed; false for a `ts` that is not loaded or not eligible.
+    pub fn extend_to(&mut self, messages: &[Message], ts: MessageTs) -> bool {
+        let Some(to) = index_of(messages, ts).filter(|ix| eligible(&messages[*ix])) else {
+            return false;
+        };
+        let Some(from) = self.last.and_then(|last| index_of(messages, last)) else {
+            self.last = Some(ts);
+            return match self.marked.binary_search(&ts) {
+                Ok(_) => false,
+                Err(ix) => {
+                    self.marked.insert(ix, ts);
+                    true
+                }
+            };
+        };
+        let before = self.marked.len();
+        for m in &messages[from.min(to)..=from.max(to)] {
+            if eligible(m)
+                && let Err(ix) = self.marked.binary_search(&m.timestamp)
+            {
+                self.marked.insert(ix, m.timestamp);
+            }
+        }
+        self.last = Some(ts);
+        self.marked.len() != before
+    }
+
+    /// Every eligible message of `messages`; `None` when there is none.
+    pub fn select_all(messages: &[Message]) -> Option<Self> {
+        let marked: Vec<_> = messages
+            .iter()
+            .filter(|m| eligible(m))
+            .map(|m| m.timestamp)
+            .collect();
+        (!marked.is_empty()).then_some(Self { marked, last: None })
+    }
+
+    /// Drops the marks of messages that are gone or no longer eligible (deleted, replaced). Returns
+    /// whether anything was dropped.
+    pub fn prune(&mut self, messages: &[Message]) -> bool {
+        let before = self.marked.len();
+        self.marked
+            .retain(|ts| index_of(messages, *ts).is_some_and(|ix| eligible(&messages[ix])));
+        if self
+            .last
+            .is_some_and(|last| !index_of(messages, last).is_some_and(|ix| eligible(&messages[ix])))
+        {
+            self.last = None;
+        }
+        self.marked.len() != before
+    }
+
+    /// The marked messages of `messages` in timeline order.
+    pub fn messages<'a>(&self, messages: &'a [Message]) -> Vec<&'a Message> {
+        self.marked
+            .iter()
+            .filter_map(|ts| index_of(messages, *ts).map(|ix| &messages[ix]))
+            .collect()
+    }
+}
+
+/// What the timeline has selected: nothing, a range of text (D1) or whole messages (D11).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Pick {
+    #[default]
+    None,
+    Text(TextSelection),
+    Messages(MessageSet),
+}
+
+/// The text a copy of the marked messages puts on the clipboard (D7): per message with copyable text
+/// (`copy_text`, so a file gives its name) a block `header(m)\n{text}`, blocks separated by one blank
+/// line, in timeline order; one block is the bare text. Messages without copyable text contribute
+/// nothing. Line endings are `\n`.
+pub fn extract_messages(
+    messages: &[Message],
+    set: &MessageSet,
+    header: impl Fn(&Message) -> String,
+) -> String {
+    let parts: Vec<(&Message, &str)> = set
+        .messages(messages)
+        .into_iter()
+        .filter_map(|m| Some((m, copy_text(m).filter(|text| !text.is_empty())?)))
+        .collect();
+    let text = match parts.as_slice() {
+        [] => String::new(),
+        [(_, text)] => (*text).to_owned(),
+        _ => parts
+            .iter()
+            .map(|(m, text)| format!("{}\n{text}", header(m)))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
     };
     if text.contains("\r\n") {
         text.replace("\r\n", "\n")
@@ -788,6 +954,241 @@ mod tests {
         assert!(
             select_all(&empty).is_none(),
             "empty text is nothing to select"
+        );
+    }
+
+    // ---- message mode (D11) ----
+
+    use bt_chat_core::model::{MediaKind, MediaRef, PayloadId};
+
+    fn own(mut m: Message) -> Message {
+        m.outgoing = true;
+        m
+    }
+
+    fn pending(mut m: Message) -> Message {
+        m.delivery = Delivery::Pending(PayloadId("p".into()));
+        m
+    }
+
+    fn failed(mut m: Message) -> Message {
+        m.delivery = Delivery::Failed {
+            payload: PayloadId("p".into()),
+            reason: "no".into(),
+        };
+        m
+    }
+
+    fn deleted(ts: MessageTs) -> Message {
+        message(ts, MessageBody::Deleted)
+    }
+
+    fn file(ts: MessageTs, name: &str) -> Message {
+        message(
+            ts,
+            MessageBody::File {
+                media: MediaRef {
+                    id: "f".into(),
+                    kind: MediaKind::File,
+                },
+                name: name.into(),
+                size: 10,
+            },
+        )
+    }
+
+    fn marked(set: &MessageSet) -> Vec<MessageTs> {
+        set.marked.clone()
+    }
+
+    #[test]
+    fn eligible_is_sent_and_not_deleted() {
+        assert!(eligible(&text(1, "a")));
+        assert!(eligible(&voice(1)));
+        assert!(!eligible(&pending(text(1, "a"))));
+        assert!(!eligible(&failed(text(1, "a"))));
+        assert!(!eligible(&deleted(1)));
+    }
+
+    #[test]
+    fn a_set_starts_only_on_an_eligible_loaded_message() {
+        let m = vec![text(1, "a"), pending(text(2, "b")), deleted(3)];
+        assert_eq!(marked(&MessageSet::new(&m, 1).unwrap()), vec![1]);
+        assert!(MessageSet::new(&m, 2).is_none());
+        assert!(MessageSet::new(&m, 3).is_none());
+        assert!(MessageSet::new(&m, 9).is_none(), "not loaded");
+    }
+
+    #[test]
+    fn toggle_marks_and_unmarks_and_keeps_the_order() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c")];
+        let mut set = MessageSet::new(&m, 3).unwrap();
+        assert!(set.toggle(&m, 1));
+        assert_eq!(marked(&set), vec![1, 3]);
+        assert!(set.contains(1) && !set.contains(2));
+        assert!(set.toggle(&m, 3));
+        assert_eq!(marked(&set), vec![1], "off again");
+        assert!(set.toggle(&m, 1));
+        assert!(set.is_empty(), "the last one off leaves the set empty");
+    }
+
+    #[test]
+    fn toggle_refuses_an_ineligible_or_unknown_message() {
+        let m = vec![text(1, "a"), failed(text(2, "b")), deleted(3)];
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        for ts in [2, 3, 9] {
+            assert!(!set.toggle(&m, ts));
+        }
+        assert_eq!(marked(&set), vec![1]);
+    }
+
+    #[test]
+    fn a_range_marks_the_eligible_messages_over_a_gap_of_ineligible_ones() {
+        let m = vec![
+            text(1, "a"),
+            pending(text(2, "b")),
+            deleted(3),
+            text(4, "c"),
+            text(5, "d"),
+            text(6, "e"),
+        ];
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        assert!(set.extend_to(&m, 4));
+        assert_eq!(
+            marked(&set),
+            vec![1, 4],
+            "the pending and the deleted are skipped"
+        );
+        assert!(set.extend_to(&m, 6), "ranges on from the clicked one");
+        assert_eq!(marked(&set), vec![1, 4, 5, 6]);
+        assert!(
+            !set.extend_to(&m, 2),
+            "an ineligible target changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_range_runs_in_either_direction() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c"), text(4, "d")];
+        let mut set = MessageSet::new(&m, 4).unwrap();
+        assert!(set.extend_to(&m, 2));
+        assert_eq!(
+            marked(&set),
+            vec![2, 3, 4],
+            "backwards from the last toggled"
+        );
+        let mut forward = MessageSet::new(&m, 1).unwrap();
+        assert!(forward.extend_to(&m, 3));
+        assert_eq!(marked(&forward), vec![1, 2, 3]);
+        assert!(!forward.extend_to(&m, 3), "nothing new to mark");
+    }
+
+    #[test]
+    fn a_range_without_a_loaded_start_marks_the_clicked_message_alone() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c")];
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        let fewer = vec![text(2, "b"), text(3, "c")];
+        assert!(set.extend_to(&fewer, 3), "message 1 is no longer loaded");
+        assert_eq!(marked(&set), vec![1, 3]);
+        let mut all = MessageSet::select_all(&m).unwrap();
+        assert!(
+            !all.extend_to(&m, 2),
+            "no earlier toggle: the message is already marked"
+        );
+    }
+
+    #[test]
+    fn select_all_skips_the_pending_failed_and_deleted() {
+        let m = vec![
+            text(1, "a"),
+            pending(text(2, "b")),
+            failed(text(3, "c")),
+            deleted(4),
+            voice(5),
+        ];
+        assert_eq!(marked(&MessageSet::select_all(&m).unwrap()), vec![1, 5]);
+        assert!(MessageSet::select_all(&[pending(text(1, "a")), deleted(2)]).is_none());
+        assert!(MessageSet::select_all(&[]).is_none());
+    }
+
+    #[test]
+    fn prune_drops_the_marks_of_messages_that_are_gone_or_deleted() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c")];
+        let mut set = MessageSet::select_all(&m).unwrap();
+        assert!(!set.prune(&m));
+        let after = vec![text(1, "a"), deleted(2)];
+        assert!(set.prune(&after));
+        assert_eq!(marked(&set), vec![1]);
+    }
+
+    #[test]
+    fn the_anchor_survives_an_uncheck_and_a_prune_but_not_its_message() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c"), text(4, "d")];
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        set.toggle(&m, 2);
+        set.toggle(&m, 2);
+        assert!(!set.prune(&m), "nothing to drop: 2 is unchecked, not gone");
+        assert!(set.extend_to(&m, 4));
+        assert_eq!(marked(&set), vec![1, 2, 3, 4], "from the unchecked 2");
+
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        set.toggle(&m, 3);
+        let after = vec![text(1, "a"), text(2, "b"), deleted(3), text(4, "d")];
+        assert!(set.prune(&after));
+        assert!(set.extend_to(&after, 4));
+        assert_eq!(marked(&set), vec![1, 4], "a deleted anchor is gone");
+    }
+
+    #[test]
+    fn all_deletable_needs_every_message_own_and_eligible() {
+        let a = own(text(1, "a"));
+        let b = own(voice(2));
+        let foreign = text(3, "c");
+        assert!(all_deletable(&[&a, &b]));
+        assert!(!all_deletable(&[&a, &foreign]), "one foreign message");
+        assert!(!all_deletable(&[&own(pending(text(4, "d")))]));
+        assert!(!all_deletable(&[]));
+    }
+
+    #[test]
+    fn extract_messages_of_one_message_is_its_bare_text() {
+        let m = vec![text(1, "hello"), text(2, "other")];
+        let set = MessageSet::new(&m, 1).unwrap();
+        assert_eq!(extract_messages(&m, &set, header), "hello");
+    }
+
+    #[test]
+    fn extract_messages_of_several_has_a_header_per_block_in_timeline_order() {
+        let m = vec![text(1, "first"), text(2, "skip"), text(3, "third\r\nline")];
+        let mut set = MessageSet::new(&m, 3).unwrap();
+        set.toggle(&m, 1);
+        assert_eq!(
+            extract_messages(&m, &set, header),
+            "H1\nfirst\n\nH3\nthird\nline"
+        );
+    }
+
+    #[test]
+    fn extract_messages_skips_a_voice_and_takes_a_files_name() {
+        let m = vec![text(1, "hello"), voice(2), file(3, "report.pdf")];
+        let set = MessageSet::select_all(&m).unwrap();
+        assert_eq!(
+            extract_messages(&m, &set, header),
+            "H1\nhello\n\nH3\nreport.pdf"
+        );
+        let only_voice = MessageSet::new(&m, 2).unwrap();
+        assert_eq!(extract_messages(&m, &only_voice, header), "");
+        let only_file = MessageSet::new(&m, 3).unwrap();
+        assert_eq!(extract_messages(&m, &only_file, header), "report.pdf");
+        let with_voice = {
+            let mut s = MessageSet::new(&m, 1).unwrap();
+            s.toggle(&m, 2);
+            s
+        };
+        assert_eq!(
+            extract_messages(&m, &with_voice, header),
+            "hello",
+            "one message with text is the bare text, the voice contributes nothing"
         );
     }
 }

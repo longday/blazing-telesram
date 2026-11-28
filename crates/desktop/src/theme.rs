@@ -29,3 +29,7 @@ pub const REACTION_OWN: u32 = 0x4f95d6;
 pub const IMPORTANT_MARK: u32 = 0xf2c14e;
 /// The highlight of selected message text, as RGBA for `rgba()`: the accent at 35 % over a bubble.
 pub const SELECTION: u32 = 0x6ab2f259;
+/// The tint of a message marked in message mode, as RGBA for `rgba()`: the accent at 16 %.
+pub const MARKED_ROW: u32 = 0x6ab2f229;
+/// The ○ of an unmarked message in message mode.
+pub const CHECK_OFF: u32 = 0x546474;
