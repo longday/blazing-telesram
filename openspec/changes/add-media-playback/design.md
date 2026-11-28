@@ -144,7 +144,7 @@ From the mockup (`docs/mockups/1-main.svg`): a 40 px circle (`BADGE` `0x3d84c6`,
 
 ### D8. Video: hand-off to the system player
 
-Chosen: fetch a playback copy (D3) with the card showing «Загрузка для просмотра: 3,2 из 80 МБ» and a cancel control, then emit `PlayerEvent::OpenExternal(path)`; `main.rs` calls `cx.open_with_system(&path)`. A later click on the same card opens the existing copy at once.
+Chosen: fetch a playback copy (D3) with the card showing «Загрузка для просмотра: 3,2 МБ из 80 МБ» and a cancel control, then emit `PlayerEvent::OpenExternal(path)`; `main.rs` calls `cx.open_with_system(&path)`. A later click on the same card opens the existing copy at once.
 
 Why: `gpui` has no video playback (R7), a native inline player would be a new unsafe AVFoundation integration with per-frame display plumbing and no way to test it headless, and the system player already does everything a video needs (seek, full screen, volume, codecs). The decision follows `add-reveal-downloaded-file` D1/D7 in spirit: one thin platform call, in `main.rs`, because the test platform's `open_with_system` is `unimplemented!()`; the store and `Player` tests assert the emitted event.
 

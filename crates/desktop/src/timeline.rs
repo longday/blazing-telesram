@@ -2,13 +2,15 @@
 
 use crate::desktop::Desktop;
 use crate::format::{
-    Clock, avatar_color, clock_time, day_key, day_label, duration_label, fit_thumbnail, human_size,
+    Clock, avatar_color, clock_time, day_key, day_label, duration_label, duration_size_line,
+    fit_thumbnail, human_size,
 };
 use crate::player::{PlayFailure, Player, VoiceKey, VoicePhase, VoiceView, failure_label};
 use crate::store::{ChatStore, DownloadState};
 use crate::theme::*;
 use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
 use crate::widgets::avatar;
+use crate::yandex_backend::is_video_name;
 use bt_chat_core::model::{
     ChatId, ChatKind, ConnectionState, Delivery, DownloadFailure, GalleryItem, MediaRef, Message,
     MessageBody, MessageTs, ReplyQuote,
@@ -16,6 +18,8 @@ use bt_chat_core::model::{
 use bt_chat_core::reactions::{NEUTRAL_GLYPH, ReactionCount, emoji};
 use gpui::{prelude::*, *};
 use std::cell::RefCell;
+use std::ffi::OsStr;
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -47,6 +51,9 @@ const VOICE_BAR_FLAT: f32 = 8.;
 const WAVEFORM_MAX_LEVEL: u8 = 15;
 /// Name offered to the Download action and to the playback copy when the message has none.
 const VOICE_NAME: &str = "Голосовое сообщение";
+/// Width of a video card and the circle that holds its play control (design D8).
+const VIDEO_W: f32 = 300.;
+const VIDEO_CIRCLE: f32 = 44.;
 
 /// Consecutive messages by one author within a few minutes of each other on the same day share a group.
 pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
@@ -416,6 +423,13 @@ fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElemen
             (media, *duration_ms, name.as_deref(), waveform.as_deref()),
         )
         .into_any_element(),
+        MessageBody::Video {
+            media,
+            name,
+            size,
+            duration_ms,
+            ..
+        } => video_card(ctx, store, cx, m, (media, name, *size, *duration_ms)).into_any_element(),
         MessageBody::Deleted => div()
             .debug_selector(move || format!("msg-{ts}-deleted"))
             .italic()
@@ -622,6 +636,157 @@ fn file_card(
         )
 }
 
+/// What the circle and the size line of a video card show for one player state (design D8). Pure, so
+/// every state's text is testable without a window.
+#[derive(Debug, PartialEq, Eq)]
+struct VideoFace {
+    glyph: &'static str,
+    line: String,
+}
+
+/// `progress` is what the store knows of the playback copy while it is fetched: the bytes received and
+/// the total when it is known. Loading shows the progress and the cancel glyph, a failure its reason,
+/// an idle card whose play is `unavailable` the offline text, any other idle card the duration and
+/// size. The card has no playing or paused state: the system player takes over.
+fn video_face(
+    phase: VoicePhase,
+    progress: Option<(u64, Option<u64>)>,
+    duration_ms: Option<u64>,
+    size: u64,
+    unavailable: bool,
+) -> VideoFace {
+    let (glyph, line) = match phase {
+        VoicePhase::Loading => {
+            let line = match progress {
+                Some((received, Some(total))) => format!(
+                    "Загрузка для просмотра: {} из {}",
+                    human_size(received),
+                    human_size(total)
+                ),
+                Some((received, None)) => {
+                    format!("Загрузка для просмотра: {}", human_size(received))
+                }
+                None => "Загрузка для просмотра…".to_owned(),
+            };
+            ("✕", line)
+        }
+        VoicePhase::Failed(failure) => ("▶", failure_label(failure).to_owned()),
+        VoicePhase::Idle | VoicePhase::Playing | VoicePhase::Paused if unavailable => (
+            "▶",
+            failure_label(PlayFailure::Download(DownloadFailure::Offline)).to_owned(),
+        ),
+        VoicePhase::Idle | VoicePhase::Playing | VoicePhase::Paused => {
+            ("▶", duration_size_line(duration_ms, Some(size)))
+        }
+    };
+    VideoFace { glyph, line }
+}
+
+/// A video message the server has gets a player; one still in the outbox (or refused) has no file to
+/// fetch, so its card is inert.
+fn video_has_player(m: &Message) -> bool {
+    matches!(m.body, MessageBody::Video { .. }) && m.delivery == Delivery::Sent
+}
+
+/// The last extension of the file name of `path` is a whitelisted video one: the check `Player` makes
+/// on a reused copy before it hands it to the system.
+fn is_video_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(is_video_name)
+}
+
+/// The video card of design D8: a 44 px circle that plays («▶», or «✕» that cancels while the copy is
+/// fetched), the name, the line with the duration and size (progress or the failure in its place), and
+/// below the Download action row of the original, as on a file card. Debug selectors: `msg-{ts}-video`
+/// (the card), `-video-play` (the circle), `-video-status` (the size line), and the action row's own.
+/// The circle's element id is `video-play-{ts}`. Without `video_has_player` the circle is dimmed, does
+/// nothing, and the action row is left out.
+fn video_card(
+    ctx: &RowContext,
+    store: &ChatStore,
+    cx: &App,
+    m: &Message,
+    video: (&MediaRef, &str, u64, Option<u64>),
+) -> Div {
+    let (media, name, size, duration_ms) = video;
+    let ts = m.timestamp;
+    let playable = video_has_player(m);
+    let original = media.original();
+    let playback = original.playback();
+    let online = store.connection() == ConnectionState::Online;
+    let copy = store.download_state(&playback);
+    let unavailable = playable && play_unavailable(online, copy, is_video_path);
+    let phase = if playable {
+        ctx.player.read(cx).video(&original)
+    } else {
+        VoicePhase::Idle
+    };
+    let progress = match copy {
+        Some(DownloadState::Running { received, total }) => Some((*received, *total)),
+        _ => None,
+    };
+    let face = video_face(phase, progress, duration_ms, size, unavailable);
+    let enabled = playable && circle_enabled(phase, unavailable);
+    probe::begin_video(ts);
+    let line = action_line(store.download_state(&original), online);
+    let toggle = {
+        let (player, original, name) = (ctx.player.clone(), original.clone(), name.to_owned());
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            player.update(cx, |player, cx| player.open_video(&original, &name, cx));
+        }
+    };
+    div()
+        .debug_selector(move || format!("msg-{ts}-video"))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .w(px(VIDEO_W))
+        .child(
+            div()
+                .id(SharedString::from(format!("video-play-{ts}")))
+                .debug_selector(move || format!("msg-{ts}-video-play"))
+                .size(px(VIDEO_CIRCLE))
+                .flex_none()
+                .rounded_full()
+                .bg(rgb(if enabled { BADGE } else { BADGE_MUTED }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(18.))
+                .when(enabled, |d| {
+                    d.cursor_pointer().on_click(probe::video_click(ts, toggle))
+                })
+                .child(probe::video_glyph(ts, face.glyph)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(probe::video_name(ts, name)),
+                )
+                .child(
+                    div()
+                        .debug_selector(move || format!("msg-{ts}-video-status"))
+                        .h(px(16.))
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child(probe::video_line(ts, face.line)),
+                )
+                .when(playable, |d| {
+                    d.child(action_row(ctx, ts, original, name, line))
+                }),
+        )
+}
+
 /// What the circle, the time slot and the lit bars show for one player state (design D7). Pure, so
 /// every state's text is testable without a window.
 #[derive(Debug, PartialEq, Eq)]
@@ -657,8 +822,19 @@ fn voice_face(view: &VoiceView, wire_ms: Option<u64>) -> VoiceFace {
 
 /// Offline and with no saved playback copy, play cannot work: the bubble says so before the click
 /// instead of after it. A copy that is already saved plays offline as it does online.
-fn play_unavailable(online: bool, copy_saved: bool) -> bool {
-    !online && !copy_saved
+fn play_unavailable(
+    online: bool,
+    copy: Option<&DownloadState>,
+    accepts: impl Fn(&Path) -> bool,
+) -> bool {
+    // Online the copy does not matter, so the disk is asked only offline.
+    !online && !usable_copy(copy, accepts)
+}
+
+/// A saved playback copy the player will really use: `Saved` and still a file on disk (the criterion of
+/// `Player::toggle_voice` and `open_video`, which fetch again when it vanished) that `accepts` the path.
+fn usable_copy(copy: Option<&DownloadState>, accepts: impl Fn(&Path) -> bool) -> bool {
+    matches!(copy, Some(DownloadState::Saved(path)) if path.is_file() && accepts(path))
 }
 
 /// Whether the circle reacts to a click. Offline without a copy only a start (from `Idle` or `Failed`)
@@ -798,6 +974,49 @@ pub(crate) mod probe {
         record(ts, |s| s.enabled = true);
         handler
     }
+
+    /// The glyph, the name and the size line of a video card, and whether the circle got its click
+    /// handler.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub(crate) struct VideoShown {
+        pub glyph: String,
+        pub name: String,
+        pub line: String,
+        pub enabled: bool,
+    }
+
+    thread_local! {
+        /// By message timestamp, started afresh by every render of the card, as `VOICE_SHOWN`.
+        pub(crate) static VIDEO_SHOWN: RefCell<HashMap<i64, VideoShown>> = RefCell::new(HashMap::new());
+    }
+
+    fn record_video(ts: i64, record: impl FnOnce(&mut VideoShown)) {
+        VIDEO_SHOWN.with(|shown| record(shown.borrow_mut().entry(ts).or_default()));
+    }
+
+    pub(super) fn begin_video(ts: i64) {
+        VIDEO_SHOWN.with(|shown| shown.borrow_mut().insert(ts, VideoShown::default()));
+    }
+
+    pub(super) fn video_glyph(ts: i64, glyph: &'static str) -> &'static str {
+        record_video(ts, |s| s.glyph = glyph.to_owned());
+        glyph
+    }
+
+    pub(super) fn video_name(ts: i64, name: &str) -> String {
+        record_video(ts, |s| s.name = name.to_owned());
+        name.to_owned()
+    }
+
+    pub(super) fn video_line(ts: i64, line: String) -> String {
+        record_video(ts, |s| s.line = line.clone());
+        line
+    }
+
+    pub(super) fn video_click<F>(ts: i64, handler: F) -> F {
+        record_video(ts, |s| s.enabled = true);
+        handler
+    }
 }
 
 /// The same hooks in a non-test build: they hand their value on.
@@ -818,6 +1037,24 @@ mod probe {
     }
 
     pub(super) fn click<F>(_: i64, handler: F) -> F {
+        handler
+    }
+
+    pub(super) fn begin_video(_: i64) {}
+
+    pub(super) fn video_glyph(_: i64, glyph: &'static str) -> &'static str {
+        glyph
+    }
+
+    pub(super) fn video_name(_: i64, name: &str) -> String {
+        name.to_owned()
+    }
+
+    pub(super) fn video_line(_: i64, line: String) -> String {
+        line
+    }
+
+    pub(super) fn video_click<F>(_: i64, handler: F) -> F {
         handler
     }
 }
@@ -844,11 +1081,8 @@ fn voice_bubble(
     };
     let original = media.original();
     let online = store.connection() == ConnectionState::Online;
-    let copy_saved = matches!(
-        store.download_state(&original.playback()),
-        Some(DownloadState::Saved(_))
-    );
-    let unavailable = playable && play_unavailable(online, copy_saved);
+    let unavailable =
+        playable && play_unavailable(online, store.download_state(&original.playback()), |_| true);
     let view = if playable {
         ctx.player.read(cx).voice(&key)
     } else {
@@ -1026,15 +1260,18 @@ fn action_row(ctx: &RowContext, ts: i64, original: MediaRef, name: &str, line: A
 mod tests {
     use super::{
         CONTENT_W, VOICE_BAR_FLAT, VOICE_BAR_MAX, VOICE_BAR_MIN, VOICE_BARS, VOICE_BARS_W,
-        VOICE_CIRCLE, VOICE_GAP, VOICE_TIME_W, VOICE_W, VoiceFace, WAVEFORM_MAX_LEVEL, bar_heights,
-        circle_enabled, lit_bars, play_unavailable, resample_waveform, shown_total_ms,
-        shows_important_marker, voice_face, voice_face_with, voice_has_player,
+        VOICE_CIRCLE, VOICE_GAP, VOICE_TIME_W, VOICE_W, VideoFace, VoiceFace, WAVEFORM_MAX_LEVEL,
+        bar_heights, circle_enabled, is_video_path, lit_bars, play_unavailable, resample_waveform,
+        shown_total_ms, shows_important_marker, video_face, video_has_player, voice_face,
+        voice_face_with, voice_has_player,
     };
     use crate::player::{PlayFailure, VoicePhase, VoiceView};
+    use crate::store::DownloadState;
     use bt_chat_core::model::{
         ChatId, Delivery, DownloadFailure, MediaKind, MediaRef, Message, MessageBody, PayloadId,
         UserId,
     };
+    use std::path::Path;
     use std::time::Duration;
 
     fn message(body: MessageBody, important: bool) -> Message {
@@ -1271,11 +1508,54 @@ mod tests {
     }
 
     #[test]
-    fn play_is_unavailable_only_offline_without_a_saved_copy() {
-        assert!(play_unavailable(false, false));
-        assert!(!play_unavailable(false, true));
-        assert!(!play_unavailable(true, false));
-        assert!(!play_unavailable(true, true));
+    fn play_is_unavailable_only_offline_without_a_usable_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.ogg");
+        std::fs::write(&path, b"x").unwrap();
+        let saved = DownloadState::Saved(path.clone());
+        let running = DownloadState::Running {
+            received: 1,
+            total: None,
+        };
+        let any = |_: &Path| true;
+        assert!(play_unavailable(false, None, any));
+        assert!(play_unavailable(false, Some(&running), any));
+        assert!(!play_unavailable(false, Some(&saved), any));
+        assert!(!play_unavailable(true, None, any));
+        assert!(!play_unavailable(true, Some(&saved), any));
+        // Offline with a copy the caller refuses is as good as none.
+        assert!(play_unavailable(false, Some(&saved), |_| false));
+        // Online the disk is not asked at all, neither for `is_file` nor for the caller's check.
+        assert!(!play_unavailable(true, Some(&saved), |_| unreachable!()));
+    }
+
+    #[test]
+    fn a_saved_copy_deleted_from_the_disk_is_unavailable_offline_like_the_player_says() {
+        // The player's criterion (`Saved` and `is_file()`): the store still says `Saved` after the file
+        // was removed, and offline the bubble must show «Нет сети» with a disabled circle, because a
+        // click would find no copy and no connection.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.ogg");
+        std::fs::write(&path, b"x").unwrap();
+        let saved = DownloadState::Saved(path.clone());
+        let idle = view(VoicePhase::Idle, 0, None);
+
+        let unavailable = play_unavailable(false, Some(&saved), |_| true);
+        assert!(!unavailable);
+        assert_eq!(
+            voice_face_with(&idle, Some(14_000), unavailable).label,
+            "0:14"
+        );
+        assert!(circle_enabled(VoicePhase::Idle, unavailable));
+
+        std::fs::remove_file(&path).unwrap();
+        let unavailable = play_unavailable(false, Some(&saved), |_| true);
+        assert!(unavailable);
+        let face = voice_face_with(&idle, Some(14_000), unavailable);
+        assert_eq!((face.glyph, face.label.as_str()), ("▶", "Нет сети"));
+        assert!(!circle_enabled(VoicePhase::Idle, unavailable));
+        // Online the same state is startable: the click fetches the copy again.
+        assert!(!play_unavailable(true, Some(&saved), |_| true));
     }
 
     #[test]
@@ -1312,5 +1592,119 @@ mod tests {
                 voice_face(&state, Some(14_000))
             );
         }
+    }
+
+    fn video_msg(delivery: Delivery) -> Message {
+        let mut m = message(
+            MessageBody::Video {
+                media: MediaRef {
+                    id: "b/2".into(),
+                    kind: MediaKind::File,
+                },
+                name: "a.mp4".into(),
+                size: 12 << 20,
+                width: 0,
+                height: 0,
+                duration_ms: Some(42_000),
+            },
+            false,
+        );
+        m.delivery = delivery;
+        m
+    }
+
+    #[test]
+    fn an_idle_video_card_shows_the_duration_and_size_or_the_size_alone() {
+        let face = |duration, size| video_face(VoicePhase::Idle, None, duration, size, false);
+        assert_eq!(
+            face(Some(42_000), 12 << 20),
+            VideoFace {
+                glyph: "▶",
+                line: "0:42 · 12 МБ".into()
+            }
+        );
+        assert_eq!(face(None, 12 << 20).line, "12 МБ");
+        assert_eq!(face(None, 0).line, "0 Б");
+    }
+
+    #[test]
+    fn a_loading_video_card_shows_the_progress_and_the_cancel_glyph() {
+        let loading =
+            |progress| video_face(VoicePhase::Loading, progress, Some(42_000), 80 << 20, false);
+        let (some, unknown, none) = (
+            loading(Some((3 << 20, Some(80 << 20)))),
+            loading(Some((3 << 20, None))),
+            loading(None),
+        );
+        assert_eq!(
+            (some.glyph, some.line.as_str()),
+            ("✕", "Загрузка для просмотра: 3,0 МБ из 80 МБ")
+        );
+        assert_eq!(unknown.line, "Загрузка для просмотра: 3,0 МБ");
+        assert_eq!(none.line, "Загрузка для просмотра…");
+        // Offline does not hide a load that is running: it can still be cancelled.
+        assert_eq!(
+            video_face(VoicePhase::Loading, None, None, 1, true).glyph,
+            "✕"
+        );
+    }
+
+    #[test]
+    fn a_failed_video_card_shows_the_reason_in_the_size_line_and_retries_with_the_circle() {
+        let failed =
+            |failure| video_face(VoicePhase::Failed(failure), None, Some(42_000), 1, false);
+        let cases = [
+            (PlayFailure::Download(DownloadFailure::Network), "Нет сети"),
+            (
+                PlayFailure::Download(DownloadFailure::NotFound),
+                "Файл недоступен",
+            ),
+            (PlayFailure::Unsupported, "Формат не поддерживается"),
+        ];
+        for (failure, text) in cases {
+            let face = failed(failure);
+            assert_eq!((face.glyph, face.line.as_str()), ("▶", text));
+            assert!(circle_enabled(VoicePhase::Failed(failure), false));
+        }
+    }
+
+    #[test]
+    fn an_idle_video_card_says_offline_when_play_is_unavailable() {
+        let face = video_face(VoicePhase::Idle, None, Some(42_000), 12 << 20, true);
+        assert_eq!((face.glyph, face.line.as_str()), ("▶", "Нет сети"));
+        assert!(!circle_enabled(VoicePhase::Idle, true));
+        assert!(circle_enabled(VoicePhase::Loading, true));
+    }
+
+    #[test]
+    fn offline_a_video_copy_is_usable_only_if_it_exists_and_passes_the_whitelist() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = dir.path().join("copy.MP4");
+        let wrong = dir.path().join("copy.command");
+        std::fs::write(&ok, b"x").unwrap();
+        std::fs::write(&wrong, b"x").unwrap();
+        let unavailable = |path: &Path| {
+            play_unavailable(
+                false,
+                Some(&DownloadState::Saved(path.to_path_buf())),
+                is_video_path,
+            )
+        };
+        assert!(!unavailable(&ok));
+        assert!(unavailable(&wrong));
+        assert!(unavailable(&dir.path().join("gone.mp4")));
+        std::fs::remove_file(&ok).unwrap();
+        assert!(unavailable(&ok));
+        assert!(is_video_path(Path::new("/x/a.mov")));
+        assert!(!is_video_path(Path::new("/x/mp4")));
+    }
+
+    #[test]
+    fn only_a_sent_video_message_gets_a_player() {
+        assert!(video_has_player(&video_msg(Delivery::Sent)));
+        assert!(!video_has_player(&video_msg(Delivery::Pending(PayloadId(
+            "p".into()
+        )))));
+        assert!(!video_has_player(&message(MessageBody::Deleted, false)));
     }
 }
