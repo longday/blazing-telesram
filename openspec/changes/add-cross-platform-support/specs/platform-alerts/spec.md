@@ -2,7 +2,7 @@
 
 ## Purpose
 
-On Windows and Linux the client tells the user about incoming messages from outside its window and shows the unread count where the platform has a place for it, with the same rules as on macOS.
+On Windows and Linux the client tells the user about incoming messages from outside its window, and on Windows shows the unread count on the task bar, with the same rules as on macOS.
 
 ## ADDED Requirements
 
@@ -28,8 +28,8 @@ On Windows and Linux the client SHALL post a desktop notification for an incomin
 - **WHEN** an incoming message arrives
 - **THEN** the client keeps working and posts nothing
 
-### Requirement: Unread badge where the platform has one
-On Windows the client SHALL show the unread count (the same number as `dock-badge` defines) as an overlay on its task bar button, and on a Linux desktop that implements the launcher entry interface it SHALL show it on the application's launcher icon; at zero the badge SHALL be removed. On a platform or desktop that has no such place the client SHALL show no badge and SHALL NOT replace it with another signal.
+### Requirement: Unread badge on Windows
+On Windows the client SHALL show the unread count (the same number as `dock-badge` defines) as an overlay on its task bar button; at zero the badge SHALL be removed. On Linux the client SHALL show no badge and SHALL NOT replace it with another signal. A missing badge SHALL NOT affect notifications, and missing notifications SHALL NOT affect the badge.
 
 #### Scenario: Unread messages on Windows
 - **GIVEN** unmuted chats hold 7 unread messages
@@ -41,7 +41,12 @@ On Windows the client SHALL show the unread count (the same number as `dock-badg
 - **WHEN** every unmuted chat has been read
 - **THEN** the badge is removed
 
-#### Scenario: Desktop without a badge
-- **GIVEN** a Linux desktop that does not implement the launcher entry interface
-- **WHEN** messages are unread
+#### Scenario: Linux has no badge
+- **GIVEN** the client runs on Linux and messages are unread
+- **WHEN** the chat list is shown
 - **THEN** the client shows no badge
+
+#### Scenario: Notification without a badge
+- **GIVEN** the platform has notifications and no badge, and the window is in the background
+- **WHEN** an incoming message arrives in an unmuted chat
+- **THEN** a notification is posted

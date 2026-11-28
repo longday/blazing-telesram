@@ -14,7 +14,7 @@ GPUI 0.2.2 has Linux (Wayland, X11) and Windows (Direct3D 11) backends and `wry`
 - **Voice playback.** On Linux and Windows `AudioOutput` is implemented with the pure-Rust Opus decoder already measured in the media-playback research (`ogg` + `ropus`) and `rodio`/`cpal` for output. macOS keeps Core Audio.
 - **Shortcuts, window and fonts.** Standard shortcuts use Ctrl where macOS uses Cmd (including Quit and the log toggle); the window is fitted to the display without AppKit; the log view uses a monospace font that exists on the platform; on Linux sessions where the compositor does not draw window decorations, the app draws a title bar with move, resize, minimise, maximise and close.
 - **Platform words.** «Показать в Finder» becomes «Показать в Проводнике» on Windows and «Показать в папке» on Linux.
-- **Alerts.** Notifications of incoming messages (the `add-notifications-and-badge` behaviour) on Windows and Linux, and an unread badge where the OS has one (Windows task bar overlay, Linux launcher entry): units that start only after NB-N is on `main`.
+- **Alerts.** Notifications of incoming messages (the `add-notifications-and-badge` behaviour) on Windows and Linux, and an unread badge on Windows (task bar overlay) only: units that start only after NB-N is on `main`. The `Platform` contract of that change gets an optional badge so that Linux has notifications without a badge (task 6.0). There is no Linux badge: it needs an installed desktop entry and a matching `app_id`, which is packaging, and it cannot be verified here.
 - **Build prerequisites and verification.** A `docs/platforms.md` that lists, per OS, what must be installed before `run-*.sh`/`.ps1` can build and start the app, the Linux VM of the verification plan, and the checks.
 - **No behaviour change on macOS.** Every existing test passes unchanged except where a test names a shortcut or the reveal label and is rewritten to be platform-neutral.
 
@@ -23,7 +23,7 @@ GPUI 0.2.2 has Linux (Wayland, X11) and Windows (Direct3D 11) backends and `wry`
 ### New Capabilities
 
 - `cross-platform-runtime`: the client starts and works on macOS, Linux and Windows with the same behaviour; what must be the same everywhere (private local storage, the Downloads folder, safe file names, local time, shortcuts, window placement and window management, voice playback, a clear message when a prerequisite is missing) and the stated per-platform differences.
-- `platform-alerts`: incoming-message notifications and the unread badge on Windows and Linux.
+- `platform-alerts`: incoming-message notifications on Windows and Linux and the unread badge on Windows.
 
 ### Modified Capabilities
 
@@ -35,7 +35,7 @@ GPUI 0.2.2 has Linux (Wayland, X11) and Windows (Direct3D 11) backends and `wry`
 ## Impact
 
 - New crate `crates/platform` (workspace member, depends on `libc` on Unix and `windows` on Windows). New dependencies, target-gated: `dirs` (Linux, Windows), `ogg`, `ropus`, `rodio`, `cpal` (Linux, Windows), `tao` (Linux, Windows; version fixed by the spike), notification crates (units XP-N, chosen by the spike), `windows` (Windows only; the version GPUI already resolves). `block2`, `objc2*` become macOS-only. `Cargo.lock` changes; `THIRD_PARTY.md` gets one line per new licence family.
-- Code: `yandex-proto` (`session.rs`, `bin/bt-probe.rs`, `runtime.rs`), `chat-core` (`cache.rs`, `client.rs`, `paths.rs`), `desktop` (`main.rs`, `login.rs`, `format.rs`, `logging.rs`, `viewer.rs`, `timeline.rs`, `desktop.rs`, `input.rs`, `tests.rs`, new `signin_*.rs`, `audio_*.rs`, `window_chrome.rs`, and the alert backends), `docs/`. The exact ownership and the overlap with open work are in `tasks.md`.
+- Code: `yandex-proto` (`session.rs`, `bin/bt-probe.rs`, `runtime.rs`), `chat-core` (`cache.rs`, `client.rs`, `paths.rs`), `desktop` (`main.rs`, `login.rs`, `format.rs`, `logging.rs`, `viewer.rs`, `timeline.rs`, `desktop.rs`, `input.rs`, `tests.rs`, `alerts.rs`, `dock.rs`, new `signin_*.rs`, `audio_*.rs`, `window_chrome.rs`, and the alert backends), `docs/`, and one preflight hunk in `run-linux.sh` once the run scripts are on `main`. The exact ownership and the overlap with open work are in `tasks.md`.
 - Specs: two new, four modified (this change's deltas).
 - Dependencies of the plan: NB-B is on `main`; `add-text-selection-and-quotes` is a proposal on `main` (no code; it already uses `secondary-`); NB-N (open) and the proposal `add-user-profile-card` (open, in another worktree) share files with several units; rule 1 of `DEPENDENCIES.md` sequences them.
 - Verification: macOS in `bt-vm` as today; Linux in a new Linux VM; Windows by a cross-target `cargo check` from the macOS VM plus a hand check on a real Windows machine (needs the user).
@@ -55,8 +55,8 @@ GPUI 0.2.2 has Linux (Wayland, X11) and Windows (Direct3D 11) backends and `wry`
 - **Q1. CI.** Real Windows (and a second Linux) verification is cheapest as a GitHub Actions matrix job (`cargo check`/`test` on `windows-latest`, `ubuntu-latest`, `macos-latest`). The project rule is "CI only on an explicit request". Do you want it? Default: **no**; Windows then gets compile checks from the macOS VM plus a hand check by you.
 - **Q2. Who runs it on real Windows?** Tasks marked `[needs-user]` need a Windows 10/11 x64 machine with WebView2 (sign-in, ACLs, audible voice, toast, task bar badge, Explorer reveal). Default: one hand check at the end, with a script of steps in `docs/platforms.md`.
 - **Q3. Linux distributions and sessions to claim.** Default: Ubuntu 24.04 (GNOME Wayland and X11) is the one that is verified; Fedora/Arch/KDE are not tested and the doc says so.
-- **Q4. Sign-in without a web view.** If the web view cannot be created (no WebKitGTK package, no WebView2 runtime) the app shows what to install and quits. Default: no paste fallback.
-- **Q5. Notifications and badges scope.** Windows toasts of an unpackaged app need an Application User Model ID registered by a Start-menu shortcut; the plan registers it at run time under `HKCU` without a shortcut if the spike shows that works, else the notification unit ships for Linux only and Windows toasts wait for packaging. The badge on GNOME has no standard API at all. Default: notifications on both where they work, a badge on Windows (overlay icon) and on Linux launchers that implement the Unity `LauncherEntry` interface, nothing on stock GNOME; cut XP-N and XP-B if you want less.
+- **Q4. Sign-in without a web view.** If the web view cannot be created the app shows what to install and quits. On Windows the WebView2 loader is linked statically, so a missing runtime is that message (helper exit 4). On Linux `libwebkit2gtk` is linked into the binary, so a missing library stops the process in the loader before the app can say anything; `run-linux.sh` therefore checks the packages with `pkg-config` before `cargo` and prints the install line (task 8.5). Default: no paste fallback.
+- **Q5. Notifications and badge scope.** Windows toasts of an unpackaged app need an Application User Model ID registered by a Start-menu shortcut; the plan registers it at run time under `HKCU` without a shortcut if the spike shows that works, else the notification unit ships for Linux only and Windows toasts wait for packaging. The badge: Windows only (overlay icon). Linux gets no badge (a launcher shows one only for an installed desktop entry with a matching `app_id`, which is packaging, and stock GNOME has no API at all). Default: notifications on both where they work, a badge on Windows; cut XP-N and XP-B if you want less.
 - **Q6. Quit shortcut on Windows.** `Ctrl+Q` is not a Windows convention; the window close button and `Alt+F4` work. Default: bind `Ctrl+Q` on Linux only.
 - **Q7. Audio output without a device.** The existing `NoOutput` message is reused; no separate Linux message about missing ALSA/PulseAudio.
 
@@ -66,8 +66,8 @@ GPUI 0.2.2 has Linux (Wayland, X11) and Windows (Direct3D 11) backends and `wry`
 
 - One change, merged as several units; none is merged with a stub or a no-op arm; backends of a platform are compiled only on that platform and their pure logic is compiled on macOS too under `cfg(test)` so the macOS gate exercises it.
 - `crates/platform` is the one place for OS-specific file-system code; `std::os::unix` and `windows` calls appear nowhere else outside the desktop backends.
-- Windows private storage by an explicit protected DACL at creation, not by trusting the parent's inheritance.
-- Sign-in by a helper process on Linux and Windows; the in-process view stays on macOS (no regression risk there).
+- Windows private storage by an explicit protected DACL at creation, not by trusting the parent's inheritance; the entry is for the object's owner (`OW`), checked in a normal and an elevated process, with the token's user SID as the fallback. It protects against other accounts, not against an administrator, SYSTEM or the same user's other processes.
+- Sign-in by a helper process on Linux and Windows; the in-process view stays on macOS (no regression risk there). The pipe keeps the cookies out of argv, environment, files and logs, not away from same-user processes (as for the session file).
 - The Opus decoder is `ogg` + `ropus` (measured in MP R3 to R5), not `libopus`/`cmake`, not `symphonia`.
 - `cargo test --workspace` stays the macOS gate in `bt-vm`; Linux has its own gate in the Linux VM; Windows has `cargo check` only plus the hand check.
-- The unread badge on macOS is not touched; on other platforms it is a separate, optional unit.
+- The unread badge on macOS is not touched; on Windows it is a separate, optional unit; on Linux there is none.

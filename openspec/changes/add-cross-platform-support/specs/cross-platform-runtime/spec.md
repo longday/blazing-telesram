@@ -20,7 +20,7 @@ The client SHALL start from source, through the run script of its platform, on m
 - **THEN** the chat window opens without the sign-in window
 
 ### Requirement: Local data readable only by the OS user
-Everything the client writes under its runtime directory (the stored session, the offline cache, media and playback copies, log files) SHALL be readable and writable only by the current OS user from the moment the file or directory is created, on every platform: owner-only permissions on macOS and Linux, and on Windows an access list that grants only the current user. The client SHALL NOT widen the access of the runtime directory it was pointed at.
+Everything the client writes under its runtime directory (session, cache, media and playback copies, logs) SHALL be readable and writable only by the current OS user from the moment it is created: owner-only permissions on macOS and Linux, and on Windows an access list that grants only the object's owner, the current user. The client SHALL NOT widen the access of the runtime directory it was pointed at.
 
 #### Scenario: Session file on macOS and Linux
 - **WHEN** the client writes the session
@@ -37,6 +37,27 @@ Everything the client writes under its runtime directory (the stored session, th
 #### Scenario: Never a wider moment
 - **WHEN** the session file, the cache database or a log file is created
 - **THEN** it is never, even for an instant, accessible to another user
+
+#### Scenario: Elevated client on Windows
+- **GIVEN** the client runs elevated on Windows
+- **WHEN** it writes the session
+- **THEN** the file's access list does not grant the Administrators group or any other user
+
+#### Scenario: What this does not protect against
+- **WHEN** another account's user, an administrator, or another process of the same user tries to read the stored session
+- **THEN** only the other account is stopped by the client's protection; the others are outside what this requirement promises
+
+### Requirement: Downloads are ordinary files
+A file the user saves with a download SHALL be an ordinary file with the access the platform gives to a file the user creates in the Downloads folder. The client SHALL NOT make it private; only its own working files (session, cache, playback copies, logs) are private.
+
+#### Scenario: Ordinary download on Linux and macOS
+- **GIVEN** the process umask is 022
+- **WHEN** an attachment is downloaded
+- **THEN** the saved file's mode is 0644, not 0600
+
+#### Scenario: Ordinary download on Windows
+- **WHEN** an attachment is downloaded
+- **THEN** the saved file has the access its folder gives to new files, with no protected access list of its own
 
 ### Requirement: Downloads folder of the platform
 The folder named «Downloads folder» in `attachment-download` SHALL be the user's Downloads folder as the platform defines it: `Downloads` in the home folder on macOS, the Downloads known folder on Windows (including when the user moved it), and the XDG download directory on Linux (including a localised one).
