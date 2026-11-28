@@ -36,6 +36,6 @@ Reading: `NotificationBehaviour: 2` is a service-message marker (it sits mostly 
 
 ## Method and cleanup
 
-- Code: `bt-probe chats` prints ` muted` after the unread count (unchanged `pinned=` printing after it); `bt-probe chats --keys` prints the entry count and the sorted key names with the number of entries that carry each and the JSON value types (names and counts only), for the top level, `ChatInfo` and `PrivateChatInfo`. `cargo test -p yandex-proto --locked` is green in the VM.
+- Code: `bt-probe chats` prints ` muted` after the unread count (unchanged `pinned=` printing after it); `bt-probe chats --keys` prints the entry count and the sorted key names with the number of entries that carry each and the JSON value types (names and counts only), for the top level, `ChatInfo` and `PrivateChatInfo`, and nothing else on stdout (no connection banner: re-run live, all 32 stdout lines match the report line shapes, none carries a banner or a 32-hex id). `cargo test -p yandex-proto --locked` is green in the VM.
 - The message counts come from `BT_LOG=yandex_proto::xiva=trace bt-probe chats` and `BT_LOG=yandex_proto::xiva=trace bt-probe history <chat>` saved to VM temp files and walked with a throw-away script that printed aggregates only; chats are identified only by their kind.
 - The trace files, the scratch script, the sample lists and `~/bt/src-NbR2` in the VM were deleted afterwards; `ls` confirms none is left.

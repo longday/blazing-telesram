@@ -61,7 +61,7 @@ react-self puts the reaction <code> (a positive integer, the web client's reacti
 whoami, members and reactors are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
 reactors is read-only (a socket list_reactions, so BT_WRITE_ONLY_CHAT does not apply): it prints one page of the users who reacted to the message with that timestamp in <chat>, in server order; --before <micros> asks for the page older than that cursor, --limit <n> (at least 1, default 30) sets the page size. It always sends Mode 0; there is no --mode
 chats prints `muted` (after the unread count, before `pinned=`) for a muted chat and nothing for the others; it prints `pinned=<micros>` after that for a chat that has a pinned message (the message's timestamp); a chat without a pin prints nothing extra
-chats --keys prints, instead of the list, `entries=<n>` and then one `name<TAB>count<TAB>type=n,...` line per sorted top-level key of the raw chat entries, and the same under `ChatInfo entries=<n>` and `PrivateChatInfo entries=<n>` for the keys of those objects (count = entries that carry the key, type = the JSON value type); key names, counts and value types only, never a value, title or id
+chats --keys prints, instead of the list, `entries=<n>` and then one `name<TAB>count<TAB>type=n,...` line per sorted top-level key of the raw chat entries, and the same under `ChatInfo entries=<n>` and `PrivateChatInfo entries=<n>` for the keys of those objects (count = entries that carry the key, type = the JSON value type); key names, counts and value types only, never a value, title or id, and no connection banner (stdout is only the report)
 edit-self rewrites the whole message: --important adds `IsImportant: true` to it (off by default, so the default frame is the plain edit's) for a message that is marked important, to check whether an edit without the flag clears it; it never marks a message by itself
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
@@ -569,7 +569,11 @@ async fn connect_silent(
 }
 
 async fn chats(mode: ChatsMode) -> Result<(), Failure> {
-    let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
+    let (client, _events, subscription_id) =
+        connect_silent(&load_session()?, ClientConfig::production()).await?;
+    if mode.announces_connection() {
+        println!("connected, subscription-id: {subscription_id}");
+    }
     let list = client.chat_list().await.map_err(fail)?;
     match mode {
         ChatsMode::List => {
@@ -590,6 +594,14 @@ async fn chats(mode: ChatsMode) -> Result<(), Failure> {
 enum ChatsMode {
     List,
     Keys,
+}
+
+impl ChatsMode {
+    /// The list keeps the `connect` banner like the other commands; the key report is names and
+    /// counts only, so nothing else (a subscription id included) reaches stdout.
+    fn announces_connection(&self) -> bool {
+        matches!(self, ChatsMode::List)
+    }
 }
 
 /// The arguments after `chats`: none (the list) or the single flag `--keys`.
@@ -1913,6 +1925,13 @@ mod tests {
         assert!(USAGE.contains("bt-probe me | chats [--keys]"));
         assert!(USAGE.contains("chats --keys prints"));
         assert!(USAGE.contains("chats prints `muted`"));
+    }
+
+    #[test]
+    fn the_key_report_mode_prints_no_connection_banner() {
+        assert!(ChatsMode::List.announces_connection());
+        assert!(!ChatsMode::Keys.announces_connection());
+        assert!(USAGE.contains("no connection banner"));
     }
 
     #[test]
