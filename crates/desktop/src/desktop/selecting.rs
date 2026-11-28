@@ -1674,10 +1674,10 @@ mod tests {
         );
     }
 
-    fn open_chat<'a>(
-        cx: &'a mut TestAppContext,
+    fn open_chat(
+        cx: &mut TestAppContext,
         messages: Vec<Message>,
-    ) -> (gpui::Entity<Desktop>, &'a mut VisualTestContext) {
+    ) -> (gpui::Entity<Desktop>, &mut VisualTestContext) {
         player_fake::reset();
         cx.update(player_fake::install);
         alerts_fake::reset();
