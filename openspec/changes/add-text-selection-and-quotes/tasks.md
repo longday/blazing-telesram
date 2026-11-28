@@ -88,9 +88,9 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Done when: these tests exist.
 
 - [x] 1.3 Selectable text in the timeline (D3)
-  - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
+  - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`, new `crates/desktop/src/text_lines.rs` (the pure model of a shaped text: caret stops, glyph under a point, highlight rectangles).
   - Depends on: 1.1, 0.1.
-  - Do: replace `text_block` (body and captions of image and gallery) by `selectable_text`: `StyledText` with `with_highlights` from `range_in`, selector `msg-{ts}-text`, `CursorStyle::IBeam`; `TextLayouts` registry and `picking: Entity<PickState>` in `RowContext`; mouse down (Left) computes the caret from the layout (`Ok`/`Err` both, grapheme-snapped, never on an unmeasured layout) and calls `Desktop::text_down(chat, ts, offset, click_count, shift)`; the quote, author, time, chips and cards stay unselectable; a theme constant `SELECTION` for the highlight. The text div's width rules and the line height stay unchanged (the highlight changes no height).
+  - Do: replace `text_block` (body and captions of image and gallery) by `selectable_text`: an unchanged `StyledText` with the selection painted as rectangles behind it by a zero-size `canvas` (not `with_highlights`, see design D3), selector `msg-{ts}-text`, `CursorStyle::IBeam`; `TextLayouts` registry (`texts` and `rows`) and `picking: Entity<PickState>` in `RowContext`; mouse down (Left) computes the caret from the layout (`Ok`/`Err` both, grapheme-snapped, never on an unmeasured layout) for a click and the glyph under the pointer for a double or triple click, and calls `Desktop::text_down(chat, ts, offset, click_count, shift)`; the quote, author, time, chips and cards stay unselectable; a theme constant `SELECTION` for the highlight. The text div's width rules and the line height stay unchanged (the highlight changes no height).
   - Tests: in 1.8 (the timeline is exercised through the window test harness).
   - Done when: the code is in place and the existing timeline tests pass.
 
@@ -104,7 +104,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 - [x] 1.5 Wiring in `Desktop` (D2-D5, D8)
   - Owns: `crates/desktop/src/desktop.rs`.
   - Depends on: 1.3, 1.4.
-  - Do: `mod selecting;`, the `PickState` entity, `RowContext` fields; a `canvas` before the list that clears the registry, a `canvas` after it that, while a drag is active, registers the window-level mouse move and up handlers and runs the autoscroll task with `ListState::scroll_by`; actions `CopySelection` and `SelectAllText` and their handlers on the root div; `validate` each render; the selection is cleared on chat switch, sign-out, account switch and when an overlay (viewer, dialog) opens. Rows that take no part keep the existing `on_children_prepainted` bounds; this task never drains `RowBounds`.
+  - Do: `mod selecting;`, the `PickState` entity, `RowContext` fields; a `canvas` before the list that clears the registry (texts and row bounds), a `canvas` after it that registers the window-level mouse move and up handlers **on every frame** (permanent; the handlers check `drag` inside) and sets the I-beam while a drag is on; the autoscroll task (16 ms timer, a fixed step per tick, see design D5) scrolls through `max_offset_for_scrollbar`/`set_offset_from_scrollbar`, not `ListState::scroll_by`, which does not move a list pinned to its end; actions `CopySelection` and `SelectAllText` and their handlers on the root div; `validate` each render; the selection is cleared on chat switch, sign-out, account switch and when an overlay (viewer, dialog) opens. Rows that take no part keep the existing `on_children_prepainted` bounds; this task never drains `RowBounds`.
   - Tests: in 1.8.
   - Done when: the code is in place and the workspace builds on the integrated tree.
 
@@ -118,7 +118,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 - [x] 1.7 Escape order, menu copy, right-click rule (D4, D6, D8)
   - Owns: `crates/desktop/src/desktop/composer.rs`.
   - Depends on: 1.5.
-  - Do: `dismiss` clears the text selection after the message menu and before the info panel and reply/edit cancel; `menu_actions` takes the selection: `Copy` reads «Скопировать выделенное» and copies `extract_text` when the selection touches the message; `open_menu` keeps the selection when it touches the clicked message and clears it otherwise; `start_edit` clears it. «Цитировать» and «Выбрать» are added by TS-Q and TS-M.
+  - Do: `dismiss` clears the text selection after the message menu and before the info panel and reply/edit cancel; `MenuAction::label(picked)` makes `Copy` read «Скопировать выделенное» when the live selection reaches the message (`selection_touches`: validity and a non-empty range in this message, no text built), and choosing it copies `extract_text` (`selection_copy`, built only then); `menu_actions(m)` keeps its signature, TS-Q gives it the selection when it adds `Quote` (design D6); `open_menu` keeps the selection when it touches the clicked message and clears it otherwise; `start_edit` clears it. «Цитировать» and «Выбрать» are added by TS-Q and TS-M.
   - Tests: Escape order (selection before info panel before reply cancel); the menu label and clipboard for a selection inside the message, across messages (the whole selection), and for a message outside it (the selection is cleared and the label is «Скопировать текст»); the existing menu tests pass unchanged.
   - Done when: these tests exist.
 
