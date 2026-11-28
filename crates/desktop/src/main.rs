@@ -1,3 +1,4 @@
+mod alerts;
 mod audio;
 mod desktop;
 mod format;
