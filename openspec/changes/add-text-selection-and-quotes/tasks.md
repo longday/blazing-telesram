@@ -73,7 +73,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 1. Text selection (unit TS-A)
 
-- [ ] 1.1 Selection model (D1, D7)
+- [x] 1.1 Selection model (D1, D7)
   - Owns: new `crates/desktop/src/selection.rs`; `crates/desktop/src/main.rs` (the `mod selection;` line only).
   - Depends on: nothing.
   - Do: `selectable_text`, `Pos`, `Unit`, `TextSelection` (with the endpoint text snapshot `source`, D1) with `range_in`, `single`, `is_empty`, `validate`, `word_at`, `paragraph_at`, `select_all`, and `extract_text(messages, &TextSelection, header) -> String` (the D7 format). Offsets are bytes on grapheme boundaries (`unicode-segmentation`, already a dependency); `Pos` order is `(message index, offset)`. `validate` compares the endpoint's current text with the snapshot, not only the offsets. No gpui types.

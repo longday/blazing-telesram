@@ -12,6 +12,7 @@ mod player;
 mod profile;
 mod reactors;
 mod search_results;
+mod selection;
 mod store;
 #[cfg(test)]
 mod tests;
