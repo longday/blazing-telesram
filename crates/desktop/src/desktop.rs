@@ -2,6 +2,7 @@
 
 mod composer;
 
+use crate::alerts::Alerts;
 use crate::format::{Clock, chat_time, log_time, one_line};
 use crate::info_panel;
 use crate::input::{InputEvent, TextInput};
@@ -95,6 +96,8 @@ fn search_query(content: &str) -> Option<&str> {
 pub struct Desktop {
     pub(crate) store: Entity<ChatStore>,
     pub(crate) player: Entity<Player>,
+    /// The Dock badge follows the store while the window lives and is cleared when it is dropped.
+    _alerts: Entity<Alerts>,
     clock: Clock,
     pub(crate) search: Entity<TextInput>,
     search_input: SearchInput,
@@ -131,6 +134,7 @@ impl Desktop {
         let search = cx.new(|cx| TextInput::single_line("Поиск", cx));
         let compose = Compose::new(cx);
         let player = cx.new(|cx| Player::new(store.clone(), cx));
+        let alerts = cx.new(|cx| Alerts::new(store.clone(), cx));
         let subscriptions = vec![
             cx.observe(&search, |this, _, cx| {
                 this.search_changed(cx);
@@ -212,6 +216,7 @@ impl Desktop {
             covered: false,
             focus,
             player,
+            _alerts: alerts,
             _subscriptions: subscriptions,
         }
     }
