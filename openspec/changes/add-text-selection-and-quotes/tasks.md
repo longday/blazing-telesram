@@ -213,7 +213,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: in 3.7.
   - Done when: the code is in place and existing timeline tests pass.
 
-- [ ] 3.5 Wiring and the delete state (D11)
+- [x] 3.5 Wiring and the delete state (D11)
   - Owns: `crates/desktop/src/desktop.rs`.
   - Depends on: 3.3, 3.4.
   - Do: `RowContext` gets the mode view; `SelectAllText` in the mode selects all eligible; the mode is left on chat switch; `delete_pending` becomes `Vec<(ChatId, MessageTs)>` (one entry for the single delete); the delete dialog text uses `messages_count`; the existing single-delete path stays the one-element case.
