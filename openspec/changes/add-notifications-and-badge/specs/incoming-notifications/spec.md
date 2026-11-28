@@ -73,7 +73,7 @@ A change of a chat's unread counter, or any refresh of the chat list, SHALL NOT 
 - **THEN** no notification is shown
 
 ### Requirement: Backlog and recovery
-No notification SHALL be shown for a message the client learns of through the start-up cache, a chat-list load, or the catch-up of a chat's history after a reconnect. After a reconnect, no notification SHALL be shown until the chat-list reload that follows it has settled (answered or failed), because messages from the offline period may be announced before it; a message that arrives live after that point notifies as usual.
+No notification SHALL be shown for a message the client learns of through the start-up cache, a chat-list load, or the catch-up of a chat's history after a reconnect. After a reconnect, no notification SHALL be shown until the chat-list reload that follows it has settled (answered or failed); when reconnects overlap, only the answer of the latest reload ends the wait, and a late answer of an earlier one does not. A message that arrives live after that point notifies as usual.
 
 #### Scenario: Backlog after a reconnect
 - **GIVEN** messages arrived in several chats while the client was offline
