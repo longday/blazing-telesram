@@ -181,51 +181,53 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Done when: these tests exist and pass.
 
 
-## 3. Message selection (unit TS-M; starts after TS-Q is on `main`)
+## 3. Message selection (unit TS-M; starts after TS-A is on `main`)
 
-- [ ] 3.1 `Pick` and the message set (D1, D11)
+Order swap, the main session's decision: TS-M runs before TS-Q because the quote research (0.7) stalls on `bt-probe.rs`; "Merge units" allows it (no task of TS-M reads a TS-Q result), and TS-Q then rebases onto TS-M.
+
+- [x] 3.1 `Pick` and the message set (D1, D11)
   - Owns: `crates/desktop/src/selection.rs`.
   - Depends on: TS-A merged.
   - Do: `MessageSet` (toggle, range from the last toggled, select all eligible, `eligible(&Message)`: sent and not deleted, `all_deletable(&[&Message])`: own and sent), `Pick` (None, Text, Messages), `extract_messages` (D7 for sets).
   - Tests: toggle on and off, range over a gap of ineligible messages, range in either direction, select all skipping pending and deleted, `all_deletable` with one foreign message, `extract_messages` for one message (bare), two (headers), a voice (skipped) and a file (its name).
   - Done when: these tests exist.
 
-- [ ] 3.2 Count label (D11)
+- [x] 3.2 Count label (D11)
   - Owns: `crates/desktop/src/format.rs`.
   - Depends on: nothing.
   - Do: `messages_count(n)` for «Удалить N сообщений?» with the Russian plural (1 сообщение, 2-4 сообщения, 5-20 сообщений, 21 сообщение, 111-114 сообщений).
   - Tests: those numbers.
   - Done when: these tests exist.
 
-- [ ] 3.3 Mode state and the bar (D11)
+- [x] 3.3 Mode state and the bar (D11)
   - Owns: `crates/desktop/src/desktop/selecting.rs`.
   - Depends on: 3.1, 3.2.
   - Do: `PickState` holds `Pick`; transitions `enter(ts)`, `toggle(ts, shift)`, `select_all`, `leave`, last-one-off leaves; entering clears the text selection and the drag; `Desktop` methods `enter_mode`, `toggle_message`, `copy_marked` (leaves the mode on), `request_delete_marked`; `selection_bar()` with selectors `selection-bar`, `selection-count`, `selection-copy`, `selection-delete`, `selection-cancel`, the disabled states of D11, no forward button.
   - Tests: transitions; entering clears a text selection; `copy_marked` text; `request_delete_marked` refuses when a foreign message is marked; the bar's enabled flags for the mixed and the all-own sets.
   - Done when: these tests exist.
 
-- [ ] 3.4 Rows in the mode (D11)
+- [x] 3.4 Rows in the mode (D11)
   - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
   - Depends on: 3.1.
   - Do: while the mode is on: a 28 px gutter with ○ / ✓ (text glyphs), a row tint, a transparent full-row layer that turns every left click into `toggle_message(ts, shift)` and starts no text drag; a primary-modifier click (`event.modifiers.secondary()`: Cmd on macOS, Ctrl on Linux and Windows) on an eligible bubble outside the mode calls `enter_mode`; selectors `msg-{ts}-check`, `msg-{ts}-marked`; new theme colours for the check and the tint; no change to a row's height or to rows outside the mode.
   - Tests: in 3.7.
   - Done when: the code is in place and existing timeline tests pass.
 
-- [ ] 3.5 Wiring and the delete state (D11)
+- [x] 3.5 Wiring and the delete state (D11)
   - Owns: `crates/desktop/src/desktop.rs`.
   - Depends on: 3.3, 3.4.
   - Do: `RowContext` gets the mode view; `SelectAllText` in the mode selects all eligible; the mode is left on chat switch; `delete_pending` becomes `Vec<(ChatId, MessageTs)>` (one entry for the single delete); the delete dialog text uses `messages_count`; the existing single-delete path stays the one-element case.
   - Tests: in 3.7.
   - Done when: the workspace builds on the integrated tree.
 
-- [ ] 3.6 Menu entry, composer swap, batch delete (D6, D11)
+- [x] 3.6 Menu entry, composer swap, batch delete (D6, D11)
   - Owns: `crates/desktop/src/desktop/composer.rs`.
   - Depends on: 3.3, 3.5.
   - Do: `MenuAction::Select` («Выбрать», selector `menu-select`, after `Copy`, offered for a sent, non-deleted message); `composer_view` returns the bar while the mode is on (the input and its draft untouched); `dismiss` leaves the mode after the message menu and before the text selection and info panel; a right click does nothing in the mode; `confirm_delete` sends one `Command::Delete` per entry through `Store::delete_message` in timeline order, closes the mode, reports failures through the existing deletion error path; the dialog is not opened for a set that is not all deletable.
   - Tests: «Выбрать» offered for sent, not for pending, failed and deleted; choosing it enters the mode with that message; the composer's draft is intact after the mode; Escape leaves the mode before closing the info panel; confirming deletion of three sends three deletes in order; one refused delete leaves that message and deletes the others; cancel keeps the marks.
   - Done when: these tests exist.
 
-- [ ] 3.7 Tests for the unit
+- [x] 3.7 Tests for the unit
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 3.3-3.6.
   - Do: a section `// ---- message selection (TS 3.7) ----`.

@@ -132,7 +132,9 @@ pub struct Desktop {
     autoscroll: Option<Task<()>>,
     message_menu: Option<MessageMenu>,
     reactors_popover: Option<ReactorsPopover>,
-    delete_pending: Option<(ChatId, MessageTs)>,
+    /// The messages the open delete dialog asks about, in timeline order; empty when it is closed. One
+    /// entry for the menu's «Удалить», the marked messages for the bar's.
+    delete_pending: Vec<(ChatId, MessageTs)>,
     toast: Option<Toast>,
     viewer: Option<Viewer>,
     log: Option<LogView>,
@@ -238,7 +240,7 @@ impl Desktop {
             autoscroll: None,
             message_menu: None,
             reactors_popover: None,
-            delete_pending: None,
+            delete_pending: Vec::new(),
             toast: None,
             viewer: None,
             log: None,
@@ -253,9 +255,13 @@ impl Desktop {
     /// True while the log view or a modal dialog covers the chat: the composer ignores input and no
     /// message counts as read until it is gone.
     pub(crate) fn blocked(&self, cx: &App) -> bool {
+        self.blocked_apart_from_delete(cx) || !self.delete_pending.is_empty()
+    }
+
+    /// `blocked` without the delete dialog, which message mode survives.
+    fn blocked_apart_from_delete(&self, cx: &App) -> bool {
         self.log.is_some()
             || self.viewer.is_some()
-            || self.delete_pending.is_some()
             || self.menu == AccountMenu::ConfirmSignOut
             || self.profile
             || self.new_chat.is_some()
@@ -269,7 +275,7 @@ impl Desktop {
             return;
         }
         self.covered = covered;
-        if !covered && self.open.is_some() {
+        if !covered && self.open.is_some() && !self.in_mode(cx) {
             window.focus(&self.compose.input.focus_handle(cx));
         } else if let Some(dialog) = self.new_chat.as_ref() {
             window.focus(&dialog.search.focus_handle(cx));
@@ -1578,11 +1584,14 @@ impl Desktop {
                 .debug_selector(|| "timeline".into())
                 .relative()
                 .size_full()
-                // A click on the timeline that no text took clears the selection and leaves focus alone.
+                // A click on the timeline that no text took clears the text selection and leaves focus
+                // alone; message mode keeps its marks, only Escape and the bar leave it.
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.clear_selection(cx);
+                        if !this.in_mode(cx) {
+                            this.clear_selection(cx);
+                        }
                     }),
                 )
                 // Before the list: the layouts of the previous frame go, the rows of this one add theirs.
@@ -1867,7 +1876,10 @@ impl Render for Desktop {
         let session = self.store.read(cx).session();
         // A selection must not outlive what it was made on: an overlay covering the chat, a sign-out,
         // or an edit of its text (D8). The rows below read the state after this.
-        if self.blocked(cx) {
+        // The delete dialog of message mode covers the chat but keeps the marks it asks about.
+        if self.blocked_apart_from_delete(cx)
+            || (!self.delete_pending.is_empty() && !self.in_mode(cx))
+        {
             self.drop_selection(cx);
         } else {
             self.validate_selection(cx);
@@ -2083,8 +2095,8 @@ fn log_line(line: &LogLine, clock: Clock) -> String {
 /// Full-window modal that blocks everything beneath it.
 fn overlay(
     selector: &'static str,
-    title: &'static str,
-    text: &'static str,
+    title: impl Into<SharedString>,
+    text: impl Into<SharedString>,
     actions: Vec<Stateful<Div>>,
 ) -> Div {
     div()
@@ -2109,9 +2121,9 @@ fn overlay(
                     div()
                         .text_size(px(17.))
                         .font_weight(FontWeight::MEDIUM)
-                        .child(title),
+                        .child(title.into()),
                 )
-                .child(div().text_color(rgb(MUTED)).child(text))
+                .child(div().text_color(rgb(MUTED)).child(text.into()))
                 .child(div().flex().justify_end().gap(px(8.)).children(actions)),
         )
 }

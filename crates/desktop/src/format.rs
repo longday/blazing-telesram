@@ -276,6 +276,18 @@ pub fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A count of messages with the Russian plural of the noun: 1 сообщение, 2-4 сообщения, 5-20 сообщений,
+/// 21 сообщение, 22-24 сообщения, 111-114 сообщений.
+pub fn messages_count(n: usize) -> String {
+    let noun = match (n % 10, n % 100) {
+        (_, 11..=14) => "сообщений",
+        (1, _) => "сообщение",
+        (2..=4, _) => "сообщения",
+        _ => "сообщений",
+    };
+    format!("{n} {noun}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +459,20 @@ mod tests {
     #[test]
     fn system_offset_is_sane() {
         assert!(system_utc_offset(1_700_000_000).abs() <= 14 * 3600);
+    }
+
+    #[test]
+    fn messages_count_has_the_russian_plural() {
+        let label = messages_count;
+        assert_eq!(label(1), "1 сообщение");
+        for n in [2, 3, 4, 22, 24, 102] {
+            assert_eq!(label(n), format!("{n} сообщения"));
+        }
+        for n in [0, 5, 10, 11, 14, 20, 25, 100, 111, 112, 113, 114, 1000] {
+            assert_eq!(label(n), format!("{n} сообщений"));
+        }
+        for n in [21, 31, 101, 121] {
+            assert_eq!(label(n), format!("{n} сообщение"));
+        }
     }
 }

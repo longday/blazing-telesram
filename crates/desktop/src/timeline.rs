@@ -6,7 +6,7 @@ use crate::format::{
     fit_thumbnail, human_size,
 };
 use crate::player::{PlayFailure, Player, VoiceKey, VoicePhase, VoiceView, failure_label};
-use crate::selection::Pos;
+use crate::selection::{Pos, eligible};
 use crate::store::{ChatStore, DownloadState};
 use crate::text_lines::{caret_for, glyph_for, highlight_rects, paragraphs_of};
 use crate::theme::*;
@@ -27,6 +27,8 @@ use std::time::Duration;
 
 const GROUP_GAP_US: i64 = 5 * 60 * 1_000_000;
 const BUBBLE_MAX: f32 = 480.;
+/// The gutter that holds the check of a row in message mode.
+const CHECK_GUTTER: f32 = 28.;
 const BUBBLE_PAD_X: f32 = 12.;
 const THUMB_MAX: f32 = 320.;
 const AVATAR: f32 = 36.;
@@ -121,6 +123,8 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
     let group_end = next.is_none_or(|n| !grouped(m, n, clock));
     let in_group_chat = !m.outgoing && kind == Some(ChatKind::Group);
     let ts = m.timestamp;
+    let mode = ctx.picking.read(cx).marked();
+    let (in_mode, marked) = (mode.is_some(), mode.is_some_and(|set| set.contains(ts)));
 
     let avatar_slot = in_group_chat.then(|| {
         let name = m.author_name.as_deref().unwrap_or("?");
@@ -184,15 +188,67 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
                 .items_end()
                 .gap(px(8.))
                 .when(m.outgoing, |d| d.justify_end())
+                .when(in_mode, |d| {
+                    // The check's gutter is paid for by the right padding, so the width left for the
+                    // bubble (and with it the wrapping and the row's height) stays what it is outside
+                    // the mode: 16 + 16 before, CHECK_GUTTER + (32 - CHECK_GUTTER) now.
+                    d.relative().pl(px(CHECK_GUTTER)).pr(px(32. - CHECK_GUTTER))
+                })
+                .when(marked, |d| {
+                    d.debug_selector(move || format!("msg-{ts}-marked"))
+                        .bg(rgba(MARKED_ROW))
+                })
+                .when(in_mode, |d| d.child(check_gutter(ts, marked)))
                 .children(avatar_slot)
-                .child(bubble(ctx, store, cx, m, in_group_chat && group_start)),
+                .child(bubble(ctx, store, cx, m, in_group_chat && group_start))
+                .when(in_mode, |d| d.child(mark_layer(ctx, ts))),
         )
         .into_any_element()
+}
+
+/// The ○ or ✓ at the left edge of a row in message mode (D11), `msg-{ts}-check`.
+fn check_gutter(ts: MessageTs, marked: bool) -> Div {
+    div()
+        .debug_selector(move || format!("msg-{ts}-check"))
+        .absolute()
+        .left_0()
+        .top_0()
+        .bottom_0()
+        .w(px(CHECK_GUTTER))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(px(18.))
+        .text_color(rgb(if marked { ACCENT } else { CHECK_OFF }))
+        .child(if marked { "✓" } else { "○" })
+}
+
+/// The transparent layer over a whole row in message mode: it blocks everything beneath it (chips,
+/// pictures, play buttons, links, the text) and turns a left click into a mark; Shift marks the range.
+/// A click on a row that cannot be marked does nothing.
+fn mark_layer(ctx: &RowContext, ts: MessageTs) -> Div {
+    let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+    div()
+        .debug_selector(move || format!("msg-{ts}-layer"))
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, move |event, _, cx| {
+            cx.stop_propagation();
+            desktop
+                .update(cx, |desktop, cx| {
+                    desktop.toggle_message(chat.clone(), ts, event.modifiers.shift, cx)
+                })
+                .ok();
+        })
 }
 
 fn bubble(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message, show_name: bool) -> Div {
     let ts = m.timestamp;
     let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+    let markable = eligible(m);
     div()
         .on_mouse_down(MouseButton::Right, move |event, _, cx| {
             desktop
@@ -200,6 +256,21 @@ fn bubble(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message, show_name:
                     desktop.open_menu(chat.clone(), ts, event.position, cx)
                 })
                 .ok();
+        })
+        // A primary-modifier click on a message that can be marked enters message mode (D11); inside
+        // the mode the row's own layer takes every click first.
+        .when(markable, |d| {
+            let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+            d.on_mouse_down(MouseButton::Left, move |event, window, cx| {
+                if event.modifiers.secondary() {
+                    cx.stop_propagation();
+                    desktop
+                        .update(cx, |desktop, cx| {
+                            desktop.enter_mode(chat.clone(), ts, window, cx)
+                        })
+                        .ok();
+                }
+            })
         })
         .debug_selector(move || format!("msg-{ts}"))
         .max_w(px(BUBBLE_MAX))
@@ -516,8 +587,7 @@ fn selectable_text(
     let range = store.timeline(&ctx.chat).and_then(|timeline| {
         ctx.picking
             .read(cx)
-            .text
-            .as_ref()?
+            .text()?
             .range_in(&timeline.messages, ts)
     });
     let text = SharedString::from(text.to_owned());
@@ -535,6 +605,10 @@ fn selectable_text(
         .on_mouse_down(MouseButton::Left, {
             let (registry, text) = (registry.clone(), text.clone());
             move |event, window, cx| {
+                // A primary-modifier click is the bubble's: it enters message mode and starts no drag.
+                if event.modifiers.secondary() {
+                    return;
+                }
                 // The click is the text's: the timeline's own handler for a click elsewhere must not clear it.
                 cx.stop_propagation();
                 let painted = registry

@@ -1,8 +1,9 @@
 //! Writing in the open chat: composer, reply and edit modes, drafts, the message menu, read markers and error toasts.
 
 use super::{AccountMenu, Desktop, OpenTimeline, SIDEBAR_WIDTH, overlay};
-use crate::format::one_line;
+use crate::format::{messages_count, one_line};
 use crate::input::{InputEvent, TextInput};
+use crate::selection::{copy_text, eligible};
 use crate::theme::*;
 use crate::widgets::{Icon, button, icon};
 use bt_chat_core::model::{ChatId, Delivery, Draft, Message, MessageBody, MessageTs, ReplyTarget};
@@ -73,6 +74,7 @@ enum MenuAction {
     Reactors,
     Reply,
     Copy,
+    Select,
     Edit,
     Delete,
 }
@@ -83,6 +85,7 @@ impl MenuAction {
             Self::Reactors => "menu-reactors",
             Self::Reply => "menu-reply",
             Self::Copy => "menu-copy",
+            Self::Select => "menu-select",
             Self::Edit => "menu-edit",
             Self::Delete => "menu-delete",
         }
@@ -94,6 +97,7 @@ impl MenuAction {
             Self::Reactors => None,
             Self::Reply => Some(Icon::Reply),
             Self::Copy => Some(Icon::Copy),
+            Self::Select => None,
             Self::Edit => Some(Icon::Edit),
             Self::Delete => Some(Icon::Trash),
         }
@@ -106,6 +110,7 @@ impl MenuAction {
             Self::Reply => "Ответить",
             Self::Copy if picked => "Скопировать выделенное",
             Self::Copy => "Скопировать текст",
+            Self::Select => "Выбрать",
             Self::Edit => "Редактировать",
             Self::Delete => "Удалить",
         }
@@ -131,6 +136,9 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
     if copy_text(m).is_some() {
         actions.push(MenuAction::Copy);
     }
+    if eligible(m) {
+        actions.push(MenuAction::Select);
+    }
     if editable(m) {
         actions.push(MenuAction::Edit);
     }
@@ -138,17 +146,6 @@ fn menu_actions(m: &Message) -> Vec<MenuAction> {
         actions.push(MenuAction::Delete);
     }
     actions
-}
-
-fn copy_text(m: &Message) -> Option<&str> {
-    match &m.body {
-        MessageBody::Text(text) => Some(text),
-        MessageBody::Image { caption, .. } | MessageBody::Gallery { caption, .. } => {
-            caption.as_deref()
-        }
-        MessageBody::File { name, .. } | MessageBody::Video { name, .. } => Some(name),
-        MessageBody::Voice { .. } | MessageBody::Deleted | MessageBody::Unsupported(_) => None,
-    }
 }
 
 /// «Кто отреагировал» is offered for a sent, non-deleted message with at least one reaction
@@ -219,7 +216,7 @@ impl Desktop {
         self.leave_chat(cx);
         self.message_menu = None;
         self.close_reactors(cx);
-        self.delete_pending = None;
+        self.delete_pending.clear();
         self.open = selected.zip(list).map(|(chat, list)| OpenTimeline {
             chat,
             list,
@@ -452,8 +449,7 @@ impl Desktop {
         let messages = &timeline.messages;
         self.picking
             .read(cx)
-            .text
-            .as_ref()
+            .text()
             .is_some_and(|s| s.validate(messages) && s.range_in(messages, ts).is_some())
     }
 
@@ -542,7 +538,7 @@ impl Desktop {
 
     #[cfg(test)]
     pub(crate) fn delete_is_pending(&self) -> bool {
-        self.delete_pending.is_some()
+        !self.delete_pending.is_empty()
     }
 
     fn edit_newest(&mut self, cx: &mut Context<Self>) {
@@ -583,7 +579,8 @@ impl Desktop {
         // What covers the chat closes before anything beneath it is touched.
         if self.log.is_some() {
             self.toggle_log(cx);
-        } else if self.delete_pending.take().is_some() {
+        } else if !self.delete_pending.is_empty() {
+            self.delete_pending.clear();
             cx.notify();
         } else if self.menu == AccountMenu::ConfirmSignOut {
             self.menu = AccountMenu::Closed;
@@ -601,7 +598,7 @@ impl Desktop {
         } else if self.message_menu.take().is_some() {
             cx.notify();
         } else if self.clear_selection(cx) {
-            // The text selection closes before the info panel and the reply or edit mode.
+            // The text selection, or message mode, closes before the info panel and the reply or edit mode.
         } else if self.info.is_some() {
             self.close_info(cx);
         } else {
@@ -616,7 +613,10 @@ impl Desktop {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
+        if self.open.as_ref().map(|o| &o.chat) != Some(&chat)
+            || self.blocked(cx)
+            || self.in_mode(cx)
+        {
             return;
         }
         let Some(message) = self.find_message(timestamp, cx) else {
@@ -682,20 +682,29 @@ impl Desktop {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
+            MenuAction::Select => self.enter_mode(menu.chat, menu.timestamp, window, cx),
             MenuAction::Edit => {
                 self.start_edit(menu.timestamp, cx);
                 window.focus(&self.compose.input.focus_handle(cx));
             }
-            MenuAction::Delete => self.delete_pending = Some((menu.chat, menu.timestamp)),
+            MenuAction::Delete => self.delete_pending = vec![(menu.chat, menu.timestamp)],
         }
         cx.notify();
     }
 
+    /// Sends one delete per entry of the dialog, in timeline order, and closes message mode. A refused
+    /// one is reported through the store's usual action failure and leaves its message in place.
     fn confirm_delete(&mut self, cx: &mut Context<Self>) {
-        if let Some((chat, timestamp)) = self.delete_pending.take() {
-            self.store.read(cx).delete_message(chat, timestamp);
-            cx.notify();
+        let pending = std::mem::take(&mut self.delete_pending);
+        if pending.is_empty() {
+            return;
         }
+        let store = self.store.read(cx);
+        for (chat, timestamp) in pending {
+            store.delete_message(chat, timestamp);
+        }
+        self.clear_selection(cx);
+        cx.notify();
     }
 
     pub(super) fn show_toast(&mut self, text: String, cx: &mut Context<Self>) {
@@ -779,6 +788,10 @@ impl Desktop {
     }
 
     pub(super) fn composer_view(&mut self, cx: &mut Context<Self>) -> Div {
+        // Message mode replaces the composer; its input and draft stay as they are.
+        if let Some(bar) = self.selection_bar(cx) {
+            return bar;
+        }
         let blank = self.compose.input.read(cx).content.trim().is_empty();
         let bar = match (&self.compose.editing, &self.compose.reply) {
             (Some(edit), _) => Some(self.quote_bar(
@@ -1047,16 +1060,30 @@ impl Desktop {
     }
 
     pub(super) fn delete_dialog(&self, cx: &mut Context<Self>) -> Option<Div> {
-        self.delete_pending.as_ref()?;
+        let count = self.delete_pending.len();
+        if count == 0 {
+            return None;
+        }
+        let (title, text) = if count == 1 {
+            (
+                "Удалить сообщение?".to_string(),
+                "Сообщение будет удалено для всех участников чата.",
+            )
+        } else {
+            (
+                format!("Удалить {}?", messages_count(count)),
+                "Сообщения будут удалены для всех участников чата.",
+            )
+        };
         Some(overlay(
             "delete-dialog",
-            "Удалить сообщение?",
-            "Сообщение будет удалено для всех участников чата.",
+            title,
+            text,
             vec![
                 button("cancel-delete", "Отмена")
                     .debug_selector(|| "cancel-delete".into())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.delete_pending = None;
+                        this.delete_pending.clear();
                         cx.notify();
                     })),
                 button("confirm-delete", "Удалить")
@@ -1097,7 +1124,7 @@ mod tests {
     // Not `super::*`: it would bring gpui's `test` attribute macro over `#[test]`.
     use super::{MenuAction, copy_text, editable, menu_actions, quote_text};
     use bt_chat_core::model::{
-        ChatId, Delivery, MediaKind, MediaRef, Message, MessageBody, UserId,
+        ChatId, Delivery, MediaKind, MediaRef, Message, MessageBody, PayloadId, UserId,
     };
 
     fn voice() -> Message {
@@ -1163,6 +1190,37 @@ mod tests {
     }
 
     #[test]
+    fn select_follows_copy_for_a_sent_message_and_is_not_offered_otherwise() {
+        let mut m = voice();
+        m.body = MessageBody::Text("hi".into());
+        let actions = menu_actions(&m);
+        let copy = actions.iter().position(|a| *a == MenuAction::Copy).unwrap();
+        assert_eq!(actions[copy + 1], MenuAction::Select, "after Copy");
+        assert!(!MenuAction::Select.is_own_only());
+        assert_eq!(MenuAction::Select.selector(), "menu-select");
+        assert_eq!(MenuAction::Select.label(false), "Выбрать");
+        assert!(MenuAction::Select.icon().is_none());
+
+        let mut own = m.clone();
+        own.outgoing = true;
+        assert!(menu_actions(&own).contains(&MenuAction::Select));
+        assert!(menu_actions(&voice()).contains(&MenuAction::Select));
+
+        let mut pending = own.clone();
+        pending.delivery = Delivery::Pending(PayloadId("p".into()));
+        assert!(!menu_actions(&pending).contains(&MenuAction::Select));
+        let mut failed = own.clone();
+        failed.delivery = Delivery::Failed {
+            payload: PayloadId("p".into()),
+            reason: "no".into(),
+        };
+        assert!(!menu_actions(&failed).contains(&MenuAction::Select));
+        let mut deleted = own;
+        deleted.body = MessageBody::Deleted;
+        assert!(!menu_actions(&deleted).contains(&MenuAction::Select));
+    }
+
+    #[test]
     fn copy_reads_selected_only_for_a_message_the_selection_touches() {
         assert_eq!(MenuAction::Copy.label(true), "Скопировать выделенное");
         assert_eq!(MenuAction::Copy.label(false), "Скопировать текст");
@@ -1170,6 +1228,7 @@ mod tests {
         for action in [
             MenuAction::Reactors,
             MenuAction::Reply,
+            MenuAction::Select,
             MenuAction::Edit,
             MenuAction::Delete,
         ] {
