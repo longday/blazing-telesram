@@ -36,7 +36,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: none (research).
   - Done when: `research-bundle.md` answers unknowns (1) and (6), or states they cannot be read from the bundle (then 0.3-0.6 decide).
 
-- [ ] 0.3 [live] Read-only history scan for fragment quotes (unknown (5), (3))
+- [x] 0.3 [live] Read-only history scan for fragment quotes (unknown (5), (3))
   - Owns: new `research-wire.md`.
   - Depends on: a free live slot (rule 5). Reads only, no user.
   - Do: in the VM, per `docs/vm.md`, with `BT_LOG=yandex_proto::xiva=trace`: `bt-probe chats`, then `bt-probe history <chat>` over every chat to its start (as MP 0.1 did). A throwaway script in the VM (not committed) counts, over all replies, how many have a `Quote` equal to the beginning of the original (≤200 chars), a different substring (fragment), a non-substring, a quote above 200 characters, a quote with `\n`; and prints the **shapes only** of up to five fragment replies (every key of `ForwardedMessageStyles[0]`, of `Plain`, lengths; no names, no message text). Names, guids and text stay in the VM.
