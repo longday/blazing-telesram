@@ -2,7 +2,8 @@
 
 use crate::alerts::fake as alerts_fake;
 use crate::desktop::{
-    AccountMenu, Desktop, Dismiss, Preview, Search, ToggleLog, ViewerNext, ViewerPrev, chat_preview,
+    AccountMenu, CopySelection, Desktop, Dismiss, Preview, Search, SelectAllText, ToggleLog,
+    ViewerNext, ViewerPrev, chat_preview,
 };
 use crate::format::{Clock, fit_thumbnail};
 use crate::logging::{LogBuffer, LogLine};
@@ -17,9 +18,11 @@ use async_channel::{Receiver, Sender};
 use bt_chat_core::model::*;
 use bt_chat_core::reactions::{KNOWN, ReactionCode, ReactionCount, Reactions};
 use gpui::{
-    AppContext, Bounds, Context, Entity, KeyBinding, ListState, Modifiers, MouseButton, Pixels,
-    ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
+    AppContext, Bounds, ClipboardItem, Context, Entity, KeyBinding, ListState, Modifiers,
+    MouseButton, MouseDownEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, TestAppContext,
+    VisualTestContext, point, px, size,
 };
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -181,6 +184,8 @@ fn build_harness(
             crate::input::bind(cx);
             cx.bind_keys([
                 KeyBinding::new("escape", Dismiss, Some("BlazingTelesram")),
+                KeyBinding::new("secondary-c", CopySelection, Some("BlazingTelesram")),
+                KeyBinding::new("secondary-a", SelectAllText, Some("BlazingTelesram")),
                 KeyBinding::new("left", ViewerPrev, Some("BlazingTelesram")),
                 KeyBinding::new("right", ViewerNext, Some("BlazingTelesram")),
             ]);
@@ -11571,4 +11576,713 @@ fn without_a_factory_nothing_is_called_and_the_window_renders(cx: &mut TestAppCo
         [],
         "closing the window calls nothing either"
     );
+}
+
+// ---- text selection (TS 1.8) ----
+//
+// The test text system advances every glyph 9 px at the 15 px of message text and a line is 21 px, so
+// glyph `k` of a text begins `9 * k` px from its left edge and a point at exactly that offset is the
+// caret before glyph `k`.
+
+fn plain(i: i64, body: &str) -> Message {
+    message("g", i, "alice", false, MessageBody::Text(body.into()))
+}
+
+fn voice_note(i: i64) -> Message {
+    message(
+        "g",
+        i,
+        "alice",
+        false,
+        MessageBody::Voice {
+            media: media("v", MediaKind::File),
+            duration_ms: Some(5_000),
+            size: 4_000,
+            name: Some("v.ogg".into()),
+            waveform: None,
+        },
+    )
+}
+
+/// The window point `glyphs` glyphs from the left edge of the text `selector`, in its line `line`.
+fn glyph_at(
+    cx: &mut VisualTestContext,
+    selector: &'static str,
+    glyphs: f32,
+    line: usize,
+) -> Point<Pixels> {
+    let b = bounds(cx, selector).unwrap_or_else(|| panic!("{selector} is not on screen"));
+    point(
+        b.origin.x + px(9. * glyphs),
+        b.origin.y + px(21. * line as f32 + 10.),
+    )
+}
+
+fn press(cx: &mut VisualTestContext, at: Point<Pixels>, clicks: usize, modifiers: Modifiers) {
+    cx.simulate_event(MouseDownEvent {
+        position: at,
+        modifiers,
+        button: MouseButton::Left,
+        click_count: clicks,
+        first_mouse: false,
+    });
+}
+
+fn release(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::none());
+}
+
+fn move_to(cx: &mut VisualTestContext, at: Point<Pixels>) {
+    cx.simulate_mouse_move(at, MouseButton::Left, Modifiers::none());
+}
+
+/// A press at `from`, a move to `to` and the release there.
+fn drag(cx: &mut VisualTestContext, from: Point<Pixels>, to: Point<Pixels>) {
+    press(cx, from, 1, Modifiers::none());
+    move_to(cx, to);
+    release(cx, to);
+}
+
+/// Drags inside the first line of one text from glyph `from` to glyph `to`.
+fn drag_in(cx: &mut VisualTestContext, selector: &'static str, from: f32, to: f32) {
+    let (a, b) = (
+        glyph_at(cx, selector, from, 0),
+        glyph_at(cx, selector, to, 0),
+    );
+    drag(cx, a, b);
+}
+
+fn picked(h: &Harness, cx: &mut VisualTestContext, i: i64) -> Option<Range<usize>> {
+    h.desktop.read_with(cx, |d, cx| d.selected_range(ts(i), cx))
+}
+
+fn has_selection(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, cx| d.has_selection(cx))
+}
+
+fn dragging(h: &Harness, cx: &mut VisualTestContext) -> bool {
+    h.desktop.read_with(cx, |d, cx| d.is_dragging(cx))
+}
+
+fn clipboard(cx: &mut VisualTestContext) -> Option<String> {
+    cx.read_from_clipboard().and_then(|item| item.text())
+}
+
+/// The copy header of message `i` of the fixtures: author ALICE, in the harness's clock.
+fn header(i: i64) -> String {
+    crate::format::copy_header(Some("ALICE"), ts(i), Clock::fixed(ts(10_000), 0))
+}
+
+/// The caret a press at `at` puts into message `i`: the start of the selection from there to the end of
+/// the text (a drag to far below it), which a plain press does not show.
+fn caret_from(h: &Harness, cx: &mut VisualTestContext, i: i64, at: Point<Pixels>) -> usize {
+    press(cx, at, 1, Modifiers::none());
+    let below = point(at.x, at.y + px(400.));
+    move_to(cx, below);
+    release(cx, below);
+    picked(h, cx, i)
+        .expect("a range to the end of the text")
+        .start
+}
+
+fn nudge(p: Point<Pixels>, dx: f32) -> Point<Pixels> {
+    point(p.x + px(dx), p.y)
+}
+
+#[gpui::test]
+fn a_drag_inside_one_message_selects_exactly_the_range(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    h.commands();
+    let from = glyph_at(cx, msg!(1, "text"), 2., 0);
+    let to = glyph_at(cx, msg!(1, "text"), 9., 0);
+
+    press(cx, from, 1, Modifiers::none());
+    assert!(dragging(&h, cx));
+    assert_eq!(picked(&h, cx, 1), None, "a press alone selects nothing");
+    move_to(cx, to);
+    assert_eq!(picked(&h, cx, 1), Some(2..9));
+    assert_eq!(picked(&h, cx, 2), None);
+    release(cx, to);
+    assert!(!dragging(&h, cx));
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(2..9),
+        "the selection outlives the button"
+    );
+
+    drag(cx, to, from);
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(2..9),
+        "backwards gives the same range"
+    );
+    assert!(
+        h.commands().is_empty(),
+        "selecting sends nothing to the core"
+    );
+}
+
+#[gpui::test]
+fn a_drag_out_of_the_text_goes_to_the_start_above_and_the_end_below(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    let from = glyph_at(cx, msg!(1, "text"), 6., 0);
+    let first = bounds(cx, msg!(1, "text")).expect("the first text is on screen");
+    let last = bounds(cx, msg!(2, "text")).expect("the last text is on screen");
+    let below = point(px(300.), last.bottom() + px(200.));
+    let above = point(px(300.), first.top() - px(30.));
+    press(cx, from, 1, Modifiers::none());
+    move_to(cx, below);
+    assert_eq!(picked(&h, cx, 1), Some(6..17));
+    assert_eq!(
+        picked(&h, cx, 2),
+        Some(0..11),
+        "below the last text is its end"
+    );
+    move_to(cx, above);
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(0..6),
+        "above the first text is its start"
+    );
+    assert_eq!(picked(&h, cx, 2), None);
+    release(cx, above);
+}
+
+#[gpui::test]
+fn double_click_selects_a_word_and_triple_click_a_paragraph(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "one\ntwo words")],
+    );
+    let in_brave = glyph_at(cx, msg!(1, "text"), 8., 0);
+    press(cx, in_brave, 2, Modifiers::none());
+    release(cx, in_brave);
+    assert_eq!(picked(&h, cx, 1), Some(6..11));
+    press(cx, in_brave, 3, Modifiers::none());
+    release(cx, in_brave);
+    assert_eq!(picked(&h, cx, 1), Some(0..17));
+
+    let in_second = glyph_at(cx, msg!(2, "text"), 5., 1);
+    press(cx, in_second, 3, Modifiers::none());
+    release(cx, in_second);
+    assert_eq!(picked(&h, cx, 2), Some(4..13), "the second line only");
+    assert_eq!(picked(&h, cx, 1), None);
+}
+
+#[gpui::test]
+fn double_click_on_the_right_half_of_a_words_last_letter_selects_that_word(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello world")]);
+    // Glyph 4 is the last `o` of `hello` (9 px wide from 36 px): 43 px is its right half, where a single
+    // click puts the caret after the word, on the space; the word is still the one under the pointer.
+    let right_half = nudge(glyph_at(cx, msg!(1, "text"), 4., 0), 7.);
+    press(cx, right_half, 2, Modifiers::none());
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(0..5),
+        "the word, not the space after it"
+    );
+    // A move to the same point with the button held is a word drag from the same glyph: no change.
+    move_to(cx, right_half);
+    release(cx, right_half);
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(0..5),
+        "the word, not the space after it"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, right_half),
+        5,
+        "a single click is the nearer stop"
+    );
+}
+
+#[gpui::test]
+fn shift_click_extends_and_a_click_clears(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello brave world")]);
+    drag_in(cx, msg!(1, "text"), 2., 6.);
+    assert_eq!(picked(&h, cx, 1), Some(2..6));
+
+    let far = glyph_at(cx, msg!(1, "text"), 12., 0);
+    press(cx, far, 1, Modifiers::shift());
+    release(cx, far);
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(2..12),
+        "the anchor stays, the focus moves"
+    );
+
+    let click = glyph_at(cx, msg!(1, "text"), 4., 0);
+    press(cx, click, 1, Modifiers::none());
+    release(cx, click);
+    assert!(!has_selection(&h, cx), "a click on the text clears");
+
+    drag_in(cx, msg!(1, "text"), 2., 6.);
+    let timeline = bounds(cx, "timeline").expect("the timeline is on screen");
+    let empty = point(timeline.right() - px(10.), timeline.top() + px(10.));
+    press(cx, empty, 1, Modifiers::none());
+    release(cx, empty);
+    assert!(
+        !has_selection(&h, cx),
+        "a click on empty timeline space clears"
+    );
+}
+
+#[gpui::test]
+fn a_drag_across_two_messages_copies_the_text_with_headers(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    h.commands();
+    let from = glyph_at(cx, msg!(1, "text"), 6., 0);
+    let to = glyph_at(cx, msg!(2, "text"), 6., 0);
+    drag(cx, from, to);
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(
+        clipboard(cx),
+        Some(format!(
+            "{}\nbrave world\n\n{}\nsecond",
+            header(1),
+            header(2)
+        ))
+    );
+    assert!(has_selection(&h, cx), "copying keeps the selection");
+    assert!(h.commands().is_empty(), "nothing goes to the core");
+}
+
+#[gpui::test]
+fn copy_goes_to_the_composer_unless_the_timeline_has_the_selection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello brave world")]);
+    cx.simulate_input("черновик");
+    cx.simulate_keystrokes("secondary-a secondary-c");
+    assert_eq!(clipboard(cx), Some("черновик".into()));
+    assert!(
+        !has_selection(&h, cx),
+        "Cmd+A in the composer selects its text"
+    );
+
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(
+        clipboard(cx),
+        Some("llo bra".into()),
+        "the selection, not the composer"
+    );
+    assert_eq!(composer_text(&h, cx), "черновик", "the draft is untouched");
+    assert!(writes(&h).is_empty());
+
+    click(cx, "composer-input");
+    cx.simulate_keystrokes("secondary-a secondary-c");
+    assert_eq!(
+        clipboard(cx),
+        Some("черновик".into()),
+        "back to the composer"
+    );
+}
+
+#[gpui::test]
+fn copy_with_a_click_and_no_selection_writes_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello brave world")]);
+    cx.write_to_clipboard(ClipboardItem::new_string("раньше".into()));
+    let at = glyph_at(cx, msg!(1, "text"), 3., 0);
+    press(cx, at, 1, Modifiers::none());
+    release(cx, at);
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(clipboard(cx), Some("раньше".into()));
+}
+
+#[gpui::test]
+fn select_all_in_the_timeline_takes_every_message_with_text(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "hello brave world"),
+            voice_note(2),
+            plain(3, "tail"),
+        ],
+    );
+    let at = glyph_at(cx, msg!(1, "text"), 3., 0);
+    press(cx, at, 1, Modifiers::none());
+    release(cx, at);
+    cx.simulate_keystrokes("secondary-a");
+    assert_eq!(picked(&h, cx, 1), Some(0..17));
+    assert_eq!(picked(&h, cx, 3), Some(0..4));
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(
+        clipboard(cx),
+        Some(format!(
+            "{}\nhello brave world\n\n{}\ntail",
+            header(1),
+            header(3)
+        )),
+        "the voice message has no text and contributes nothing"
+    );
+}
+
+#[gpui::test]
+fn the_quote_the_author_and_a_voice_card_are_not_selectable(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let mut quoting = plain(1, "hello brave world");
+    quoting.reply_to = Some(ReplyQuote {
+        author: Some("BOB".into()),
+        text: "quoted words".into(),
+        timestamp: Some(ts(0)),
+    });
+    open_with(&h, cx, vec![quoting, voice_note(2)]);
+    for selector in [msg!(1, "reply"), msg!(1, "author"), msg!(2, "voice")] {
+        let at = bounds(cx, selector)
+            .unwrap_or_else(|| panic!("{selector} is not on screen"))
+            .center();
+        press(cx, at, 1, Modifiers::none());
+        assert!(!dragging(&h, cx), "{selector} starts no selection");
+        release(cx, at);
+        assert!(!has_selection(&h, cx), "{selector}");
+    }
+    assert!(
+        !shown(cx, msg!(2, "text")),
+        "a voice message has no text to select"
+    );
+
+    let at = glyph_at(cx, msg!(1, "text"), 3., 0);
+    press(cx, at, 1, Modifiers::none());
+    release(cx, at);
+    cx.simulate_keystrokes("secondary-a secondary-c");
+    let copied = clipboard(cx).expect("the text is copied");
+    assert!(copied.contains("hello brave world"));
+    assert!(!copied.contains("quoted words") && !copied.contains("BOB"));
+}
+
+#[gpui::test]
+fn escape_clears_the_selection_after_the_menu_and_before_the_panel_and_the_reply(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    go_online(&h, cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    choose_reply_to_2(cx);
+    click(cx, "chat-header");
+    assert!(info_open(&h, cx) && composer_reply(&h, cx).is_some());
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    right_click(cx, msg!(1));
+    assert!(h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(2..9),
+        "a right click inside keeps it"
+    );
+
+    cx.simulate_keystrokes("escape");
+    assert!(!h.desktop.read_with(cx, |d, _| d.menu_is_open()));
+    assert!(has_selection(&h, cx), "the menu closes first");
+    cx.simulate_keystrokes("escape");
+    assert!(!has_selection(&h, cx), "then the selection");
+    assert!(info_open(&h, cx) && composer_reply(&h, cx).is_some());
+    cx.simulate_keystrokes("escape");
+    assert!(
+        !info_open(&h, cx) && composer_reply(&h, cx).is_some(),
+        "then the panel"
+    );
+    cx.simulate_keystrokes("escape");
+    assert!(composer_reply(&h, cx).is_none(), "the reply last");
+}
+
+#[gpui::test]
+fn a_chat_switch_clears_the_selection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello brave world")]);
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    assert!(has_selection(&h, cx));
+    click(cx, row!("p"));
+    assert!(!has_selection(&h, cx));
+    click(cx, row!("g"));
+    assert!(
+        !has_selection(&h, cx),
+        "it does not come back with the chat"
+    );
+}
+
+#[gpui::test]
+fn deleting_or_editing_an_end_message_drops_the_selection_even_for_the_same_length(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    cx.write_to_clipboard(ClipboardItem::new_string("раньше".into()));
+
+    drag_in(cx, msg!(2, "text"), 0., 6.);
+    let edited = |i, body: &str| {
+        let mut m = plain(i, body);
+        m.edited = true;
+        ClientEvent::MessageUpserted(m)
+    };
+    h.feed(cx, [edited(1, "hello brave there")]);
+    assert_eq!(
+        picked(&h, cx, 2),
+        Some(0..6),
+        "an edit of another message keeps it"
+    );
+    h.feed(cx, [edited(2, "second lines")]);
+    assert!(!has_selection(&h, cx), "a longer text is another text");
+
+    drag_in(cx, msg!(2, "text"), 0., 6.);
+    h.feed(cx, [edited(2, "SECOND LINES")]);
+    assert!(!has_selection(&h, cx), "so is one with the same length");
+    cx.simulate_keystrokes("secondary-c");
+    assert_eq!(
+        clipboard(cx),
+        Some("раньше".into()),
+        "nothing stale is copied"
+    );
+    right_click(cx, msg!(2));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, cx| d.menu_copy_label(cx)),
+        Some("Скопировать текст"),
+        "nor offered by the menu"
+    );
+    cx.simulate_keystrokes("escape");
+
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    h.feed(
+        cx,
+        [ClientEvent::MessageDeleted {
+            chat: chat_g(),
+            timestamp: ts(1),
+        }],
+    );
+    assert!(
+        !has_selection(&h, cx),
+        "a deleted message takes its selection"
+    );
+}
+
+#[gpui::test]
+fn a_new_message_and_older_history_keep_the_selection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(5, "hello brave world"), plain(6, "second line")],
+    );
+    drag_in(cx, msg!(5, "text"), 2., 9.);
+    h.feed(cx, [ClientEvent::MessageUpserted(plain(7, "newest"))]);
+    assert_eq!(picked(&h, cx, 5), Some(2..9), "a new incoming message");
+    h.feed(
+        cx,
+        [history(
+            "g",
+            vec![plain(3, "old one"), plain(4, "old two")],
+            true,
+        )],
+    );
+    assert!(shown(cx, msg!(5, "text")));
+    assert_eq!(
+        picked(&h, cx, 5),
+        Some(2..9),
+        "older history loaded above it"
+    );
+}
+
+#[gpui::test]
+fn the_caret_follows_the_nearer_edge_of_a_glyph_also_around_a_line_break(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "ab\ncd")]);
+    let glyph =
+        |cx: &mut VisualTestContext, k: f32, line: usize| glyph_at(cx, msg!(1, "text"), k, line);
+    let a = glyph(cx, 0., 0);
+    assert_eq!(caret_from(&h, cx, 1, nudge(a, 2.)), 0);
+    let b = glyph(cx, 1., 0);
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(b, 2.)),
+        1,
+        "left half of the last glyph of a line"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(b, 6.)),
+        2,
+        "its right half is the end of the line"
+    );
+    let c = glyph(cx, 0., 1);
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(c, 2.)),
+        3,
+        "left half of the first glyph after a break"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(c, 6.)),
+        4,
+        "its right half is past it"
+    );
+}
+
+#[gpui::test]
+fn the_caret_at_a_soft_wrap_belongs_to_the_line_the_pointer_is_on(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    let words = ["wwwwwwwww"; 12].join(" ");
+    open_with(&h, cx, vec![plain(1, &words)]);
+    let first = glyph_at(cx, msg!(1, "text"), 0., 1);
+    let start = caret_from(&h, cx, 1, nudge(first, 2.));
+    assert!(
+        start > 0 && start.is_multiple_of(10),
+        "the second line begins at a word: {start}"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(first, 6.)),
+        start + 1,
+        "right half of the first glyph of the wrapped line"
+    );
+    let last = glyph_at(cx, msg!(1, "text"), (start - 1) as f32, 0);
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(last, 2.)),
+        start - 1,
+        "left half of the last glyph of the line above"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, nudge(last, 6.)),
+        start,
+        "its right half is the wrap point, not the glyph after the line break"
+    );
+}
+
+#[gpui::test]
+fn a_drag_past_the_top_edge_scrolls_the_list_and_extends_to_older_messages(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_group(&h, cx);
+    h.feed(cx, [chunk("g", 41..=100, false)]);
+    h.commands();
+    let start = h.list(cx).logical_scroll_top().item_ix;
+    let from = glyph_at(cx, msg!(100, "text"), 3., 0);
+    press(cx, from, 1, Modifiers::none());
+    move_to(cx, point(px(300.), px(0.)));
+    for _ in 0..40 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    let scrolled = h.list(cx).logical_scroll_top().item_ix;
+    assert!(
+        scrolled < start,
+        "the list scrolled up: {scrolled} < {start}"
+    );
+    let earliest = (41..=100)
+        .find(|&i| picked(&h, cx, i).is_some())
+        .expect("the selection reaches an older message");
+    assert!(earliest < 100);
+
+    release(cx, point(px(300.), px(0.)));
+    let stopped = h.list(cx).logical_scroll_top();
+    for _ in 0..10 {
+        cx.executor().advance_clock(Duration::from_millis(16));
+        cx.run_until_parked();
+    }
+    let after = h.list(cx).logical_scroll_top();
+    assert_eq!(
+        (after.item_ix, after.offset_in_item),
+        (stopped.item_ix, stopped.offset_in_item),
+        "the release stops it"
+    );
+}
+
+#[gpui::test]
+fn the_menu_copies_the_selection_for_a_message_it_touches_and_the_message_otherwise(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(
+        &h,
+        cx,
+        vec![plain(1, "hello brave world"), plain(2, "second line")],
+    );
+    let label = |h: &Harness, cx: &mut VisualTestContext| {
+        h.desktop.read_with(cx, |d, cx| d.menu_copy_label(cx))
+    };
+
+    // Inside the message: the selection, which stays.
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    right_click(cx, msg!(1));
+    assert_eq!(label(&h, cx), Some("Скопировать выделенное"));
+    click(cx, "menu-copy");
+    assert_eq!(clipboard(cx), Some("llo bra".into()));
+    assert_eq!(picked(&h, cx, 1), Some(2..9));
+
+    // Across messages: the whole selection, from either of them.
+    let from = glyph_at(cx, msg!(1, "text"), 6., 0);
+    let to = glyph_at(cx, msg!(2, "text"), 6., 0);
+    drag(cx, from, to);
+    right_click(cx, msg!(2));
+    assert_eq!(label(&h, cx), Some("Скопировать выделенное"));
+    click(cx, "menu-copy");
+    assert_eq!(
+        clipboard(cx),
+        Some(format!(
+            "{}\nbrave world\n\n{}\nsecond",
+            header(1),
+            header(2)
+        ))
+    );
+    assert!(has_selection(&h, cx));
+
+    // A message the selection does not reach: the selection goes, the message is copied.
+    drag_in(cx, msg!(1, "text"), 2., 9.);
+    right_click(cx, msg!(2));
+    assert!(!has_selection(&h, cx), "a right click elsewhere clears it");
+    assert_eq!(label(&h, cx), Some("Скопировать текст"));
+    click(cx, "menu-copy");
+    assert_eq!(clipboard(cx), Some("second line".into()));
+}
+
+#[gpui::test]
+fn editing_a_message_clears_the_selection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 1, "my words here")]);
+    drag_in(cx, msg!(1, "text"), 3., 8.);
+    right_click(cx, msg!(1));
+    assert_eq!(picked(&h, cx, 1), Some(3..8));
+    click(cx, "menu-edit");
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.composer_editing()),
+        Some(ts(1))
+    );
+    assert!(!has_selection(&h, cx));
+}
+
+#[gpui::test]
+fn a_dialog_over_the_chat_drops_the_selection(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![own("g", 1, "my words here")]);
+    drag_in(cx, msg!(1, "text"), 3., 8.);
+    right_click(cx, msg!(1));
+    click(cx, "menu-delete");
+    assert!(h.desktop.read_with(cx, |d, _| d.delete_is_pending()));
+    assert!(!has_selection(&h, cx), "the confirmation covers the chat");
 }

@@ -1,5 +1,6 @@
 //! Pure presentation helpers: local time, initials, avatar colors, sizes.
 
+use crate::reactors::UNKNOWN_NAME;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const US: i64 = 1_000_000;
@@ -182,6 +183,27 @@ pub fn day_label(ts_us: i64, clock: Clock) -> String {
     }
 }
 
+/// `ДД.ММ.ГГГГ ЧЧ:ММ` in local time, for the header of copied messages.
+pub fn date_time(ts_us: i64, clock: Clock) -> String {
+    let c = local(ts_us, clock);
+    format!(
+        "{:02}.{:02}.{:04} {:02}:{:02}",
+        c.dom,
+        c.month,
+        c.year,
+        c.secs / 3600,
+        c.secs / 60 % 60
+    )
+}
+
+/// Header line of a copied message: `{author}, {date_time}`; a missing or blank author reads «Неизвестный».
+pub fn copy_header(author: Option<&str>, ts_us: i64, clock: Clock) -> String {
+    let author = author
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or(UNKNOWN_NAME);
+    format!("{author}, {}", date_time(ts_us, clock))
+}
+
 /// First letters of the first and last word, uppercased.
 pub fn initials(name: &str) -> String {
     let mut words = name.split_whitespace();
@@ -305,6 +327,53 @@ mod tests {
         assert_eq!(day_label(ts(2026, 11, 18, 23, 0), clock), "Вчера");
         assert_eq!(day_label(ts(2026, 3, 5, 0, 0), clock), "5 марта");
         assert_eq!(day_label(ts(2025, 12, 31, 0, 0), clock), "31 декабря 2025");
+    }
+
+    #[test]
+    fn date_time_uses_the_clock_offset() {
+        let clock = Clock::fixed(0, 3 * 3600);
+        assert_eq!(date_time(ts(2026, 11, 19, 9, 5), clock), "19.11.2026 12:05");
+        assert_eq!(
+            date_time(ts(2026, 3, 5, 0, 0), Clock::fixed(0, 0)),
+            "05.03.2026 00:00"
+        );
+    }
+
+    #[test]
+    fn date_time_at_midnight_and_year_boundaries() {
+        let utc = Clock::fixed(0, 0);
+        assert_eq!(date_time(ts(2026, 12, 31, 23, 59), utc), "31.12.2026 23:59");
+        assert_eq!(date_time(ts(2027, 1, 1, 0, 0), utc), "01.01.2027 00:00");
+        // 21:30 UTC on 31 December is 00:30 on 1 January at +3.
+        assert_eq!(
+            date_time(ts(2026, 12, 31, 21, 30), Clock::fixed(0, 3 * 3600)),
+            "01.01.2027 00:30"
+        );
+        // 00:30 UTC on 1 January is still 31 December at -1.
+        assert_eq!(
+            date_time(ts(2027, 1, 1, 0, 30), Clock::fixed(0, -3600)),
+            "31.12.2026 23:30"
+        );
+        assert_eq!(date_time(ts(2024, 2, 29, 12, 0), utc), "29.02.2024 12:00");
+        assert_eq!(date_time(0, utc), "01.01.1970 00:00");
+    }
+
+    #[test]
+    fn copy_header_names_the_author_or_an_unknown_one() {
+        let clock = Clock::fixed(0, 3 * 3600);
+        let at = ts(2026, 11, 19, 9, 5);
+        assert_eq!(
+            copy_header(Some("Анна Петрова"), at, clock),
+            "Анна Петрова, 19.11.2026 12:05"
+        );
+        assert_eq!(
+            copy_header(None, at, clock),
+            "Неизвестный, 19.11.2026 12:05"
+        );
+        assert_eq!(
+            copy_header(Some("  "), at, clock),
+            "Неизвестный, 19.11.2026 12:05"
+        );
     }
 
     #[test]

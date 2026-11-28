@@ -1,12 +1,14 @@
 //! One timeline row: day separator, grouped bubble, attachments, reaction chips.
 
-use crate::desktop::Desktop;
+use crate::desktop::{Desktop, PickState};
 use crate::format::{
     Clock, avatar_color, clock_time, day_key, day_label, duration_label, duration_size_line,
     fit_thumbnail, human_size,
 };
 use crate::player::{PlayFailure, Player, VoiceKey, VoicePhase, VoiceView, failure_label};
+use crate::selection::Pos;
 use crate::store::{ChatStore, DownloadState};
+use crate::text_lines::{caret_for, glyph_for, highlight_rects, paragraphs_of};
 use crate::theme::*;
 use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
 use crate::widgets::avatar;
@@ -68,6 +70,26 @@ pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
 /// frame drains it.
 pub type RowBounds = Rc<RefCell<Vec<(MessageTs, Bounds<Pixels>)>>>;
 
+/// The text layouts painted in the latest frame, by message, and the bounds of the message rows they
+/// sit in. A canvas before the list clears it in its prepaint; every row reports its bounds in its
+/// prepaint (`rows`) and every row with selectable text pushes its layout while painting (`texts`), so
+/// `texts` holds only measured and prepainted layouts (gpui panics on a hit test of any other). `rows`
+/// is the registry's own copy: `RowBounds` is drained by `check_read`.
+#[derive(Default)]
+pub struct TextRegistry {
+    pub texts: Vec<(MessageTs, TextLayout)>,
+    pub rows: Vec<(MessageTs, Bounds<Pixels>)>,
+}
+
+impl TextRegistry {
+    pub fn clear(&mut self) {
+        self.texts.clear();
+        self.rows.clear();
+    }
+}
+
+pub type TextLayouts = Rc<RefCell<TextRegistry>>;
+
 /// What a row needs besides the store's data: the entities its clicks act on.
 #[derive(Clone)]
 pub struct RowContext {
@@ -77,6 +99,8 @@ pub struct RowContext {
     pub chat: ChatId,
     pub clock: Clock,
     pub rows: RowBounds,
+    pub texts: TextLayouts,
+    pub picking: Entity<PickState>,
 }
 
 /// Renders message `ix` of the context's chat; pure in the store so it can run inside list callbacks.
@@ -120,11 +144,12 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
         .flex()
         .flex_col()
         .on_children_prepainted({
-            let rows = ctx.rows.clone();
+            let (rows, texts) = (ctx.rows.clone(), ctx.texts.clone());
             move |children, _, _| {
                 if let (Some(first), Some(last)) = (children.first(), children.last()) {
-                    rows.borrow_mut()
-                        .push((ts, Bounds::from_corners(first.origin, last.bottom_right())));
+                    let bounds = Bounds::from_corners(first.origin, last.bottom_right());
+                    rows.borrow_mut().push((ts, bounds));
+                    texts.borrow_mut().rows.push((ts, bounds));
                 }
             }
         })
@@ -384,7 +409,9 @@ fn reply_quote(ts: i64, quote: &ReplyQuote) -> Div {
 fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElement {
     let ts = m.timestamp;
     match &m.body {
-        MessageBody::Text(text) => text_block(text.clone()).into_any_element(),
+        MessageBody::Text(text) => {
+            selectable_text(ctx, store, cx, ts, text, "text").into_any_element()
+        }
         MessageBody::Image {
             media,
             width,
@@ -392,6 +419,9 @@ fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElemen
             caption,
             ..
         } => attachment(
+            ctx,
+            store,
+            cx,
             ts,
             Some(single_image(ctx, store, ts, media, *width, *height)),
             caption.as_deref(),
@@ -404,7 +434,7 @@ fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElemen
                 )),
                 many => Some(grid(ctx, store, ts, many)),
             };
-            attachment(ts, pictures, caption.as_deref())
+            attachment(ctx, store, cx, ts, pictures, caption.as_deref())
         }
         MessageBody::File { media, name, size } => {
             file_card(ctx, store, ts, media, name, *size).into_any_element()
@@ -448,28 +478,122 @@ fn body(ctx: &RowContext, store: &ChatStore, cx: &App, m: &Message) -> AnyElemen
 }
 
 /// Pictures with their caption (`msg-{ts}-caption`) below.
-fn attachment(ts: i64, pictures: Option<AnyElement>, caption: Option<&str>) -> AnyElement {
+fn attachment(
+    ctx: &RowContext,
+    store: &ChatStore,
+    cx: &App,
+    ts: MessageTs,
+    pictures: Option<AnyElement>,
+    caption: Option<&str>,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap(px(4.))
         .children(pictures)
         .when_some(caption, |d, caption| {
-            d.child(
-                text_block(caption.to_owned()).debug_selector(move || format!("msg-{ts}-caption")),
-            )
+            d.child(selectable_text(ctx, store, cx, ts, caption, "caption"))
         })
         .into_any_element()
 }
 
-/// The bubble is content-sized, so gpui measures its text at max-content width and keeps that single-line
-/// height even after the bubble is clamped; a max width on the text itself makes the measurement wrap.
-fn text_block(text: String) -> Div {
+/// The text of a message that can be selected (D3), `msg-{ts}-{suffix}`. The bubble is content-sized, so
+/// gpui measures its text at max-content width and keeps that single-line height even after the bubble is
+/// clamped; a max width on the text itself makes the measurement wrap.
+///
+/// The text itself is an unchanged `StyledText`; the selection is painted as rectangles behind it by a
+/// zero-size canvas placed before it, which also registers the painted layout for the caret mapping of
+/// drags (spike 0.1: highlighting through the text runs would reshape the text). Mouse down on the text
+/// puts the caret from the registered layout and hands the gesture to `Desktop::text_down`.
+fn selectable_text(
+    ctx: &RowContext,
+    store: &ChatStore,
+    cx: &App,
+    ts: MessageTs,
+    text: &str,
+    suffix: &'static str,
+) -> Div {
+    let range = store.timeline(&ctx.chat).and_then(|timeline| {
+        ctx.picking
+            .read(cx)
+            .text
+            .as_ref()?
+            .range_in(&timeline.messages, ts)
+    });
+    let text = SharedString::from(text.to_owned());
+    let styled = StyledText::new(text.clone());
+    let layout = styled.layout().clone();
+    let (desktop, chat) = (ctx.desktop.clone(), ctx.chat.clone());
+    let registry = ctx.texts.clone();
     div()
+        .debug_selector(move || format!("msg-{ts}-{suffix}"))
+        .relative()
         .max_w(px(CONTENT_W))
         .text_size(px(15.))
         .line_height(px(21.))
-        .child(text)
+        .cursor(CursorStyle::IBeam)
+        .on_mouse_down(MouseButton::Left, {
+            let (registry, text) = (registry.clone(), text.clone());
+            move |event, window, cx| {
+                // The click is the text's: the timeline's own handler for a click elsewhere must not clear it.
+                cx.stop_propagation();
+                let painted = registry
+                    .borrow()
+                    .texts
+                    .iter()
+                    .find(|(t, _)| *t == ts)
+                    .map(|(_, layout)| layout.clone());
+                let Some(painted) = painted else { return };
+                // A caret goes to the nearer side of a glyph; a word or a paragraph is the one the
+                // glyph under the pointer belongs to, so the right half of a word's last letter is
+                // still that word.
+                let offset = if event.click_count >= 2 {
+                    glyph_for(&painted, event.position, &text)
+                } else {
+                    caret_for(&painted, event.position, &text)
+                };
+                let at = Pos { ts, offset };
+                desktop
+                    .update(cx, |desktop, cx| {
+                        desktop.text_down(
+                            chat.clone(),
+                            at,
+                            event.click_count,
+                            event.modifiers.shift,
+                            window,
+                            cx,
+                        )
+                    })
+                    .ok();
+            }
+        })
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    registry.borrow_mut().texts.push((ts, layout.clone()));
+                    let Some(range) = range.filter(|r| !r.is_empty()) else {
+                        return;
+                    };
+                    let (origin, line_height) = (layout.bounds().origin, layout.line_height());
+                    for (line, left, right) in
+                        highlight_rects(&paragraphs_of(&layout, &text), range)
+                    {
+                        let top = origin.y + line_height * line as f32;
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(origin.x + px(left), top),
+                                size(px(right - left), line_height),
+                            ),
+                            rgba(SELECTION),
+                        ));
+                    }
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+        .child(styled)
 }
 
 /// Columns of the picture grid: one picture on its own, two or four in two columns, otherwise three.

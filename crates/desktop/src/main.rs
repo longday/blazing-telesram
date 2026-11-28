@@ -12,9 +12,11 @@ mod player;
 mod profile;
 mod reactors;
 mod search_results;
+mod selection;
 mod store;
 #[cfg(test)]
 mod tests;
+mod text_lines;
 mod theme;
 mod timeline;
 mod viewer;
@@ -24,7 +26,9 @@ mod yandex_backend;
 use alerts::{AlertsFactory, Platform};
 use bt_chat_core::model::{ChatId, UserId};
 use bt_chat_core::{ChatClient, ClientConfig};
-use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog, ViewerNext, ViewerPrev};
+use desktop::{
+    CopySelection, Desktop, Dismiss, Quit, Search, SelectAllText, ToggleLog, ViewerNext, ViewerPrev,
+};
 use format::Clock;
 use gpui::{prelude::*, *};
 use login::{LoginCookie, SignInWindow};
@@ -70,6 +74,8 @@ fn main() {
             KeyBinding::new("ctrl-f", Search, Some("BlazingTelesram")),
             KeyBinding::new("cmd-shift-l", ToggleLog, Some("BlazingTelesram")),
             KeyBinding::new("escape", Dismiss, Some("BlazingTelesram")),
+            KeyBinding::new("secondary-c", CopySelection, Some("BlazingTelesram")),
+            KeyBinding::new("secondary-a", SelectAllText, Some("BlazingTelesram")),
             KeyBinding::new("left", ViewerPrev, Some("BlazingTelesram")),
             KeyBinding::new("right", ViewerNext, Some("BlazingTelesram")),
             KeyBinding::new("cmd-q", Quit, None),
