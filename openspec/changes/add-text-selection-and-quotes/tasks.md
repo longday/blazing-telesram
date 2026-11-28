@@ -22,7 +22,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 
 ## 0. Research (evidence for the open points)
 
-- [ ] 0.1 gpui spike: the mechanisms of D3 (research.md "gpui 0.2.2", points (a)-(g))
+- [x] 0.1 gpui spike: the mechanisms of D3 (research.md "gpui 0.2.2", points (a)-(g))
   - Owns: new `openspec/changes/add-text-selection-and-quotes/research-gpui.md`; a **scratch crate in the VM** (`~/bt/spike-select/`, not committed, deleted at the end).
   - Depends on: nothing. No account, no live slot (the VM needs no session).
   - Do: a scratch gpui 0.2.2 app (the version of `Cargo.lock`) with a `gpui::list` of 60 rows of wrapped `StyledText` (some with several runs, one with `\n`), an `Entity` that holds a selection, and: (a) the drag whose pointer leaves the row, the list and the window — do `on_mouse_move`/`on_mouse_up` on the row still fire; do `window.on_mouse_event` handlers registered in a `canvas` paint fire; `on_mouse_up_out`; (b) a `canvas` before the list that clears a registry the rows fill while painting: the order and whether rows painted in the previous frame are still in it; (c) `with_highlights` background over a wrapped line and over a run boundary: seams, line-height clipping, emoji; (d) a selection change re-renders rows already measured, their heights unchanged; (e) `.cursor(CursorStyle::IBeam)`; (f) `click_count` 1/2/3 from a real double and triple click, and in the test context (`simulate_mouse_down` with a hand-built event); (g) 120 `cx.notify()` per second with 60 rows. Also `index_for_position` called on a layout from a row that was never painted (confirm the panic and that it is avoided by the registry).
