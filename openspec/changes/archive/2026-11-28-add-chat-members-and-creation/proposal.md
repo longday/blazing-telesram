@@ -32,6 +32,7 @@ Context document: `research.md` in this directory (verbatim research report with
 - `bt-probe`: read-members/`whoami` probe; guarded create-chat probes for payload discovery.
 - Dependency on `add-sending` is satisfied: it is archived (`openspec/changes/archive/2026-11-24-add-sending/`) and its closed-write-set conventions (`write.rs`, `BT_WRITE_ONLY_CHAT` guard in `yandex_backend.rs`) are the base this change follows. Sibling changes in flight (`add-message-reactions`, `add-media-download`, `add-global-search`) may also extend `ALLOWED_METHODS`; whoever lands second extends the exact-list tests instead of replacing them.
 - Risk: `create_chat` / `create_private_chat` change the real account and may create duplicates on retry (no known idempotency key); the protocol is unofficial. Live verification limited to chats created with the user's explicit approval. The read shapes are observed live (task 1.2, `design.md`), except the populated `UserStatus`, which no account chat produced; the parser accepts only a non-blank `text` there.
+- Residual risk accepted at close (user decision, 2026-11-28): private chat creation (`create_private_chat`) was run live only against a person who already had a private chat, so the call returned that chat and created nothing. Not verified live: the reply shape of a really created chat, the effect of `wait_for_update: true` on a new chat, and whether `onetime_user_token` is required then. The implementation, its unit and fixture tests and the "Private chat" requirement stay; every failure path is safe (no retry, list refresh, no duplicate). See the notes of tasks 5.1 and 5.3.
 
 ## Non-goals
 
@@ -48,6 +49,7 @@ Context document: `research.md` in this directory (verbatim research report with
 - (c) Profile and status changes: only after the semantics (status message vs availability vs online presence), rights and side effects on other devices are decided and probed.
 - Directory search as a participant source for "New chat" (reuse the `search` read of `add-global-search` once it lands).
 - Group creation, if the gate in decision 1 fails: a separate change `add-group-chat-creation`.
+- `add-private-chat-creation-live-check`: run `bt-probe create-private <guid> --confirm-create` and the app flow once against a person with no private chat (needs the user's approval of the target); record the created chat's reply shape, the `wait_for_update` behaviour and whether `onetime_user_token` is needed; fix the parser or move private creation out if the server refuses without the token.
 - Groups and departments in the member list: once a non-empty example is recorded (live reply or web client code), add their display with a spec delta.
 
 ## Decisions on the Open Questions
