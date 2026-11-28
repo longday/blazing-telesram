@@ -24,6 +24,7 @@ fn fixtures_hold_no_credentials() {
         "push-reaction-removed",
         "history-important",
         "history-voice",
+        "history-video",
         "chat-pinned",
         "push-pin",
         "push-pin-replaced",
@@ -302,6 +303,47 @@ fn live_voice_history_fixture() {
             "{waveform:?}"
         );
     }
+}
+
+/// A live history frame (2026-11-28, `research-history-video.json`) holding one video file with a
+/// `PreviewHint.VideoPreview`: ids, the file name, the display name, the payload and the
+/// `BlurHash` are placeholders, every number (timestamps, `Size`, `Source`, `Width`, `Height`,
+/// `DurationMs`) is verbatim. The reaction siblings of the message were removed.
+#[test]
+fn live_video_history_fixture() {
+    let chat = "0/0/33333333-3333-4333-8333-333333333333";
+    let raw = fixture("research-history-video.json");
+    let page = parse_history(&raw, chat, 50).unwrap();
+    assert_eq!((page.messages.len(), page.skipped), (1, 0));
+    let message = &page.messages[0];
+    assert_eq!(message.timestamp, 1_795_535_249_425_210);
+    let WireBody::Video(video) = &message.body else {
+        panic!("video: {:?}", message.body)
+    };
+    assert_eq!(
+        video.file.id,
+        "bucket-b/cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    );
+    assert_eq!(
+        (video.file.name.as_deref(), video.file.size),
+        (Some("video.mp4"), Some(60_344_549))
+    );
+    assert_eq!(
+        (video.width, video.height, video.duration_ms),
+        (1920, 1080, 221_769)
+    );
+
+    // Without the hint (88 % of the live video files) the same message is a plain file.
+    let mut raw = raw;
+    raw["Chats"][0]["Messages"][0]["ServerMessage"]["ClientMessage"]["Plain"]["MiscFile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PreviewHint");
+    let page = parse_history(&raw, chat, 50).unwrap();
+    let WireBody::File(file) = &page.messages[0].body else {
+        panic!("file: {:?}", page.messages[0].body)
+    };
+    assert_eq!(file.name.as_deref(), Some("video.mp4"));
 }
 
 #[test]
