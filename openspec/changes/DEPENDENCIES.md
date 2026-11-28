@@ -223,7 +223,7 @@ Proposal on `propose/port` (docs only: `openspec/changes/add-cross-platform-supp
 | 1.2 | open, XP-A: `session.rs`, `runtime.rs` | 1.1 | `yandex-proto` `session.rs`, `runtime.rs`, `Cargo.toml` |
 | 1.3 | open, XP-A: `bt-probe.rs` two hunks | 1.1; the file free (NB 0.2, TS 0.5, UC 0.1) | `bin/bt-probe.rs` |
 | 1.4 | open, XP-A: chat-core `cache.rs`, `client.rs` hunks | 1.1; `client.rs` free (NB-N 1.2, TS 2.1) | `cache.rs`, `client.rs`, `Cargo.toml` |
-| 1.5 | open, XP-A: `windows_safe_name`, hard-link fallback | 1.1 | chat-core `paths.rs` |
+| 1.5 | open, XP-A: `windows_safe_name`, atomic final-name claim (no copy fallback) | 1.1 | chat-core `paths.rs` |
 | 1.6 | open, XP-A: `logging.rs` | 1.1 | `desktop/src/logging.rs`, `crates/desktop/Cargo.toml` (one line) |
 | 1.7 | open, XP-A: cross-target check of the libraries | 1.1 to 1.6, 0.2's tools | none |
 | 2.1 | open, XP-D: `keys.rs`, bindings (including TS 1.6's `secondary-c`/`secondary-a`), test keystrokes | none | `keys.rs`, `main.rs`, `input.rs`, `tests.rs` |

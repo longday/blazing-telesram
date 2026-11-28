@@ -52,7 +52,7 @@ The folder named «Downloads folder» in `attachment-download` SHALL be the user
 - **THEN** it is saved there and not in `~/Downloads`
 
 ### Requirement: File names valid on the host
-A saved file's name SHALL be valid on the host file system as well as safe by the rules of `attachment-download`: on Windows the characters `<`, `>`, `:`, `"`, `|`, `?`, `*` and control characters SHALL NOT survive, a name SHALL NOT end with a dot or a space, and a reserved device name SHALL be changed so that the result is an ordinary file. Saving SHALL never overwrite an existing file, also on a file system that cannot make hard links.
+A saved file's name SHALL be valid on the host file system as well as safe by the rules of `attachment-download`: on Windows the characters `<`, `>`, `:`, `"`, `|`, `?`, `*` and control characters SHALL NOT survive, a name SHALL NOT end with a dot or a space, and a reserved device name SHALL be changed so that the result is an ordinary file.
 
 #### Scenario: Forbidden characters on Windows
 - **WHEN** an attachment named `a:b*c?.txt` is downloaded on Windows
@@ -70,8 +70,20 @@ A saved file's name SHALL be valid on the host file system as well as safe by th
 - **WHEN** the same names are downloaded on macOS
 - **THEN** the saved names are those the rules of `attachment-download` gave before this requirement
 
-#### Scenario: No hard links
-- **GIVEN** the Downloads folder is on a file system without hard links and already holds `report.pdf`
+### Requirement: Saved files are complete or absent on every file system
+The "Complete or absent" rule of `attachment-download` SHALL hold on every platform and file system: the final name SHALL appear only together with the complete file, claimed by an atomic operation that fails when the name exists. Where the file system cannot make that claim, the download SHALL fail with a reason that names the disk problem instead of copying into the final name.
+
+#### Scenario: File system that cannot claim a name atomically
+- **GIVEN** the Downloads folder is on a file system where neither an atomic no-replace rename nor a hard link works
+- **WHEN** an attachment is downloaded
+- **THEN** the download fails with a reason that names the disk problem, no file exists under the final name, and no partial file is left
+
+#### Scenario: Interrupted save
+- **WHEN** a download is cancelled or the client stops while the file is being written, on any platform
+- **THEN** nothing exists under the final name, and a name that was taken stays unchanged
+
+#### Scenario: Name taken on a file system without hard links
+- **GIVEN** the Downloads folder is on Windows FAT or exFAT and already holds `report.pdf`
 - **WHEN** another attachment named `report.pdf` is downloaded
 - **THEN** it is saved as `report (1).pdf` and the existing file is unchanged
 
