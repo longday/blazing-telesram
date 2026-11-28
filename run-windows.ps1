@@ -14,5 +14,10 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:BT_RUNTIME_DIR = Join-Path $PSScriptRoot '.runtime'
 New-Item -ItemType Directory -Force -Path $env:BT_RUNTIME_DIR | Out-Null
 
+# Owner-only access (the equivalent of mode 700): drop inherited ACEs, grant the current user's SID only.
+$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $env:BT_RUNTIME_DIR /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 cargo run --locked --release -p blazing-telesram @args
 exit $LASTEXITCODE
