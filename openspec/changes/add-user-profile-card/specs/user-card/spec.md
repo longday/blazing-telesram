@@ -7,7 +7,7 @@ Lets the user see who another person is: a read-only card with the name, avatar 
 ## ADDED Requirements
 
 ### Requirement: Open the card from a person
-The client SHALL open the card of a person other than the current user when the user clicks that person's avatar or author name on a message in a group chat's timeline, the avatar or name part of the person's row in the chat info panel, or the avatar in the header of a private chat whose chat list entry names that person as the partner. The rest of the private chat header SHALL keep opening the info panel. A click that opens the card SHALL cause no other action.
+The client SHALL open the card of a person when the user clicks that person's avatar or author name on a message in a group chat's timeline, the avatar or name part of the person's row in the chat info panel, or the avatar in the header of a private chat whose chat list entry names that person as the partner. A click that opens the card SHALL cause no other action, and in message selection mode a click on a message's avatar or author name SHALL toggle the message and open no card.
 
 #### Scenario: Timeline avatar
 - **WHEN** the user clicks the avatar next to a message of another person in a group chat
@@ -16,6 +16,11 @@ The client SHALL open the card of a person other than the current user when the 
 #### Scenario: Timeline author name
 - **WHEN** the user clicks the author name above the first message of a run in a group chat
 - **THEN** the card of that author opens, and the message is not selected or otherwise acted on
+
+#### Scenario: Message selection mode
+- **GIVEN** the message selection mode of `add-text-selection-and-quotes` is on
+- **WHEN** the user clicks the avatar or the author name of a message
+- **THEN** the message is toggled as by any click on its row and no card opens
 
 #### Scenario: Member row
 - **WHEN** the user clicks the avatar or the name in a person's row of the info panel
@@ -134,12 +139,22 @@ The card SHALL open at once, show a loading state for the details while they are
 - **THEN** the card says the person was not found, with the name and avatar from the opening place and a retry action
 
 ### Requirement: No stale details
-Details from an earlier opening SHALL never be shown as current: each opening reads the server anew, and an answer that belongs to another person or to an earlier opening is dropped.
+Details from an earlier opening or an earlier read SHALL never be shown as current: each opening and each retry reads the server anew, and an answer that belongs to another person or to a read that was superseded is dropped.
 
 #### Scenario: Reopened card starts clean
 - **GIVEN** the user has closed the card of a person
 - **WHEN** the user opens the card of the same person again
 - **THEN** the card shows the loading state first and shows only details of the new read
+
+#### Scenario: Reopened before the first request completes
+- **GIVEN** the user opened the card of person A, closed it and opened it again before A's first read was answered
+- **WHEN** the first read's answer arrives, and then the second's
+- **THEN** the first answer is not shown, a second read was sent, and the card shows the second answer
+
+#### Scenario: Connection returns while loading
+- **GIVEN** the card is loading and the connection drops and comes back
+- **WHEN** an answer to the read sent before the drop arrives
+- **THEN** it is not shown and the card asks again, showing only the new answer
 
 #### Scenario: Another card while one is loading
 - **GIVEN** the card of person A is loading
@@ -179,6 +194,11 @@ Once the details have loaded, the card SHALL offer «Написать» for ever
 - **WHEN** the user chooses «Написать»
 - **THEN** the card closes and the chat stays open
 
+#### Scenario: Person outside the dialog's known people
+- **GIVEN** the card was opened from the timeline of a group chat, the info panel is closed, and the account has no private chat with that person, who is therefore in no list of the new chat dialog
+- **WHEN** the user chooses «Написать»
+- **THEN** the card closes and the confirmation dialog opens with that person chosen, named as on the card, and nothing is sent until the user confirms there
+
 ### Requirement: Closing the card
 The card SHALL close with its «Закрыть» action and with Escape, SHALL close when the session is no longer active, and SHALL block the chat underneath like the own profile view does.
 
@@ -196,15 +216,20 @@ The card SHALL close with its «Закрыть» action and with Escape, SHALL c
 - **THEN** a click behind it reaches nothing, and no second card, profile view or dialog opens over it
 
 ### Requirement: Privacy of the card
-The client SHALL keep a person's card details in memory only, for the card on screen: not in the offline cache, not in any table that outlives the card, and forgotten when the card closes, the session ends or the account is switched. No name, email, id, status text, position, department or clipboard text SHALL be written to the log; only counts and outcomes.
+The client SHALL keep a person's card details in memory only, for the card on screen: not in the offline cache, not in any table that outlives the card, and forgotten when the card closes, the session ends or the account is switched. No name, email, id, status text, position, department or clipboard text SHALL be written to the log at `debug` level or above, only counts and outcomes.
 
 #### Scenario: Nothing is stored
 - **WHEN** a card has been opened and closed
 - **THEN** the offline cache holds nothing from it and a later opening asks the server again
 
 #### Scenario: Log content
-- **WHEN** a card loads, fails or is copied from with debug logging on
+- **WHEN** a card loads, fails or is copied from with `debug` logging on
 - **THEN** the log lines carry at most a result and a count, never a person's data
+
+#### Scenario: Trace level is not covered
+- **GIVEN** the developer enabled the request layer's `trace` level, which records raw reply bodies of every read
+- **WHEN** a card loads
+- **THEN** the card's replies are logged there as for any other read, and this capability changes nothing about that level
 
 ### Requirement: Viewing changes nothing
 Opening a card SHALL send only read requests from the client's closed read set; it SHALL NOT change server state, send a presence or heartbeat message, or send any write.
