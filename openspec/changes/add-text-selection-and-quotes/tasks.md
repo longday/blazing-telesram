@@ -192,7 +192,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: toggle on and off, range over a gap of ineligible messages, range in either direction, select all skipping pending and deleted, `all_deletable` with one foreign message, `extract_messages` for one message (bare), two (headers), a voice (skipped) and a file (its name).
   - Done when: these tests exist.
 
-- [ ] 3.2 Count label (D11)
+- [x] 3.2 Count label (D11)
   - Owns: `crates/desktop/src/format.rs`.
   - Depends on: nothing.
   - Do: `messages_count(n)` for «Удалить N сообщений?» with the Russian plural (1 сообщение, 2-4 сообщения, 5-20 сообщений, 21 сообщение, 111-114 сообщений).
