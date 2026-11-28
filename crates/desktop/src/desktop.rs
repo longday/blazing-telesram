@@ -1,6 +1,7 @@
 //! Root view: chat list on the left, timeline and composer on the right.
 
 mod composer;
+mod selecting;
 
 use crate::alerts::Alerts;
 use crate::format::{Clock, chat_time, log_time, one_line};
@@ -17,7 +18,7 @@ use crate::store::{
     SEARCH_MIN_CHARS, SearchStatus, SessionState, StoreEvent, TimelineChange,
 };
 use crate::theme::*;
-use crate::timeline::{self, RowBounds, RowContext};
+use crate::timeline::{self, RowBounds, RowContext, TextLayouts};
 use crate::viewer::{self, Viewer};
 use crate::widgets::{avatar, button};
 use bt_chat_core::model::{
@@ -26,12 +27,22 @@ use bt_chat_core::model::{
 };
 use composer::{Compose, MessageMenu, Toast};
 use gpui::{prelude::*, *};
+pub(crate) use selecting::PickState;
 use std::ops::Range;
 use std::time::Duration;
 
 actions!(
     bt,
-    [Search, Quit, ToggleLog, Dismiss, ViewerPrev, ViewerNext]
+    [
+        Search,
+        Quit,
+        ToggleLog,
+        Dismiss,
+        ViewerPrev,
+        ViewerNext,
+        CopySelection,
+        SelectAllText
+    ]
 );
 
 /// How often an open log view looks for new records.
@@ -111,6 +122,14 @@ pub struct Desktop {
     new_chat: Option<NewChat>,
     pub(crate) menu: AccountMenu,
     compose: Compose,
+    /// The text selection of the open chat (D2) and the drag in progress.
+    picking: Entity<PickState>,
+    /// The text layouts painted in the latest frame (D3), for mapping the pointer of a drag to a caret.
+    texts: TextLayouts,
+    /// Where the pointer of the drag in progress was last seen, for the autoscroll timer.
+    drag_pointer: Option<Point<Pixels>>,
+    /// The autoscroll timer; dropped when the drag ends.
+    autoscroll: Option<Task<()>>,
     message_menu: Option<MessageMenu>,
     reactors_popover: Option<ReactorsPopover>,
     delete_pending: Option<(ChatId, MessageTs)>,
@@ -152,6 +171,8 @@ impl Desktop {
                 this.sync_open(window, cx);
                 if this.open.as_ref().map(|o| &o.chat) != before.as_ref() {
                     this.player.update(cx, |player, cx| player.stop(cx));
+                    this.clear_selection(cx);
+                    this.texts.borrow_mut().clear();
                 }
                 this.sync_viewer(cx);
                 this.sync_info();
@@ -169,7 +190,10 @@ impl Desktop {
                         this.stop_gone_voice(chat, change, cx);
                     }
                     StoreEvent::Drafts => this.restore_late_draft(cx),
-                    StoreEvent::Account => this.discard_composer(cx),
+                    StoreEvent::Account => {
+                        this.discard_composer(cx);
+                        this.clear_selection(cx);
+                    }
                     StoreEvent::Connection => {
                         this.resume_search(cx);
                         this.resume_reads(cx);
@@ -190,6 +214,7 @@ impl Desktop {
         // Keystrokes with nothing focused would skip this view's key context.
         let focus = cx.focus_handle();
         window.focus(&focus);
+        let picking = cx.new(|_| PickState::default());
         Self {
             store,
             clock,
@@ -207,6 +232,10 @@ impl Desktop {
             new_chat: None,
             menu: AccountMenu::Closed,
             compose,
+            picking,
+            texts: Default::default(),
+            drag_pointer: None,
+            autoscroll: None,
             message_menu: None,
             reactors_popover: None,
             delete_pending: None,
@@ -1533,17 +1562,89 @@ impl Desktop {
                 chat: selected.clone(),
                 clock: self.clock,
                 rows,
+                texts: self.texts.clone(),
+                picking: self.picking.clone(),
             };
             let probe_list = list.clone();
             let (probe_store, probe_chat, probe_desktop) =
                 (self.store.clone(), selected.clone(), cx.weak_entity());
+            let (clear_texts, texts, picking, capture) = (
+                self.texts.clone(),
+                self.texts.clone(),
+                self.picking.clone(),
+                cx.weak_entity(),
+            );
             div()
                 .debug_selector(|| "timeline".into())
                 .relative()
                 .size_full()
+                // A click on the timeline that no text took clears the selection and leaves focus alone.
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                        this.clear_selection(cx);
+                    }),
+                )
+                // Before the list: the layouts of the previous frame go, the rows of this one add theirs.
+                .child(
+                    canvas(
+                        move |_, _, _| clear_texts.borrow_mut().clear(),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_0(),
+                )
                 .child(
                     gpui::list(list, move |ix, _, cx| timeline::message_row(&ctx, ix, cx))
                         .size_full(),
+                )
+                // After the list: while a drag is on, a move or the release anywhere in the window, also
+                // outside the list and the window, reaches the selection (element handlers only see
+                // what is under the pointer). Registered on every frame because the release of a quick
+                // click arrives before the next frame; the drag is checked inside.
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, cx| {
+                            if picking.read(cx).drag.is_some() {
+                                window.set_window_cursor_style(CursorStyle::IBeam);
+                            }
+                            window.on_mouse_event({
+                                let (picking, capture, texts) =
+                                    (picking.clone(), capture.clone(), texts.clone());
+                                move |event: &MouseMoveEvent, phase, _, cx| {
+                                    if phase == DispatchPhase::Bubble
+                                        && picking.read(cx).drag.is_some()
+                                    {
+                                        capture
+                                            .update(cx, |this, cx| {
+                                                let registry = texts.borrow();
+                                                this.drag_to(
+                                                    event.position,
+                                                    &registry.texts,
+                                                    &registry.rows,
+                                                    cx,
+                                                )
+                                            })
+                                            .ok();
+                                    }
+                                }
+                            });
+                            window.on_mouse_event({
+                                let (picking, capture) = (picking.clone(), capture.clone());
+                                move |event: &MouseUpEvent, phase, _, cx| {
+                                    if phase == DispatchPhase::Bubble
+                                        && event.button == MouseButton::Left
+                                        && picking.read(cx).drag.is_some()
+                                    {
+                                        capture.update(cx, |this, cx| this.drag_end(cx)).ok();
+                                    }
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
                 )
                 // Runs after the list is laid out: asks for older history when the top is in view.
                 .child(
@@ -1764,6 +1865,13 @@ fn preview_view(preview: Preview, tag: &str) -> Div {
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let session = self.store.read(cx).session();
+        // A selection must not outlive what it was made on: an overlay covering the chat, a sign-out,
+        // or an edit of its text (D8). The rows below read the state after this.
+        if self.blocked(cx) {
+            self.drop_selection(cx);
+        } else {
+            self.validate_selection(cx);
+        }
         if self.blocked(cx) != self.covered {
             cx.defer_in(window, |this, window, cx| this.place_focus(window, cx));
         }
@@ -1802,6 +1910,12 @@ impl Render for Desktop {
             .on_action(cx.listener(|this, _: &Dismiss, _, cx| this.dismiss(cx)))
             .on_action(cx.listener(|this, _: &ViewerPrev, _, cx| this.step_viewer(-1, cx)))
             .on_action(cx.listener(|this, _: &ViewerNext, _, cx| this.step_viewer(1, cx)))
+            .on_action(cx.listener(|this, _: &CopySelection, _, cx| this.copy_selection(cx)))
+            .on_action(cx.listener(|this, _: &SelectAllText, _, cx| {
+                if !this.blocked(cx) {
+                    this.select_all_text(cx);
+                }
+            }))
             .child(sidebar)
             .child(pane)
             .children(info)
