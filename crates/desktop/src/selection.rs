@@ -416,7 +416,10 @@ impl MessageSet {
         let before = self.marked.len();
         self.marked
             .retain(|ts| index_of(messages, *ts).is_some_and(|ix| eligible(&messages[ix])));
-        if self.last.is_some_and(|last| !self.contains(last)) {
+        if self
+            .last
+            .is_some_and(|last| !index_of(messages, last).is_some_and(|ix| eligible(&messages[ix])))
+        {
             self.last = None;
         }
         self.marked.len() != before
@@ -1116,6 +1119,24 @@ mod tests {
         let after = vec![text(1, "a"), deleted(2)];
         assert!(set.prune(&after));
         assert_eq!(marked(&set), vec![1]);
+    }
+
+    #[test]
+    fn the_anchor_survives_an_uncheck_and_a_prune_but_not_its_message() {
+        let m = vec![text(1, "a"), text(2, "b"), text(3, "c"), text(4, "d")];
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        set.toggle(&m, 2);
+        set.toggle(&m, 2);
+        assert!(!set.prune(&m), "nothing to drop: 2 is unchecked, not gone");
+        assert!(set.extend_to(&m, 4));
+        assert_eq!(marked(&set), vec![1, 2, 3, 4], "from the unchecked 2");
+
+        let mut set = MessageSet::new(&m, 1).unwrap();
+        set.toggle(&m, 3);
+        let after = vec![text(1, "a"), text(2, "b"), deleted(3), text(4, "d")];
+        assert!(set.prune(&after));
+        assert!(set.extend_to(&after, 4));
+        assert_eq!(marked(&set), vec![1, 4], "a deleted anchor is gone");
     }
 
     #[test]

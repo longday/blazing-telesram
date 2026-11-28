@@ -1584,6 +1584,23 @@ mod tests {
     }
 
     #[test]
+    fn shift_ranges_from_a_message_that_was_unchecked_even_after_a_validate() {
+        let m = chat();
+        let mut state = PickState::default();
+        state.enter(&m, 1);
+        state.toggle(&m, 2, false);
+        state.toggle(&m, 2, false);
+        assert_eq!(marked(&state, &m), Some(vec![1]));
+        assert!(!state.validate(&m), "a render between the clicks");
+        assert!(state.toggle(&m, 4, true));
+        assert_eq!(
+            marked(&state, &m),
+            Some(vec![1, 2, 3, 4]),
+            "the range starts at the unchecked message"
+        );
+    }
+
+    #[test]
     fn text_clicks_are_ignored_in_the_mode() {
         let m = chat();
         let mut state = PickState::default();
