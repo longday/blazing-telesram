@@ -15,6 +15,18 @@ Blazing Telesram (БТ) is a native Rust + GPUI desktop client for Yandex Telemo
 - Offline cache: the last state of chats and history is visible without a network.
 - Diagnostic log: terminal, in-app log window and JSON Lines files.
 
+## Screenshots
+
+Chat names, people's names, message texts and photo avatars are pixelated; the interface itself is untouched.
+
+![Chat list and an open chat with video cards](docs/screenshots/chat-list.png)
+
+![Voice message player](docs/screenshots/voice-message.png)
+
+![Chat info panel with the member list](docs/screenshots/chat-info.png)
+
+![Profile dialog](docs/screenshots/profile.png)
+
 ## Run
 
 The app is built from source; there are no automatic builds or ready packages yet (see [TODO](#todo)). You need a Rust development environment: [rustup](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml` and installed by the scripts.
