@@ -153,6 +153,8 @@ struct VideoOpen {
     name: String,
     /// `Loading` or `Failed`.
     phase: VoicePhase,
+    /// The running transfer was started by someone else (a joined one), not by this video.
+    joined: bool,
     /// A start that waits for the confirmation of a cancel in flight.
     restart: bool,
 }
@@ -555,6 +557,7 @@ impl Player {
         let video = VideoOpen {
             name: name.to_owned(),
             phase: VoicePhase::Loading,
+            joined: false,
             restart: cancel_out,
         };
         self.videos.insert(playback.clone(), video);
@@ -573,11 +576,21 @@ impl Player {
         allowed
     }
 
-    /// Asks the store for the playback copy of a loading video under its own name.
+    /// Asks the store for the playback copy of a loading video under its own name. A transfer of
+    /// the same file that is already running (a voice message of the same `Id2`, named otherwise)
+    /// is joined by the store, whatever name it was asked under: `joined` remembers that, because
+    /// its result may fail the whitelist without the video's own name being at fault.
     fn request_video(&mut self, playback: &MediaRef, cx: &mut Context<Self>) {
         let Some(name) = self.videos.get(playback).map(|v| v.name.clone()) else {
             return;
         };
+        let running = matches!(
+            self.store.read(cx).download_state(playback),
+            Some(DownloadState::Running { .. })
+        );
+        if let Some(video) = self.videos.get_mut(playback) {
+            video.joined = running;
+        }
         self.store
             .update(cx, |s, cx| s.download(playback.clone(), Some(name), cx));
         self.settle_video(playback, cx);
@@ -590,6 +603,13 @@ impl Player {
         }
         match self.store.read(cx).download_state(playback).cloned() {
             Some(DownloadState::Saved(path)) => {
+                let joined = self.videos.get(playback).is_some_and(|v| v.joined);
+                if joined && !is_video_path(&path) {
+                    // Another message's copy of the same file, under its name: not ours to open.
+                    // The store starts a new transfer even when the state is `Saved`, so the
+                    // video is fetched under its own name now (and checked again when it lands).
+                    return self.request_video(playback, cx);
+                }
                 let opened = self.emit_open(path, cx);
                 self.finish_video(playback, (!opened).then_some(PlayFailure::Unsupported), cx);
             }
@@ -1776,6 +1796,55 @@ mod tests {
         rig.open(cx, "v2", "y.mp4");
         rig.player.update(cx, |p, cx| p.stop(cx));
         assert_eq!(rig.video(cx, "v2"), VoicePhase::Loading);
+    }
+
+    #[gpui::test]
+    fn a_joined_voice_transfer_that_fails_the_check_is_followed_by_the_videos_own(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::new(cx);
+        // A voice of the same file is loading under `v.ogg`; the store joins the video to it.
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.commands(), [fetch("f1", "v.ogg")]);
+        rig.open(cx, "f1", "clip.mp4");
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [], "the running transfer is joined");
+
+        // The voice's copy lands: the voice plays it, the video does not open it and asks again.
+        let ogg = rig.saved(cx, "f1");
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Playing);
+        assert_eq!(rig.fake.take_calls(), [Call::Open(ogg), Call::Play]);
+        assert_eq!(rig.events(), []);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("f1", "clip.mp4")]);
+
+        let mp4 = rig.saved_as(cx, "f1", "hash.mp4");
+        assert_eq!(rig.events(), [opens(&mp4)]);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), []);
+        assert_eq!(
+            rig.phase(cx, 1),
+            VoicePhase::Playing,
+            "the voice is left alone"
+        );
+    }
+
+    #[gpui::test]
+    fn a_joined_transfer_that_passes_the_check_opens_without_a_second_fetch(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::new(cx);
+        // A voice message whose file is named like a video starts the transfer.
+        let file = original("f1");
+        rig.player
+            .update(cx, |p, cx| p.toggle_voice(key(1), &file, Some("a.mov"), cx));
+        cx.run_until_parked();
+        assert_eq!(rig.commands(), [fetch("f1", "a.mov")]);
+        rig.open(cx, "f1", "clip.mp4");
+        let path = rig.saved_as(cx, "f1", "hash.mov");
+        assert_eq!(rig.events(), [opens(&path)]);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), [], "no second fetch");
     }
 
     #[test]
