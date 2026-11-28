@@ -122,7 +122,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: Escape order (selection before info panel before reply cancel); the menu label and clipboard for a selection inside the message, across messages (the whole selection), and for a message outside it (the selection is cleared and the label is «Скопировать текст»); the existing menu tests pass unchanged.
   - Done when: these tests exist.
 
-- [ ] 1.8 Tests for the unit
+- [x] 1.8 Tests for the unit
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 1.3-1.7.
   - Do: a section `// ---- text selection (TS 1.8) ----`; build `MouseDownEvent { click_count }` by hand where `simulate_mouse_down` cannot set it (0.1 (f)).
