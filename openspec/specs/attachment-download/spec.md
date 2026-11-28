@@ -6,7 +6,7 @@ Lets the user save the original of a message's file or image to disk by an expli
 ## Requirements
 
 ### Requirement: Explicit download action
-A file card SHALL offer a Download action, and the image viewer SHALL offer one for the image it shows. A download SHALL start only when the user chooses the action. Opening a chat, loading or scrolling history, receiving a message and opening the viewer SHALL NOT download any original; the client SHALL keep fetching only avatars and image previews on its own. Downloading SHALL NOT change anything on the server.
+A file card, a voice message, a video card and the image viewer SHALL each offer a Download action for its original, and a download SHALL start only when the user chooses it. Opening a chat, loading or scrolling history, receiving a message and opening the viewer SHALL NOT download any original; the client SHALL fetch on its own only avatars, image previews and a playback copy on a play choice (`media-playback`). Downloading SHALL NOT change anything on the server.
 
 #### Scenario: Download a file
 - **WHEN** the user chooses Download on a file card
@@ -20,6 +20,14 @@ A file card SHALL offer a Download action, and the image viewer SHALL offer one 
 #### Scenario: Nothing without a click
 - **WHEN** a chat with file and image messages is opened and scrolled through
 - **THEN** no original file is requested from the server and nothing is written to the Downloads folder
+
+#### Scenario: Download a voice message or a video
+- **WHEN** the user chooses Download on a voice message or on a video card
+- **THEN** the original file is saved to the Downloads folder under its own name by the same rules as any file, with the same progress, cancel, retry and result, and playback is not started
+
+#### Scenario: Nothing without a click for voice and video
+- **WHEN** a chat with voice messages and videos is opened and scrolled through
+- **THEN** no original is requested, no playback copy is fetched and nothing is written to the Downloads folder
 
 ### Requirement: Destination and file name
 A download SHALL be saved in the user's Downloads folder under the attachment's own name. The name SHALL be reduced to a single file name: path separators, control characters and leading dots SHALL NOT survive, an over-long name SHALL be shortened keeping its extension, and a missing or empty name SHALL be replaced by a generic one. The client SHALL NOT overwrite an existing file: when the name is taken it SHALL add a numeric suffix before the extension.
@@ -119,7 +127,7 @@ Without a connection the Download action SHALL be shown as unavailable instead o
 - **THEN** the download starts
 
 ### Requirement: Authenticated and private transfer
-A download SHALL use the signed-in account's session, sending the session cookie only to the host it belongs to and never to a host the server redirects to. Cookie values, tokens, URL query strings, attachment names and saved paths SHALL NOT appear in log output above `trace`, and the client SHALL NOT open, execute or index a saved file; the one thing it does with a saved file after the transfer is to select it in Finder when the user chooses «Показать в Finder».
+A download SHALL use the signed-in account's session, sending the session cookie only to the host it belongs to, never to a redirect target. Cookie values, tokens, URL query strings, attachment names and saved paths SHALL NOT appear in log output above `trace`. The client SHALL NOT open, execute or index a saved file, and only selects it in Finder on «Показать в Finder»; it opens only a video playback copy, in the system player, on play (`media-playback`).
 
 #### Scenario: Redirect to another host
 - **WHEN** the server answers a download with a redirect to a different host
@@ -134,6 +142,15 @@ A download SHALL use the signed-in account's session, sending the session cookie
 - **GIVEN** `BT_LOG=debug`
 - **WHEN** the user chooses «Показать в Finder»
 - **THEN** the log contains no file name or path of the saved file
+
+#### Scenario: A downloaded video is never opened
+- **GIVEN** a video was downloaded to the Downloads folder
+- **WHEN** the user chooses play on its card
+- **THEN** a separate playback copy is opened and the downloaded file is neither opened nor changed
+
+#### Scenario: Playback fetch redirected
+- **WHEN** the server answers the fetch of a playback copy with a redirect to a different host
+- **THEN** the client follows it without sending the session cookie to that host
 
 ### Requirement: Reveal in Finder
 A card whose file or image was saved by a download of the current session, and the image viewer for such an image, SHALL offer «Показать в Finder», which selects the saved file in a Finder window without opening it. The action SHALL be local (no request, no server change, no connection needed) and SHALL NOT be offered otherwise. If the saved file no longer exists, choosing it SHALL reveal nothing and the card SHALL offer Download again.

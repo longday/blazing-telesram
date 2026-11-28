@@ -39,7 +39,7 @@ Each message SHALL show its author (in groups), text as received with line break
 - **THEN** it shows a placeholder naming the type instead of being hidden
 
 ### Requirement: Attachments preview
-Image attachments SHALL show a thumbnail; a message with several images (a gallery) SHALL show all of them as a grid of thumbnails; other files SHALL show a card with name and size and a Download action (see `attachment-download`). Previews SHALL load without a click; originals SHALL NOT.
+Image attachments SHALL show a thumbnail; a message with several images (a gallery) SHALL show all of them as a grid of thumbnails; a voice message SHALL show a player and a video a video card (see `media-playback`); other files SHALL show a card with name and size and a Download action (see `attachment-download`). Previews SHALL load without a click; originals and playback audio or video SHALL NOT.
 
 #### Scenario: Image message
 - **WHEN** a message contains an image
@@ -56,6 +56,19 @@ Image attachments SHALL show a thumbnail; a message with several images (a galle
 #### Scenario: Preview not loaded yet
 - **WHEN** the preview of an image or grid cell has not arrived
 - **THEN** a placeholder of the same size is shown, so the row height does not change when the preview arrives
+
+#### Scenario: Voice message
+- **WHEN** a message contains a voice message
+- **THEN** a player with a play control, a track and the duration is shown instead of an unsupported-type placeholder, and nothing is fetched for it
+
+#### Scenario: Video message
+- **WHEN** a message contains a video attachment
+- **THEN** a video card with a play control, the name, the size and a Download action is shown, with the duration when the server states it, and nothing is fetched for it
+
+#### Scenario: Voice message cached by an earlier version
+- **GIVEN** the cache holds a voice message stored as an unsupported type
+- **WHEN** the chat is opened
+- **THEN** the message shows the placeholder without an error until the server's copy of that part of the history replaces it
 
 ### Requirement: Image viewer
 Choosing an image or a grid cell SHALL open a viewer over the chat that shows that image large, with the position among the message's images, previous and next controls when the message has more than one, and a Download action. Left and Right arrow keys SHALL move between the message's images and Escape or the close control SHALL close the viewer. The viewer SHALL cover the chat while open, so no message is marked as read and the composer ignores input until it closes.

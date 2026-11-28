@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Explicit download action
-A file card SHALL offer a Download action, a voice message and a video card SHALL offer one for their original, and the image viewer SHALL offer one for the image it shows. A download SHALL start only when the user chooses the action. Opening a chat, loading or scrolling history, receiving a message and opening the viewer SHALL NOT download any original; the client SHALL keep fetching only avatars and image previews on its own, plus a playback copy of a voice message or video when the user chooses its play control (`media-playback`). Downloading SHALL NOT change anything on the server.
+A file card, a voice message, a video card and the image viewer SHALL each offer a Download action for its original, and a download SHALL start only when the user chooses it. Opening a chat, loading or scrolling history, receiving a message and opening the viewer SHALL NOT download any original; the client SHALL fetch on its own only avatars, image previews and a playback copy on a play choice (`media-playback`). Downloading SHALL NOT change anything on the server.
 
 #### Scenario: Download a file
 - **WHEN** the user chooses Download on a file card
@@ -27,7 +27,7 @@ A file card SHALL offer a Download action, a voice message and a video card SHAL
 - **THEN** no original is requested, no playback copy is fetched and nothing is written to the Downloads folder
 
 ### Requirement: Authenticated and private transfer
-A download SHALL use the signed-in account's session, sending the session cookie only to the host it belongs to and never to a host the server redirects to. Cookie values, tokens, URL query strings, attachment names and saved paths SHALL NOT appear in log output above `trace`, and the client SHALL NOT open, execute or index a saved file; the one thing it does with a saved file after the transfer is to select it in Finder when the user chooses «Показать в Finder». The one thing the client opens is a playback copy (not a download) of a video with a recognised video extension, in the system player, when the user chooses play (`media-playback`).
+A download SHALL use the signed-in account's session, sending the session cookie only to the host it belongs to, never to a redirect target. Cookie values, tokens, URL query strings, attachment names and saved paths SHALL NOT appear in log output above `trace`. The client SHALL NOT open, execute or index a saved file, and only selects it in Finder on «Показать в Finder»; it opens only a video playback copy, in the system player, on play (`media-playback`).
 
 #### Scenario: Redirect to another host
 - **WHEN** the server answers a download with a redirect to a different host
