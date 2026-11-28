@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Three changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, no code started), **UC** `add-user-profile-card` (proposal merged, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Four changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, no code started), **UC** `add-user-profile-card` (proposal merged, no code started) and **XP** `add-cross-platform-support` (proposal on `propose/port`, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -236,6 +236,61 @@ File ownership (rule 1): `selection.rs` (1.1, then 2.2, then 3.1); `format.rs` (
 
 Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's approval; 0.7 closes; TS-A (1.1, 1.2, 1.4, then 1.3, 1.5, 1.6, 1.7, 1.8) can start as soon as 0.1 is done; TS-Q after TS-A and 0.7; TS-M after TS-Q (or before it); 4.1 per unit; 4.2 last live; 4.3 archive. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-text-selection-and-quotes --strict`.
 
+## add-cross-platform-support (XP)
+
+Proposal on `propose/port` (docs only: `openspec/changes/add-cross-platform-support/**` and this file; `openspec validate add-cross-platform-support --strict` valid). Goal: the client runs from source on Windows, macOS and Linux (`run-mac.sh`, `run-linux.sh`, `run-windows.ps1` come from another change set and only start `cargo run`). Inventory of every macOS-only place with `file:line`: `research.md` Part 1. Decisions (details in `design.md`): private storage through a new crate `crates/platform` (Windows by a protected DACL for the object's owner, checked in a normal and an elevated process); sign-in on Linux/Windows in a helper process (the same binary with `--sign-in-helper`), macOS keeps the in-process view; voice on Linux/Windows with `ogg` + `ropus` (the pure-Rust decoder measured in MP R5, with the pre-skip and end-granule rules) and `rodio`; shortcuts through `secondary-` (Ctrl off macOS), every `cmd-` in the tests migrated; an app-drawn title bar only where the compositor draws none; Linux/Windows notifications after NB-N, with `Platform.badge` made optional by XP-N 6.0; a badge on Windows only (no Linux badge: it needs packaging); a `pkg-config` preflight in `run-linux.sh` (8.5, after `docs/readme` merges).
+
+**Merge units** (tasks.md "Merge units"; integration branch **`integ/cross-platform`**, not created yet):
+
+- **XP-A** (storage and names, libraries only) = 1.1 to 1.7; merges first; its gate adds the cross-target check of the three libraries (Windows through `cargo-xwin`/mingw in `bt-vm`, Linux in the Linux VM).
+- **XP-D** (desktop neutral parts) = 2.1 to 2.6, after XP-A.
+- **XP-S** (sign-in helper) = 3.1 to 3.4, **XP-P** (voice) = 4.1, 4.2, **XP-W** (Linux window chrome) = 5.1: after XP-D, in parallel; after the last of them the desktop builds on Linux and Windows.
+- **XP-N** (notifications) = 6.0, 6.1, 6.2 and **XP-B** (Windows badge) = 7.1: after NB-N is on `main` (they use its `Notifier`, `alerts.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`); 6.0 first (`Platform.badge` becomes an `Option`, first consumer 6.1); optional by the user's answer to Q5.
+- Research 0.2 to 0.7 write only `research.md` (one writer at a time), 0.8 closes it; 8.x are docs, the final runs and the archive.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | open, **[needs-user]**: create the Linux VM `bt-vm-linux` and install the prerequisites | the user's go-ahead | `docs/vm.md` (new section) |
+| 0.2 | open, spike: the compile-error inventory on a scratch copy, Linux and Windows | 0.1 (Linux half) | `research.md` |
+| 0.3 | open, spike: the sign-in helper (Linux VM; Windows [needs-user]) | 0.1 | `research.md` |
+| 0.4 | open, spike, **[live]** reads only: Ogg Opus decode with `ogg` + `ropus` of re-fetched voice samples; `rodio` feature set | 0.1, a free live slot | `research.md` |
+| 0.5 | open, spike: GPUI window and decorations in the Linux VM | 0.1 | `research.md` |
+| 0.6 | open, spike, **[needs-user]**: the Windows ACL descriptor | a Windows machine | `research.md` |
+| 0.7 | open, spike: Linux and Windows notifications, the Windows overlay badge | 0.1; Windows [needs-user] | `research.md` |
+| 0.8 | open: close the research into `design.md` and `tasks.md` | 0.2 to 0.7 | `design.md`, `tasks.md`, `research.md`, specs |
+| 1.1 | open, XP-A: crate `bt-platform` (private dir/file, `is_owner_only`) | none | `crates/platform/**`, root `Cargo.toml`, `Cargo.lock` |
+| 1.2 | open, XP-A: `session.rs`, `runtime.rs` | 1.1 | `yandex-proto` `session.rs`, `runtime.rs`, `Cargo.toml` |
+| 1.3 | open, XP-A: `bt-probe.rs` two hunks | 1.1; the file free (NB 0.2, TS 0.5, UC 0.1) | `bin/bt-probe.rs` |
+| 1.4 | open, XP-A: chat-core `cache.rs`, `client.rs` hunks (production and every Unix-only test), the `PartialMode` choice at `client.rs:773` | 1.1, 1.5; `client.rs` free (NB-N 1.2, TS 2.1) | `cache.rs`, `client.rs`, `Cargo.toml` |
+| 1.5 | open, XP-A: `windows_safe_name`, `PartialMode::{Private, Ordinary}`, atomic final-name claim (no copy fallback) | 1.1 | chat-core `paths.rs` |
+| 1.6 | open, XP-A: `logging.rs` | 1.1 | `desktop/src/logging.rs`, `crates/desktop/Cargo.toml` (one line) |
+| 1.7 | open, XP-A: cross-target check of the libraries | 1.1 to 1.6, 0.2's tools | none |
+| 2.1 | open, XP-D: `keys.rs`, bindings (including TS 1.6's `secondary-c`/`secondary-a`), test keystrokes | none | `keys.rs`, `main.rs`, `input.rs`, `tests.rs` |
+| 2.2 | open, XP-D: Windows UTC offset | none; `format.rs` free (TS 1.2, 3.2) | `format.rs` |
+| 2.3 | open, XP-D: downloads dir, fitted bounds | 2.1, 1.6 | `main.rs`, `Cargo.toml`, `Cargo.lock` |
+| 2.4 | open, XP-D: per-platform reveal label | none | `viewer.rs`, `timeline.rs`, `tests.rs` |
+| 2.5 | open, XP-D: log font | none | `desktop.rs` (one hunk) |
+| 2.6 | open, XP-D: gating of the macOS crates, `dock`, `AlertsFactory` | 2.3 | `Cargo.toml`, `Cargo.lock`, `main.rs` |
+| 3.1 | open, XP-S: cookie types out of `login.rs` | 2.6 | `login.rs`, `login_cookies.rs`, `main.rs` |
+| 3.2 | open, XP-S: the helper and its protocol | 3.1, 0.3, 0.8 | `signin_helper.rs`, `signin_proto.rs`, `main.rs`, `Cargo.toml`, `Cargo.lock` |
+| 3.3 | open, XP-S: the app side and the waiting window | 3.2 | `signin_proc.rs`, `main.rs` |
+| 3.4 | open, XP-S: Linux VM run | 3.3, 0.1 | none |
+| 4.1 | open, XP-P: Ogg Opus decode, length, position | 0.4, 0.8, 2.6 | `audio_pcm.rs`, `Cargo.toml`, `Cargo.lock` |
+| 4.2 | open, XP-P: `rodio` adapter, registration, gating of `audio.rs` | 4.1 | `audio_pcm.rs`, `main.rs`, `Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md` |
+| 5.1 | open, XP-W: Linux title bar and resize edges | 0.5, 0.8, 2.5, 3.3 | `window_chrome.rs`, `desktop.rs`, `signin_proc.rs`, `main.rs` |
+| 6.0 | open, XP-N: `Platform.badge` becomes `Option<Box<dyn DockBadge>>` (macOS `Some`), `Alerts` serves a missing badge or notifier | NB-N merged | `alerts.rs`, `dock.rs`, `main.rs`, `tests.rs` |
+| 6.1 | open, XP-N: Linux notifier, registered as `Platform { badge: None, .. }` | 6.0, NB-N merged, 0.7 | `notifier_linux.rs`, `main.rs`, `Cargo.toml`, `Cargo.lock`, `THIRD_PARTY.md` |
+| 6.2 | open, XP-N, **[needs-user]** to verify: Windows notifier | 6.1, 0.7 | `notifier_windows.rs`, `main.rs` |
+| 7.1 | open, XP-B: Windows overlay badge, `DockBadge::set` gets the window; no Linux badge | 6.0, 6.2, 2.6, 0.7 | `alerts.rs`, `dock.rs`, `badge_windows.rs`, `main.rs`, `tests.rs`, `Cargo.toml` |
+| 8.1 | open: `docs/platforms.md`, `THIRD_PARTY.md` | 0.8 | `docs/platforms.md`, `THIRD_PARTY.md` |
+| 8.2 | open: final runs per unit (macOS, Linux VM, Windows cross-check) | the unit | none |
+| 8.3 | open, **[needs-user]**: hand checks on a real Windows and a real Linux desktop | XP-S, XP-P, XP-W, 8.1 | `research.md` |
+| 8.4 | open: this file, specs sync, archive | everything above, the NB archive | this file, archive |
+| 8.5 | open: preflight in `run-linux.sh` (`pkg-config` modules and the Vulkan loader/driver; install line, no cargo when missing; GPUI fails before any app handler, so the script is the owner) | `docs/readme` merged to `main`, 0.1, 0.5, 8.1 | `run-linux.sh` (one hunk) |
+
+File ownership (rule 1): see `tasks.md` "File ownership" (`main.rs` is serialised 2.1, 2.3, 2.6, 3.1, 3.2, 3.3, 4.2, 5.1, then 6.0 to 7.1, and against TS 1.1/1.6, NB-N 2.2/5.1). Overlaps: NB-N (`client.rs`, `alerts.rs`, `main.rs`, `Cargo.toml`, `Cargo.lock`, `desktop.rs`, `tests.rs`); TS (`main.rs`, `format.rs`, `timeline.rs`, `desktop.rs`, `tests.rs`, `client.rs`, `bt-probe.rs`; it already binds `secondary-c`/`secondary-a` and tests `Modifiers::secondary()`, so it needs no change; its bindings move into `keys.rs` when XP 2.1 lands after it); `add-user-profile-card` (proposal in review: `client.rs`, `bt-probe.rs`, `desktop.rs`, `main.rs`, `tests.rs`); the README/run-scripts agents (untouched except 8.5's one hunk of `run-linux.sh`, after `docs/readme` merges).
+
+Order: 0.2 Windows half and XP-A in parallel with 0.1 (user); 0.2 to 0.7, 0.8; XP-D; XP-S/XP-P/XP-W in parallel; XP-N/XP-B after NB-N; 8.2 per unit; 8.3 by the user; 8.4 last. Checks per unit: the macOS gate (fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-cross-platform-support --strict`) plus the cross-target and Linux checks of `tasks.md`.
 
 ## Ready now
 
@@ -246,6 +301,7 @@ Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's
 - **NB: nothing is startable without the user except the code.** NB 0.1 (VM scratch research), NB 0.2 (live reads) and the whole NB-B unit (1.1, 2.1, 3.1, 4.1, 6.1) can start at once; NB-N waits for NB-B and 0.4.
 - **UC: startable now without the user** once the proposal is merged: 0.3 (static) and **5.0** (`open_new_chat` takes the person; needs no research) at once; 0.1 once NB 0.2 has merged or by taking `bt-probe.rs` first; 0.2 in a free live slot after 0.1; everything else in UC waits for 0.4; UC-T also waits for TS-M (the selection mode of `add-text-selection-and-quotes`) to be on `main`.
 - **TS: TS-A can start as soon as 0.1 (VM scratch crate, no account) is done**; 0.2 and 0.5 start at once; 0.3 needs only a free live slot. TS-Q waits for TS-A and 0.7; TS-M for TS-Q.
+- **XP: only the research and XP-A are startable now.** 0.2 (Windows half, `bt-vm`) starts at once; 0.2 (Linux half) and 0.3 to 0.5 need the Linux VM (0.1, needs the user); XP-A (1.1 to 1.7) needs nothing but `bt-vm` and is independent of the UI; XP-D follows it; XP-N/XP-B wait for NB-N.
 
 ## Needs the user
 
@@ -255,4 +311,5 @@ Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's
 - **NB needs the user** for 7.2 (and the optional 0.3): a person other than the app account who sends incoming messages (or the main session's decision to use the web client of the second account, as PIN 0.2 and RL 8.2 did), a chat the user mutes in their own web session, and a live slot. Open design questions for the user: do muted chats count in the badge (default no), is the message text shown in the notification (default yes).
 - **UC needs no user** (reads only, no second person, no write approval). Decisions the owner may want to flip, all with a default in `proposal.md`: the whole private-chat header opening the card (default: avatar only), one position/department for people with several employments, email shown on the card (default yes, as in member lists).
 - **TS needs the user for 0.4, 0.6 and 4.2** (writes to the account): approval of the target, proposed as the private chat between the admin account and the app account with `BT_WRITE_ONLY_CHAT` set to it. Open design questions (defaults are written into the spec): cross-message text selection (default yes), copy format of several messages (headers per message), Cmd+A scope, the 200-character quote bound, selection-mode details (Cmd+click entry, bar replaces the composer, Delete only when every message is own), forward is out of scope.
+- **XP (`add-cross-platform-support`) needs the user**: (1) the go-ahead to create the Linux VM `bt-vm-linux` (0.1; `docs/vm.md` forbids agents to start or create VMs; the image is `ghcr.io/cirruslabs/ubuntu:latest`, no Linux VM exists today); (2) a real **Windows 10/11 x64 machine** for the hand checks 0.3(b), 0.6 (normal and elevated process), 0.7 and 8.3 (WebView2 sign-in, ACLs, audible voice, toast, task bar badge, Explorer) and a real Linux desktop (GNOME) for the audible and title-bar checks; (3) answers to `proposal.md` Q1 (a CI matrix is the cheapest Windows check, but the rule is "CI only on explicit request"), Q4 (no cookie-paste sign-in), Q5 (keep or cut the notification and Windows badge units XP-N/XP-B; there is no Linux badge). Live slot: only 0.4 (reads only) and the sign-in part of 8.3.
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, recorded in the archived `add-reaction-list/research.md`); PIN 0.1 is no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
