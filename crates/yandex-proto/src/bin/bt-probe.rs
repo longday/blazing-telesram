@@ -12,6 +12,7 @@
 //! the desktop app: set, it limits writes to the chat it names, and it refuses every creation.
 //! Command output goes to stdout; diagnostics go through `tracing` to stderr (filter: `BT_LOG`).
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, IsTerminal, Write};
 use std::path::Path;
@@ -37,7 +38,7 @@ use yandex_proto::write::{Committed, ReactionChange, ReplyRef, WriteRequest};
 use yandex_proto::xiva::{XivaEvent, XivaEvents};
 use yandex_proto::{Client, ClientConfig, MAX_CHAT_TITLE, ManageError, ProtoError};
 
-const USAGE: &str = "usage: bt-probe me | chats | history <chat> [--before <micros>] | listen [--watch <chat>]
+const USAGE: &str = "usage: bt-probe me | chats [--keys] | history <chat> [--before <micros>] | listen [--watch <chat>]
        bt-probe send-self <text> [--payload <id>] [--reply <micros>] [--chat <self chat>]
        bt-probe edit-self <micros> <text> [--reply <micros>] [--important] [--chat <self chat>]
        bt-probe delete-self <micros> [--chat <self chat>]
@@ -59,7 +60,8 @@ search is read-only: per entity it prints total/limit/page/pages and the raw ite
 react-self puts the reaction <code> (a positive integer, the web client's reaction type) on the self-chat message with that timestamp, or takes the account's reaction away with `remove`; it sends one write push and prints the same status line as the other *-self commands. history lists a row's reactions after its text: code x count, the version, the recent reactors (user:code)
 whoami, members and reactors are read-only and print the parsed reply (`{:#?}`) on stdout (guids and display names; the header line goes to stderr). members asks get_chat_members for the first page of 50 users and answers group chats only
 reactors is read-only (a socket list_reactions, so BT_WRITE_ONLY_CHAT does not apply): it prints one page of the users who reacted to the message with that timestamp in <chat>, in server order; --before <micros> asks for the page older than that cursor, --limit <n> (at least 1, default 30) sets the page size. It always sends Mode 0; there is no --mode
-chats prints `pinned=<micros>` after the unread count of a chat that has a pinned message (the message's timestamp); a chat without a pin prints nothing extra
+chats prints `muted` (after the unread count, before `pinned=`) for a muted chat and nothing for the others; it prints `pinned=<micros>` after that for a chat that has a pinned message (the message's timestamp); a chat without a pin prints nothing extra
+chats --keys prints, instead of the list, `entries=<n>` and then one `name<TAB>count<TAB>type=n,...` line per sorted top-level key of the raw chat entries, and the same under `ChatInfo entries=<n>` and `PrivateChatInfo entries=<n>` for the keys of those objects (count = entries that carry the key, type = the JSON value type); key names, counts and value types only, never a value, title or id
 edit-self rewrites the whole message: --important adds `IsImportant: true` to it (off by default, so the default frame is the plain edit's) for a message that is marked important, to check whether an edit without the flag clears it; it never marks a message by itself
 create-private opens (creating it when missing) the private chat with the user <guid> on the real account, once and never retried; without --confirm-create it prints the target and exits with code 2 without any request. Exit codes: 0 created, 1 not sent or rejected (nothing was created), 3 outcome unknown (the chat may exist: check the web client before repeating)
 create-chat creates a group chat named <title> with the listed participants (guids, not your own) on the real account, once and never retried; the payload is the web client's own (description empty, not a channel, is_public true), not yet confirmed against the server. Without --confirm-create it prints the title and participants it would send and exits with code 2 without any request; the title must be non-blank and at most 250 characters, every guid distinct. Same exit codes as create-private; a created group whose reply lists participants the server could not add still exits 0 and names them";
@@ -90,7 +92,10 @@ fn main() -> ExitCode {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match args.as_slice() {
         ["me"] => block_on(me()),
-        ["chats"] => block_on(chats()),
+        ["chats", flags @ ..] => match chats_mode(flags) {
+            Some(mode) => block_on(chats(mode)),
+            None => return usage(),
+        },
         ["history", chat] => block_on(history(chat, None)),
         ["history", chat, "--before", before] => match before.parse() {
             Ok(before) => block_on(history(chat, Some(before))),
@@ -563,12 +568,134 @@ async fn connect_silent(
     Ok((client, events, subscription_id))
 }
 
-async fn chats() -> Result<(), Failure> {
+async fn chats(mode: ChatsMode) -> Result<(), Failure> {
     let (client, _events) = connect(&load_session()?, ClientConfig::production()).await?;
-    for chat in client.chat_list().await.map_err(fail)? {
-        println!("{}", chat_line(&chat));
+    let list = client.chat_list().await.map_err(fail)?;
+    match mode {
+        ChatsMode::List => {
+            for chat in &list {
+                println!("{}", chat_line(chat));
+            }
+        }
+        ChatsMode::Keys => {
+            for line in key_report(&key_counts(&list)) {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ChatsMode {
+    List,
+    Keys,
+}
+
+/// The arguments after `chats`: none (the list) or the single flag `--keys`.
+fn chats_mode(flags: &[&str]) -> Option<ChatsMode> {
+    match flags {
+        [] => Some(ChatsMode::List),
+        ["--keys"] => Some(ChatsMode::Keys),
+        _ => None,
+    }
+}
+
+/// How many entries carry one key, and how many of them per JSON value type (`null`, `bool`,
+/// `number`, `string`, `array`, `object`). The values themselves are never kept.
+#[derive(Debug, Default)]
+struct KeyCount {
+    total: usize,
+    types: BTreeMap<&'static str, usize>,
+}
+
+/// The key counts of the objects found at one level.
+#[derive(Debug, Default)]
+struct LevelCounts {
+    entries: usize,
+    keys: BTreeMap<String, KeyCount>,
+}
+
+impl LevelCounts {
+    fn add(&mut self, object: &serde_json::Map<String, serde_json::Value>) {
+        self.entries += 1;
+        for (name, value) in object {
+            let count = self.keys.entry(name.clone()).or_default();
+            count.total += 1;
+            *count.types.entry(json_type(value)).or_default() += 1;
+        }
+    }
+}
+
+/// Key-name counts over the raw chat entries: the top level (`entries` counts every entry, `top`
+/// the keys of those that are objects) and the objects under `ChatInfo` and `PrivateChatInfo`
+/// (only entries that carry an object there).
+#[derive(Debug, Default)]
+struct ChatKeyCounts {
+    entries: usize,
+    top: LevelCounts,
+    chat_info: LevelCounts,
+    private_info: LevelCounts,
+}
+
+fn json_type(value: &serde_json::Value) -> &'static str {
+    use serde_json::Value;
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Counts the keys of `WireChat.raw` (the entry without `Messages`). An entry that is not an
+/// object counts as an entry with no keys.
+fn key_counts(chats: &[WireChat]) -> ChatKeyCounts {
+    let mut counts = ChatKeyCounts::default();
+    for chat in chats {
+        counts.entries += 1;
+        let Some(object) = chat.raw.as_object() else {
+            continue;
+        };
+        counts.top.add(object);
+        if let Some(info) = object
+            .get("ChatInfo")
+            .and_then(serde_json::Value::as_object)
+        {
+            counts.chat_info.add(info);
+        }
+        if let Some(info) = object
+            .get("PrivateChatInfo")
+            .and_then(serde_json::Value::as_object)
+        {
+            counts.private_info.add(info);
+        }
+    }
+    counts
+}
+
+fn key_lines(keys: &BTreeMap<String, KeyCount>) -> impl Iterator<Item = String> + '_ {
+    keys.iter().map(|(name, key)| {
+        let types: Vec<String> = key.types.iter().map(|(t, n)| format!("{t}={n}")).collect();
+        format!("{name}\t{}\t{}", key.total, types.join(","))
+    })
+}
+
+/// The `chats --keys` output: the entry count, then one `name<TAB>count<TAB>type=n,...` line per
+/// sorted key, for the top level and for the objects under `ChatInfo` and `PrivateChatInfo`.
+fn key_report(counts: &ChatKeyCounts) -> Vec<String> {
+    let mut lines = vec![format!("entries={}", counts.entries)];
+    lines.extend(key_lines(&counts.top.keys));
+    for (label, level) in [
+        ("ChatInfo", &counts.chat_info),
+        ("PrivateChatInfo", &counts.private_info),
+    ] {
+        lines.push(format!("{label} entries={}", level.entries));
+        lines.extend(key_lines(&level.keys));
+    }
+    lines
 }
 
 /// One `chats` row: id, kind, title, unread (with the muted flag and, for a chat that has one,
@@ -1689,6 +1816,117 @@ mod tests {
             chat_line(&muted),
             "c1\tGroup\tTeam\tunread=2 muted pinned=7\tts=500\t"
         );
+    }
+
+    fn chat_with_raw(raw: serde_json::Value) -> WireChat {
+        let mut chat = chat(None, None);
+        chat.raw = raw;
+        chat
+    }
+
+    #[test]
+    fn a_muted_chat_prints_muted_after_the_unread_count_and_a_plain_one_prints_nothing() {
+        let mut muted = chat(None, None);
+        muted.muted = true;
+        let list = [chat(None, None), muted];
+        let lines: Vec<String> = list.iter().map(chat_line).collect();
+        assert_eq!(lines[0], "c1\tGroup\tTeam\tunread=2\tts=500\t");
+        assert_eq!(lines[1], "c1\tGroup\tTeam\tunread=2 muted\tts=500\t");
+    }
+
+    #[test]
+    fn the_key_report_counts_names_and_value_types_over_both_levels() {
+        use serde_json::json;
+        let list = [
+            chat_with_raw(json!({
+                "ChatId": "x", "Muted": true, "ChatInfo": {"Name": "secret", "Flags": 1}
+            })),
+            chat_with_raw(json!({
+                "ChatId": "y", "Muted": 1, "LastTsMcs": 5,
+                "ChatInfo": {"Name": "other"}
+            })),
+            chat_with_raw(json!({
+                "ChatId": "z", "Muted": false, "PrivateChatInfo": {"Extra": null}
+            })),
+        ];
+        let counts = key_counts(&list);
+        assert_eq!(counts.entries, 3);
+        assert_eq!(counts.top.keys["ChatId"].total, 3);
+        assert_eq!(counts.top.keys["Muted"].total, 3);
+        assert_eq!(counts.top.keys["Muted"].types["bool"], 2);
+        assert_eq!(counts.top.keys["Muted"].types["number"], 1);
+        assert_eq!(counts.top.keys["LastTsMcs"].total, 1);
+        assert_eq!(counts.chat_info.entries, 2);
+        assert_eq!(counts.chat_info.keys["Name"].total, 2);
+        assert_eq!(counts.chat_info.keys["Flags"].total, 1);
+        assert_eq!(counts.private_info.entries, 1);
+        assert_eq!(counts.private_info.keys["Extra"].types["null"], 1);
+        let report = key_report(&counts);
+        assert_eq!(
+            report,
+            vec![
+                "entries=3",
+                "ChatId\t3\tstring=3",
+                "ChatInfo\t2\tobject=2",
+                "LastTsMcs\t1\tnumber=1",
+                "Muted\t3\tbool=2,number=1",
+                "PrivateChatInfo\t1\tobject=1",
+                "ChatInfo entries=2",
+                "Flags\t1\tnumber=1",
+                "Name\t2\tstring=2",
+                "PrivateChatInfo entries=1",
+                "Extra\t1\tnull=1",
+            ]
+        );
+        // Names and counts only: no value, title or id reaches the report.
+        let text = report.join("\n");
+        for value in ["secret", "other", "\"x\"", "x\t"] {
+            assert!(!text.contains(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn a_chat_without_chat_info_or_with_a_non_object_entry_adds_no_info_keys() {
+        use serde_json::json;
+        let list = [
+            chat_with_raw(json!({"ChatId": "x"})),
+            chat_with_raw(json!({"ChatId": "y", "ChatInfo": null})),
+            chat_with_raw(serde_json::Value::Null),
+        ];
+        let counts = key_counts(&list);
+        assert_eq!(counts.entries, 3);
+        assert_eq!(counts.top.keys.len(), 2);
+        assert_eq!(counts.top.keys["ChatInfo"].types["null"], 1);
+        assert_eq!(counts.chat_info.entries, 0);
+        assert!(counts.chat_info.keys.is_empty());
+        assert_eq!(counts.private_info.entries, 0);
+        let report = key_report(&counts);
+        assert_eq!(
+            report.last().map(String::as_str),
+            Some("PrivateChatInfo entries=0")
+        );
+        assert_eq!(key_report(&key_counts(&[]))[0], "entries=0");
+    }
+
+    #[test]
+    fn the_usage_text_lists_the_chats_keys_mode() {
+        assert!(USAGE.contains("bt-probe me | chats [--keys]"));
+        assert!(USAGE.contains("chats --keys prints"));
+        assert!(USAGE.contains("chats prints `muted`"));
+    }
+
+    #[test]
+    fn only_the_bare_chats_command_and_chats_keys_are_chat_modes() {
+        assert_eq!(chats_mode(&[]), Some(ChatsMode::List));
+        assert_eq!(chats_mode(&["--keys"]), Some(ChatsMode::Keys));
+        for bad in [
+            &["--key"][..],
+            &["--keys", "--keys"],
+            &["x"],
+            &["--keys", "x"],
+        ] {
+            assert_eq!(chats_mode(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
