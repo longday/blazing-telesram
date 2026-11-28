@@ -80,7 +80,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: word and paragraph at the start, middle, end, on a space, on punctuation, in Cyrillic, with an emoji and a combining mark, in an empty text; `range_in` for the first, middle, last and outside messages, for an anchor after the focus and equal ends; `single`; `validate` drops the selection when an endpoint's message is gone, when its text shrank, **and when it was edited to a text of the same length** (`hello world` selected at 6..11, edited to `hello there`: offsets in range, snapshot differs, so dropped), and keeps one whose message only moved or whose other messages changed; `extract_text` inside one message (bare), across three with a voice message between (skipped), a header per message, a blank line between, the ends cut at the offsets; `select_all` over a chat with only non-text messages is `None`.
   - Done when: these tests exist.
 
-- [ ] 1.2 Date and time label for the copy header (D7)
+- [x] 1.2 Date and time label for the copy header (D7)
   - Owns: `crates/desktop/src/format.rs`.
   - Depends on: nothing.
   - Do: `date_time(ts, clock) -> String` as `ДД.ММ.ГГГГ ЧЧ:ММ` in the app's clock (the helper the timeline's time uses decides the zone); `copy_header(author, ts, clock)` = `{author}, {date_time}`, «Неизвестный» without an author.
