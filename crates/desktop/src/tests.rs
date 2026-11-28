@@ -11791,6 +11791,13 @@ fn double_click_on_the_right_half_of_a_words_last_letter_selects_that_word(
     // click puts the caret after the word, on the space; the word is still the one under the pointer.
     let right_half = nudge(glyph_at(cx, msg!(1, "text"), 4., 0), 7.);
     press(cx, right_half, 2, Modifiers::none());
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(0..5),
+        "the word, not the space after it"
+    );
+    // A move to the same point with the button held is a word drag from the same glyph: no change.
+    move_to(cx, right_half);
     release(cx, right_half);
     assert_eq!(
         picked(&h, cx, 1),

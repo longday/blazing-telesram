@@ -9,7 +9,7 @@ use crate::format::copy_header;
 use crate::selection::{
     Pos, TextSelection, Unit, extract_text, paragraph_at, select_all, snap, text_of, word_at,
 };
-use crate::text_lines::caret_for;
+use crate::text_lines::{caret_for, glyph_for};
 use bt_chat_core::model::{ChatId, Message, MessageTs};
 use gpui::{
     Bounds, ClipboardItem, Context, ListState, Pixels, Point, TextLayout, Window, point, px,
@@ -215,6 +215,8 @@ pub(crate) trait TextHit {
     /// The caret offset nearest to `point` in this layout of `text`: on a grapheme boundary and a glyph
     /// cluster boundary (see `text_lines::caret_in`).
     fn caret(&self, point: Point<Pixels>, text: &str) -> usize;
+    /// The offset of the glyph under `point` (see `text_lines::glyph_in`).
+    fn glyph(&self, point: Point<Pixels>, text: &str) -> usize;
 }
 
 impl TextHit for TextLayout {
@@ -225,6 +227,10 @@ impl TextHit for TextLayout {
     fn caret(&self, point: Point<Pixels>, text: &str) -> usize {
         caret_for(self, point, text)
     }
+
+    fn glyph(&self, point: Point<Pixels>, text: &str) -> usize {
+        glyph_for(self, point, text)
+    }
 }
 
 /// The caret under `point` among the texts painted in the latest frame (D5). The row is the one nearest
@@ -233,12 +239,15 @@ impl TextHit for TextLayout {
 /// the rest of the row, above or below the text, by the half of the row the pointer is in: the upper
 /// half is the text's start, the lower half its end (so beside the lower half of a tall picture it is
 /// the end of its caption). So above the first row is the start of it, below the last the end. Rows
-/// without text are not in `texts` and are skipped. `None` when no registered text belongs to a loaded
+/// without text are not in `texts` and are skipped. `by_glyph` asks for the glyph under the pointer
+/// instead of the nearer caret stop, which a drag by word or paragraph needs (its unit is the one of
+/// the glyph, as for the click that began it). `None` when no registered text belongs to a loaded
 /// message.
 pub(crate) fn caret_at<L: TextHit>(
     point: Point<Pixels>,
     texts: &[(MessageTs, L)],
     rows: &[(MessageTs, Bounds<Pixels>)],
+    by_glyph: bool,
     messages: &[Message],
 ) -> Option<Pos> {
     let y = f32::from(point.y);
@@ -264,7 +273,11 @@ pub(crate) fn caret_at<L: TextHit>(
     let (_, ts, layout, text, row) = nearest?;
     let lines = layout.bounds();
     let offset = if point.y >= lines.top() && point.y <= lines.bottom() {
-        layout.caret(point, text)
+        if by_glyph {
+            layout.glyph(point, text)
+        } else {
+            layout.caret(point, text)
+        }
     } else if y < f32::from(row.top() + row.bottom()) / 2. {
         0
     } else {
@@ -360,7 +373,9 @@ impl Desktop {
         }
         self.drag_pointer = Some(point);
         let changed = self.with_picking(cx, |state, messages| {
-            caret_at(point, texts, rows, messages).is_some_and(|pos| state.drag_to(messages, pos))
+            let by_glyph = state.drag.as_ref().is_some_and(|d| d.unit != Unit::Char);
+            caret_at(point, texts, rows, by_glyph, messages)
+                .is_some_and(|pos| state.drag_to(messages, pos))
         });
         if changed {
             cx.notify();
@@ -879,6 +894,11 @@ mod tests {
             let index = ((f32::from(p.x) - 10.) / self.cell).round().max(0.) as usize;
             index.min(self.len)
         }
+
+        fn glyph(&self, p: Point<Pixels>, _text: &str) -> usize {
+            let index = ((f32::from(p.x) - 10.) / self.cell).floor().max(0.) as usize;
+            index.min(self.len)
+        }
     }
 
     /// Texts 1, 2 and 4 painted at y 0..20, 40..60 and 100..120 (message 3 is a voice row with no text).
@@ -899,7 +919,16 @@ mod tests {
 
     fn caret(x: f32, y: f32) -> Option<Pos> {
         let (m, texts) = painted();
-        caret_at(point(px(x), px(y)), &texts, &[], &m)
+        caret_at(point(px(x), px(y)), &texts, &[], false, &m)
+    }
+
+    #[test]
+    fn a_word_or_paragraph_drag_maps_the_pointer_to_the_glyph_under_it_not_the_nearer_stop() {
+        let (m, texts) = painted();
+        // x = 38 is the middle of byte 3 (8 px a byte from 10): the caret is 4, the glyph 3.
+        let at = |glyph| caret_at(point(px(38.), px(10.)), &texts, &[], glyph, &m);
+        assert_eq!(at(false), Some(pos(1, 4)));
+        assert_eq!(at(true), Some(pos(1, 3)));
     }
 
     #[test]
@@ -955,12 +984,18 @@ mod tests {
         let (m, mut texts) = painted();
         texts.push((7, Line::at(200., 5)));
         assert_eq!(
-            caret_at(point(px(26.), px(300.)), &texts, &[], &m),
+            caret_at(point(px(26.), px(300.)), &texts, &[], false, &m),
             Some(pos(4, 4)),
             "message 7 is not loaded"
         );
-        assert_eq!(caret_at(point(px(0.), px(0.)), &texts[..0], &[], &m), None);
-        assert_eq!(caret_at(point(px(0.), px(0.)), &texts[3..], &[], &m), None);
+        assert_eq!(
+            caret_at(point(px(0.), px(0.)), &texts[..0], &[], false, &m),
+            None
+        );
+        assert_eq!(
+            caret_at(point(px(0.), px(0.)), &texts[3..], &[], false, &m),
+            None
+        );
     }
 
     #[test]
@@ -978,7 +1013,12 @@ mod tests {
                 Bounds::new(point(px(0.), px(170.)), size(px(400.), px(20.))),
             ),
         ];
-        let at = |x: f32, y: f32| caret_at(point(px(x), px(y)), &texts, &rows, &m);
+        let at = |x: f32, y: f32| caret_at(point(px(x), px(y)), &texts, &rows, false, &m);
+        // A word drag asks for the glyph under the pointer: the same lines, the same row rule.
+        assert_eq!(
+            caret_at(point(px(500.), px(120.)), &texts, &rows, true, &m),
+            Some(pos(1, 7))
+        );
         assert_eq!(
             at(500., 30.),
             Some(pos(1, 0)),
