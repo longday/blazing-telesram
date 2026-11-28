@@ -29,7 +29,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: none (research). Write each point's observed answer and the chosen mechanism (or the fallback of D3) in `research-gpui.md`; delete the scratch crate.
   - Done when: points (a)-(g) each have an answer and D3's registry and drag-capture mechanisms are confirmed or replaced by a stated alternative.
 
-- [ ] 0.2 Public web client bundle: the quote request (unknowns (1), (6))
+- [x] 0.2 Public web client bundle: the quote request (unknowns (1), (6))
   - Owns: new `research-bundle.md`.
   - Depends on: nothing. VM network, anonymous GET only, no account.
   - Do: fetch the public build of `https://yastatic.net/s3/chat-static/telemessenger/_/<build>/web/app.js` (build number from the page; 3.6.3 at the time of writing) and its chunks in the VM; search `Quote`, `ForwardedMessageStyles`, `ForwardedMessageRefs`, `Цитировать`, selection or range handling. Record, without copying the code: the shape of the request the «Цитировать» action builds (extra keys in the style entry or in `Plain`), the quote length limit, newline and trim handling, how a fragment quote is rendered (line count, truncation).
