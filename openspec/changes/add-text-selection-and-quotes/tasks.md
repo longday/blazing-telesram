@@ -156,7 +156,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Owns: `crates/desktop/src/yandex_backend.rs`.
   - Depends on: 2.1, 2.2.
   - Do: in the reply mapping set `ReplyQuote.partial = original_text.map_or(false, |o| is_fragment(o, quote))`; `Backend::edit` and the send path pass `ReplyTarget.partial` unchanged; every literal in this file updated.
-  - Tests: the fixture reply with `"Quote": "plain text"` stays non-partial; a synthetic reply whose quote is a middle word is partial; a quote above 200 characters of a long original is not; an absent original (deleted) is not partial; an edit of a partial reply sends the same quote text.
+  - Tests: the fixture reply with `"Quote": "plain text"` stays non-partial; a synthetic reply whose quote is a middle word is partial; a reply whose quote is the first 200 characters of a 300-character original (what the reply action sends) is **not** partial, while a 250-character quote of the same original is partial (D9: only the whole original cut at 200 is not a fragment); a shorter beginning (`hello` of `hello world`) is partial; an absent original (deleted) is not partial; an edit of a partial reply sends the same quote text.
   - Done when: these tests exist.
 
 - [ ] 2.5 «Цитировать» and the quote bar (D6, D10)
