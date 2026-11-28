@@ -68,7 +68,7 @@ Unsent composer text and a pending reply target SHALL be kept per chat across ch
 - **THEN** its row shows "Черновик:" and the draft text
 
 ### Requirement: Writes only from user actions
-The client SHALL change server state only as a direct result of the user's actions defined by the sending, editing, read-marker, typing and message-reactions capabilities. It SHALL NOT send presence heartbeats or status changes.
+The client SHALL change server state only as a direct result of the user's actions defined by the sending, editing, read-marker, typing, message-reactions and chat-creation capabilities. It SHALL NOT send presence heartbeats or status changes.
 
 #### Scenario: Idle client
 - **WHEN** the client runs without user input
