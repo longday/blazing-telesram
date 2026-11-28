@@ -15,7 +15,7 @@ use yandex_proto::media::{AvatarSize, MediaTarget};
 use yandex_proto::search::SearchItems;
 use yandex_proto::session::Session;
 use yandex_proto::wire::{
-    PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireMember,
+    PushEvent, ReactionAction, Relation, WireBody, WireChat, WireChatKind, WireFile, WireMember,
     WireMemberRole, WireMembers, WireMessage, WireProfile, WireReactions, WireReactorEntry,
     WireReactors, WireSender, WireUser, refusal_reason, without_refusal_reason,
 };
@@ -1231,6 +1231,53 @@ fn pin_changed(chat: String, pinned: Option<MessageTs>, at: Option<i64>) -> Live
     }
 }
 
+/// The extensions (lower case) a file name may carry to be a video: the only ones whose copy is
+/// handed to the system player (D8). Applied to the name here (the card's look) and to the
+/// actual path in `Player::open_video` (the guarantee).
+pub(crate) const VIDEO_EXTENSIONS: [&str; 2] = ["mp4", "mov"];
+
+/// Whether the last extension of `name` is in [`VIDEO_EXTENSIONS`], case-insensitive. No
+/// extension, or an extension of a double-extension name (`a.mp4.command`), is not a video.
+pub(crate) fn is_video_name(name: &str) -> bool {
+    std::path::Path::new(name)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            VIDEO_EXTENSIONS
+                .iter()
+                .any(|video| ext.eq_ignore_ascii_case(video))
+        })
+}
+
+/// A `MiscFile` as a message body: a video when its name passes [`is_video_name`] (the hint, when
+/// there is one, gives the size of the picture and the duration; a zero duration is `None`),
+/// otherwise a file card, hint or not.
+fn file_body(file: &WireFile, hint: Option<(u32, u32, u64)>) -> MessageBody {
+    let media = MediaRef {
+        id: file.id.clone(),
+        kind: MediaKind::File,
+    };
+    let size = file.size.unwrap_or(0);
+    match &file.name {
+        Some(name) if is_video_name(name) => {
+            let (width, height, duration) = hint.unwrap_or_default();
+            MessageBody::Video {
+                media,
+                name: name.clone(),
+                size,
+                width,
+                height,
+                duration_ms: Some(duration).filter(|&ms| ms > 0),
+            }
+        }
+        name => MessageBody::File {
+            media,
+            name: name.clone().unwrap_or_else(|| "Файл".into()),
+            size,
+        },
+    }
+}
+
 fn body(wire: &WireBody) -> MessageBody {
     match wire {
         WireBody::Text(text) => MessageBody::Text(text.clone()),
@@ -1242,14 +1289,11 @@ fn body(wire: &WireBody) -> MessageBody {
             items: items.iter().map(gallery_item).collect(),
             caption: text.clone(),
         },
-        WireBody::File(file) => MessageBody::File {
-            media: MediaRef {
-                id: file.id.clone(),
-                kind: MediaKind::File,
-            },
-            name: file.name.clone().unwrap_or_else(|| "Файл".into()),
-            size: file.size.unwrap_or(0),
-        },
+        WireBody::File(file) => file_body(file, None),
+        WireBody::Video(video) => file_body(
+            &video.file,
+            Some((video.width, video.height, video.duration_ms)),
+        ),
         WireBody::Voice {
             file,
             duration,
@@ -1485,7 +1529,7 @@ mod tests {
     use super::*;
     use yandex_proto::frame::{IncomingFrame, RequestFrame};
     use yandex_proto::search::{WireSearchChat, WireSearchMessage, WireSearchUser};
-    use yandex_proto::wire::{WireFile, WireForwarded, WireReactionCount, WireReactor, WireRef};
+    use yandex_proto::wire::{WireForwarded, WireReactionCount, WireReactor, WireRef};
     use yandex_proto::xiva::{ConnectError, Connector, Socket, SocketEvent, Target};
 
     fn wire(body: WireBody, relation: Relation, from: &str) -> WireMessage {
@@ -2014,6 +2058,111 @@ mod tests {
             MessageBody::Unsupported("Foo".into())
         );
         assert_eq!(body(&WireBody::Deleted), MessageBody::Deleted);
+    }
+
+    /// A `MiscFile` named `name` without and with a `VideoPreview` hint (`width`, `height`,
+    /// `duration_ms`), as the adapter maps it.
+    fn misc_file(name: Option<&str>, hint: Option<(u32, u32, u64)>) -> MessageBody {
+        let file = WireFile {
+            id: "b/m".into(),
+            name: name.map(Into::into),
+            size: Some(7),
+        };
+        body(&match hint {
+            None => WireBody::File(file),
+            Some((width, height, duration_ms)) => WireBody::Video(yandex_proto::wire::WireVideo {
+                file,
+                width,
+                height,
+                duration_ms,
+            }),
+        })
+    }
+
+    fn video(name: &str, width: u32, height: u32, duration_ms: Option<u64>) -> MessageBody {
+        MessageBody::Video {
+            media: MediaRef {
+                id: "b/m".into(),
+                kind: MediaKind::File,
+            },
+            name: name.into(),
+            size: 7,
+            width,
+            height,
+            duration_ms,
+        }
+    }
+
+    fn file_card(name: &str) -> MessageBody {
+        MessageBody::File {
+            media: MediaRef {
+                id: "b/m".into(),
+                kind: MediaKind::File,
+            },
+            name: name.into(),
+            size: 7,
+        }
+    }
+
+    #[test]
+    fn a_whitelisted_extension_makes_a_video_with_or_without_the_hint() {
+        for name in ["a.mp4", "a.mov", "a.MP4", "A.MoV", "my.clip.mp4"] {
+            assert_eq!(
+                misc_file(Some(name), None),
+                video(name, 0, 0, None),
+                "{name} without the hint"
+            );
+            assert_eq!(
+                misc_file(Some(name), Some((640, 360, 42_000))),
+                video(name, 640, 360, Some(42_000)),
+                "{name} with the hint"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hint_with_a_zero_duration_has_no_duration() {
+        assert_eq!(
+            misc_file(Some("a.mp4"), Some((640, 360, 0))),
+            video("a.mp4", 640, 360, None)
+        );
+    }
+
+    #[test]
+    fn any_other_name_stays_a_file_card_hint_or_not() {
+        for name in [
+            "clip",
+            "x.app",
+            "x.command",
+            "a.mp4.command",
+            "x.webm",
+            "x.mkv",
+            "x.m4v",
+            "x.avi",
+            "x.mp4 ",
+            ".mp4",
+            "mp4",
+        ] {
+            assert_eq!(misc_file(Some(name), None), file_card(name), "{name}");
+            assert_eq!(
+                misc_file(Some(name), Some((640, 360, 42_000))),
+                file_card(name),
+                "{name} with the hint"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_name_is_a_file_card_hint_or_not() {
+        assert_eq!(misc_file(None, None), file_card("Файл"));
+        assert_eq!(misc_file(None, Some((640, 360, 42_000))), file_card("Файл"));
+    }
+
+    #[test]
+    fn the_whitelist_is_mp4_and_mov() {
+        assert_eq!(VIDEO_EXTENSIONS, ["mp4", "mov"]);
+        assert!(is_video_name("a.mp4") && is_video_name("a.MOV"));
+        assert!(!is_video_name("") && !is_video_name("a.mp4.command"));
     }
 
     #[test]
@@ -3905,6 +4054,11 @@ mod tests {
                 .with_ansi(false)
                 .finish(),
         );
+        // With a single registered dispatcher tracing rebuilds callsite interest from the calling
+        // thread's default, which `set_default` has not installed yet, so a callsite that another
+        // test already hit stays disabled for this capture. A second registered dispatcher makes
+        // it consider all of them.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let refusal = || serde_json::json!({ "ErrorInfo": { "Message": "server-secret-reason", "WorkerId": 1 }, "Status": 4 });
         let (backend, _) =
             backend_with_replies(None, vec![refusal(), refusal()], HashMap::new()).await;

@@ -1,0 +1,52 @@
+{
+  "Chats": [
+    {
+      "ChatId": "0/0/33333333-3333-4333-8333-333333333333",
+      "Messages": [
+        {
+          "Meta": {
+            "Origin": 28
+          },
+          "ServerMessage": {
+            "ClientMessage": {
+              "Plain": {
+                "ChatId": "0/0/33333333-3333-4333-8333-333333333333",
+                "CustomPayload": "<custom payload>",
+                "MiscFile": {
+                  "FileInfo": {
+                    "Id2": "bucket-b/cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "Name": "video.mp4",
+                    "Size": 60344549,
+                    "Source": 1
+                  },
+                  "PreviewHint": {
+                    "VideoPreview": {
+                      "BlurHash": "L000000000000000000000000000",
+                      "DurationMs": 221769,
+                      "Height": 1080,
+                      "Width": 1920
+                    }
+                  }
+                },
+                "PayloadId": "00000000-0000-4000-8000-000000000002"
+              }
+            },
+            "ServerMessageInfo": {
+              "From": {
+                "AvatarId": "user_avatar/yapic/1/a",
+                "DisplayName": "<name>",
+                "Guid": "00000000-0000-4000-8000-000000000001",
+                "Version": 1788872168943662
+              },
+              "PrevTimestamp": 1795535241933210,
+              "SeqNo": 157,
+              "Timestamp": 1795535249425210,
+              "Version": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "RequestId": "00000000-0000-4000-8000-000000000003"
+}

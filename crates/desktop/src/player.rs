@@ -3,13 +3,18 @@
 //! `Player` owns no UI. Views read `voice(key)` and call `toggle_voice`; the playback copy of the
 //! file comes from the store (`ChatStore::download` with the `Playback` kind), the sound from the
 //! `AudioOutput` the registered `AudioFactory` makes. No factory registered means no sound output.
+//! A video is never decoded here: `open_video` fetches its playback copy and emits
+//! `PlayerEvent::OpenExternal` for a copy whose extension is whitelisted; `main.rs` hands it to the
+//! system (design D8).
 //! Nothing here logs: no path, file name or message is ever written to a log line.
 
 use crate::store::{ChatStore, DownloadState, SessionState, StoreEvent};
+use crate::yandex_backend::is_video_name;
 use bt_chat_core::model::{ChatId, DownloadFailure, MediaRef, MessageTs};
-use gpui::{App, Context, Entity, Global, Subscription};
+use gpui::{App, Context, Entity, EventEmitter, Global, Subscription};
 use std::collections::HashMap;
-use std::path::Path;
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// How often the position and the end of the playing file are read.
@@ -126,7 +131,40 @@ pub struct Player {
     cancelling: Vec<MediaRef>,
     /// The length of the file the last time each message's file was opened.
     measured: HashMap<VoiceKey, Duration>,
+    /// Videos whose playback copy is being fetched or whose open failed, per playback copy. A
+    /// video that was handed to the system, cancelled or never asked is absent (idle).
+    videos: HashMap<MediaRef, VideoOpen>,
     _store_events: Subscription,
+}
+
+/// What the player asks the app to do outside the window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlayerEvent {
+    /// Open this playback copy of a video in the system's player. Only emitted for a path whose
+    /// extension passed the whitelist of design D8 just before.
+    OpenExternal(PathBuf),
+}
+
+impl EventEmitter<PlayerEvent> for Player {}
+
+/// A video that is not idle.
+struct VideoOpen {
+    /// The video's own name (the adapter limited it to the whitelist), the name of its copy.
+    name: String,
+    /// `Loading` or `Failed`.
+    phase: VoicePhase,
+    /// The running transfer was started by someone else (a joined one), not by this video.
+    joined: bool,
+    /// A start that waits for the confirmation of a cancel in flight.
+    restart: bool,
+}
+
+/// The last extension of the file name of `path` is a whitelisted video extension (design D8).
+/// The path is what gets opened, so it is the path that is checked, never the name of the message.
+fn is_video_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(is_video_name)
 }
 
 impl Player {
@@ -141,6 +179,7 @@ impl Player {
             generation: 0,
             cancelling: Vec::new(),
             measured: HashMap::new(),
+            videos: HashMap::new(),
             _store_events: subscription,
         }
     }
@@ -209,18 +248,7 @@ impl Player {
             return;
         };
         match current.phase {
-            VoicePhase::Loading => {
-                let store = self.store.read(cx);
-                if matches!(
-                    store.download_state(&current.playback),
-                    Some(DownloadState::Running { .. })
-                ) {
-                    store.cancel_download(&current.playback);
-                    if !self.cancelling.contains(&current.playback) {
-                        self.cancelling.push(current.playback);
-                    }
-                }
-            }
+            VoicePhase::Loading => self.cancel_transfer(current.playback, cx),
             VoicePhase::Playing | VoicePhase::Paused => {
                 if let Some(output) = self.output.as_mut() {
                     output.stop();
@@ -427,8 +455,32 @@ impl Player {
     /// switch of the account).
     fn forget(&mut self, cx: &mut Context<Self>) {
         self.stop(cx);
+        let videos = std::mem::take(&mut self.videos);
+        if !videos.is_empty() {
+            cx.notify();
+        }
+        for (playback, video) in videos {
+            if video.phase == VoicePhase::Loading {
+                self.cancel_transfer(playback, cx);
+            }
+        }
         self.cancelling.clear();
         self.measured.clear();
+    }
+
+    /// Asks the core to stop the running fetch of `playback`, once; the store clears the state
+    /// when the core confirms.
+    fn cancel_transfer(&mut self, playback: MediaRef, cx: &App) {
+        let store = self.store.read(cx);
+        if matches!(
+            store.download_state(&playback),
+            Some(DownloadState::Running { .. })
+        ) {
+            store.cancel_download(&playback);
+            if !self.cancelling.contains(&playback) {
+                self.cancelling.push(playback);
+            }
+        }
     }
 
     fn on_store_event(&mut self, event: &StoreEvent, cx: &mut Context<Self>) {
@@ -448,6 +500,13 @@ impl Player {
                 if loading {
                     self.settle_download(cx);
                 }
+                if self
+                    .videos
+                    .get(media)
+                    .is_some_and(|v| v.phase == VoicePhase::Loading)
+                {
+                    self.settle_video(media, cx);
+                }
             }
             StoreEvent::Session if self.store.read(cx).session() != SessionState::Active => {
                 self.forget(cx)
@@ -456,6 +515,140 @@ impl Player {
             StoreEvent::Account => self.forget(cx),
             _ => {}
         }
+    }
+
+    /// Where the playback copy of the video `original` stands: `Loading` while it is fetched,
+    /// `Failed(..)` after a failure (the next `open_video` retries), `Idle` otherwise.
+    pub fn video(&self, original: &MediaRef) -> VoicePhase {
+        (self.videos.get(&original.playback())).map_or(VoicePhase::Idle, |v| v.phase)
+    }
+
+    /// The click on a video card's control. While the copy is being fetched it cancels the fetch;
+    /// otherwise an existing copy (also offline) is opened at once and a missing one is fetched
+    /// under `name`, the video's own name, then opened. A copy is opened by emitting
+    /// `PlayerEvent::OpenExternal`, and only if the extension of its actual path is whitelisted:
+    /// a reused copy that fails the check (the same file saved earlier for a message with another
+    /// name) is treated as absent, a fresh one that fails is `Failed(Unsupported)`.
+    pub fn open_video(&mut self, original: &MediaRef, name: &str, cx: &mut Context<Self>) {
+        let playback = original.playback();
+        let loading = (self.videos.get(&playback)).is_some_and(|v| v.phase == VoicePhase::Loading);
+        if loading {
+            self.videos.remove(&playback);
+            self.cancel_transfer(playback, cx);
+            cx.notify();
+            return;
+        }
+        let reused = match self.store.read(cx).download_state(&playback) {
+            Some(DownloadState::Saved(path)) if path.is_file() => Some(path.clone()),
+            _ => None,
+        };
+        if reused.is_some_and(|path| self.emit_open(path, cx)) {
+            self.videos.remove(&playback);
+            cx.notify();
+            return;
+        }
+        // As for voice: the store still holds a cancelled transfer as running until the core
+        // confirms, and `download` would send nothing then.
+        let cancel_out = self.cancelling.contains(&playback)
+            && matches!(
+                self.store.read(cx).download_state(&playback),
+                Some(DownloadState::Running { .. })
+            );
+        let video = VideoOpen {
+            name: name.to_owned(),
+            phase: VoicePhase::Loading,
+            joined: false,
+            restart: cancel_out,
+        };
+        self.videos.insert(playback.clone(), video);
+        cx.notify();
+        if !cancel_out {
+            self.request_video(&playback, cx);
+        }
+    }
+
+    /// The one place `OpenExternal` is emitted: only for a path that passes the whitelist now.
+    fn emit_open(&mut self, path: PathBuf, cx: &mut Context<Self>) -> bool {
+        let allowed = is_video_path(&path);
+        if allowed {
+            cx.emit(PlayerEvent::OpenExternal(path));
+        }
+        allowed
+    }
+
+    /// Asks the store for the playback copy of a loading video under its own name. A transfer of
+    /// the same file that is already running (a voice message of the same `Id2`, named otherwise)
+    /// is joined by the store, whatever name it was asked under: `joined` remembers that, because
+    /// its result may fail the whitelist without the video's own name being at fault.
+    fn request_video(&mut self, playback: &MediaRef, cx: &mut Context<Self>) {
+        let Some(name) = self.videos.get(playback).map(|v| v.name.clone()) else {
+            return;
+        };
+        let running = matches!(
+            self.store.read(cx).download_state(playback),
+            Some(DownloadState::Running { .. })
+        );
+        if let Some(video) = self.videos.get_mut(playback) {
+            video.joined = running;
+        }
+        self.store
+            .update(cx, |s, cx| s.download(playback.clone(), Some(name), cx));
+        self.settle_video(playback, cx);
+    }
+
+    /// Acts on what the store says about the playback copy of a loading video.
+    fn settle_video(&mut self, playback: &MediaRef, cx: &mut Context<Self>) {
+        if !self.videos.contains_key(playback) {
+            return;
+        }
+        match self.store.read(cx).download_state(playback).cloned() {
+            Some(DownloadState::Saved(path)) => {
+                let joined = self.videos.get(playback).is_some_and(|v| v.joined);
+                if joined && !is_video_path(&path) {
+                    // Another message's copy of the same file, under its name: not ours to open.
+                    // The store starts a new transfer even when the state is `Saved`, so the
+                    // video is fetched under its own name now (and checked again when it lands).
+                    return self.request_video(playback, cx);
+                }
+                let opened = self.emit_open(path, cx);
+                self.finish_video(playback, (!opened).then_some(PlayFailure::Unsupported), cx);
+            }
+            Some(DownloadState::Failed(reason)) => {
+                self.finish_video(playback, Some(PlayFailure::Download(reason)), cx);
+            }
+            // Cancelled (by us, or the store forgot it): a start that waited for the confirmation
+            // asks now, otherwise the card is idle again.
+            None => {
+                let restart =
+                    (self.videos.get_mut(playback)).is_some_and(|v| std::mem::take(&mut v.restart));
+                if restart {
+                    self.request_video(playback, cx);
+                } else {
+                    self.finish_video(playback, None, cx);
+                }
+            }
+            Some(DownloadState::Running { .. }) => {}
+        }
+    }
+
+    /// Ends the loading of a video: idle (`None`) or failed.
+    fn finish_video(
+        &mut self,
+        playback: &MediaRef,
+        failure: Option<PlayFailure>,
+        cx: &mut Context<Self>,
+    ) {
+        match failure {
+            Some(failure) => {
+                if let Some(video) = self.videos.get_mut(playback) {
+                    video.phase = VoicePhase::Failed(failure);
+                }
+            }
+            None => {
+                self.videos.remove(playback);
+            }
+        }
+        cx.notify();
     }
 }
 
@@ -620,7 +813,9 @@ mod tests {
     use async_channel::{Receiver, Sender};
     use bt_chat_core::model::{ClientEvent, Command, ConnectionState, MediaKind};
     use gpui::{AppContext, TestAppContext};
+    use std::cell::RefCell;
     use std::path::PathBuf;
+    use std::rc::Rc;
 
     const SECS: fn(u64) -> Duration = Duration::from_secs;
 
@@ -652,6 +847,8 @@ mod tests {
         commands: Receiver<Command>,
         fake: Fake,
         dir: tempfile::TempDir,
+        /// The `PlayerEvent`s since the last take.
+        events: Rc<RefCell<Vec<PlayerEvent>>>,
         _client: Sender<ClientEvent>,
     }
 
@@ -675,12 +872,21 @@ mod tests {
             let (command_tx, commands) = async_channel::unbounded();
             let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
             let player = cx.new(|cx| Player::new(store.clone(), cx));
+            let events = Rc::new(RefCell::new(Vec::new()));
+            let sink = events.clone();
+            cx.update(|cx| {
+                cx.subscribe(&player, move |_, event: &PlayerEvent, _| {
+                    sink.borrow_mut().push(event.clone())
+                })
+                .detach()
+            });
             let rig = Self {
                 store,
                 player,
                 commands,
                 fake,
                 dir: tempfile::tempdir().unwrap(),
+                events,
                 _client: client,
             };
             rig.apply(cx, ClientEvent::Connection(ConnectionState::Online));
@@ -715,8 +921,13 @@ mod tests {
 
         /// The store learns that the playback copy of `file` is on disk; returns its path.
         fn saved(&self, cx: &mut TestAppContext, file: &str) -> PathBuf {
-            let path = self.dir.path().join(format!("{file}.ogg"));
-            std::fs::write(&path, b"ogg").unwrap();
+            self.saved_as(cx, file, &format!("{file}.ogg"))
+        }
+
+        /// The same, with the copy saved under the file name `name`.
+        fn saved_as(&self, cx: &mut TestAppContext, file: &str, name: &str) -> PathBuf {
+            let path = self.dir.path().join(name);
+            std::fs::write(&path, b"data").unwrap();
             self.apply(
                 cx,
                 ClientEvent::Downloaded {
@@ -725,6 +936,22 @@ mod tests {
                 },
             );
             path
+        }
+
+        /// The click on the card of the video `file`, whose own name is `name`.
+        fn open(&self, cx: &mut TestAppContext, file: &str, name: &str) {
+            let original = original(file);
+            self.player
+                .update(cx, |p, cx| p.open_video(&original, name, cx));
+            cx.run_until_parked();
+        }
+
+        fn video(&self, cx: &mut TestAppContext, file: &str) -> VoicePhase {
+            self.player.read_with(cx, |p, _| p.video(&original(file)))
+        }
+
+        fn events(&self) -> Vec<PlayerEvent> {
+            std::mem::take(&mut *self.events.borrow_mut())
         }
 
         /// Message `ts` plays its (already saved) file `file`; the calls and commands so far are dropped.
@@ -1309,6 +1536,334 @@ mod tests {
         ];
         for (failure, label) in labels {
             assert_eq!(failure_label(failure), label, "{failure:?}");
+        }
+    }
+
+    fn fetch(file: &str, name: &str) -> Command {
+        Command::Download {
+            media: playback(file),
+            name: Some(name.into()),
+        }
+    }
+
+    fn opens(path: &Path) -> PlayerEvent {
+        PlayerEvent::OpenExternal(path.to_path_buf())
+    }
+
+    // ---- video (PB 5.7) ----
+
+    #[gpui::test]
+    fn a_video_is_fetched_and_opened_on_saved(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("v1", "x.mp4")]);
+        assert_eq!(rig.events(), []);
+
+        // The copy of another file does not open this video.
+        rig.saved_as(cx, "other", "o.mp4");
+        assert_eq!(rig.events(), []);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+
+        let path = rig.saved_as(cx, "v1", "hash.mp4");
+        assert_eq!(rig.events(), [opens(&path)], "the exact path");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), []);
+        assert_eq!(rig.fake.created(), 0, "a video needs no audio output");
+        assert_eq!(rig.fake.take_calls(), []);
+    }
+
+    #[gpui::test]
+    fn an_existing_copy_opens_at_once_again_and_offline(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        let path = rig.saved_as(cx, "v1", "hash.mp4");
+        rig.apply(cx, ClientEvent::Connection(ConnectionState::Offline));
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.events(), [opens(&path)]);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), [], "nothing is fetched");
+
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.events(), [opens(&path)], "a second play opens it again");
+        assert_eq!(rig.commands(), []);
+    }
+
+    #[gpui::test]
+    fn a_video_copy_that_vanished_from_the_disk_is_fetched_again(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        let path = rig.saved_as(cx, "v1", "hash.mp4");
+        std::fs::remove_file(&path).unwrap();
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.events(), []);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("v1", "x.mp4")]);
+    }
+
+    #[gpui::test]
+    fn the_name_given_to_open_video_is_not_trusted(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        // The same file was saved earlier for another message, under a name that is no video's.
+        let old = rig.saved_as(cx, "v1", "hash.command");
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.events(), [], "the old copy is not opened");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(
+            rig.commands(),
+            [fetch("v1", "x.mp4")],
+            "a new copy under the video's own name"
+        );
+
+        let new = rig.saved_as(cx, "v1", "hash.mp4");
+        assert_ne!(old, new);
+        assert_eq!(rig.events(), [opens(&new)]);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+    }
+
+    #[gpui::test]
+    fn a_reused_copy_with_a_bad_extension_is_absent(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        let names = ["hash", "hash.app", "hash.mp4.command", "hash.", ".mp4"];
+        for (i, name) in names.into_iter().enumerate() {
+            let file = format!("v{i}");
+            rig.saved_as(cx, &file, name);
+            rig.open(cx, &file, "x.mp4");
+            assert_eq!(rig.events(), [], "{name}: not opened");
+            assert_eq!(rig.video(cx, &file), VoicePhase::Loading, "{name}");
+            assert_eq!(rig.commands(), [fetch(&file, "x.mp4")], "{name}");
+        }
+
+        // Whitelisted, in any case.
+        for (i, name) in ["hash.MP4", "hash.mov", "hash.MOV"].into_iter().enumerate() {
+            let file = format!("w{i}");
+            let path = rig.saved_as(cx, &file, name);
+            rig.open(cx, &file, "x.mp4");
+            assert_eq!(rig.events(), [opens(&path)], "{name}");
+            assert_eq!(rig.commands(), [], "{name}");
+        }
+    }
+
+    #[gpui::test]
+    fn a_fresh_copy_that_fails_the_check_is_unsupported(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.open(cx, "v1", "x.mp4");
+        rig.commands();
+        rig.saved_as(cx, "v1", "hash.app");
+        assert_eq!(rig.events(), []);
+        assert_eq!(
+            rig.video(cx, "v1"),
+            VoicePhase::Failed(PlayFailure::Unsupported)
+        );
+
+        // The next click does not reuse that copy: it fetches a new one and checks it again.
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("v1", "x.mp4")]);
+        let path = rig.saved_as(cx, "v1", "hash2.mp4");
+        assert_eq!(rig.events(), [opens(&path)]);
+    }
+
+    #[gpui::test]
+    fn cancelling_while_loading_stops_the_transfer_and_opens_nothing(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.open(cx, "v1", "x.mp4");
+        rig.commands();
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), [Command::CancelDownload(playback("v1"))]);
+
+        // The core's answer, and a copy that finished before the cancel took effect, open nothing.
+        rig.apply(cx, ClientEvent::DownloadCancelled(playback("v1")));
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+        rig.saved_as(cx, "v1", "hash.mp4");
+        assert_eq!(rig.events(), []);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+    }
+
+    #[gpui::test]
+    fn playing_a_video_again_before_the_cancel_is_confirmed_waits_for_it(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.open(cx, "v1", "x.mp4");
+        rig.open(cx, "v1", "x.mp4");
+        rig.commands();
+
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [], "no download while the cancel is out");
+
+        rig.apply(cx, ClientEvent::DownloadCancelled(playback("v1")));
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("v1", "x.mp4")]);
+        let path = rig.saved_as(cx, "v1", "hash.mp4");
+        assert_eq!(rig.events(), [opens(&path)]);
+    }
+
+    #[gpui::test]
+    fn offline_with_no_usable_copy_fails_without_a_command(cx: &mut TestAppContext) {
+        let offline = ClientEvent::Connection(ConnectionState::Offline);
+        let rig = Rig::new(cx);
+        rig.apply(cx, offline.clone());
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(
+            rig.video(cx, "v1"),
+            VoicePhase::Failed(PlayFailure::Download(DownloadFailure::Offline))
+        );
+        assert_eq!(rig.commands(), []);
+        assert_eq!(rig.events(), []);
+
+        // Only a copy that fails the check: the same.
+        let rig = Rig::new(cx);
+        rig.saved_as(cx, "v1", "hash.command");
+        rig.apply(cx, offline);
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(
+            rig.video(cx, "v1"),
+            VoicePhase::Failed(PlayFailure::Download(DownloadFailure::Offline))
+        );
+        assert_eq!(rig.commands(), []);
+        assert_eq!(rig.events(), []);
+    }
+
+    #[gpui::test]
+    fn each_download_failure_shows_and_the_next_click_retries(cx: &mut TestAppContext) {
+        use DownloadFailure::*;
+        let rig = Rig::new(cx);
+        for reason in [Offline, NotFound, Destination, Disk, Network, Other] {
+            rig.open(cx, "v1", "x.mp4");
+            assert_eq!(rig.video(cx, "v1"), VoicePhase::Loading, "{reason:?}");
+            assert_eq!(rig.commands(), [fetch("v1", "x.mp4")], "{reason:?}");
+            rig.apply(
+                cx,
+                ClientEvent::DownloadFailed {
+                    media: playback("v1"),
+                    reason,
+                },
+            );
+            assert_eq!(
+                rig.video(cx, "v1"),
+                VoicePhase::Failed(PlayFailure::Download(reason))
+            );
+        }
+        assert_eq!(rig.events(), []);
+    }
+
+    #[gpui::test]
+    fn another_account_or_the_end_of_the_session_cancels_a_pending_load(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.open(cx, "v1", "x.mp4");
+        rig.open(cx, "v2", "y.mp4");
+        rig.apply(
+            cx,
+            ClientEvent::DownloadFailed {
+                media: playback("v2"),
+                reason: DownloadFailure::Network,
+            },
+        );
+        rig.commands();
+        rig.apply(cx, ClientEvent::AccountSwitched);
+        assert_eq!(rig.video(cx, "v1"), VoicePhase::Idle);
+        assert_eq!(
+            rig.video(cx, "v2"),
+            VoicePhase::Idle,
+            "a failure is forgotten"
+        );
+
+        // Whatever the old account's transfer still delivers opens nothing.
+        rig.saved_as(cx, "v1", "hash.mp4");
+        assert_eq!(rig.events(), []);
+
+        // A click after the switch asks at once: no cancel is awaited.
+        rig.open(cx, "v3", "z.mp4");
+        assert_eq!(rig.video(cx, "v3"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("v3", "z.mp4")]);
+
+        rig.apply(cx, ClientEvent::SignedOut);
+        assert_eq!(rig.video(cx, "v3"), VoicePhase::Idle);
+        rig.saved_as(cx, "v3", "hash.mp4");
+        assert_eq!(rig.events(), []);
+    }
+
+    #[gpui::test]
+    fn opening_a_video_leaves_a_playing_voice_alone(cx: &mut TestAppContext) {
+        let rig = Rig::new(cx);
+        rig.playing(cx, 1, "f1");
+        let path = rig.saved_as(cx, "v1", "hash.mp4");
+        rig.open(cx, "v1", "x.mp4");
+        assert_eq!(rig.events(), [opens(&path)]);
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Playing);
+        assert_eq!(rig.fake.take_calls(), []);
+
+        // And stopping the voice does not touch a video that is loading.
+        rig.open(cx, "v2", "y.mp4");
+        rig.player.update(cx, |p, cx| p.stop(cx));
+        assert_eq!(rig.video(cx, "v2"), VoicePhase::Loading);
+    }
+
+    #[gpui::test]
+    fn a_joined_voice_transfer_that_fails_the_check_is_followed_by_the_videos_own(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::new(cx);
+        // A voice of the same file is loading under `v.ogg`; the store joins the video to it.
+        rig.toggle(cx, 1, "f1");
+        assert_eq!(rig.commands(), [fetch("f1", "v.ogg")]);
+        rig.open(cx, "f1", "clip.mp4");
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [], "the running transfer is joined");
+
+        // The voice's copy lands: the voice plays it, the video does not open it and asks again.
+        let ogg = rig.saved(cx, "f1");
+        assert_eq!(rig.phase(cx, 1), VoicePhase::Playing);
+        assert_eq!(rig.fake.take_calls(), [Call::Open(ogg), Call::Play]);
+        assert_eq!(rig.events(), []);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Loading);
+        assert_eq!(rig.commands(), [fetch("f1", "clip.mp4")]);
+
+        let mp4 = rig.saved_as(cx, "f1", "hash.mp4");
+        assert_eq!(rig.events(), [opens(&mp4)]);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), []);
+        assert_eq!(
+            rig.phase(cx, 1),
+            VoicePhase::Playing,
+            "the voice is left alone"
+        );
+    }
+
+    #[gpui::test]
+    fn a_joined_transfer_that_passes_the_check_opens_without_a_second_fetch(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = Rig::new(cx);
+        // A voice message whose file is named like a video starts the transfer.
+        let file = original("f1");
+        rig.player
+            .update(cx, |p, cx| p.toggle_voice(key(1), &file, Some("a.mov"), cx));
+        cx.run_until_parked();
+        assert_eq!(rig.commands(), [fetch("f1", "a.mov")]);
+        rig.open(cx, "f1", "clip.mp4");
+        let path = rig.saved_as(cx, "f1", "hash.mov");
+        assert_eq!(rig.events(), [opens(&path)]);
+        assert_eq!(rig.video(cx, "f1"), VoicePhase::Idle);
+        assert_eq!(rig.commands(), [], "no second fetch");
+    }
+
+    #[test]
+    fn only_the_extension_of_the_actual_path_counts() {
+        for yes in ["/a/b/x.mp4", "x.MP4", "/a/x.y.mov", "/a/b.command/x.MOV"] {
+            assert!(is_video_path(Path::new(yes)), "{yes}");
+        }
+        for no in [
+            "",
+            "/",
+            "/a/b.mp4/x",
+            "x",
+            "x.",
+            ".mp4",
+            "x.app",
+            "x.mp4.command",
+            "x.webm",
+        ] {
+            assert!(!is_video_path(Path::new(no)), "{no:?}");
         }
     }
 }

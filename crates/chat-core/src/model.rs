@@ -251,6 +251,17 @@ pub enum MessageBody {
         #[serde(default)]
         waveform: Option<Vec<u8>>,
     },
+    /// A video file. `media` is the original (kind `File`); `width` and `height` are zero and
+    /// `duration_ms` is `None` when the server sent no preview hint.
+    Video {
+        media: MediaRef,
+        name: String,
+        size: u64,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
     Deleted,
     /// A message type this client cannot render yet; holds the server type name.
     Unsupported(String),
@@ -288,6 +299,7 @@ impl MessageBody {
             }
             MessageBody::File { name, .. } => name.clone(),
             MessageBody::Voice { .. } => "Голосовое сообщение".into(),
+            MessageBody::Video { .. } => "Видео".into(),
             MessageBody::Deleted => "Сообщение удалено".into(),
             MessageBody::Unsupported(kind) => format!("[{kind}]"),
         }
@@ -807,6 +819,59 @@ mod tests {
         assert_eq!((duration_ms, size, name, waveform), (None, 9, None, None));
     }
 
+    fn video() -> MessageBody {
+        MessageBody::Video {
+            media: thumb("b/5").original(),
+            name: "clip.mp4".into(),
+            size: 12_000_000,
+            width: 1280,
+            height: 720,
+            duration_ms: Some(42_000),
+        }
+    }
+
+    #[test]
+    fn a_video_survives_a_json_round_trip() {
+        let without_duration = MessageBody::Video {
+            media: thumb("b/5").original(),
+            name: "clip.mov".into(),
+            size: 0,
+            width: 0,
+            height: 0,
+            duration_ms: None,
+        };
+        for body in [video(), without_duration] {
+            let json = serde_json::to_string(&body).unwrap();
+            assert_eq!(serde_json::from_str::<MessageBody>(&json).unwrap(), body);
+        }
+    }
+
+    #[test]
+    fn a_video_without_a_duration_decodes_to_none() {
+        let json = r#"{"Video":{"media":{"id":"b/5","kind":"File"},"name":"a.mp4","size":9,"width":4,"height":3}}"#;
+        let MessageBody::Video {
+            media,
+            name,
+            size,
+            width,
+            height,
+            duration_ms,
+        } = serde_json::from_str(json).unwrap()
+        else {
+            panic!("video")
+        };
+        assert_eq!(media, thumb("b/5").original());
+        assert_eq!(
+            (name.as_str(), size, width, height, duration_ms),
+            ("a.mp4", 9, 4, 3, None)
+        );
+    }
+
+    #[test]
+    fn a_video_has_no_pictures_for_the_gallery() {
+        assert!(video().gallery_items().is_empty());
+    }
+
     #[test]
     fn search_contract_types_compare_by_value() {
         let hits = SearchHits {
@@ -923,6 +988,7 @@ mod tests {
             waveform: None,
         };
         assert_eq!(voice.preview_text(), "Голосовое сообщение");
+        assert_eq!(video().preview_text(), "Видео");
     }
 
     #[test]
