@@ -147,14 +147,14 @@ Proposal merged into `main` as `b0fcdbc` (2026-11-28, `--no-ff` from `propose/no
 | 4.1 | **done**, on `main` with NB-B (`b81508a`): `Desktop` owns `Alerts` | 2.1 | `desktop.rs` |
 | 4.2 | open, NB-N: forward `Incoming` with the window state, click opens the chat | 1.2, 2.2, 4.1 | `desktop.rs` |
 | 5.1 | open, NB-N: `notifier.rs` over `UNUserNotificationCenter`, delegate, new crate | 0.4, 2.2 | `notifier.rs`, `crates/desktop/Cargo.toml`, `Cargo.lock`, `main.rs` |
-| 5.2 | open, NB-N, **only for R1 outcome 2**: `scripts/bundle.sh`, `run.sh`, docs | 0.4, 5.1 | `scripts/bundle.sh`, `run.sh`, `docs/vm.md`, `README.md` |
+| 5.2 | open, NB-N, **only for R1 outcome 2**: `scripts/bundle.sh`, `run-mac.sh`, docs | 0.4, 5.1 | `scripts/bundle.sh`, `run-mac.sh`, `docs/vm.md`, `README.md` |
 | 6.1 | **done**, on `main` with NB-B (`b81508a`): badge section of `tests.rs` | 2.1, 4.1 | `tests.rs` |
 | 6.2 | open, NB-N: notification section of `tests.rs` | 4.2, 6.1 | `tests.rs` |
 | 7.1 | **NB-B part done** (gate on `a5a8de6` and on `main` `b81508a`, see above); open for NB-N: final run per unit in `bt-vm` | the unit | build/test/lint matrix |
 | 7.2 | open, **[live] [needs-user]**: hand check in the VM (permission, badge, banner, muted chat, click, withdraw, backlog, log has no text) | 7.1, a sender other than the app account, a muted chat | none (checks only) |
 | 7.3 | open: this file, specs sync (`dock-badge`, `incoming-notifications` created), archive | everything above | this file, archive |
 
-File ownership (rule 1): `store.rs` (1.1, then 1.2); chat-core `model.rs` and `client.rs` (1.2); `alerts.rs` (2.1, then 2.2); `desktop.rs` (4.1, then 4.2); `tests.rs` (6.1, then 6.2); `main.rs` (2.1 module line, 3.1 module and registration, then 2.2 / 5.1; serialise); `crates/desktop/Cargo.toml` and `Cargo.lock` (3.1, then 5.1); `dock.rs` (3.1); `notifier.rs` (5.1); `scripts/bundle.sh`, `run.sh`, `docs/vm.md`, `README.md` (5.2); `bin/bt-probe.rs` (0.2); `research-r1.md` (0.1); `research-r2.md` (0.2, then 0.3); `research.md`, `design.md`, `tasks.md` and the specs (0.4).
+File ownership (rule 1): `store.rs` (1.1, then 1.2); chat-core `model.rs` and `client.rs` (1.2); `alerts.rs` (2.1, then 2.2); `desktop.rs` (4.1, then 4.2); `tests.rs` (6.1, then 6.2); `main.rs` (2.1 module line, 3.1 module and registration, then 2.2 / 5.1; serialise); `crates/desktop/Cargo.toml` and `Cargo.lock` (3.1, then 5.1); `dock.rs` (3.1); `notifier.rs` (5.1); `scripts/bundle.sh`, `run-mac.sh`, `docs/vm.md`, `README.md` (5.2); `bin/bt-probe.rs` (0.2); `research-r1.md` (0.1); `research-r2.md` (0.2, then 0.3); `research.md`, `design.md`, `tasks.md` and the specs (0.4).
 
 Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -> 3.1 / 4.1 -> 6.1) can start at once and merges first; NB-N after NB-B and 0.4; 7.1 per unit; 7.2 when the user provides the sender; 7.3 last. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-notifications-and-badge --strict`.
 

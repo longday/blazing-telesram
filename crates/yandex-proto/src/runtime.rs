@@ -8,7 +8,7 @@ pub struct RuntimeDir(PathBuf);
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "{RUNTIME_DIR_VAR} is not set: point it at the directory for session and cache files (run.sh uses <repo>/.runtime)"
+    "{RUNTIME_DIR_VAR} is not set: point it at the directory for session and cache files (the run-*.sh and run-windows.ps1 scripts use <repo>/.runtime)"
 )]
 pub struct MissingRuntimeDir;
 

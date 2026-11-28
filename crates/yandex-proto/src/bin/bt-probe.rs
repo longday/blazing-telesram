@@ -202,7 +202,7 @@ fn block_on(future: impl Future<Output = Result<(), Failure>>) -> Result<(), Fai
 /// `BT_LOG=yandex_proto::xiva=trace` for a developer who wants it.
 fn fail(e: ProtoError) -> Failure {
     match e {
-        ProtoError::SessionExpired => (1, "session expired: sign in again via ./run.sh".to_owned()),
+        ProtoError::SessionExpired => (1, "session expired: sign in again in the app".to_owned()),
         ProtoError::Protocol(text) => (
             1,
             ProtoError::Protocol(without_refusal_reason(&text).into()).to_string(),
@@ -218,7 +218,7 @@ fn load_session() -> Result<Session, Failure> {
         .ok_or_else(|| {
             (
                 1,
-                "no stored session: sign in first via ./run.sh".to_owned(),
+                "no stored session: sign in first in the app".to_owned(),
             )
         })
 }
