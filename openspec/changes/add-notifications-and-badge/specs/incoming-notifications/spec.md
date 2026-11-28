@@ -45,6 +45,11 @@ No notification SHALL be shown for: a message of the user's own account, includi
 - **WHEN** a message is edited, deleted or reacted to
 - **THEN** no notification is shown
 
+#### Scenario: Edit of the newest message in a chat never opened
+- **GIVEN** a chat the user has never opened in this client, with unread messages, whose newest message the client knows only from the chat list
+- **WHEN** the other person edits that newest message
+- **THEN** no notification is shown
+
 #### Scenario: Muted chat
 - **GIVEN** a chat is muted
 - **WHEN** another person sends a message in it
