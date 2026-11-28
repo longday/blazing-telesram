@@ -11,7 +11,9 @@ use crate::selection::{
 };
 use crate::text_lines::caret_for;
 use bt_chat_core::model::{ChatId, Message, MessageTs};
-use gpui::{Bounds, ClipboardItem, Context, Pixels, Point, TextLayout, Window, px};
+use gpui::{
+    Bounds, ClipboardItem, Context, ListState, Pixels, Point, TextLayout, Window, point, px,
+};
 use std::ops::Range;
 use std::time::Duration;
 
@@ -264,6 +266,21 @@ pub(crate) fn autoscroll_step(y: Pixels, viewport: Bounds<Pixels>) -> Pixels {
     px(step.clamp(-AUTOSCROLL_MAX, AUTOSCROLL_MAX))
 }
 
+/// Scrolls `list` by `step` pixels, positive towards the newest message. `ListState::scroll_by` counts
+/// from the item at the logical scroll top, which for a list pinned to its end is one past the last
+/// item, so the first step up from the bottom would land back on the bottom. This takes the top
+/// from the measured heights and sets it through the scrollbar offset, which clamps to the content.
+fn scroll_list(list: &ListState, step: Pixels) {
+    let max = list.max_offset_for_scrollbar().height;
+    let current = if list.logical_scroll_top().item_ix >= list.item_count() {
+        max
+    } else {
+        -list.scroll_px_offset_for_scrollbar().y
+    };
+    let to = (current + step).max(px(0.)).min(max);
+    list.set_offset_from_scrollbar(point(px(0.), -to));
+}
+
 impl Desktop {
     /// Runs `f` on the selection state with the loaded messages of the open chat (none without one).
     fn with_picking<R>(
@@ -368,7 +385,7 @@ impl Desktop {
         if step == px(0.) {
             return true;
         }
-        list.scroll_by(step);
+        scroll_list(&list, step);
         let texts = self.texts.clone();
         self.drag_to(point, texts.borrow().as_slice(), cx);
         cx.notify();
@@ -425,6 +442,27 @@ impl Desktop {
             self.autoscroll = None;
             self.drag_pointer = None;
         }
+    }
+
+    /// The selected byte range inside message `ts` of the open chat.
+    #[cfg(test)]
+    pub(crate) fn selected_range(&self, ts: MessageTs, cx: &gpui::App) -> Option<Range<usize>> {
+        let chat = &self.open.as_ref()?.chat;
+        let store = self.store.read(cx);
+        let messages = &store.timeline(chat)?.messages;
+        self.picking.read(cx).text.as_ref()?.range_in(messages, ts)
+    }
+
+    /// Whether a text selection exists, whatever it covers.
+    #[cfg(test)]
+    pub(crate) fn has_selection(&self, cx: &gpui::App) -> bool {
+        self.picking.read(cx).text.is_some()
+    }
+
+    /// Whether a text drag is in progress (the button is held).
+    #[cfg(test)]
+    pub(crate) fn is_dragging(&self, cx: &gpui::App) -> bool {
+        self.picking.read(cx).drag.is_some()
     }
 }
 
