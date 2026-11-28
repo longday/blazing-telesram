@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Four changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, TS-A unit merged, TS-Q and TS-M not started), **UC** `add-user-profile-card` (proposal merged, no code started) and **XP** `add-cross-platform-support` (proposal merged, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Four changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, research 0.2 merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, TS-A unit merged, TS-Q and TS-M not started), **UC** `add-user-profile-card` (proposal merged, no code started) and **XP** `add-cross-platform-support` (proposal merged, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -123,10 +123,12 @@ Proposal merged into `main` as `b0fcdbc` (2026-11-28, `--no-ff` from `propose/no
 - **NB-N** (notifications) = 1.2, 2.2, 4.2, 5.1, 5.2 (only for R1 outcome 2), 6.2, started **after NB-B is on `main` and after 0.4** (it extends `store.rs`, `alerts.rs`, `desktop.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`, and adds chat-core `model.rs` and `client.rs`: the new `ClientEvent::Incoming` and the recovery hold). If R1 ends in outcome 3 (no API works), NB-N does not run and the badge unit alone is delivered.
 - Research 0.1, 0.2 (its `bt-probe.rs` code and live run), 0.3, 0.4 merge as docs plus the `bt-probe.rs` change of 0.2. **`research.md` has one writer (0.4)**: 0.1 writes `research-r1.md`, 0.2 and then 0.3 write `research-r2.md`, so 0.1 and 0.2 do not share a file and can run in parallel.
 
+**NB 0.2 merged into `main` as `503f8e3`** (2026-11-28, `--no-ff` from the integration branch `6e748b3`; `nb/0.2` `884a4d4` merged into it, review `ReviewNbR2` approved; `git diff 6e748b3 503f8e3` is empty: the merge result equals the integration tree; 3 files, +306/-8: `crates/yandex-proto/src/bin/bt-probe.rs`, new `research-r2.md`, the tick in `tasks.md`). **Gate on integ `6e748b3`** (Integrator, VM `~/bt/src-IntegrateRev`, `--locked --offline`): fmt OK; build 0 warnings; `cargo test --workspace` green, **737 + 327 + 220 + 49 + 4 + 23** (desktop, chat-core, yandex-proto lib, bt-probe, `probe_write_guard`, `wire_fixtures`; bt-probe 43 -> 49: the six `chats --keys` tests), 0 failed; clippy **9 warnings, the same places as after TS-A**; `openspec validate --all --strict` 23/23. **Gate rerun on the resulting `main` `503f8e3`** (same VM directory, removed afterwards): fmt OK; build 0 warnings; the same test numbers, 0 failed; clippy 9; validate 23/23. `nb/0.2` and its worktree `bt-nb-0.2` are removed. **`bin/bt-probe.rs` is free**; next owners in order: **TS 0.5, UC 0.1, XP 1.3**.
+
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
 | 0.1 | open: R1, notification centre and Dock badge in a bare binary and in a minimal bundle (VM scratch crate, no account); decides the platform API, whether 5.2 exists, the cargo feature lists | VM network | `research-r1.md` (new) |
-| 0.2 | open: R2, `bt-probe chats` prints `muted`, `chats --keys`, live count of mute keys and `IsSilent` / `NotificationBehaviour` values; **[live]**, reads only | 0.1 not required; a free live slot | `yandex-proto/src/bin/bt-probe.rs`, `research-r2.md` (new) |
+| 0.2 | **done**, on `main` as `503f8e3` (`--no-ff` from the integration branch `6e748b3`; `nb/0.2` `884a4d4`): `bt-probe chats` prints `muted`, `chats --keys` (names and value types only, no connection banner), `research-r2.md` with the live R2 results; reads only, the live slot is released; `bt-probe.rs` is free (next TS 0.5, UC 0.1, XP 1.3) | 0.1 not required; a free live slot | `yandex-proto/src/bin/bt-probe.rs`, `research-r2.md` (new) |
 | 0.3 | open, **optional, non-gating, [live] [needs-user]**: mute-change push, first-message-of-a-new-chat push order, replay of missed messages after a reconnect | 0.2, the user as the second party | `research-r2.md` (after 0.2) |
 | 0.4 | open: copy the answers into `research.md` and `design.md`, fix the dependent tasks | 0.1, 0.2 (0.3 if run) | `research.md`, `design.md`, `tasks.md`, specs |
 | 1.1 | **done**, on `main` with NB-B (`b81508a`): `badge_total`, `ChatStore::badge_count` | none | `store.rs` |
@@ -161,7 +163,7 @@ Proposal merged into `main` from branch `propose/usercard` (2026-11-28, docs onl
 
 | ID | Status | Needs | Files / notes |
 |----|--------|-------|---------------|
-| 0.1 | open: `bt-probe user-keys` (key paths and value kinds only, never a value) | NB 0.2 merged, or this task first | `yandex-proto/src/bin/bt-probe.rs` |
+| 0.1 | open: `bt-probe user-keys` (key paths and value kinds only, never a value) | NB 0.2 merged (done, `503f8e3`); the file is free, TS 0.5 and UC 0.1 go before XP 1.3 | `yandex-proto/src/bin/bt-probe.rs` |
 | 0.2 | open, **[live]** reads only: Q1-Q3, Q5-Q9 (shapes of another user's record, `whoami { Guid: other }`, unknown guid) | 0.1, a free live slot | `research-r1.md` (new) |
 | 0.3 | open, **[static]**: Q4 (what the web client calls to open a person's card; any method outside the allowlist?) | none | `research-r2.md` (new) |
 | 0.4 | open: close the research; fix or drop card lines no record carries, decide D2b (status) and D2c (new read method) | 0.2, 0.3 | `design.md`, `tasks.md`, `research.md`, specs, `proposal.md` |
@@ -260,7 +262,7 @@ Proposal merged into `main` from branch `propose/port` (docs only: `openspec/cha
 | 0.8 | open: close the research into `design.md` and `tasks.md` | 0.2 to 0.7 | `design.md`, `tasks.md`, `research.md`, specs |
 | 1.1 | open, XP-A: crate `bt-platform` (private dir/file, `is_owner_only`) | none | `crates/platform/**`, root `Cargo.toml`, `Cargo.lock` |
 | 1.2 | open, XP-A: `session.rs`, `runtime.rs` | 1.1 | `yandex-proto` `session.rs`, `runtime.rs`, `Cargo.toml` |
-| 1.3 | open, XP-A: `bt-probe.rs` two hunks | 1.1; the file free (NB 0.2, TS 0.5, UC 0.1) | `bin/bt-probe.rs` |
+| 1.3 | open, XP-A: `bt-probe.rs` two hunks | 1.1; the file free (NB 0.2 done; TS 0.5 and UC 0.1 first) | `bin/bt-probe.rs` |
 | 1.4 | open, XP-A: chat-core `cache.rs`, `client.rs` hunks (production and every Unix-only test), the `PartialMode` choice at `client.rs:773` | 1.1, 1.5; `client.rs` free (NB-N 1.2, TS 2.1) | `cache.rs`, `client.rs`, `Cargo.toml` |
 | 1.5 | open, XP-A: `windows_safe_name`, `PartialMode::{Private, Ordinary}`, atomic final-name claim (no copy fallback) | 1.1 | chat-core `paths.rs` |
 | 1.6 | open, XP-A: `logging.rs` | 1.1 | `desktop/src/logging.rs`, `crates/desktop/Cargo.toml` (one line) |
