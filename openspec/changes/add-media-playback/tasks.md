@@ -64,3 +64,4 @@ File overlap with other open changes at the time of writing: none in flight (CM 
 Playback speed and seeking by clicking the track; a "listened" mark; a mini player across chats; an inline video player through `Surface` + `AVPlayer` (design D8); showing the voice transcript (R1: present on all 17 voices); a cap or eviction policy for playback copies; a second audio backend for an uncovered format (C4 is the measured reserve, design D5).
 
 - Fallback voice name without `.ogg` when `FileInfo.Name` is absent.
+- Playback copies keyed by `Id2` only: a video re-fetch can drop a voice copy of the same file from the store (replay and the offline voice bubble then fail); fix in `ChatStore`: keep the available copy apart from the current transfer state, one accessor for `Player` and the timeline (or key by `Id2` plus extension), if it matters.
