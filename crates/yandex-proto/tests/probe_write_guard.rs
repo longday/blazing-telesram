@@ -124,6 +124,11 @@ impl Run {
 /// proxy variable points at a loopback listener, which counts the HTTP connections the run opens
 /// (not the push socket, which the sandbox would refuse).
 fn probe(args: &[&str], limit: &str, with_session: bool) -> Run {
+    probe_with_limit(args, Some(limit), with_session)
+}
+
+/// `probe`, with `limit == None` leaving `BT_WRITE_ONLY_CHAT` unset.
+fn probe_with_limit(args: &[&str], limit: Option<&str>, with_session: bool) -> Run {
     let sentinel = TcpListener::bind("127.0.0.1:0").unwrap();
     sentinel.set_nonblocking(true).unwrap();
     let proxy = format!("http://{}", sentinel.local_addr().unwrap());
@@ -131,20 +136,22 @@ fn probe(args: &[&str], limit: &str, with_session: bool) -> Run {
     if with_session {
         dummy_session(&RuntimeDir::new(runtime.path()));
     }
-    let output = Command::new(SANDBOX_EXEC)
+    let mut command = Command::new(SANDBOX_EXEC);
+    command
         .args(["-p", SANDBOX_PROFILE, env!("CARGO_BIN_EXE_bt-probe")])
         .args(args)
         .env_clear()
         .env("BT_RUNTIME_DIR", runtime.path())
-        .env("BT_WRITE_ONLY_CHAT", limit)
         .env("HTTP_PROXY", &proxy)
         .env("HTTPS_PROXY", &proxy)
         .env("ALL_PROXY", &proxy)
         .env("http_proxy", &proxy)
         .env("https_proxy", &proxy)
-        .env("all_proxy", &proxy)
-        .output()
-        .unwrap();
+        .env("all_proxy", &proxy);
+    if let Some(limit) = limit {
+        command.env("BT_WRITE_ONLY_CHAT", limit);
+    }
+    let output = command.output().unwrap();
     let mut connections = 0;
     while sentinel.accept().is_ok() {
         connections += 1;
@@ -226,5 +233,79 @@ fn an_empty_limit_refuses_every_write_command() {
     ];
     for args in &commands {
         probe(args, "  ", true).assert_refused(args, "set but empty");
+    }
+}
+
+#[test]
+fn send_reply_is_refused_unless_the_limit_names_its_chat() {
+    if !sandbox_ready() {
+        return;
+    }
+    let chat = own_chat();
+    let commands: [Vec<&str>; 2] = [
+        vec!["send-reply", &chat, "hello", "--reply", "5"],
+        vec![
+            "send-reply",
+            &chat,
+            "hello",
+            "--reply",
+            "5",
+            "--quote",
+            "a quote",
+        ],
+    ];
+    for args in &commands {
+        // Unset: unlike the other writes, no limit does not mean "allowed".
+        for with_session in [false, true] {
+            probe_with_limit(args, None, with_session).assert_refused(args, "not set");
+            probe(args, OTHER_CHAT, with_session).assert_refused(args, OTHER_CHAT);
+            probe(args, "  ", with_session).assert_refused(args, "set but empty");
+        }
+    }
+}
+
+#[test]
+fn send_reply_passes_the_guard_when_the_limit_names_its_chat() {
+    if !sandbox_ready() {
+        return;
+    }
+    let chat = own_chat();
+    for args in [
+        vec!["send-reply", &chat, "hello", "--reply", "5"],
+        vec!["send-reply", &chat, "hello", "--reply", "5", "--quote", "q"],
+    ] {
+        // No stored session: a command that passed the guard stops at loading it (exit 1, not the
+        // guard's 2), before any connection is made.
+        let run = probe(&args, &chat, false);
+        let stderr = run.stderr();
+        assert_eq!(run.output.status.code(), Some(1), "{args:?}: {stderr}");
+        assert!(
+            stderr.contains("no stored session") && !stderr.contains("refusing"),
+            "{args:?}: {stderr}"
+        );
+        assert_eq!(run.connections, 0, "{args:?}");
+    }
+}
+
+#[test]
+fn send_reply_usage_errors_exit_with_code_2_before_the_guard_or_a_connection() {
+    if !sandbox_ready() {
+        return;
+    }
+    let chat = own_chat();
+    let commands: [Vec<&str>; 5] = [
+        vec!["send-reply"],
+        vec!["send-reply", &chat],
+        vec!["send-reply", &chat, "hello"],
+        vec!["send-reply", &chat, "hello", "--reply", "x"],
+        vec!["send-reply", &chat, "hello", "--reply", "5", "--bogus", "1"],
+    ];
+    for args in &commands {
+        let run = probe(args, &chat, true);
+        let stderr = run.stderr();
+        assert_eq!(run.output.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.contains("usage: bt-probe"), "{args:?}: {stderr}");
+        assert!(run.output.stdout.is_empty(), "{args:?}");
+        assert_eq!(run.connections, 0, "{args:?}");
     }
 }
