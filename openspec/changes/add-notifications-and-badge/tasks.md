@@ -31,7 +31,7 @@ File overlap with other open changes at the time of writing: none in flight (CM 
 
 ## 4. Wiring (`desktop::desktop`)
 
-- [ ] 4.1 **[NB-B]** `desktop.rs`: `Desktop::new` creates the `Alerts` entity (field `alerts`; signature unchanged: it reads the global itself) and holds it for the life of the window, so the badge never outlives the window. Owns: `desktop/src/desktop.rs`. Depends on: 2.1. Verify: asserted in 6.1.
+- [x] 4.1 **[NB-B]** `desktop.rs`: `Desktop::new` creates the `Alerts` entity (field `alerts`; signature unchanged: it reads the global itself) and holds it for the life of the window, so the badge never outlives the window. Owns: `desktop/src/desktop.rs`. Depends on: 2.1. Verify: asserted in 6.1.
 - [ ] 4.2 **[NB-N]** `desktop.rs`: in the `subscribe_in` closure that already has the `Window`, `StoreEvent::Incoming { chat, preview }` calls `alerts.update(cx, |a, cx| a.incoming(chat, preview, window.is_window_active(), store.selected().cloned(), cx))`; `Desktop` subscribes to `AlertsEvent::Open(chat)`: `store.select(chat)` when `store.chat(&chat)` is `Some` (the ordinary open: its one `Command::OpenChat` is the only request a click causes), then `window.activate_window()` and `cx.activate(true)` (D7); nothing else changes in the selection path. Owns: `desktop/src/desktop.rs`. Depends on: 1.2, 2.2, 4.1. Verify: asserted in 6.2.
 
 ## 5. Platform: notifications (`desktop::notifier`)
