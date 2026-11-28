@@ -94,7 +94,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: in 1.8 (the timeline is exercised through the window test harness).
   - Done when: the code is in place and the existing timeline tests pass.
 
-- [ ] 1.4 The selection state machine (D2, D4, D5)
+- [x] 1.4 The selection state machine (D2, D4, D5)
   - Owns: new `crates/desktop/src/desktop/selecting.rs`.
   - Depends on: 1.1, 1.2.
   - Do: `PickState { text: Option<TextSelection>, drag: Option<Drag> }`; pure transitions over `&[Message]`: `down(ts, offset, clicks, shift)` (1 caret/clear, shift extends, 2 word, 3+ paragraph), `drag_to(pos)` extending by the click's unit, `drag_end`, `clear`, `validate`, `select_all`; the caret mapping `caret_at(point, registry) -> Option<Pos>` (D5: over a text, beside a bubble to the nearest row, above/below the painted rows); the autoscroll speed function (distance outside the viewport to pixels per tick, capped, 0 inside); `Desktop` methods `text_down`, `drag_to`, `drag_end`, `copy_selection(cx)` (writes `extract_text` to the clipboard, no-op when empty), `select_all_text(cx)`, `clear_selection(cx)`; focus handed to the root handle on `text_down`.
