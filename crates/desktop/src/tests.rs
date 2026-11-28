@@ -10362,3 +10362,837 @@ fn a_chat_row_whose_last_message_is_voice_shows_the_plain_label(cx: &mut TestApp
         );
     });
 }
+
+// ---- video playback (PB 5.8) ----
+//
+// A click on a video card's circle drives the real `Player` and the real store; the system hand-off
+// itself lives in `main.rs` (the test platform's `open_with_system` is `unimplemented!()`), so the tests
+// observe the `PlayerEvent::OpenExternal` the player emits and the commands the store sends. As for voice,
+// debug bounds cannot read a glyph or a line, so the card records what it puts into its elements at render
+// (`timeline::probe::VIDEO_SHOWN`) and `video_rendered` clears that record before an action and reads it
+// after, so a stale record cannot pass. The wire-to-body choice between video card and file card is the
+// adapter's (its own tests, MP 3.2); here a `Video` body with no duration is what a `File` named `x.mp4`
+// without a hint becomes, and `is_video_name` ties the names used below to the adapter's whitelist.
+
+use crate::player::PlayerEvent;
+use crate::timeline::probe::{VIDEO_SHOWN, VideoShown};
+use crate::yandex_backend::is_video_name;
+
+const MB: u64 = 1024 * 1024;
+
+/// What a video card was rendered with: the glyph, the name and the size line put into the elements, and
+/// whether the circle got its click handler.
+fn vface(glyph: &str, name: &str, line: &str, enabled: bool) -> VideoShown {
+    VideoShown {
+        glyph: glyph.into(),
+        name: name.into(),
+        line: line.into(),
+        enabled,
+    }
+}
+
+/// What card `i` was last rendered with.
+fn video_rendered_now(i: i64) -> VideoShown {
+    VIDEO_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("video card {i} was never rendered"))
+}
+
+/// Runs `act`, then returns what card `i` was rendered with; the record is cleared first, so it is there
+/// again only if the row really rendered after `act`.
+fn video_rendered(
+    cx: &mut VisualTestContext,
+    i: i64,
+    act: impl FnOnce(&mut VisualTestContext),
+) -> VideoShown {
+    VIDEO_SHOWN.with(|shown| shown.borrow_mut().remove(&ts(i)));
+    act(cx);
+    VIDEO_SHOWN
+        .with(|shown| shown.borrow().get(&ts(i)).cloned())
+        .unwrap_or_else(|| panic!("video card {i} was not rendered again"))
+}
+
+/// A video message of 12 MB in chat "g"; `duration_ms` is `None` for a video the server gave no hint for.
+fn video_message(i: i64, file: &str, name: &str, duration_ms: Option<u64>) -> Message {
+    message(
+        "g",
+        i,
+        "bob",
+        false,
+        MessageBody::Video {
+            media: original(file),
+            name: name.into(),
+            size: 12 * MB,
+            width: if duration_ms.is_some() { 1280 } else { 0 },
+            height: if duration_ms.is_some() { 720 } else { 0 },
+            duration_ms,
+        },
+    )
+}
+
+/// Online, chat "g" open with `messages`.
+fn video_chat(
+    cx: &mut TestAppContext,
+    messages: Vec<Message>,
+) -> (Harness, &mut VisualTestContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_with(&h, cx, messages);
+    (h, cx)
+}
+
+fn video_phase(h: &Harness, cx: &mut VisualTestContext, file: &str) -> VoicePhase {
+    h.desktop
+        .read_with(cx, |d, cx| d.player.read(cx).video(&original(file)))
+}
+
+/// Every event the player emits from now on, in order.
+fn record_player_events(h: &Harness, cx: &mut VisualTestContext) -> Rc<RefCell<Vec<PlayerEvent>>> {
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let sink = log.clone();
+    let player = h.desktop.read_with(cx, |d, _| d.player.clone());
+    cx.update(|_, app| {
+        app.subscribe(&player, move |_, event: &PlayerEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach()
+    });
+    cx.run_until_parked();
+    log
+}
+
+fn take_player_events(log: &Rc<RefCell<Vec<PlayerEvent>>>) -> Vec<PlayerEvent> {
+    std::mem::take(&mut *log.borrow_mut())
+}
+
+fn opens(path: &std::path::Path) -> PlayerEvent {
+    PlayerEvent::OpenExternal(path.to_path_buf())
+}
+
+fn download_of(file: &str, name: &str) -> Command {
+    Command::Download {
+        media: playback_of(file),
+        name: Some(name.into()),
+    }
+}
+
+macro_rules! video_parts {
+    ($ts:literal) => {
+        [
+            msg!($ts),
+            msg!($ts, "video"),
+            msg!($ts, "video-play"),
+            msg!($ts, "video-status"),
+        ]
+    };
+}
+
+#[gpui::test]
+fn a_video_body_renders_the_card_and_asks_for_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+    open_group(&h, cx);
+    let events = record_player_events(&h, cx);
+    let mut messages: Vec<Message> = (1..=40).map(|i| text("g", i)).collect();
+    messages.push(video_message(41, "vf", "clip.mp4", Some(42_000)));
+    messages.push(video_message(42, "vg", "long.mov", None));
+    messages.extend((43..=45).map(|i| text("g", i)));
+    h.feed(cx, [history("g", messages, true)]);
+    for part in video_parts!(41).into_iter().chain(video_parts!(42)) {
+        assert!(shown(cx, part), "{part}");
+    }
+    for part in [
+        msg!(41, "file"),
+        msg!(41, "voice"),
+        msg!(41, "unsupported"),
+        msg!(42, "file"),
+    ] {
+        assert!(!shown(cx, part), "{part}: a video is its own card");
+    }
+    assert!(shown(cx, msg!(41, "download")), "the Download row");
+    assert!(shown(cx, msg!(42, "download")));
+    assert_eq!(
+        video_rendered_now(41),
+        vface("▶", "clip.mp4", "0:42 · 12 МБ", true),
+        "play glyph, the name, the duration and the size, a clickable circle"
+    );
+    assert_eq!(
+        video_rendered_now(42),
+        vface("▶", "long.mov", "12 МБ", true),
+        "no duration: the size alone"
+    );
+
+    // Scrolled through and a new video arriving: still nothing requested, nothing opened.
+    scroll(cx, 600.);
+    scroll(cx, -600.);
+    h.feed(
+        cx,
+        [ClientEvent::MessageUpserted(video_message(
+            46,
+            "vh",
+            "new.mp4",
+            Some(5_000),
+        ))],
+    );
+    assert!(shown(cx, msg!(46, "video")), "the new message has its card");
+    assert_eq!(h.commands(), [], "nothing is requested");
+    for file in ["vf", "vg", "vh"] {
+        assert_eq!(download_state(&h, cx, &playback_of(file)), None);
+        assert_eq!(download_state(&h, cx, &original(file)), None);
+    }
+    assert_eq!(take_player_events(&events), []);
+    assert_eq!(h.fake.created(), 0, "no audio is touched");
+}
+
+#[gpui::test]
+fn play_fetches_the_playback_copy_shows_progress_and_opens_the_saved_path(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    let dir = tempfile::tempdir().unwrap();
+
+    let seen = video_rendered(cx, 5, |cx| click(cx, msg!(5, "video-play")));
+    assert_eq!(
+        seen,
+        vface("✕", "clip.mp4", "Загрузка для просмотра: 0 Б", true),
+        "loading: the cancel glyph, nothing received yet"
+    );
+    assert_eq!(
+        h.commands(),
+        [download_of("vf", "clip.mp4")],
+        "the playback copy is asked for, under the video's own name, not the original"
+    );
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Loading);
+    assert_eq!(
+        download_state(&h, cx, &playback_of("vf")),
+        Some(DownloadState::Running {
+            received: 0,
+            total: None
+        })
+    );
+    assert_eq!(download_state(&h, cx, &original("vf")), None);
+    assert!(
+        !shown(cx, msg!(5, "cancel")),
+        "the action row belongs to the original's download"
+    );
+    assert_eq!(
+        take_player_events(&events),
+        [],
+        "nothing opens before the copy is here"
+    );
+
+    let seen = video_rendered(cx, 5, |cx| {
+        h.feed(
+            cx,
+            [ClientEvent::DownloadProgress {
+                media: playback_of("vf"),
+                received: 3_355_443,
+                total: Some(80 * MB),
+            }],
+        )
+    });
+    assert_eq!(
+        seen,
+        vface(
+            "✕",
+            "clip.mp4",
+            "Загрузка для просмотра: 3,2 МБ из 80 МБ",
+            true
+        )
+    );
+    let seen = video_rendered(cx, 5, |cx| {
+        h.feed(
+            cx,
+            [ClientEvent::DownloadProgress {
+                media: playback_of("vf"),
+                received: 3_355_443,
+                total: None,
+            }],
+        )
+    });
+    assert_eq!(
+        seen,
+        vface("✕", "clip.mp4", "Загрузка для просмотра: 3,2 МБ", true),
+        "no total: the received size alone"
+    );
+    assert_eq!(take_player_events(&events), []);
+
+    let path = saved_file(&dir, "vf.mp4");
+    let seen = video_rendered(cx, 5, |cx| saved(&h, cx, &playback_of("vf"), &path));
+    assert_eq!(
+        take_player_events(&events),
+        [opens(&path)],
+        "the exact saved path is handed over"
+    );
+    assert_eq!(
+        seen,
+        vface("▶", "clip.mp4", "0:42 · 12 МБ", true),
+        "handed to the system: the card is idle again"
+    );
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Idle);
+    assert_eq!(h.commands(), []);
+    assert_eq!(h.fake.created(), 0, "no audio output is made for a video");
+}
+
+#[gpui::test]
+fn a_second_play_opens_the_copy_on_disk_without_a_request(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    let dir = tempfile::tempdir().unwrap();
+    click(cx, msg!(5, "video-play"));
+    let path = saved_file(&dir, "vf.mp4");
+    saved(&h, cx, &playback_of("vf"), &path);
+    assert_eq!(take_player_events(&events), [opens(&path)]);
+    h.commands();
+
+    for _ in 0..2 {
+        let seen = video_rendered(cx, 5, |cx| click(cx, msg!(5, "video-play")));
+        assert_eq!(take_player_events(&events), [opens(&path)]);
+        assert_eq!(h.commands(), [], "the copy is reused");
+        assert_eq!(seen, vface("▶", "clip.mp4", "0:42 · 12 МБ", true));
+    }
+}
+
+#[gpui::test]
+fn the_circle_cancels_a_loading_copy_and_the_next_click_starts_again(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Loading);
+    h.commands();
+
+    let seen = video_rendered(cx, 5, |cx| click(cx, msg!(5, "video-play")));
+    assert_eq!(
+        h.commands(),
+        [Command::CancelDownload(playback_of("vf"))],
+        "cancel stops the transfer of the playback copy"
+    );
+    assert_eq!(take_player_events(&events), [], "nothing opens");
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Idle);
+    assert_eq!(seen, vface("▶", "clip.mp4", "0:42 · 12 МБ", true));
+
+    // The core confirms; a start after that fetches again.
+    h.feed(cx, [ClientEvent::DownloadCancelled(playback_of("vf"))]);
+    assert_eq!(download_state(&h, cx, &playback_of("vf")), None);
+    let seen = video_rendered(cx, 5, |cx| click(cx, msg!(5, "video-play")));
+    assert_eq!(seen.glyph, "✕");
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+    assert_eq!(take_player_events(&events), []);
+}
+
+#[gpui::test]
+fn every_failure_has_its_text_on_the_card_and_the_next_click_retries(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    let cases = [
+        (DownloadFailure::Offline, "Нет сети"),
+        (DownloadFailure::Network, "Нет сети"),
+        (DownloadFailure::NotFound, "Файл недоступен"),
+        (DownloadFailure::Disk, "Файл недоступен"),
+        (DownloadFailure::Destination, "Ошибка"),
+        (DownloadFailure::Other, "Ошибка"),
+    ];
+    for (reason, label) in cases {
+        click(cx, msg!(5, "video-play"));
+        assert_eq!(
+            video_phase(&h, cx, "vf"),
+            VoicePhase::Loading,
+            "{reason:?}: the click retries"
+        );
+        assert_eq!(h.commands(), [download_of("vf", "clip.mp4")], "{reason:?}");
+        let seen = video_rendered(cx, 5, |cx| {
+            h.feed(
+                cx,
+                [ClientEvent::DownloadFailed {
+                    media: playback_of("vf"),
+                    reason,
+                }],
+            )
+        });
+        let failure = PlayFailure::Download(reason);
+        assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Failed(failure));
+        assert_eq!(failure_label(failure), label, "{reason:?}");
+        assert_eq!(
+            seen,
+            vface("▶", "clip.mp4", label, true),
+            "{reason:?}: its reason in the size line, play again offered"
+        );
+    }
+    assert!(
+        !shown(cx, msg!(5, "retry")),
+        "the original's row has no failure of its own"
+    );
+    assert_eq!(take_player_events(&events), []);
+}
+
+#[gpui::test]
+fn a_downloaded_original_is_not_opened_and_its_state_is_independent(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    let dir = tempfile::tempdir().unwrap();
+
+    click(cx, msg!(5, "download"));
+    assert_eq!(
+        h.commands(),
+        [Command::Download {
+            media: original("vf"),
+            name: Some("clip.mp4".into())
+        }],
+        "the row downloads the original"
+    );
+    assert_eq!(
+        video_phase(&h, cx, "vf"),
+        VoicePhase::Idle,
+        "and does not play"
+    );
+    assert_eq!(download_state(&h, cx, &playback_of("vf")), None);
+    assert_eq!(
+        video_rendered_now(5),
+        vface("▶", "clip.mp4", "0:42 · 12 МБ", true)
+    );
+
+    // Both transfers run at once.
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Loading);
+    assert!(matches!(
+        download_state(&h, cx, &original("vf")),
+        Some(DownloadState::Running { .. })
+    ));
+
+    // The original lands in Downloads: it is shown as saved, and never opened.
+    let downloaded = saved_file(&dir, "clip.mp4");
+    saved(&h, cx, &original("vf"), &downloaded);
+    assert_eq!(
+        take_player_events(&events),
+        [],
+        "a download is never opened"
+    );
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Loading);
+    assert!(shown(cx, msg!(5, "saved")));
+    assert!(shown(cx, msg!(5, "reveal")));
+
+    // Cancelling the playback copy leaves the original as it was.
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), [Command::CancelDownload(playback_of("vf"))]);
+    h.feed(cx, [ClientEvent::DownloadCancelled(playback_of("vf"))]);
+    assert_eq!(
+        download_state(&h, cx, &original("vf")),
+        Some(DownloadState::Saved(downloaded.clone()))
+    );
+
+    // Play after the download fetches a second copy and opens that one.
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+    assert_eq!(take_player_events(&events), []);
+    let copy = saved_file(&dir, "playback.mp4");
+    saved(&h, cx, &playback_of("vf"), &copy);
+    assert_eq!(take_player_events(&events), [opens(&copy)]);
+    assert_eq!(
+        download_state(&h, cx, &original("vf")),
+        Some(DownloadState::Saved(downloaded.clone())),
+        "the playback copy did not touch the download's state"
+    );
+
+    // «Показать в Finder» is the original's.
+    let log = record_store_events(&h, cx);
+    click(cx, msg!(5, "reveal"));
+    assert_eq!(take_events(&log), [StoreEvent::Reveal(downloaded)]);
+    assert_eq!(take_player_events(&events), []);
+}
+
+#[gpui::test]
+fn a_copy_saved_under_another_extension_is_not_opened_and_the_video_is_fetched_anew(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let events = record_player_events(&h, cx);
+    let dir = tempfile::tempdir().unwrap();
+
+    // The same file was saved earlier for a message that names it otherwise.
+    for (n, stale) in [
+        "vf.command",
+        "vf",
+        "vf.app",
+        "vf.mp4.command",
+        "vf.webm",
+        "vf.mkv",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let stale_path = saved_file(&dir, stale);
+        saved(&h, cx, &playback_of("vf"), &stale_path);
+        h.commands();
+        take_player_events(&events);
+
+        let seen = video_rendered(cx, 5, |cx| click(cx, msg!(5, "video-play")));
+        assert_eq!(
+            take_player_events(&events),
+            [],
+            "{stale}: the copy is not opened"
+        );
+        assert_eq!(
+            h.commands(),
+            [download_of("vf", "clip.mp4")],
+            "{stale}: a new copy is asked for under the video's own name"
+        );
+        assert_eq!(
+            seen,
+            vface("✕", "clip.mp4", "Загрузка для просмотра: 0 Б", true),
+            "{stale}"
+        );
+        assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Loading);
+
+        let fresh = saved_file(&dir, &format!("fresh-{n}.mp4"));
+        saved(&h, cx, &playback_of("vf"), &fresh);
+        assert_eq!(
+            take_player_events(&events),
+            [opens(&fresh)],
+            "{stale}: the new copy is opened"
+        );
+        assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Idle);
+    }
+
+    // The check is case-insensitive.
+    let upper = saved_file(&dir, "vf.MP4");
+    saved(&h, cx, &playback_of("vf"), &upper);
+    h.commands();
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&events), [opens(&upper)]);
+    assert_eq!(h.commands(), [], ".MP4 is a video: opened at once");
+
+    // A fresh copy that fails the check is not opened and says so; the next click does not trust it.
+    let stale = saved_file(&dir, "vf.command");
+    saved(&h, cx, &playback_of("vf"), &stale);
+    h.commands();
+    click(cx, msg!(5, "video-play"));
+    h.commands();
+    let bad = saved_file(&dir, "fresh.command");
+    let seen = video_rendered(cx, 5, |cx| saved(&h, cx, &playback_of("vf"), &bad));
+    assert_eq!(take_player_events(&events), [], "nothing is opened");
+    assert_eq!(
+        video_phase(&h, cx, "vf"),
+        VoicePhase::Failed(PlayFailure::Unsupported)
+    );
+    assert_eq!(
+        seen,
+        vface("▶", "clip.mp4", "Формат не поддерживается", true)
+    );
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&events), []);
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+
+    // A copy that vanished from disk is fetched again as well.
+    let gone = saved_file(&dir, "gone.mp4");
+    saved(&h, cx, &playback_of("vf"), &gone);
+    assert_eq!(take_player_events(&events), [opens(&gone)]);
+    h.commands();
+    std::fs::remove_file(&gone).unwrap();
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&events), []);
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+}
+
+#[gpui::test]
+fn offline_without_a_copy_the_video_circle_does_nothing_and_asks_for_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![ClientEvent::Connection(ConnectionState::Offline)],
+        |_, _| {},
+    );
+    open_with(
+        &h,
+        cx,
+        vec![video_message(5, "vf", "clip.mp4", Some(42_000))],
+    );
+    let events = record_player_events(&h, cx);
+    assert_eq!(
+        video_rendered_now(5),
+        vface("▶", "clip.mp4", "Нет сети", false),
+        "before any click: the offline text and no click handler"
+    );
+
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), []);
+    assert_eq!(take_player_events(&events), []);
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Idle);
+    assert_eq!(download_state(&h, cx, &playback_of("vf")), None);
+
+    let seen = video_rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)])
+    });
+    assert_eq!(
+        seen,
+        vface("▶", "clip.mp4", "0:42 · 12 МБ", true),
+        "back online: the line and an enabled circle"
+    );
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), [download_of("vf", "clip.mp4")]);
+}
+
+#[gpui::test]
+fn offline_with_a_copy_the_video_opens_and_a_lost_or_unfit_copy_is_unavailable(
+    cx: &mut TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let good = saved_file(&dir, "vf.mp4");
+    let unfit = saved_file(&dir, "vg.command");
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::Downloaded {
+            media: playback_of("vf"),
+            path: good.clone(),
+        },
+        ClientEvent::Downloaded {
+            media: playback_of("vg"),
+            path: unfit,
+        },
+        ClientEvent::Connection(ConnectionState::Offline),
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    open_with(
+        &h,
+        cx,
+        vec![
+            video_message(5, "vf", "clip.mp4", Some(42_000)),
+            video_message(6, "vg", "other.mp4", Some(42_000)),
+        ],
+    );
+    let log = record_player_events(&h, cx);
+    assert_eq!(
+        video_rendered_now(5),
+        vface("▶", "clip.mp4", "0:42 · 12 МБ", true),
+        "a usable copy: offline plays"
+    );
+    assert_eq!(
+        video_rendered_now(6),
+        vface("▶", "other.mp4", "Нет сети", false),
+        "only a copy that fails the check: unavailable before any click"
+    );
+
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&log), [opens(&good)]);
+    assert_eq!(h.commands(), [], "the copy is local: nothing is fetched");
+    click(cx, msg!(6, "video-play"));
+    assert_eq!(take_player_events(&log), []);
+    assert_eq!(h.commands(), []);
+    assert_eq!(video_phase(&h, cx, "vg"), VoicePhase::Idle);
+
+    // The copy is deleted from disk: offline there is nothing to open.
+    std::fs::remove_file(&good).unwrap();
+    let seen = video_rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)]);
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    });
+    assert_eq!(seen, vface("▶", "clip.mp4", "Нет сети", false));
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&log), []);
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn a_video_load_started_online_can_still_be_cancelled_after_the_connection_drops(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    click(cx, msg!(5, "video-play"));
+    h.commands();
+    let seen = video_rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)])
+    });
+    assert_eq!(
+        seen,
+        vface("✕", "clip.mp4", "Загрузка для просмотра: 0 Б", true),
+        "offline while loading the circle still cancels"
+    );
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(h.commands(), [Command::CancelDownload(playback_of("vf"))]);
+    assert_eq!(video_phase(&h, cx, "vf"), VoicePhase::Idle);
+}
+
+#[gpui::test]
+fn only_a_whitelisted_name_is_a_video_card_the_rest_stay_file_cards(cx: &mut TestAppContext) {
+    for name in ["x.mp4", "X.MOV", "clip.Mp4"] {
+        assert!(is_video_name(name), "{name}");
+    }
+    for name in [
+        "x.mkv",
+        "x.webm",
+        "x.m4v",
+        "x.avi",
+        "x.app",
+        "x.command",
+        "a.mp4.command",
+        "x",
+    ] {
+        assert!(!is_video_name(name), "{name}");
+    }
+
+    // What the adapter makes of them: a `Video` (with no duration when there is no hint) or a `File`.
+    let file = |i: i64, name: &str| {
+        message(
+            "g",
+            i,
+            "bob",
+            false,
+            MessageBody::File {
+                media: original(&format!("f{i}")),
+                name: name.into(),
+                size: 12 * MB,
+            },
+        )
+    };
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::ChatsReplaced(vec![chat("g", ChatKind::Group, "Команда", Some(1))]),
+        history(
+            "g",
+            vec![
+                video_message(5, "f5", "x.mp4", None),
+                file(6, "x.mkv"),
+                file(7, "x.webm"),
+                file(8, "a.mp4.command"),
+            ],
+            true,
+        ),
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    click(cx, row!("g"));
+    h.commands();
+    assert!(shown(cx, msg!(5, "video")));
+    assert!(!shown(cx, msg!(5, "file")));
+    assert_eq!(
+        video_rendered_now(5),
+        vface("▶", "x.mp4", "12 МБ", true),
+        "a video without a hint: a card without a duration"
+    );
+    for part in [msg!(6, "file"), msg!(7, "file"), msg!(8, "file")] {
+        assert!(shown(cx, part), "{part}");
+    }
+    for part in [
+        msg!(6, "video"),
+        msg!(6, "video-play"),
+        msg!(7, "video"),
+        msg!(8, "video"),
+    ] {
+        assert!(!shown(cx, part), "{part}: a file card has no play control");
+    }
+}
+
+#[gpui::test]
+fn a_video_playback_copy_is_never_shown_as_a_saved_download(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = saved_file(&dir, "vf.mp4");
+    let events = vec![
+        ClientEvent::Connection(ConnectionState::Online),
+        ClientEvent::Downloaded {
+            media: playback_of("vf"),
+            path: path.clone(),
+        },
+    ];
+    let (h, cx) = harness_with(cx, events, |_, _| {});
+    open_with(
+        &h,
+        cx,
+        vec![video_message(5, "vf", "clip.mp4", Some(42_000))],
+    );
+    let log = record_player_events(&h, cx);
+    assert!(shown(cx, msg!(5, "video")));
+    assert!(
+        shown(cx, msg!(5, "download")),
+        "the original is not downloaded"
+    );
+    assert!(!shown(cx, msg!(5, "saved")));
+    assert!(!shown(cx, msg!(5, "reveal")));
+
+    // Opening the copy changes nothing about that.
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(take_player_events(&log), [opens(&path)]);
+    assert!(!shown(cx, msg!(5, "saved")));
+    assert!(!shown(cx, msg!(5, "reveal")));
+    assert_eq!(h.commands(), []);
+}
+
+#[gpui::test]
+fn the_video_card_keeps_its_bounds_in_every_state(cx: &mut TestAppContext) {
+    let (h, cx) = video_chat(cx, vec![video_message(5, "vf", "clip.mp4", Some(42_000))]);
+    let dir = tempfile::tempdir().unwrap();
+    let layout = |cx: &mut VisualTestContext| {
+        video_parts!(5)
+            .into_iter()
+            .map(|part| (origin(cx, part), dims(cx, part)))
+            .collect::<Vec<_>>()
+    };
+    let idle = layout(cx);
+    assert_eq!(idle[1].1.0, 300.0, "the card is 300 px wide");
+
+    click(cx, msg!(5, "video-play"));
+    assert_eq!(layout(cx), idle, "loading");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadProgress {
+            media: playback_of("vf"),
+            received: 3_355_443,
+            total: Some(80 * MB),
+        }],
+    );
+    assert_eq!(layout(cx), idle, "loading with progress");
+    h.feed(
+        cx,
+        [ClientEvent::DownloadFailed {
+            media: playback_of("vf"),
+            reason: DownloadFailure::Other,
+        }],
+    );
+    assert_eq!(layout(cx), idle, "failed");
+    click(cx, msg!(5, "video-play"));
+    let path = saved_file(&dir, "vf.mp4");
+    saved(&h, cx, &playback_of("vf"), &path);
+    assert_eq!(layout(cx), idle, "handed to the system");
+    h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)]);
+    assert_eq!(layout(cx), idle, "offline");
+}
+
+#[gpui::test]
+fn a_lost_voice_copy_offline_is_unavailable_at_render_not_after_a_click(cx: &mut TestAppContext) {
+    let (h, cx) = voice_chat(cx, vec![voice_message(5, "vf", Some("v.ogg"))]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = playback_arrives(&h, cx, &dir, "vf");
+    h.commands();
+
+    // The copy is on disk: offline the bubble plays.
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)])
+    });
+    assert_eq!(
+        seen,
+        face("▶", "0:14", 0, true),
+        "a copy on disk plays offline"
+    );
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Online)])
+    });
+    assert_eq!(seen, face("▶", "0:14", 0, true));
+
+    // The file is deleted while the store still says `Saved`; the connection drops.
+    std::fs::remove_file(&path).unwrap();
+    let seen = rendered(cx, 5, |cx| {
+        h.feed(cx, [ClientEvent::Connection(ConnectionState::Offline)])
+    });
+    assert_eq!(
+        seen,
+        face("▶", "Нет сети", 0, false),
+        "before any click: the offline text and no click handler"
+    );
+    assert_eq!(
+        h.commands(),
+        [],
+        "no Download is sent before a click either"
+    );
+    click(cx, msg!(5, "voice-toggle"));
+    assert_eq!(h.commands(), []);
+    assert_eq!(voice_view(&h, cx, 5), VoiceView::default());
+    assert_eq!(h.fake.created(), 0);
+}
