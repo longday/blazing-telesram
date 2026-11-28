@@ -172,12 +172,17 @@ A voice message SHALL play with the behaviour of `media-playback` on macOS, Linu
 - **THEN** the voice message shows the existing «no sound output» outcome and the rest of the client is unaffected
 
 ### Requirement: A missing prerequisite is explained
-When something the client needs from the system is missing at start (the web view runtime for the sign-in, the graphics driver for the window, the system's file opener), the client SHALL say what is missing and what to install, in one message, instead of failing silently or with a bare error code, and SHALL NOT leave a half-written session or cache behind.
+When something the client needs from the system is missing (the web view runtime for the sign-in, the graphics driver for the window, the system's file opener), the user SHALL be told what is missing and what to install, in one message, instead of a silent failure or a bare error code, and nothing half-written SHALL be left behind. On Linux the run script reports the missing system libraries before the client is built or started; elsewhere the client reports it.
 
-#### Scenario: No web view runtime
-- **GIVEN** the platform's web view runtime is not installed
+#### Scenario: No web view runtime on Windows
+- **GIVEN** the WebView2 runtime is not installed
 - **WHEN** the sign-in is needed
 - **THEN** a message names the runtime to install and the client quits when it is closed, with nothing stored
+
+#### Scenario: Missing system libraries on Linux
+- **GIVEN** a system library the client needs (such as the WebKitGTK development package) is not installed
+- **WHEN** the Linux run script is started
+- **THEN** the terminal shows the install line for the missing packages, the script exits with a non-zero status, and neither the build nor the client is started
 
 #### Scenario: No graphics driver on Linux
 - **GIVEN** no Vulkan driver is installed

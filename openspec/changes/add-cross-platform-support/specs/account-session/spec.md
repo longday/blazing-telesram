@@ -40,7 +40,12 @@ When no valid session exists, the client SHALL show a sign-in window that loads 
 - **WHEN** a sign-in completes on Linux or Windows
 - **THEN** no file other than the stored session, and no log line, argument or environment variable, contains a cookie value
 
-#### Scenario: Web view runtime missing
-- **GIVEN** the web view runtime of the platform is not installed
+#### Scenario: Web view runtime missing on Windows
+- **GIVEN** the WebView2 runtime is not installed
 - **WHEN** the sign-in is needed
 - **THEN** the client shows what to install and quits when the message is closed, storing nothing
+
+#### Scenario: Web view libraries missing on Linux
+- **GIVEN** the system libraries of the web view are not installed
+- **WHEN** the Linux run script is started
+- **THEN** the terminal shows the install line, the script exits with a non-zero status, the client is not started and nothing is stored
