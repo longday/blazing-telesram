@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Two changes are open: **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal merged, no code started). **CM** `add-chat-members-and-creation` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-chat-members-and-creation`), **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Three changes are open: **PIN** `add-pins-and-importance-view`, **NB** `add-notifications-and-badge` (proposal merged, no code started), **TS** `add-text-selection-and-quotes` (proposal merged, no code started). **CM** `add-chat-members-and-creation` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-chat-members-and-creation`), **MP** `add-media-playback` is **archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -22,7 +22,7 @@ Owner: Integrator. Updated: 2026-11-28. Two changes are open: **PIN** `add-pins-
 2. **Every merge to `main` compiles with no stubs and no no-op arms** (`cargo check --workspace --all-targets`; `cargo test --workspace` green). A task that cannot compile on its own is merged only inside a *merge unit* with the tasks that complete it.
 3. **Zero build warnings** (`cargo build --workspace --all-targets`; no CI and no `-D warnings`, but `main` builds with 0 warnings). `desktop` is a binary crate, so a store method, field or view model with no caller is a `dead_code` warning. A unit therefore contains the first consumer of everything it adds; `#[allow(dead_code)]` is not used.
 4. **Cargo, `bt-probe` and the app run only in the Tart VM `bt-vm`, never on the host** (rule `containers.md`). Procedure: sync the tree to test into `~/bt/src-<name>` (tracked and untracked, no ignored files; `~/bt/src` is shared, so concurrent agents use their own directory), put `$HOME/.cargo/bin` in `PATH` (`tart exec` lacks it), build and run there; `.runtime` for live runs is the VM's `~/bt/.runtime`. Remove the `~/bt/src-<name>` directory when the task is done. `git` and `openspec` on the host are fine. How to start the VM and the full workflow: [docs/vm.md](../../docs/vm.md).
-5. **Live-account tasks share one session and run one at a time**: PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user); NB 0.2 (live part, reads only), 0.3 (optional, needs-user), 7.2 (needs-user; reads only). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**. NB 0.1 needs no account (VM scratch crate) and takes no live slot.
+5. **Live-account tasks share one session and run one at a time**: PIN 0.1, 0.2, 1.5 (done 2026-11-27), 6.2 (reads only, except PIN 6.2's one self-chat edit); MP 0.1, 0.2 (its live run), 0.3, 6.2 (all reads only, no user); NB 0.2 (live part, reads only), 0.3 (optional, needs-user), 7.2 (needs-user; reads only); TS 0.3 (reads only), 0.4 (approval; a write by the admin web client, nothing from the app account), 0.6 (approval; sends from the app account to the private admin chat), 4.2 (approval; the app sends to the same chat). Writes to the account need the user's approval of the target; every `bt-probe` write command obeys `BT_WRITE_ONLY_CHAT`, and `create-*` is refused whenever it is set, so the creation runs need it **unset**. NB 0.1 and TS 0.1 need no account (VM scratch crate) and take no live slot.
 6. **A task that is not started locks nothing.** Rule 1 holds files only for started, unmerged tasks. Tasks gated on approvals, live runs or open questions (for example PIN 6.2) hold no file until the moment they start; whoever starts a file first keeps it until its unit merges, the other waits.
 
 ## add-chat-members-and-creation (CM): archived 2026-11-28
@@ -147,6 +147,56 @@ File ownership (rule 1): `store.rs` (1.1, then 1.2); chat-core `model.rs` and `c
 
 Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -> 3.1 / 4.1 -> 6.1) can start at once and merges first; NB-N after NB-B and 0.4; 7.1 per unit; 7.2 when the user provides the sender; 7.3 last. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-notifications-and-badge --strict`.
 
+## add-text-selection-and-quotes (TS)
+
+Proposal merged into `main` from branch `propose/select` (docs only: `openspec/changes/add-text-selection-and-quotes/**` and this file; `openspec validate --all --strict` run before the merge). User report: no way to select text in a message, to quote a selected part, or to select messages. Roadmap: selection and quoting. Decisions (details in `design.md`): selection is client state keyed by message timestamp and byte offset, built over gpui `StyledText`/`TextLayout` (gpui 0.2.2 has no selectable text); cross-message selection yes; a fragment quote is the same `Quote` string as today with the reference to the whole message (no wire change expected, research 0.2-0.6 confirm); forward is **not** offered (not implemented; follow-up).
+
+**Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds). All three units edit `timeline.rs`, `desktop.rs`, `desktop/composer.rs`, `selection.rs`, `tests.rs`, so they run **one after another** on the branch **`integ/add-text-selection-and-quotes`**:
+
+- **TS-A** (text selection) = 1.1-1.8; needs research 0.1 (gpui spike, VM scratch crate, no account); merges **first**.
+- **TS-Q** (quotes) = 2.1-2.7, started **after TS-A is on `main` and after 0.7** (the research outcome gates it; 2.3 has work only if the server needs an extra key).
+- **TS-M** (message selection) = 3.1-3.7, started **after TS-Q is on `main`**; needs none of the wire research, so the main session may put it before TS-Q.
+- **TS-probe** = 0.5 merges **alone** (`bt-probe send-reply`, guarded by `BT_WRITE_ONLY_CHAT`), before 0.6. Research 0.1-0.4, 0.6, 0.7 merge as docs.
+
+| ID | Status | Needs | Files / notes |
+|----|--------|-------|---------------|
+| 0.1 | open: gpui spike (drag capture, registry order, highlight, `click_count`, cursor, notify cost) | VM | `research-gpui.md` (new) |
+| 0.2 | open: the web bundle's «Цитировать» request | VM network | `research-bundle.md` (new) |
+| 0.3 | open, **[live]**: read-only scan of the real history for fragment quotes (counts and shapes only) | a free live slot | `research-wire.md` (new) |
+| 0.4 | open, **[live] [approval]**, only if 0.3 finds too few shapes: the admin web client (other party) sends fragment quotes to the private chat | 0.3, the user | `research-wire.md` |
+| 0.5 | open: `bt-probe send-reply <chat> <text> --reply <micros> [--quote]`, refused unless `BT_WRITE_ONLY_CHAT` names `<chat>`; an explicit uncut-quote encoder entry point used only by the probe (the app keeps the 200 cut) | none | `yandex-proto/src/bin/bt-probe.rs`, `tests/probe_write_guard.rs`, `src/write.rs` |
+| 0.6 | open, **[live] [approval]**: the app account sends fragment, non-substring, 250-char and padded quotes to the private admin chat, with `BT_WRITE_ONLY_CHAT` set; read back with `history`; seen in the web client | 0.5 merged, the user, a free live slot | `research-wire.md` |
+| 0.7 | open: close the research into `research.md`, `design.md`, `tasks.md`, specs; lifts or stops TS-Q | 0.1-0.6 | `research.md`, `design.md`, `tasks.md`, specs |
+| 1.1 | open, TS-A: `selection.rs` (model, words, paragraphs, extraction) | none | `selection.rs` (new), `main.rs` (module line) |
+| 1.2 | open, TS-A: date-time label for the copy header | none | `format.rs` |
+| 1.3 | open, TS-A: selectable text, highlight, I-beam, registry | 1.1, 0.1 | `timeline.rs`, `theme.rs` |
+| 1.4 | open, TS-A: the state machine, caret mapping, autoscroll speed, copy | 1.1, 1.2 | `desktop/selecting.rs` (new) |
+| 1.5 | open, TS-A: `Desktop` wiring, drag-capture canvases, actions | 1.3, 1.4 | `desktop.rs` |
+| 1.6 | open, TS-A: `cmd-c`/`cmd-a` bindings in the `BlazingTelesram` context | 1.1, 1.5 | `main.rs` |
+| 1.7 | open, TS-A: Escape order, «Скопировать выделенное», right-click rule | 1.5 | `desktop/composer.rs` |
+| 1.8 | open, TS-A: tests section | 1.3-1.7 | `tests.rs` |
+| 2.1 | open, TS-Q: `partial` on `ReplyQuote` and `ReplyTarget` (`serde(default)`) | 0.7, TS-A merged | chat-core `model.rs`, `fixtures.rs`, `client.rs`, `cache.rs`; `store.rs` (literals) |
+| 2.2 | open, TS-Q: `is_fragment`, `fragment_quote` | 2.1 | `selection.rs` |
+| 2.3 | open, TS-Q, **only if 0.7 finds an extra wire key**; otherwise ticked as no work | 0.7 | `write.rs`, `wire.rs`, `tests/wire_fixtures.rs`, a fixture |
+| 2.4 | open, TS-Q: the adapter derives `partial` | 2.1, 2.2 | `yandex_backend.rs` |
+| 2.5 | open, TS-Q: «Цитировать», `start_quote`, the quote bar | 1.7, 2.1, 2.2 | `desktop/composer.rs` |
+| 2.6 | open, TS-Q: the three-line fragment block | 2.1 | `timeline.rs` |
+| 2.7 | open, TS-Q: tests section | 2.1-2.6 | `tests.rs` |
+| 3.1 | open, TS-M: `MessageSet`, `Pick`, `extract_messages` | TS-A merged | `selection.rs` |
+| 3.2 | open, TS-M: the Russian plural label | none | `format.rs` |
+| 3.3 | open, TS-M: mode state and the selection bar | 3.1, 3.2 | `desktop/selecting.rs` |
+| 3.4 | open, TS-M: rows in the mode (check, tint, click layer, Cmd+click) | 3.1 | `timeline.rs`, `theme.rs` |
+| 3.5 | open, TS-M: wiring, `delete_pending` as a list | 3.3, 3.4 | `desktop.rs` |
+| 3.6 | open, TS-M: «Выбрать», the bar instead of the composer, batch delete | 3.3, 3.5 | `desktop/composer.rs` |
+| 3.7 | open, TS-M: tests section | 3.3-3.6 | `tests.rs` |
+| 4.1 | open: final run per unit in `bt-vm` (fmt, build 0 warnings, test, clippy at the 10-warning baseline, validate) | the unit | build/test/lint matrix |
+| 4.2 | open, **[live] [approval]**: hand check of the app in the VM against the private admin chat, `BT_WRITE_ONLY_CHAT` set | 4.1, TS-M, the user | none (checks only) |
+| 4.3 | open: this file, specs sync (`text-selection`, `message-quotes`, `message-selection` created; `message-editing`, `message-sending`, `message-history` modified), archive | everything above | this file, archive |
+
+File ownership (rule 1): `selection.rs` (1.1, then 2.2, then 3.1); `format.rs` (1.2, then 3.2); `timeline.rs` and `theme.rs` (1.3, then 2.6, then 3.4); `desktop/selecting.rs` (1.4, then 3.3); `desktop.rs` (1.5, then 3.5); `main.rs` (1.1 module line, then 1.6; serialise); `desktop/composer.rs` (1.7, then 2.5, then 3.6); `tests.rs` (1.8, then 2.7, then 3.7); chat-core `model.rs`, `fixtures.rs`, `client.rs`, `cache.rs` and `store.rs` (2.1); `yandex_backend.rs` (2.4); `write.rs` (0.5, then 2.3), `wire.rs`, `tests/wire_fixtures.rs` (2.3); `bin/bt-probe.rs` and `tests/probe_write_guard.rs` (0.5); `research-gpui.md` (0.1); `research-bundle.md` (0.2); `research-wire.md` (0.3, then 0.4, then 0.6, then 4.2); `research.md`, `design.md`, `tasks.md` and the specs (0.7). **Overlap with NB-N** (not started, holds nothing yet): `store.rs`, chat-core `model.rs` and `client.rs` (NB 1.2), `desktop.rs` (NB 4.2), `main.rs` (NB 2.2, 5.1), `tests.rs` (NB 6.2); whoever starts a file first keeps it until its unit merges (rule 6). PIN and CM hold no app file.
+
+Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's approval; 0.7 closes; TS-A (1.1, 1.2, 1.4, then 1.3, 1.5, 1.6, 1.7, 1.8) can start as soon as 0.1 is done; TS-Q after TS-A and 0.7; TS-M after TS-Q (or before it); 4.1 per unit; 4.2 last live; 4.3 archive. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-text-selection-and-quotes --strict`.
+
 ## Ready now
 
 - **Nothing is startable without the user** in PIN. PIN 6.2 part 1 (strip/marker in the admin chat) is done and merged (`3233c95`), together with the 4.5 fix; the branches `pins/6.2`, `pins/bar-preview` and their worktrees are removed. PIN 3.3 code, PIN 1.5 and PIN 4.5 are on `main` (`a395100`, `db5950c`, `3233c95`). What is left for PIN (6.2 self-chat UI path with the live re-check of 4.5, 6.2 Q6, closing 3.3, then 6.3 archive) needs the user's web session of the app account.
@@ -154,6 +204,7 @@ Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -
 - **CM: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-chat-members-and-creation`); CM-G and 7.1 are on `main` (`942a109`, `18141dc`). Closed by user decision without the live tasks 5.1 and 5.3; nothing is left open for CM; the follow-up `add-private-chat-creation-live-check` is not a task.
 - **MP: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`); PB-V `6287bea` and PB-W `19f2223` are on `main`, the gate is recorded under 6.1. Nothing is left open for MP; the follow-ups (playback copies keyed by `Id2` only) are not tasks.
 - **NB: nothing is startable without the user except the code.** NB 0.1 (VM scratch research), NB 0.2 (live reads) and the whole NB-B unit (1.1, 2.1, 3.1, 4.1, 6.1) can start at once; NB-N waits for NB-B and 0.4.
+- **TS: TS-A can start as soon as 0.1 (VM scratch crate, no account) is done**; 0.2 and 0.5 start at once; 0.3 needs only a free live slot. TS-Q waits for TS-A and 0.7; TS-M for TS-Q.
 
 ## Needs the user
 
@@ -161,4 +212,5 @@ Order: 0.1 and 0.2 in parallel (0.1 needs no live slot), 0.4; NB-B (1.1 -> 2.1 -
 - PIN 0.2 is done (the web client was the other party, no user action needed). **PIN 6.2 part 1 (bar and marker in the admin chat) is done** (2026-11-27, merged `3233c95`; deviation: the private admin chat, not the self chat). **PIN 6.2 remainder needs the user**: (a) the self-chat UI path, i.e. the bar and marker in the self chat, with a live look at the 4.5 fix (the pinned text under the label, not "…"); (b) **Q6**: an edit authored by the app account is required, and `bt-probe edit-self` refuses any chat but the self chat, so the user marks a message of the self chat as important in a web session **of the app account** (the web client of `admin@sgnl.pro` cannot, it is another account); then `edit-self <ts> <text>` with and without `--important` and `history` (task 6.2 text; `research.md` 0.2 note on Q6). Closing 3.3 and the 6.3 archive wait for it.
 - **MP needs no user** and is archived. The **R1 fallback** (the admin web client sending a sample, a write by another account) was not needed: 0.1 found the samples.
 - **NB needs the user** for 7.2 (and the optional 0.3): a person other than the app account who sends incoming messages (or the main session's decision to use the web client of the second account, as PIN 0.2 and RL 8.2 did), a chat the user mutes in their own web session, and a live slot. Open design questions for the user: do muted chats count in the badge (default no), is the message text shown in the notification (default yes).
+- **TS needs the user for 0.4, 0.6 and 4.2** (writes to the account): approval of the target, proposed as the private chat between the admin account and the app account with `BT_WRITE_ONLY_CHAT` set to it. Open design questions (defaults are written into the spec): cross-message text selection (default yes), copy format of several messages (headers per message), Cmd+A scope, the 200-character quote bound, selection-mode details (Cmd+click entry, bar replaces the composer, Delete only when every message is own), forward is out of scope.
 - The VM's outbound network works again (the 2026-11-26 failure was an environment fault, recorded in the archived `add-reaction-list/research.md`); PIN 0.1 is no longer blocked by it. What remains is rule 5: one live task at a time. `WebLive` runs the live tasks now.
