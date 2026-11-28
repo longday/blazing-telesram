@@ -1,6 +1,6 @@
 # Task dependency graph of open changes
 
-Owner: Integrator. Updated: 2026-11-28. Four changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, research 0.2 merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, TS-A unit merged, TS-Q and TS-M not started), **UC** `add-user-profile-card` (proposal merged, no code started) and **XP** `add-cross-platform-support` (proposal merged, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
+Owner: Integrator. Updated: 2026-11-28. Four changes are open: **NB** `add-notifications-and-badge` (proposal merged, NB-B unit merged, research 0.2 merged, NB-N not started), **TS** `add-text-selection-and-quotes` (proposal merged, TS-A and TS-M units merged, TS-Q not started), **UC** `add-user-profile-card` (proposal merged, no code started) and **XP** `add-cross-platform-support` (proposal merged, no code started). **PIN** `add-pins-and-importance-view`, **CM** `add-chat-members-and-creation` and **MP** `add-media-playback` are **archived** (2026-11-28, under `openspec/changes/archive/`). Source: their `tasks.md`.
 
 `[live]` = needs the signed-in session in `.runtime` and the real account (reads only unless noted). `[approval]` = needs the user's explicit approval of the target first.
 
@@ -158,7 +158,7 @@ Proposal merged into `main` from branch `propose/usercard` (2026-11-28, docs onl
 **Merge units** (tasks.md "Merge units"; rule 3: the unit holds the first consumer of everything it adds):
 
 - **UC** (card) = 1.1, 2.1, 3.1, 4.1, 5.0, 5.1, 5.3, 5.4, 6.1 on **`integ/add-user-profile-card`**, started **after 0.4** (5.0 needs no research and may start earlier); merges first. 5.3 (panel row) and 5.4 (header avatar) are the first callers of `Desktop::open_user_card`, so they belong to the unit.
-- **UC-T** (timeline click targets) = 5.2, 6.2 after UC is on `main` **and TS-M (the selection mode of `add-text-selection-and-quotes`) is on `main`**: adds no symbol, holds `timeline.rs` for one small task.
+- **UC-T** (timeline click targets) = 5.2, 6.2 after UC is on `main` **and TS-M (the selection mode of `add-text-selection-and-quotes`) is on `main`** (TS-M is merged, `0b5026b`; only UC is awaited): adds no symbol, holds `timeline.rs` for one small task.
 - Research 0.1 (probe), 0.2 (live), 0.3 (static) and 0.4 (closing) merge as docs plus the probe change; **`research.md` has one writer (0.4)**: 0.2 writes `research-r1.md`, 0.3 `research-r2.md`.
 
 | ID | Status | Needs | Files / notes |
@@ -175,7 +175,7 @@ Proposal merged into `main` from branch `propose/usercard` (2026-11-28, docs onl
 | 5.1 | open, UC: `user_card.rs` view, `Desktop` open/close/retry/copy/write, `resume_reads` reload, `Escape` arm | 4.1, 5.0 | `user_card.rs` (new), `desktop.rs` (**overlaps NB-N 4.2**), `desktop/composer.rs`, `main.rs` (module line) |
 | 5.3 | open, UC: info panel row click | 5.0, 5.1 | `info_panel.rs` |
 | 5.4 | open, UC: private-chat header avatar | 5.1 (merged into integ: same file `desktop.rs`) | `desktop.rs` |
-| 5.2 | open, UC-T: timeline avatar and author-name click targets; with the mode on yield to TS's row layer, Cmd+click calls `enter_mode` itself | UC on `main`, TS-M on `main` | `timeline.rs` (**overlaps TS 1.3, 2.6, 3.4**: first starter holds, the other waits, rule 1/6) |
+| 5.2 | open, UC-T: timeline avatar and author-name click targets; with the mode on yield to TS's row layer, Cmd+click calls `enter_mode` itself | UC on `main`; TS-M on `main` (done, `0b5026b`) | `timeline.rs` (**overlaps TS 2.6**: TS 1.3 and 3.4 are merged; first starter holds, the other waits, rule 1/6) |
 | 6.1 | open, UC: `// ---- user card (UC 6.1) ----` in `tests.rs`: open-before-reply token test, reconnect through `resume_reads`, «Написать» with the panel closed | 5.0, 5.1, 5.3, 5.4 | `tests.rs` (**overlaps NB-N 6.2**) |
 | 6.2 | open, UC-T: `// ---- user card from the timeline (UC 6.2) ----`, incl. the selection-mode click and Cmd+click | 5.2, 6.1 | `tests.rs` (**overlaps TS 1.8, 2.7, 3.7**) |
 | 7.1 | open: final run per unit in `bt-vm`; `request.rs`/`write.rs`/`manage.rs` diff empty unless G2 | the unit | build/test/lint matrix |
@@ -196,7 +196,7 @@ Proposal merged into `main` from branch `propose/select` (docs only: `openspec/c
 
 - **TS-A** (text selection) = 1.1-1.8; needs research 0.1 (gpui spike, VM scratch crate, no account); merges **first**. **Merged into `main` as `8564579`** (2026-11-28, `--no-ff` from the integration branch `integ/add-text-selection-and-quotes` `96f138a`; `ts/a` `d1612a6`, 12 commits, merged into it with `main` `a21b315` already inside; review `ReviewTsA` approved; `git diff 96f138a 8564579` is empty: the merge result equals the integration tree; 12 files, +3571/-44; new `selection.rs`, `text_lines.rs`, `desktop/selecting.rs`). **Gate on integ `96f138a`** (task 4.1, Integrator, VM `~/bt/src-IntegrateRev`, `--locked --offline`): `cargo fmt --all --check` OK; `cargo build --workspace --all-targets` 0 warnings; `cargo test --workspace` green, **737 + 327 + 220 + 43 + 4 + 23** (desktop, chat-core, yandex-proto lib, bt-probe, `probe_write_guard`, `wire_fixtures`), 0 failed; `cargo clippy --workspace --all-targets` **9 warnings, below the 10-warning baseline** (`wire.rs` 211 and 316, `xiva.rs:113`, `ws.rs:130`, `client.rs` 72, 195 and the test at 4812, `yandex_backend.rs:389`, `tests.rs:606`; the `composer.rs` collapsible `if` is gone, `tests.rs` line moved); `openspec validate --all --strict` 23/23. **Gate rerun on the resulting `main` `8564579`** (same VM directory, removed afterwards): fmt OK; build 0 warnings; tests **737 + 327 + 220 + 43 + 4 + 23** green, 0 failed; clippy 9, the same places; validate 23/23. `ts/a` and its worktree are removed; the integration branch `integ/add-text-selection-and-quotes` and its worktree `bt-ts-integ` are kept for TS-Q and TS-M.
 - **TS-Q** (quotes) = 2.1-2.7, started **after TS-A is on `main` and after 0.7** (the research outcome gates it; 2.3 has work only if the server needs an extra key).
-- **TS-M** (message selection) = 3.1-3.7, started **after TS-Q is on `main`**; needs none of the wire research, so the main session may put it before TS-Q.
+- **TS-M** (message selection) = 3.1-3.7, **merged into `main` as `0b5026b`** (2026-11-28, `--no-ff` from the integration branch `integ/add-text-selection-and-quotes` `b49d705`; `ts/m` `9f1d6bf`, 10 commits, merged into integ after integ was synced to `main` `5144be0`; `ReviewTsM` approved; `git diff b49d705 0b5026b` is empty; 9 files, +1817/-112). Gate on integ `b49d705`: fmt OK; build 0 warnings; tests 781 + 327 + 220 + 49 + 4 + 23, 0 failed; clippy 9 warnings (same places as after TS-A); validate 23/23. The gate rerun on `main` `0b5026b` gave the same numbers. `ts/m` and the worktree `bt-ts-m` are removed; the integration branch and `bt-ts-integ` are kept for TS-Q. **Order swap (decision of the main session): TS-M went before TS-Q; TS-Q now follows TS-M.** TS-M needed none of the wire research.
 - **TS-probe** = 0.5 merges **alone** (`bt-probe send-reply`, guarded by `BT_WRITE_ONLY_CHAT`), before 0.6. Research 0.1-0.4, 0.6, 0.7 merge as docs.
 
 | ID | Status | Needs | Files / notes |
@@ -223,20 +223,20 @@ Proposal merged into `main` from branch `propose/select` (docs only: `openspec/c
 | 2.5 | open, TS-Q: «Цитировать», `start_quote`, the quote bar | 1.7, 2.1, 2.2 | `desktop/composer.rs` |
 | 2.6 | open, TS-Q: the three-line fragment block | 2.1 | `timeline.rs` |
 | 2.7 | open, TS-Q: tests section | 2.1-2.6 | `tests.rs` |
-| 3.1 | open, TS-M: `MessageSet`, `Pick`, `extract_messages` | TS-A merged | `selection.rs` |
-| 3.2 | open, TS-M: the Russian plural label | none | `format.rs` |
-| 3.3 | open, TS-M: mode state and the selection bar | 3.1, 3.2 | `desktop/selecting.rs` |
-| 3.4 | open, TS-M: rows in the mode (check, tint, click layer, Cmd+click) | 3.1 | `timeline.rs`, `theme.rs` |
-| 3.5 | open, TS-M: wiring, `delete_pending` as a list | 3.3, 3.4 | `desktop.rs` |
-| 3.6 | open, TS-M: «Выбрать», the bar instead of the composer, batch delete | 3.3, 3.5 | `desktop/composer.rs` |
-| 3.7 | open, TS-M: tests section | 3.3-3.6 | `tests.rs` |
+| 3.1 | **done**, on `main` with TS-M (`0b5026b`): `MessageSet`, `Pick`, `extract_messages` | TS-A merged | `selection.rs` |
+| 3.2 | **done**, on `main` with TS-M (`0b5026b`): the Russian plural label | none | `format.rs` |
+| 3.3 | **done**, on `main` with TS-M (`0b5026b`): mode state and the selection bar | 3.1, 3.2 | `desktop/selecting.rs` |
+| 3.4 | **done**, on `main` with TS-M (`0b5026b`): rows in the mode (check, tint, click layer, Cmd+click) | 3.1 | `timeline.rs`, `theme.rs` |
+| 3.5 | **done**, on `main` with TS-M (`0b5026b`): wiring, `delete_pending` as a list | 3.3, 3.4 | `desktop.rs` |
+| 3.6 | **done**, on `main` with TS-M (`0b5026b`): «Выбрать», the bar instead of the composer, batch delete | 3.3, 3.5 | `desktop/composer.rs` |
+| 3.7 | **done**, on `main` with TS-M (`0b5026b`): tests section | 3.3-3.6 | `tests.rs` |
 | 4.1 | open: final run per unit in `bt-vm` (fmt, build 0 warnings, test, clippy at the 10-warning baseline, validate) | the unit | build/test/lint matrix |
 | 4.2 | open, **[live] [approval]**: hand check of the app in the VM against the private admin chat, `BT_WRITE_ONLY_CHAT` set | 4.1, TS-M, the user | none (checks only) |
 | 4.3 | open: this file, specs sync (`text-selection`, `message-quotes`, `message-selection` created; `message-editing`, `message-sending`, `message-history` modified), archive | everything above | this file, archive |
 
 File ownership (rule 1): `selection.rs` (1.1, then 2.2, then 3.1); `format.rs` (1.2, then 3.2); `timeline.rs` and `theme.rs` (1.3, then 2.6, then 3.4); `desktop/selecting.rs` (1.4, then 3.3); `desktop.rs` (1.5, then 3.5); `main.rs` (1.1 module line, then 1.6; serialise); `desktop/composer.rs` (1.7, then 2.5, then 3.6); `tests.rs` (1.8, then 2.7, then 3.7); chat-core `model.rs`, `fixtures.rs`, `client.rs`, `cache.rs` and `store.rs` (2.1); `yandex_backend.rs` (2.4); `write.rs` (0.5, then 2.3), `wire.rs`, `tests/wire_fixtures.rs` (2.3); `bin/bt-probe.rs` and `tests/probe_write_guard.rs` (0.5); `research-gpui.md` (0.1); `research-bundle.md` (0.2); `research-wire.md` (0.3, then 0.4, then 0.6, then 4.2); `research.md`, `design.md`, `tasks.md` and the specs (0.7). **Overlap with NB-N** (not started, holds nothing yet): `store.rs`, chat-core `model.rs` and `client.rs` (NB 1.2), `desktop.rs` (NB 4.2), `main.rs` (NB 2.2, 5.1), `tests.rs` (NB 6.2); whoever starts a file first keeps it until its unit merges (rule 6). PIN and CM hold no app file.
 
-Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's approval; 0.7 closes; TS-A (1.1, 1.2, 1.4, then 1.3, 1.5, 1.6, 1.7, 1.8) can start as soon as 0.1 is done; TS-Q after TS-A and 0.7; TS-M after TS-Q (or before it); 4.1 per unit; 4.2 last live; 4.3 archive. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-text-selection-and-quotes --strict`.
+Order: 0.1, 0.2, 0.5 at once; 0.3 on a free live slot; 0.4 and 0.6 on the user's approval; 0.7 closes; TS-A (1.1, 1.2, 1.4, then 1.3, 1.5, 1.6, 1.7, 1.8) can start as soon as 0.1 is done; TS-M went before TS-Q (decision of the main session, merged); TS-Q after TS-A and 0.7; 4.1 per unit; 4.2 last live; 4.3 archive. Checks per unit: fmt, build 0 warnings, test, clippy no new warning over the 10-warning baseline, `openspec validate add-text-selection-and-quotes --strict`.
 
 ## add-cross-platform-support (XP)
 
@@ -245,6 +245,7 @@ Proposal merged into `main` from branch `propose/port` (docs only: `openspec/cha
 **Merge units** (tasks.md "Merge units"; integration branch **`integ/cross-platform`**, created off `main` after the proposal merge, worktree `/Users/longday/Documents/pet/bt-xp-integ`):
 
 - **XP-A** (storage and names, libraries only) = 1.1 to 1.7; merges first; its gate adds the cross-target check of the three libraries (Windows through `cargo-xwin`/mingw in `bt-vm`, Linux in the Linux VM).
+- **XP-A yields (decision of the main session, 2026-11-28).** XP-A (`xp/a`) is blocked on a Linux VM or Windows by the user, so it **yields `crates/chat-core/src/client.rs`, the root and crate `Cargo.toml` and `Cargo.lock` to NB-N and TS-Q**; XP-A rebases onto them when it starts.
 - **XP-D** (desktop neutral parts) = 2.1 to 2.6, after XP-A.
 - **XP-S** (sign-in helper) = 3.1 to 3.4, **XP-P** (voice) = 4.1, 4.2, **XP-W** (Linux window chrome) = 5.1: after XP-D, in parallel; after the last of them the desktop builds on Linux and Windows.
 - **XP-N** (notifications) = 6.0, 6.1, 6.2 and **XP-B** (Windows badge) = 7.1: after NB-N is on `main` (they use its `Notifier`, `alerts.rs`, `main.rs`, `tests.rs`, `Cargo.toml`, `Cargo.lock`); 6.0 first (`Platform.badge` becomes an `Option`, first consumer 6.1); optional by the user's answer to Q5.
@@ -263,7 +264,7 @@ Proposal merged into `main` from branch `propose/port` (docs only: `openspec/cha
 | 1.1 | open, XP-A: crate `bt-platform` (private dir/file, `is_owner_only`) | none | `crates/platform/**`, root `Cargo.toml`, `Cargo.lock` |
 | 1.2 | open, XP-A: `session.rs`, `runtime.rs` | 1.1 | `yandex-proto` `session.rs`, `runtime.rs`, `Cargo.toml` |
 | 1.3 | open, XP-A: `bt-probe.rs` two hunks | 1.1; the file free (NB 0.2 done; TS 0.5 and UC 0.1 first) | `bin/bt-probe.rs` |
-| 1.4 | open, XP-A: chat-core `cache.rs`, `client.rs` hunks (production and every Unix-only test), the `PartialMode` choice at `client.rs:773` | 1.1, 1.5; `client.rs` free (NB-N 1.2, TS 2.1) | `cache.rs`, `client.rs`, `Cargo.toml` |
+| 1.4 | open, XP-A: chat-core `cache.rs`, `client.rs` hunks (production and every Unix-only test), the `PartialMode` choice at `client.rs:773` | 1.1, 1.5; `client.rs` after NB-N 1.2 and TS 2.1 have merged (XP-A yields it, main-session decision 2026-11-28) | `cache.rs`, `client.rs`, `Cargo.toml` |
 | 1.5 | open, XP-A: `windows_safe_name`, `PartialMode::{Private, Ordinary}`, atomic final-name claim (no copy fallback) | 1.1 | chat-core `paths.rs` |
 | 1.6 | open, XP-A: `logging.rs` | 1.1 | `desktop/src/logging.rs`, `crates/desktop/Cargo.toml` (one line) |
 | 1.7 | open, XP-A: cross-target check of the libraries | 1.1 to 1.6, 0.2's tools | none |
@@ -301,8 +302,8 @@ Order: 0.2 Windows half and XP-A in parallel with 0.1 (user); 0.2 to 0.7, 0.8; X
 - **CM: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-chat-members-and-creation`); CM-G and 7.1 are on `main` (`942a109`, `18141dc`). Closed by user decision without the live tasks 5.1 and 5.3; nothing is left open for CM; the follow-up `add-private-chat-creation-live-check` is not a task.
 - **MP: archived** (2026-11-28, `openspec/changes/archive/2026-11-28-add-media-playback`); PB-V `6287bea` and PB-W `19f2223` are on `main`, the gate is recorded under 6.1. Nothing is left open for MP; the follow-ups (playback copies keyed by `Id2` only) are not tasks.
 - **NB: nothing is startable without the user except the code.** NB 0.1 (VM scratch research), NB 0.2 (live reads) and the whole NB-B unit (1.1, 2.1, 3.1, 4.1, 6.1) can start at once; NB-N waits for NB-B and 0.4.
-- **UC: startable now without the user** once the proposal is merged: 0.3 (static) and **5.0** (`open_new_chat` takes the person; needs no research) at once; 0.1 once NB 0.2 has merged or by taking `bt-probe.rs` first; 0.2 in a free live slot after 0.1; everything else in UC waits for 0.4; UC-T also waits for TS-M (the selection mode of `add-text-selection-and-quotes`) to be on `main`.
-- **TS: TS-A can start as soon as 0.1 (VM scratch crate, no account) is done**; 0.2 and 0.5 start at once; 0.3 needs only a free live slot. TS-Q waits for TS-A and 0.7; TS-M for TS-Q.
+- **UC: startable now without the user** once the proposal is merged: 0.3 (static) and **5.0** (`open_new_chat` takes the person; needs no research) at once; 0.1 once NB 0.2 has merged or by taking `bt-probe.rs` first; 0.2 in a free live slot after 0.1; everything else in UC waits for 0.4; UC-T no longer waits for TS-M (on `main`, `0b5026b`), only for UC.
+- **TS: TS-A can start as soon as 0.1 (VM scratch crate, no account) is done**; 0.2 and 0.5 start at once; 0.3 needs only a free live slot. TS-Q waits for TS-A and 0.7; TS-M is merged (before TS-Q, decision of the main session).
 - **XP: only the research and XP-A are startable now.** 0.2 (Windows half, `bt-vm`) starts at once; 0.2 (Linux half) and 0.3 to 0.5 need the Linux VM (0.1, needs the user); XP-A (1.1 to 1.7) needs nothing but `bt-vm` and is independent of the UI; XP-D follows it; XP-N/XP-B wait for NB-N.
 
 ## Needs the user
