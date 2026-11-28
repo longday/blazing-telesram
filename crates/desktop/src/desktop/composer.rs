@@ -440,16 +440,34 @@ impl Desktop {
         Some(messages[ix].clone())
     }
 
+    /// Whether the text selection is live and reaches message `ts` (D6): what the menu's Copy label and
+    /// the right click ask. Only the validity check and the range of this one message, no text is built.
+    fn selection_touches(&self, ts: MessageTs, cx: &App) -> bool {
+        let Some(chat) = self.open.as_ref().map(|o| &o.chat) else {
+            return false;
+        };
+        let Some(timeline) = self.store.read(cx).timeline(chat) else {
+            return false;
+        };
+        let messages = &timeline.messages;
+        self.picking
+            .read(cx)
+            .text
+            .as_ref()
+            .is_some_and(|s| s.validate(messages) && s.range_in(messages, ts).is_some())
+    }
+
     /// What Copy puts on the clipboard for message `ts` when the text selection touches it (D6, D7): the
     /// whole selection, also across messages. `None` when nothing is selected, the selection is stale
-    /// or it does not reach this message; the menu then copies the message's own text.
+    /// or it does not reach this message; the menu then copies the message's own text. Built only when
+    /// the user chooses Copy.
     fn selection_copy(&self, ts: MessageTs, cx: &App) -> Option<String> {
+        if !self.selection_touches(ts, cx) {
+            return None;
+        }
         let chat = &self.open.as_ref()?.chat;
-        let store = self.store.read(cx);
-        let messages = &store.timeline(chat)?.messages;
-        let picking = self.picking.read(cx);
-        picking.text.as_ref()?.range_in(messages, ts)?;
-        picking.selected_text(messages, |m| {
+        let messages = &self.store.read(cx).timeline(chat)?.messages;
+        self.picking.read(cx).selected_text(messages, |m| {
             crate::format::copy_header(m.author_name.as_deref(), m.timestamp, self.clock)
         })
     }
@@ -458,7 +476,7 @@ impl Desktop {
     #[cfg(test)]
     pub(crate) fn menu_copy_label(&self, cx: &App) -> Option<&'static str> {
         let menu = self.message_menu.as_ref()?;
-        Some(MenuAction::Copy.label(self.selection_copy(menu.timestamp, cx).is_some()))
+        Some(MenuAction::Copy.label(self.selection_touches(menu.timestamp, cx)))
     }
 
     fn start_reply(&mut self, timestamp: MessageTs, window: &mut Window, cx: &mut Context<Self>) {
@@ -605,7 +623,7 @@ impl Desktop {
             return;
         };
         // A right click keeps a selection that touches the clicked message and drops any other (D6).
-        if self.selection_copy(timestamp, cx).is_none() {
+        if !self.selection_touches(timestamp, cx) {
             self.clear_selection(cx);
         }
         if menu_actions(&message).is_empty() && !reactable(&message) {
@@ -903,7 +921,7 @@ impl Desktop {
         let menu = self.message_menu.as_ref()?;
         let message = self.find_message(menu.timestamp, cx)?;
         let actions = menu_actions(&message);
-        let picked = self.selection_copy(menu.timestamp, cx).is_some();
+        let picked = self.selection_touches(menu.timestamp, cx);
         let reactions = reactable(&message);
         if actions.is_empty() && !reactions {
             return None;

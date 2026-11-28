@@ -1618,9 +1618,11 @@ impl Desktop {
                                     {
                                         capture
                                             .update(cx, |this, cx| {
+                                                let registry = texts.borrow();
                                                 this.drag_to(
                                                     event.position,
-                                                    texts.borrow().as_slice(),
+                                                    &registry.texts,
+                                                    &registry.rows,
                                                     cx,
                                                 )
                                             })

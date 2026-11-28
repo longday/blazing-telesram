@@ -8,7 +8,7 @@ use crate::format::{
 use crate::player::{PlayFailure, Player, VoiceKey, VoicePhase, VoiceView, failure_label};
 use crate::selection::Pos;
 use crate::store::{ChatStore, DownloadState};
-use crate::text_lines::{caret_for, highlight_rects, paragraphs_of};
+use crate::text_lines::{caret_for, glyph_for, highlight_rects, paragraphs_of};
 use crate::theme::*;
 use crate::viewer::{Action, ActionLine, REVEAL_LABEL, action_line};
 use crate::widgets::avatar;
@@ -70,10 +70,25 @@ pub fn grouped(earlier: &Message, later: &Message, clock: Clock) -> bool {
 /// frame drains it.
 pub type RowBounds = Rc<RefCell<Vec<(MessageTs, Bounds<Pixels>)>>>;
 
-/// The text layouts painted in the latest frame, by message. A canvas before the list clears it in its
-/// prepaint and every row with selectable text pushes its layout while painting, so it holds only
-/// measured and prepainted layouts (gpui panics on a hit test of any other).
-pub type TextLayouts = Rc<RefCell<Vec<(MessageTs, TextLayout)>>>;
+/// The text layouts painted in the latest frame, by message, and the bounds of the message rows they
+/// sit in. A canvas before the list clears it in its prepaint; every row reports its bounds in its
+/// prepaint (`rows`) and every row with selectable text pushes its layout while painting (`texts`), so
+/// `texts` holds only measured and prepainted layouts (gpui panics on a hit test of any other). `rows`
+/// is the registry's own copy: `RowBounds` is drained by `check_read`.
+#[derive(Default)]
+pub struct TextRegistry {
+    pub texts: Vec<(MessageTs, TextLayout)>,
+    pub rows: Vec<(MessageTs, Bounds<Pixels>)>,
+}
+
+impl TextRegistry {
+    pub fn clear(&mut self) {
+        self.texts.clear();
+        self.rows.clear();
+    }
+}
+
+pub type TextLayouts = Rc<RefCell<TextRegistry>>;
 
 /// What a row needs besides the store's data: the entities its clicks act on.
 #[derive(Clone)]
@@ -129,11 +144,12 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
         .flex()
         .flex_col()
         .on_children_prepainted({
-            let rows = ctx.rows.clone();
+            let (rows, texts) = (ctx.rows.clone(), ctx.texts.clone());
             move |children, _, _| {
                 if let (Some(first), Some(last)) = (children.first(), children.last()) {
-                    rows.borrow_mut()
-                        .push((ts, Bounds::from_corners(first.origin, last.bottom_right())));
+                    let bounds = Bounds::from_corners(first.origin, last.bottom_right());
+                    rows.borrow_mut().push((ts, bounds));
+                    texts.borrow_mut().rows.push((ts, bounds));
                 }
             }
         })
@@ -523,14 +539,20 @@ fn selectable_text(
                 cx.stop_propagation();
                 let painted = registry
                     .borrow()
+                    .texts
                     .iter()
                     .find(|(t, _)| *t == ts)
                     .map(|(_, layout)| layout.clone());
                 let Some(painted) = painted else { return };
-                let at = Pos {
-                    ts,
-                    offset: caret_for(&painted, event.position, &text),
+                // A caret goes to the nearer side of a glyph; a word or a paragraph is the one the
+                // glyph under the pointer belongs to, so the right half of a word's last letter is
+                // still that word.
+                let offset = if event.click_count >= 2 {
+                    glyph_for(&painted, event.position, &text)
+                } else {
+                    caret_for(&painted, event.position, &text)
                 };
+                let at = Pos { ts, offset };
                 desktop
                     .update(cx, |desktop, cx| {
                         desktop.text_down(
@@ -549,7 +571,7 @@ fn selectable_text(
             canvas(
                 |_, _, _| {},
                 move |_, _, window, _| {
-                    registry.borrow_mut().push((ts, layout.clone()));
+                    registry.borrow_mut().texts.push((ts, layout.clone()));
                     let Some(range) = range.filter(|r| !r.is_empty()) else {
                         return;
                     };

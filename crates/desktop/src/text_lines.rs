@@ -11,7 +11,7 @@
 use crate::selection::snap;
 use gpui::{Point, TextLayout};
 use std::ops::Range;
-use unicode_segmentation::GraphemeCursor;
+use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
 /// One paragraph of a shaped text. Offsets inside are relative to the paragraph, `base` locates it in the text.
 #[derive(Clone, Debug, PartialEq)]
@@ -183,9 +183,30 @@ pub(crate) fn caret_for(layout: &TextLayout, point: Point<gpui::Pixels>, text: &
     caret_in(text, &paragraphs_of(layout, text), hit, x)
 }
 
+/// The start of the grapheme under the pointer for a hit test `hit`: the glyph the pointer is over, not
+/// the nearer caret stop (which for the right half of a word's last letter is the end of the word). For
+/// a pointer outside the text, `hit`'s own nearest index.
+pub(crate) fn glyph_in(text: &str, hit: Result<usize, usize>) -> usize {
+    match hit {
+        Ok(index) => text
+            .grapheme_indices(true)
+            .take_while(|(start, _)| *start <= index)
+            .last()
+            .map_or(0, |(start, _)| start),
+        Err(index) => snap(text, index),
+    }
+}
+
+/// The offset of the glyph under `point` in a painted `layout` of `text` (see `caret_for` for the layout's
+/// requirements); what a double or triple click takes its word or paragraph from.
+pub(crate) fn glyph_for(layout: &TextLayout, point: Point<gpui::Pixels>, text: &str) -> usize {
+    glyph_in(text, layout.index_for_position(point))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::word_at;
 
     /// A paragraph of `text` shaped at `cell` px a char, one glyph per char (the test platform's shaping).
     fn para(base: usize, text: &str, cell: f32, wraps: &[usize]) -> Para {
@@ -369,5 +390,30 @@ mod tests {
         ];
         assert_eq!(highlight_rects(&p, 1..6), vec![(0, 9., 18.), (2, 0., 18.)]);
         assert_eq!(highlight_rects(&p, 3..3), vec![]);
+    }
+
+    #[test]
+    fn the_glyph_under_the_pointer_is_the_grapheme_it_starts_not_the_nearer_caret_stop() {
+        let text = "hello world";
+        // The right half of the last `o` has the caret after the word, the glyph is still the `o`.
+        let p = [para(0, text, 9., &[])];
+        assert_eq!(caret_in(text, &p, Ok(4), 42.), 5);
+        assert_eq!(glyph_in(text, Ok(4)), 4);
+        assert_eq!(word_at(text, glyph_in(text, Ok(4))), 0..5);
+        assert_eq!(glyph_in(text, Ok(6)), 6);
+    }
+
+    #[test]
+    fn a_glyph_inside_a_grapheme_gives_its_start_and_a_pointer_outside_the_text_its_nearest_index()
+    {
+        let text = "e\u{301}x";
+        assert_eq!(
+            glyph_in(text, Ok(1)),
+            0,
+            "a combining mark belongs to its base"
+        );
+        assert_eq!(glyph_in(text, Ok(3)), 3);
+        assert_eq!(glyph_in(text, Err(3)), 3);
+        assert_eq!(glyph_in("", Ok(0)), 0);
     }
 }

@@ -11782,6 +11782,29 @@ fn double_click_selects_a_word_and_triple_click_a_paragraph(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn double_click_on_the_right_half_of_a_words_last_letter_selects_that_word(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = harness(cx);
+    open_with(&h, cx, vec![plain(1, "hello world")]);
+    // Glyph 4 is the last `o` of `hello` (9 px wide from 36 px): 43 px is its right half, where a single
+    // click puts the caret after the word, on the space; the word is still the one under the pointer.
+    let right_half = nudge(glyph_at(cx, msg!(1, "text"), 4., 0), 7.);
+    press(cx, right_half, 2, Modifiers::none());
+    release(cx, right_half);
+    assert_eq!(
+        picked(&h, cx, 1),
+        Some(0..5),
+        "the word, not the space after it"
+    );
+    assert_eq!(
+        caret_from(&h, cx, 1, right_half),
+        5,
+        "a single click is the nearer stop"
+    );
+}
+
+#[gpui::test]
 fn shift_click_extends_and_a_click_clears(cx: &mut TestAppContext) {
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![plain(1, "hello brave world")]);
@@ -11825,7 +11848,7 @@ fn a_drag_across_two_messages_copies_the_text_with_headers(cx: &mut TestAppConte
     let from = glyph_at(cx, msg!(1, "text"), 6., 0);
     let to = glyph_at(cx, msg!(2, "text"), 6., 0);
     drag(cx, from, to);
-    cx.simulate_keystrokes("cmd-c");
+    cx.simulate_keystrokes("secondary-c");
     assert_eq!(
         clipboard(cx),
         Some(format!(
@@ -11843,7 +11866,7 @@ fn copy_goes_to_the_composer_unless_the_timeline_has_the_selection(cx: &mut Test
     let (h, cx) = harness(cx);
     open_with(&h, cx, vec![plain(1, "hello brave world")]);
     cx.simulate_input("черновик");
-    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.simulate_keystrokes("secondary-a secondary-c");
     assert_eq!(clipboard(cx), Some("черновик".into()));
     assert!(
         !has_selection(&h, cx),
@@ -11851,7 +11874,7 @@ fn copy_goes_to_the_composer_unless_the_timeline_has_the_selection(cx: &mut Test
     );
 
     drag_in(cx, msg!(1, "text"), 2., 9.);
-    cx.simulate_keystrokes("cmd-c");
+    cx.simulate_keystrokes("secondary-c");
     assert_eq!(
         clipboard(cx),
         Some("llo bra".into()),
@@ -11861,7 +11884,7 @@ fn copy_goes_to_the_composer_unless_the_timeline_has_the_selection(cx: &mut Test
     assert!(writes(&h).is_empty());
 
     click(cx, "composer-input");
-    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.simulate_keystrokes("secondary-a secondary-c");
     assert_eq!(
         clipboard(cx),
         Some("черновик".into()),
@@ -11877,7 +11900,7 @@ fn copy_with_a_click_and_no_selection_writes_nothing(cx: &mut TestAppContext) {
     let at = glyph_at(cx, msg!(1, "text"), 3., 0);
     press(cx, at, 1, Modifiers::none());
     release(cx, at);
-    cx.simulate_keystrokes("cmd-c");
+    cx.simulate_keystrokes("secondary-c");
     assert_eq!(clipboard(cx), Some("раньше".into()));
 }
 
@@ -11896,10 +11919,10 @@ fn select_all_in_the_timeline_takes_every_message_with_text(cx: &mut TestAppCont
     let at = glyph_at(cx, msg!(1, "text"), 3., 0);
     press(cx, at, 1, Modifiers::none());
     release(cx, at);
-    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_keystrokes("secondary-a");
     assert_eq!(picked(&h, cx, 1), Some(0..17));
     assert_eq!(picked(&h, cx, 3), Some(0..4));
-    cx.simulate_keystrokes("cmd-c");
+    cx.simulate_keystrokes("secondary-c");
     assert_eq!(
         clipboard(cx),
         Some(format!(
@@ -11938,7 +11961,7 @@ fn the_quote_the_author_and_a_voice_card_are_not_selectable(cx: &mut TestAppCont
     let at = glyph_at(cx, msg!(1, "text"), 3., 0);
     press(cx, at, 1, Modifiers::none());
     release(cx, at);
-    cx.simulate_keystrokes("cmd-a cmd-c");
+    cx.simulate_keystrokes("secondary-a secondary-c");
     let copied = clipboard(cx).expect("the text is copied");
     assert!(copied.contains("hello brave world"));
     assert!(!copied.contains("quoted words") && !copied.contains("BOB"));
@@ -12027,7 +12050,7 @@ fn deleting_or_editing_an_end_message_drops_the_selection_even_for_the_same_leng
     drag_in(cx, msg!(2, "text"), 0., 6.);
     h.feed(cx, [edited(2, "SECOND LINES")]);
     assert!(!has_selection(&h, cx), "so is one with the same length");
-    cx.simulate_keystrokes("cmd-c");
+    cx.simulate_keystrokes("secondary-c");
     assert_eq!(
         clipboard(cx),
         Some("раньше".into()),
