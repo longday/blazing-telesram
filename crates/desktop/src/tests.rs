@@ -12799,3 +12799,36 @@ fn a_single_message_set_asks_the_single_question_and_the_menu_delete_is_unchange
     click(cx, "confirm-delete");
     assert_eq!(deleted_commands(&h), [ts(2)]);
 }
+
+#[gpui::test]
+fn entering_the_mode_changes_neither_the_wrapping_nor_the_height_of_a_row(cx: &mut TestAppContext) {
+    let (h, cx) = harness(cx);
+    cx.simulate_resize(size(px(850.), px(1400.)));
+    let long = "очень длинное сообщение которое переносится на несколько строк ".repeat(5);
+    open_with(
+        &h,
+        cx,
+        vec![
+            plain(1, "short"),
+            plain(2, &long),
+            own("g", 3, &long),
+            plain(4, "short"),
+        ],
+    );
+    let sizes = |cx: &mut VisualTestContext| {
+        [msg!(1), msg!(2), msg!(3), msg!(4)].map(|selector| {
+            bounds(cx, selector)
+                .unwrap_or_else(|| panic!("{selector} is not on screen"))
+                .size
+        })
+    };
+    let before = sizes(cx);
+    assert!(
+        before[1].height > before[0].height * 2.0,
+        "the long messages wrap"
+    );
+
+    primary_click(cx, msg!(1));
+    assert!(in_mode(&h, cx));
+    assert_eq!(sizes(cx), before, "the mode keeps every bubble's size");
+}

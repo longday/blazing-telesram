@@ -189,9 +189,10 @@ pub fn message_row(ctx: &RowContext, ix: usize, cx: &App) -> AnyElement {
                 .gap(px(8.))
                 .when(m.outgoing, |d| d.justify_end())
                 .when(in_mode, |d| {
-                    // The gutter of the check takes the room the left padding leaves; the row's height
-                    // does not change.
-                    d.relative().pl(px(16. + CHECK_GUTTER))
+                    // The check's gutter is paid for by the right padding, so the width left for the
+                    // bubble (and with it the wrapping and the row's height) stays what it is outside
+                    // the mode: 16 + 16 before, CHECK_GUTTER + (32 - CHECK_GUTTER) now.
+                    d.relative().pl(px(CHECK_GUTTER)).pr(px(32. - CHECK_GUTTER))
                 })
                 .when(marked, |d| {
                     d.debug_selector(move || format!("msg-{ts}-marked"))
@@ -210,7 +211,7 @@ fn check_gutter(ts: MessageTs, marked: bool) -> Div {
     div()
         .debug_selector(move || format!("msg-{ts}-check"))
         .absolute()
-        .left(px(12.))
+        .left_0()
         .top_0()
         .bottom_0()
         .w(px(CHECK_GUTTER))
