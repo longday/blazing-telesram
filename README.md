@@ -2,19 +2,44 @@
 
 Blazing Telesram (БТ) is a native Rust + GPUI desktop client for Yandex Telemost / Messenger chats, styled after Telegram Desktop. It is not affiliated with Telegram or Yandex.
 
-Current status: **read-only**. It shows your chat list, history, image thumbnails and file cards, and receives new messages live. It cannot send messages, mark chats as read or show typing. Chats and history are cached locally, so the last state is visible offline.
-
 > **Risk:** there is no public API. The client speaks the unofficial protocol of the Telemost web client, using your Yandex session cookies. Yandex can change or block it at any time.
+
+## Features
+
+- Sign-in through the Yandex web page (two-factor and Yandex 360 steps included); the session is reused on later starts.
+- Chat list in a Telegram Desktop style sidebar: avatars, previews, unread counters, pinned and muted markers, filter by name and kind, server search of chats, people and messages.
+- History with reply quotes, forwarded-from lines, edited and deleted markers, image thumbnails and galleries with a viewer, file cards.
+- Sending text and replies with delivery state, offline queue and per-chat drafts; edit and delete own messages; reactions and the list of who reacted.
+- Voice messages played in the timeline, videos in the system player; files saved to `~/Downloads` only on request, with progress, cancel and retry.
+- Live updates over the Xiva push channel with automatic reconnect; read markers and typing indicator.
+- Offline cache: the last state of chats and history is visible without a network.
+- Diagnostic log: terminal, in-app log window and JSON Lines files.
+
+## Screenshots
+
+Chat names, people's names, message texts and photo avatars are pixelated; the interface itself is untouched.
+
+![Chat list and an open chat with video cards](docs/screenshots/chat-list.png)
+
+![Voice message player](docs/screenshots/voice-message.png)
+
+![Chat info panel with the member list](docs/screenshots/chat-info.png)
+
+![Profile dialog](docs/screenshots/profile.png)
 
 ## Run
 
-macOS only. Needs rustup and the Xcode Command Line Tools (full Xcode is not required).
+The app is built from source; there are no automatic builds or ready packages yet (see [TODO](#todo)). You need a Rust development environment: [rustup](https://rustup.rs). The toolchain version is pinned in `rust-toolchain.toml` and installed by the scripts.
 
-```sh
-./run.sh
-```
+| OS | Command | Status |
+| --- | --- | --- |
+| macOS | `./run-mac.sh` (needs the Xcode Command Line Tools; full Xcode is not required) | works |
+| Linux | `./run-linux.sh` | in progress (change `add-cross-platform-support`); not supported yet |
+| Windows | `.\run-windows.ps1` | in progress (change `add-cross-platform-support`); not supported yet |
 
-`run.sh` installs the pinned toolchain, sets `BT_RUNTIME_DIR` to `.runtime/` in the repository (git-ignored) and starts the app. To run cargo directly, set the variable yourself; the app refuses to start without it:
+Today the desktop crate depends unconditionally on macOS frameworks (AppKit, AVFAudio, the Dock, an embedded WebKit window for sign-in), so only macOS is supported. The Linux and Windows scripts are the entry points for the port: they check rustup, install the toolchain and run cargo, but the app is not expected to work on those systems until that change lands.
+
+Each script installs the pinned toolchain, sets `BT_RUNTIME_DIR` to `.runtime/` in the repository (git-ignored; session, cache, previews and logs live there) and starts the app in release mode. To run cargo directly, set the variable yourself; the app refuses to start without it:
 
 ```sh
 BT_RUNTIME_DIR="$PWD/.runtime" cargo run --locked --release -p blazing-telesram
@@ -62,12 +87,16 @@ The app logs to three places at once: the terminal (stderr), the log window (⌘
 `BT_LOG` selects what is logged, in [`tracing-subscriber` `EnvFilter`](https://docs.rs/tracing-subscriber/0.3.23/tracing_subscriber/filter/struct.EnvFilter.html) syntax; the default is `info`. An invalid value stops the app at startup.
 
 ```sh
-BT_LOG=debug ./run.sh                                   # every HTTP and socket request with status and timing
-BT_LOG=info,yandex_proto::xiva=trace ./run.sh           # plus raw Xiva frames, including message text
+BT_LOG=debug ./run-mac.sh                               # every HTTP and socket request with status and timing
+BT_LOG=info,yandex_proto::xiva=trace ./run-mac.sh       # plus raw Xiva frames, including message text
 jq -c 'select(.level != "DEBUG")' "$(ls -t .runtime/logs/*.jsonl | head -1)"   # read the running app's log
 ```
 
 No level logs cookie values, tokens or URL query strings; `trace` does log message text, so share trace logs with care. `bt-probe` uses the same `BT_LOG` and writes its log to stderr only, e.g. `BT_LOG=yandex_proto::xiva=trace bt-probe listen --watch <chat>` shows the raw frames; `--watch` adds the per-chat subscription the app makes for the open chat.
+
+## TODO
+
+- Automatic builds (CI) and ready-to-install packages for macOS, Windows and Linux.
 
 ## License
 

@@ -42,8 +42,8 @@ Facts gathered while writing the proposal (2026-11-28, host: source reading and 
 | `src/desktop.rs:1923` | `.font_family("Menlo")` for the log view (no such font on Windows/Linux; the fallback is a proportional font) |
 | `src/main.rs:68-76`, `src/input.rs:1028-1040,1040` | `cmd-q` (Quit), `cmd-shift-l` (ToggleLog) have no `ctrl` form; `cmd` is the Windows/Super key elsewhere; `ctrl-cmd-space` (character palette) is a macOS gesture. `cmd-f`/`ctrl-f` and `cmd-a/c/v/x`/`ctrl-a/c/v/x` already come in pairs |
 | `src/tests.rs:777,830,1679,1688,1881,1903,1917,2212,2302,2386` and the helper `with_log_shortcut` (`:2824-2847`, callers `:2841,2868,3166,3219`, keystrokes `:2847,2872,3174,3232`) | simulate `cmd-a` and `cmd-shift-l` keystrokes and bind `cmd-shift-l` themselves; they must become `secondary-*` or take the binding from `keys.rs` |
-| `run.sh` | `uname -s != Darwin` guard (the other agent adds `run-mac.sh`, `run-linux.sh`, `run-windows.ps1`; they set `BT_RUNTIME_DIR=<repo>/.runtime`) |
-| `crates/yandex-proto/src/runtime.rs:11` | the error text names `run.sh` |
+| `run-mac.sh` (the former macOS-only run script) | `uname -s != Darwin` guard (`run-linux.sh` and `run-windows.ps1` are the other agent's files, merged with `docs/readme`; they set `BT_RUNTIME_DIR=<repo>/.runtime`) |
+| `crates/yandex-proto/src/runtime.rs:11` | the error text named the former macOS-only script; `docs/readme` changed it to "the run-*.sh and run-windows.ps1 scripts" |
 | `docs`, specs | `openspec/specs/media-playback` (lines 157, 175), `attachment-download` (`Reveal in Finder`), `diagnostic-log` (lines 61, 64: `Cmd+Shift+L`) |
 
 ### Already portable (read, nothing to do)

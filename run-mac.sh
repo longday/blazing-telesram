@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [[ "$(uname -s)" != Darwin ]]; then
-  echo "run.sh supports macOS only" >&2
+  echo "run-mac.sh supports macOS only" >&2
   exit 1
 fi
 

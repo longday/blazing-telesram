@@ -41,7 +41,7 @@ The client SHALL record each HTTP request and each WebSocket request it sends at
 Every produced record SHALL be written to standard error as one human-readable line.
 
 #### Scenario: Run from a terminal
-- **WHEN** the app runs from `./run.sh`
+- **WHEN** the app runs from `./run-mac.sh`
 - **THEN** records appear in that terminal as they happen
 
 ### Requirement: Machine-readable log file
