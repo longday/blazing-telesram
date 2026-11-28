@@ -8,7 +8,7 @@ use crate::format::{Clock, chat_time, log_time, one_line};
 use crate::info_panel;
 use crate::input::{InputEvent, TextInput};
 use crate::logging::{LogBuffer, LogLine};
-use crate::new_chat::{self, Mode, NewChat};
+use crate::new_chat::{self, Candidate, Mode, NewChat};
 use crate::player::Player;
 use crate::profile;
 use crate::reactors;
@@ -469,21 +469,29 @@ impl Desktop {
         self.store.read(cx).connection() == ConnectionState::Online
     }
 
-    /// Opens the new chat dialog, with `user` already chosen when it comes from "Написать". A person who
-    /// already has a private chat with the account gets that chat opened instead. Ignored while something
-    /// else covers the chat. The dialog needs the own guid to leave the current user out, so it asks for
-    /// the profile (a read) unless one is loaded.
-    pub(crate) fn open_new_chat(&mut self, user: Option<UserId>, cx: &mut Context<Self>) {
+    /// Opens the new chat dialog, with `person` already chosen when it comes from "Написать" (a member row
+    /// or a user card): the person is passed in, so one who is in none of the dialog's lists is not lost.
+    /// A person who already has a private chat with the account gets that chat opened instead; the current
+    /// user is ignored. Ignored while something else covers the chat. The dialog needs the own guid to leave
+    /// the current user out, so it asks for the profile (a read) unless one is loaded.
+    pub(crate) fn open_new_chat(&mut self, person: Option<Candidate>, cx: &mut Context<Self>) {
         self.menu = AccountMenu::Closed;
         if self.blocked(cx) || self.new_chat.is_some() {
             cx.notify();
             return;
         }
-        if let Some(chat) = user
+        if let Some(chat) = person
             .as_ref()
-            .and_then(|u| new_chat::existing_chat(self.store.read(cx), u))
+            .and_then(|p| new_chat::existing_chat(self.store.read(cx), &p.user))
         {
             self.select(chat, cx);
+            return;
+        }
+        if person
+            .as_ref()
+            .is_some_and(|p| new_chat::is_current_user(self.store.read(cx), &p.user))
+        {
+            cx.notify();
             return;
         }
         // The message menu is drawn above the dialog; it must not outlive the cover's start.
@@ -496,11 +504,7 @@ impl Desktop {
             }
         });
         let mut dialog = NewChat::new(cx);
-        dialog.chosen = user.and_then(|user| {
-            new_chat::candidates(self.store.read(cx), self.info_chat().as_ref())
-                .into_iter()
-                .find(|c| c.user == user)
-        });
+        dialog.chosen = person;
         self.new_chat = Some(dialog);
         cx.notify();
     }

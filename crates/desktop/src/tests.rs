@@ -7363,6 +7363,129 @@ fn the_dialog_notice_follows_the_creation_state() {
     ));
 }
 
+// ---- write to a person outside the dialog's lists (UC 5.0) ----
+
+fn person(guid: &str, name: &str) -> crate::new_chat::Candidate {
+    crate::new_chat::Candidate {
+        user: UserId(guid.into()),
+        name: name.into(),
+        avatar: None,
+    }
+}
+
+fn write_to(h: &Harness, cx: &mut VisualTestContext, who: Option<crate::new_chat::Candidate>) {
+    h.desktop.update(cx, |d, cx| d.open_new_chat(who, cx));
+    cx.run_until_parked();
+}
+
+/// Online with the group, Анна's private chat and the self chat; no chat open, no panel.
+fn online_with_people(cx: &mut TestAppContext) -> (Harness, &mut VisualTestContext) {
+    harness_with(
+        cx,
+        vec![
+            ClientEvent::ChatsReplaced(people_chats()),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+        |_, _| {},
+    )
+}
+
+#[gpui::test]
+fn a_person_in_none_of_the_lists_opens_the_dialog_chosen_and_named(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_people(cx);
+    assert!(!info_open(&h, cx), "the panel is closed");
+    let zoya = person("zoya", "Зоя");
+    write_to(&h, cx, Some(zoya.clone()));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.new_chat_choice().cloned()),
+        Some(zoya)
+    );
+    assert!(
+        shown(cx, "new-chat-participant"),
+        "the confirmation is for that person"
+    );
+    assert!(
+        !shown(cx, "candidate-zoya"),
+        "she is in no list: she is chosen, not offered"
+    );
+    assert_eq!(
+        h.commands(),
+        [Command::LoadProfile],
+        "the dialog opens, nothing is created"
+    );
+    click(cx, "new-chat-create");
+    assert_eq!(
+        h.commands(),
+        [Command::CreatePrivateChat {
+            user: UserId("zoya".into())
+        }]
+    );
+}
+
+#[gpui::test]
+fn with_the_profile_loaded_the_person_opens_the_dialog_and_sends_no_command(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = online_with_people(cx);
+    h.store.update(cx, |s, cx| s.load_profile(cx));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    assert_eq!(h.commands(), [Command::LoadProfile], "the setup read");
+    let zoya = person("zoya", "Зоя");
+    write_to(&h, cx, Some(zoya.clone()));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.new_chat_choice().cloned()),
+        Some(zoya)
+    );
+    assert!(shown(cx, "new-chat-participant"));
+    assert!(h.commands().is_empty(), "no command is sent");
+}
+
+#[gpui::test]
+fn a_person_with_a_private_chat_selects_it_and_no_dialog_opens(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_people(cx);
+    write_to(&h, cx, Some(person("anna", "Анна")));
+    assert!(!dialog_open(&h, cx));
+    assert_eq!(selected_chat(&h, cx), Some(ChatId("p".into())));
+    assert_eq!(h.commands(), [Command::OpenChat(ChatId("p".into()))]);
+}
+
+#[gpui::test]
+fn the_current_user_opens_nothing(cx: &mut TestAppContext) {
+    let (h, cx) = harness_with(
+        cx,
+        vec![
+            ClientEvent::ChatsReplaced(vec![
+                chat("g", ChatKind::Group, "Команда", Some(1)),
+                person_chat("p", "Анна", "anna"),
+            ]),
+            ClientEvent::Connection(ConnectionState::Online),
+        ],
+        |_, _| {},
+    );
+    h.store.update(cx, |s, cx| s.load_profile(cx));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+    h.store.read_with(cx, |s, _| {
+        assert!(crate::new_chat::is_current_user(s, &UserId("me".into())));
+        assert!(!crate::new_chat::is_current_user(s, &UserId("anna".into())));
+    });
+    write_to(&h, cx, Some(person("me", "Я")));
+    assert!(!dialog_open(&h, cx), "no dialog, so no chosen person");
+    assert_eq!(selected_chat(&h, cx), None);
+    assert!(h.commands().is_empty(), "nothing is read or created");
+}
+
+#[gpui::test]
+fn no_person_opens_the_empty_dialog_as_before(cx: &mut TestAppContext) {
+    let (h, cx) = online_with_people(cx);
+    write_to(&h, cx, None);
+    assert!(dialog_open(&h, cx));
+    assert_eq!(chosen_person(&h, cx), None);
+    assert_eq!(h.commands(), [Command::LoadProfile]);
+}
+
 // ---- add-reaction-list 6.3: «Кто отреагировал» in the message menu ----
 //
 // Bounds are never removed once painted, so every "not offered" case runs in a window that never painted

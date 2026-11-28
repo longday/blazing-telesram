@@ -117,6 +117,12 @@ pub fn identity_known(store: &ChatStore) -> bool {
     !own_ids(store, &store.visible_chats("", ChatFilter::All)).is_empty()
 }
 
+/// Whether `user` is the current user as far as the store knows (see `own_ids`); false until the identity
+/// is known.
+pub fn is_current_user(store: &ChatStore, user: &UserId) -> bool {
+    own_ids(store, &store.visible_chats("", ChatFilter::All)).contains(user)
+}
+
 /// The people on offer, sorted by name: distinct, never the current user. The partners of private chats
 /// wait for the identity (`identity_known`).
 pub fn candidates(store: &ChatStore, panel: Option<&ChatId>) -> Vec<Candidate> {
