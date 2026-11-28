@@ -985,6 +985,7 @@ fn select_file(body: &WireBody, item: Option<usize>) -> Result<Chosen<'_>, Strin
     };
     match body {
         WireBody::File(file) | WireBody::Voice { file, .. } => single(file),
+        WireBody::Video(video) => single(&video.file),
         WireBody::Image(image) => single(&image.file),
         WireBody::Gallery { items, .. } => {
             let position = item.unwrap_or(1);
@@ -1629,6 +1630,27 @@ mod tests {
         assert_eq!(describe(&row), "20\t?\tmine (edited) (important)");
     }
 
+    #[test]
+    fn a_video_history_row_is_described_with_its_hint() {
+        use yandex_proto::wire::WireVideo;
+        let mut row = message(Relation::None);
+        row.body = WireBody::Video(WireVideo {
+            file: WireFile {
+                id: "disk/m".into(),
+                name: Some("clip.mp4".into()),
+                size: Some(5),
+            },
+            width: 1080,
+            height: 1920,
+            duration_ms: 42_000,
+        });
+        let line = describe(&row);
+        assert!(line.starts_with("20\t?\t[Video("), "{line}");
+        for part in ["width: 1080", "height: 1920", "duration_ms: 42000"] {
+            assert!(line.contains(part), "{line}");
+        }
+    }
+
     fn chat(pinned: Option<i64>, pin_action_ts: Option<i64>) -> WireChat {
         WireChat {
             id: "c1".into(),
@@ -2098,6 +2120,37 @@ mod download_tests {
                 .unwrap_err()
                 .contains("one file")
         );
+    }
+
+    #[test]
+    fn select_file_accepts_a_video_and_names_it_as_the_file_arm_does() {
+        use yandex_proto::wire::WireVideo;
+        let video = WireVideo {
+            file: file("disk/m", Some("../clip.mp4")),
+            width: 1080,
+            height: 1920,
+            duration_ms: 42_000,
+        };
+        let body = WireBody::Video(video.clone());
+        assert_eq!(
+            select_file(&body, None),
+            Ok(Chosen {
+                file: &video.file,
+                position: 1,
+                count: 1
+            })
+        );
+        assert!(select_file(&body, Some(1)).is_ok());
+        assert!(
+            select_file(&body, Some(2))
+                .unwrap_err()
+                .contains("one file")
+        );
+        // Same local name as the file arm gives the same `FileInfo`.
+        let plain = WireBody::File(video.file.clone());
+        let name = |body| local_name(select_file(body, None).unwrap().file);
+        assert_eq!(name(&body), "clip.mp4");
+        assert_eq!(name(&body), name(&plain));
     }
 
     #[test]
