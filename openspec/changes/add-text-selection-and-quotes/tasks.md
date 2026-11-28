@@ -227,7 +227,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: «Выбрать» offered for sent, not for pending, failed and deleted; choosing it enters the mode with that message; the composer's draft is intact after the mode; Escape leaves the mode before closing the info panel; confirming deletion of three sends three deletes in order; one refused delete leaves that message and deletes the others; cancel keeps the marks.
   - Done when: these tests exist.
 
-- [ ] 3.7 Tests for the unit
+- [x] 3.7 Tests for the unit
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 3.3-3.6.
   - Do: a section `// ---- message selection (TS 3.7) ----`.
