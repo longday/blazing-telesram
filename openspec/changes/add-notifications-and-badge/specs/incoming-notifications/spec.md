@@ -35,7 +35,7 @@ The notification SHALL be titled with the chat's name and its text SHALL be the 
 - **THEN** the notification shows its first 140 characters followed by «…», on one line
 
 ### Requirement: What never notifies
-No notification SHALL be shown for: a message of the user's own account, including one sent from another client; an edit of a message; a deletion; a reaction; a typing indicator; a pin change; a muted chat; a message that was already in the chat list when the client started or that a reconnect or a refresh of the chat list brings in; a message in an older position than the chat's newest one. Showing no notification SHALL leave the unread counter and the badge as they are.
+No notification SHALL be shown for: a message of the user's own account, including one sent from another client; an edit of a message; a deletion; a reaction; a typing indicator; a pin change; a muted chat; a message that was already in the chat list when the client started or that a reconnect or a refresh of the chat list brings in; a message in an older position than the chat's newest one.
 
 #### Scenario: Own message from another device
 - **WHEN** the user sends a message to a chat from the web client
@@ -59,6 +59,14 @@ No notification SHALL be shown for: a message of the user's own account, includi
 - **GIVEN** chats with unread messages
 - **WHEN** the app starts and loads its chat list
 - **THEN** no notification is shown
+
+### Requirement: Suppression changes no state
+Suppressing a notification SHALL NOT change any unread counter and SHALL NOT stop the Dock badge from being recomputed from the chat list's own unread state: the badge follows `dock-badge`, independently of whether a notification was shown.
+
+#### Scenario: Backlog moves the badge without a notification
+- **GIVEN** the badge reads «2»
+- **WHEN** a reconnect reload brings three more unread messages in an unmuted chat and no notification is shown
+- **THEN** the unread counters are as the server reports them and the badge reads «5»
 
 ### Requirement: Open chat and the key window
 No notification SHALL be shown for a message in the chat that is open while the chat window is the key window, because the user is looking at it. A notification SHALL be shown for the open chat when the chat window is not the key window (another app in front, the window minimised or hidden), and for any other chat whether or not the window is the key window.
