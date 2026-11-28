@@ -1,6 +1,7 @@
 mod alerts;
 mod audio;
 mod desktop;
+mod dock;
 mod format;
 mod info_panel;
 mod input;
@@ -20,6 +21,7 @@ mod viewer;
 mod widgets;
 mod yandex_backend;
 
+use alerts::{AlertsFactory, Platform};
 use bt_chat_core::model::{ChatId, UserId};
 use bt_chat_core::{ChatClient, ClientConfig};
 use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog, ViewerNext, ViewerPrev};
@@ -58,6 +60,10 @@ fn main() {
         cx.set_global(WriteOnly(write_only));
         // Before any window: the player reads it when the first voice message is clicked.
         cx.set_global(player::AudioFactory(audio::output));
+        // Before any window: `Desktop` creates its `Alerts` from it.
+        cx.set_global(AlertsFactory(|| Platform {
+            badge: dock::badge(),
+        }));
         input::bind(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-f", Search, Some("BlazingTelesram")),
