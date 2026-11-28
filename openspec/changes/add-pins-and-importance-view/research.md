@@ -166,7 +166,7 @@ Screenshots (`.runtime/vm/`, not committed): `pin-6.2-a0-launch.png`, `a1-chat-o
 - **Omission (hazard).** Message authored by the app account, marked by the admin (`history`: `(edited) (important)`). Edited in the app built from `fbf2a2c` (`cc05534^`, before 3.3, so the edit frame never carries the key): `history` afterwards `(edited)` and no `(important)`. The flag was cleared by the edit.
 - **Repeat (3.3).** The admin marked the same message again (`history`: `(edited) (important)`). Edited in the app built from main `870e584` (3.3: the engine passes the cached flag, `IsImportant: true` is in the frame): `history` afterwards `(edited) (important)`. The flag survived. (The 3.3 build cannot produce the omission form for a message it holds as important, which is why the omission came from the older build.)
 - **Also seen.** Part 1 repeated with the current build: the bar appears with the pinned text on its second line, disappears on the unpin; the "⚡" marker appears and disappears with the mark and the unmark. Pins and importance were written by the web client only; the app sent none.
-- Side effects that stay: `ChatInfoDiff` system rows for the pin, the mark, the unmark and the second mark. The disposable messages were deleted; screenshots and the VM build directories were removed.
+- Side effects that stay: `ChatInfoDiff` system rows for the pin and the unpin (the mark and the unmark added none, only a `Plain` push, as in part 1). The disposable messages were deleted; screenshots and the VM build directories were removed.
 
 ## What would settle the open questions
 
