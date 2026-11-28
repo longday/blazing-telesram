@@ -108,7 +108,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: in 1.8.
   - Done when: the code is in place and the workspace builds on the integrated tree.
 
-- [ ] 1.6 Key bindings (D4)
+- [x] 1.6 Key bindings (D4)
   - Owns: `crates/desktop/src/main.rs`.
   - Depends on: 1.1, 1.5.
   - Do: `KeyBinding::new("secondary-c", CopySelection, Some("BlazingTelesram"))` and `"secondary-a"` with `SelectAllText` (`secondary` = Cmd on macOS, Ctrl on Linux and Windows, D4; the `TextInput` bindings are untouched).
