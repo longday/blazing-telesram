@@ -220,7 +220,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: in 3.7.
   - Done when: the workspace builds on the integrated tree.
 
-- [ ] 3.6 Menu entry, composer swap, batch delete (D6, D11)
+- [x] 3.6 Menu entry, composer swap, batch delete (D6, D11)
   - Owns: `crates/desktop/src/desktop/composer.rs`.
   - Depends on: 3.3, 3.5.
   - Do: `MenuAction::Select` («Выбрать», selector `menu-select`, after `Copy`, offered for a sent, non-deleted message); `composer_view` returns the bar while the mode is on (the input and its draft untouched); `dismiss` leaves the mode after the message menu and before the text selection and info panel; a right click does nothing in the mode; `confirm_delete` sends one `Command::Delete` per entry through `Store::delete_message` in timeline order, closes the mode, reports failures through the existing deletion error path; the dialog is not opened for a set that is not all deletable.
