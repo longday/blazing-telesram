@@ -11054,6 +11054,9 @@ fn only_a_whitelisted_name_is_a_video_card_the_rest_stay_file_cards(cx: &mut Tes
                 file(6, "x.mkv"),
                 file(7, "x.webm"),
                 file(8, "a.mp4.command"),
+                // A `File` body is the adapter's decision: the UI never reclassifies it by extension.
+                file(9, "x.mp4"),
+                file(10, "a.MOV"),
             ],
             true,
         ),
@@ -11068,7 +11071,13 @@ fn only_a_whitelisted_name_is_a_video_card_the_rest_stay_file_cards(cx: &mut Tes
         vface("▶", "x.mp4", "12 МБ", true),
         "a video without a hint: a card without a duration"
     );
-    for part in [msg!(6, "file"), msg!(7, "file"), msg!(8, "file")] {
+    for part in [
+        msg!(6, "file"),
+        msg!(7, "file"),
+        msg!(8, "file"),
+        msg!(9, "file"),
+        msg!(10, "file"),
+    ] {
         assert!(shown(cx, part), "{part}");
     }
     for part in [
@@ -11076,8 +11085,20 @@ fn only_a_whitelisted_name_is_a_video_card_the_rest_stay_file_cards(cx: &mut Tes
         msg!(6, "video-play"),
         msg!(7, "video"),
         msg!(8, "video"),
+        msg!(9, "video"),
+        msg!(9, "video-play"),
+        msg!(9, "video-status"),
+        msg!(10, "video"),
+        msg!(10, "video-play"),
+        msg!(10, "video-status"),
     ] {
         assert!(!shown(cx, part), "{part}: a file card has no play control");
+    }
+    for i in [6, 7, 8, 9, 10] {
+        assert!(
+            VIDEO_SHOWN.with(|shown| !shown.borrow().contains_key(&ts(i))),
+            "{i}: a file card records no video face"
+        );
     }
 }
 
