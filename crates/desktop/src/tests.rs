@@ -7424,6 +7424,25 @@ fn a_person_in_none_of_the_lists_opens_the_dialog_chosen_and_named(cx: &mut Test
 }
 
 #[gpui::test]
+fn with_the_profile_loaded_the_person_opens_the_dialog_and_sends_no_command(
+    cx: &mut TestAppContext,
+) {
+    let (h, cx) = online_with_people(cx);
+    h.store.update(cx, |s, cx| s.load_profile(cx));
+    h.feed(cx, [ClientEvent::Profile(profile_of(Some("Я"), None))]);
+    assert_eq!(h.commands(), [Command::LoadProfile], "the setup read");
+    let zoya = person("zoya", "Зоя");
+    write_to(&h, cx, Some(zoya.clone()));
+    assert!(dialog_open(&h, cx));
+    assert_eq!(
+        h.desktop.read_with(cx, |d, _| d.new_chat_choice().cloned()),
+        Some(zoya)
+    );
+    assert!(shown(cx, "new-chat-participant"));
+    assert!(h.commands().is_empty(), "no command is sent");
+}
+
+#[gpui::test]
 fn a_person_with_a_private_chat_selects_it_and_no_dialog_opens(cx: &mut TestAppContext) {
     let (h, cx) = online_with_people(cx);
     write_to(&h, cx, Some(person("anna", "Анна")));
