@@ -4054,6 +4054,11 @@ mod tests {
                 .with_ansi(false)
                 .finish(),
         );
+        // With a single registered dispatcher tracing rebuilds callsite interest from the calling
+        // thread's default, which `set_default` has not installed yet, so a callsite that another
+        // test already hit stays disabled for this capture. A second registered dispatcher makes
+        // it consider all of them.
+        let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let refusal = || serde_json::json!({ "ErrorInfo": { "Message": "server-secret-reason", "WorkerId": 1 }, "Status": 4 });
         let (backend, _) =
             backend_with_replies(None, vec![refusal(), refusal()], HashMap::new()).await;
