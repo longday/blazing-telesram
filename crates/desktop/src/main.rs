@@ -25,6 +25,7 @@ use desktop::{Desktop, Dismiss, Quit, Search, ToggleLog, ViewerNext, ViewerPrev}
 use format::Clock;
 use gpui::{prelude::*, *};
 use login::{LoginCookie, SignInWindow};
+use player::PlayerEvent;
 use store::{ChatStore, SessionState, StoreEvent};
 use yandex_backend::{YandexBackend, parse_write_only};
 use yandex_proto::bootstrap::{BootstrapError, RegistryEndpoints, bootstrap};
@@ -209,6 +210,20 @@ fn open_chat_window(runtime: RuntimeDir, session: Session, cx: &mut App) {
             return cx.quit();
         }
     };
+    // The video hand-off (design D8): the system opens the copy the player checked. The arm is not
+    // run by any test (the test platform's `open_with_system` is `unimplemented!()`).
+    match handle.read(cx).map(|desktop| desktop.player.clone()) {
+        Ok(player) => cx
+            .subscribe(&player, |_, event: &PlayerEvent, cx| {
+                let PlayerEvent::OpenExternal(path) = event;
+                cx.open_with_system(path);
+            })
+            .detach(),
+        Err(error) => {
+            tracing::error!(%error, "cannot reach the chat window");
+            return cx.quit();
+        }
+    }
     // Expiry and sign-out both lead back to the sign-in window.
     cx.subscribe(&store, move |store, event, cx| {
         if *event == StoreEvent::Session && store.read(cx).session() != SessionState::Active {
