@@ -99,10 +99,12 @@ impl MenuAction {
         }
     }
 
-    fn label(self) -> &'static str {
+    /// The entry's text; Copy reads «Скопировать выделенное» when it copies the text selection (D6).
+    fn label(self, picked: bool) -> &'static str {
         match self {
             Self::Reactors => "Кто отреагировал",
             Self::Reply => "Ответить",
+            Self::Copy if picked => "Скопировать выделенное",
             Self::Copy => "Скопировать текст",
             Self::Edit => "Редактировать",
             Self::Delete => "Удалить",
@@ -438,6 +440,27 @@ impl Desktop {
         Some(messages[ix].clone())
     }
 
+    /// What Copy puts on the clipboard for message `ts` when the text selection touches it (D6, D7): the
+    /// whole selection, also across messages. `None` when nothing is selected, the selection is stale
+    /// or it does not reach this message; the menu then copies the message's own text.
+    fn selection_copy(&self, ts: MessageTs, cx: &App) -> Option<String> {
+        let chat = &self.open.as_ref()?.chat;
+        let store = self.store.read(cx);
+        let messages = &store.timeline(chat)?.messages;
+        let picking = self.picking.read(cx);
+        picking.text.as_ref()?.range_in(messages, ts)?;
+        picking.selected_text(messages, |m| {
+            crate::format::copy_header(m.author_name.as_deref(), m.timestamp, self.clock)
+        })
+    }
+
+    /// The label of the open menu's Copy entry.
+    #[cfg(test)]
+    pub(crate) fn menu_copy_label(&self, cx: &App) -> Option<&'static str> {
+        let menu = self.message_menu.as_ref()?;
+        Some(MenuAction::Copy.label(self.selection_copy(menu.timestamp, cx).is_some()))
+    }
+
     fn start_reply(&mut self, timestamp: MessageTs, window: &mut Window, cx: &mut Context<Self>) {
         let Some(message) = self
             .find_message(timestamp, cx)
@@ -463,6 +486,7 @@ impl Desktop {
         else {
             return;
         };
+        self.clear_selection(cx);
         let MessageBody::Text(original) = message.body else {
             return;
         };
@@ -558,6 +582,8 @@ impl Desktop {
             self.close_reactors(cx);
         } else if self.message_menu.take().is_some() {
             cx.notify();
+        } else if self.clear_selection(cx) {
+            // The text selection closes before the info panel and the reply or edit mode.
         } else if self.info.is_some() {
             self.close_info(cx);
         } else {
@@ -578,6 +604,10 @@ impl Desktop {
         let Some(message) = self.find_message(timestamp, cx) else {
             return;
         };
+        // A right click keeps a selection that touches the clicked message and drops any other (D6).
+        if self.selection_copy(timestamp, cx).is_none() {
+            self.clear_selection(cx);
+        }
         if menu_actions(&message).is_empty() && !reactable(&message) {
             return;
         }
@@ -626,10 +656,12 @@ impl Desktop {
             }
             MenuAction::Reply => self.start_reply(menu.timestamp, window, cx),
             MenuAction::Copy => {
-                if let Some(message) = self.find_message(menu.timestamp, cx) {
-                    if let Some(text) = copy_text(&message) {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
-                    }
+                let text = self.selection_copy(menu.timestamp, cx).or_else(|| {
+                    let message = self.find_message(menu.timestamp, cx)?;
+                    copy_text(&message).map(str::to_string)
+                });
+                if let Some(text) = text {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
                 }
             }
             MenuAction::Edit => {
@@ -871,6 +903,7 @@ impl Desktop {
         let menu = self.message_menu.as_ref()?;
         let message = self.find_message(menu.timestamp, cx)?;
         let actions = menu_actions(&message);
+        let picked = self.selection_copy(menu.timestamp, cx).is_some();
         let reactions = reactable(&message);
         if actions.is_empty() && !reactions {
             return None;
@@ -920,7 +953,7 @@ impl Desktop {
                         Some(kind) => icon(kind, 16., MENU_ICON).into_any_element(),
                         None => div().size(px(16.)).flex_none().into_any_element(),
                     })
-                    .child(action.label())
+                    .child(action.label(picked))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.run_menu_action(action, window, cx)
                     }))
@@ -1109,5 +1142,20 @@ mod tests {
         assert_eq!(copy_text(&m), Some("clip.mp4"));
         assert!(menu_actions(&m).contains(&MenuAction::Reply));
         assert!(!editable(&m));
+    }
+
+    #[test]
+    fn copy_reads_selected_only_for_a_message_the_selection_touches() {
+        assert_eq!(MenuAction::Copy.label(true), "Скопировать выделенное");
+        assert_eq!(MenuAction::Copy.label(false), "Скопировать текст");
+        // Only Copy changes with the selection; every other entry reads the same.
+        for action in [
+            MenuAction::Reactors,
+            MenuAction::Reply,
+            MenuAction::Edit,
+            MenuAction::Delete,
+        ] {
+            assert_eq!(action.label(true), action.label(false));
+        }
     }
 }

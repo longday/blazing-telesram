@@ -115,7 +115,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: in 1.8 (dispatch the actions with the composer focused and unfocused).
   - Done when: the bindings are registered next to the existing ones.
 
-- [ ] 1.7 Escape order, menu copy, right-click rule (D4, D6, D8)
+- [x] 1.7 Escape order, menu copy, right-click rule (D4, D6, D8)
   - Owns: `crates/desktop/src/desktop/composer.rs`.
   - Depends on: 1.5.
   - Do: `dismiss` clears the text selection after the message menu and before the info panel and reply/edit cancel; `menu_actions` takes the selection: `Copy` reads «Скопировать выделенное» and copies `extract_text` when the selection touches the message; `open_menu` keeps the selection when it touches the clicked message and clears it otherwise; `start_edit` clears it. «Цитировать» and «Выбрать» are added by TS-Q and TS-M.
