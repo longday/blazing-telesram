@@ -158,7 +158,7 @@ A delivered notification of a chat SHALL be removed from the notification centre
 - **THEN** all of them are removed
 
 ### Requirement: Permission
-The client SHALL ask the system for permission to show notifications once, when the chat window opens, and SHALL NOT ask again in the same run after an answer. When permission is refused, or the system cannot show notifications to this app, the client SHALL show none, SHALL show no error, and SHALL keep working, the Dock badge included.
+The client SHALL ask the system once per run, when the chat window opens, for permission to show notifications (alerts, sounds and the Dock badge, in one prompt), and SHALL NOT ask again after an answer. When permission is refused, or the system cannot show notifications to this app, the client SHALL show none, SHALL show no error, and SHALL keep working.
 
 #### Scenario: First launch
 - **WHEN** the chat window opens and the system has not been asked yet
@@ -167,7 +167,12 @@ The client SHALL ask the system for permission to show notifications once, when 
 #### Scenario: Refused
 - **GIVEN** the user refused notifications
 - **WHEN** another person sends a message in a chat that is not open
-- **THEN** no notification is shown, no error is shown, and the badge and the unread counter still change
+- **THEN** no notification is shown, no error is shown, and the unread counter still changes; the badge count follows `dock-badge`
+
+#### Scenario: Not an application bundle
+- **GIVEN** the app is started as a plain binary, not from an application bundle
+- **WHEN** the chat window opens and another person sends a message in a chat that is not open
+- **THEN** no permission prompt and no notification is shown, no error is shown, the app does not stop, and the Dock badge reads the unread total
 
 ### Requirement: Privacy of notifications
 A notification's text, a chat's name and an author's name SHALL go only to the system's notification centre. They SHALL NOT be written to any log at `debug` or above, to a file, or to the notification's own payload beyond the chat identifier needed to open the chat on a click.

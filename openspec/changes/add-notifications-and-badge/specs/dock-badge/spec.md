@@ -56,6 +56,24 @@ The badge SHALL change whenever the total changes, without user action and witho
 - **WHEN** a message arrives in a muted chat
 - **THEN** the badge still reads 2
 
+### Requirement: The system decides whether the badge is drawn
+The client SHALL hand the Dock icon the unmuted unread total whatever the notification permission is, and SHALL NOT show an error or ask again when the system draws no badge. In a signed application bundle that the notification system accepts, the system draws the badge only while notifications are allowed for the app with the badge option; elsewhere it is drawn with no permission.
+
+#### Scenario: Permission refused
+- **GIVEN** the user refused notifications for the app and the app runs as a signed application bundle
+- **WHEN** a message arrives in a chat that is not muted
+- **THEN** the unread counter of the chat grows as usual, no error is shown, and the system draws no Dock badge
+
+#### Scenario: Allowed after the prompt
+- **GIVEN** the permission prompt is open and the total is 3
+- **WHEN** the user allows notifications with badges
+- **THEN** the Dock badge reads 3 without a new change of the total
+
+#### Scenario: Process the notification system does not know
+- **GIVEN** the app is started as a plain binary, or as a bundle that is not signed
+- **WHEN** the total is 7
+- **THEN** the Dock badge reads 7, with no permission asked for it
+
 ### Requirement: Badge ends with the session
 The badge SHALL be cleared when the session expires, when the user signs out, when the account behind the session changes, and when the chat window closes. The badge of one account SHALL NOT be shown for another.
 
