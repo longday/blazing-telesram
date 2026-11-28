@@ -350,10 +350,6 @@ impl MessageSet {
         self.marked.binary_search(&ts).is_ok()
     }
 
-    pub fn len(&self) -> usize {
-        self.marked.len()
-    }
-
     pub fn is_empty(&self) -> bool {
         self.marked.is_empty()
     }
@@ -1031,7 +1027,6 @@ mod tests {
         assert_eq!(marked(&set), vec![1], "off again");
         assert!(set.toggle(&m, 1));
         assert!(set.is_empty(), "the last one off leaves the set empty");
-        assert_eq!(set.len(), 0);
     }
 
     #[test]

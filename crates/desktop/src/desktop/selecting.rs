@@ -7,12 +7,15 @@
 use super::Desktop;
 use crate::format::copy_header;
 use crate::selection::{
-    Pos, TextSelection, Unit, extract_text, paragraph_at, select_all, snap, text_of, word_at,
+    MessageSet, Pick, Pos, TextSelection, Unit, all_deletable, copy_text, extract_messages,
+    extract_text, paragraph_at, select_all, snap, text_of, word_at,
 };
 use crate::text_lines::{caret_for, glyph_for};
+use crate::theme::*;
 use bt_chat_core::model::{ChatId, Message, MessageTs};
 use gpui::{
-    Bounds, ClipboardItem, Context, ListState, Pixels, Point, TextLayout, Window, point, px,
+    Bounds, ClipboardItem, Context, Div, FontWeight, ListState, Pixels, Point, Stateful,
+    TextLayout, Window, div, point, prelude::*, px, rgb,
 };
 use std::ops::Range;
 use std::sync::Arc;
@@ -35,10 +38,21 @@ pub(crate) struct Drag {
     source: (MessageTs, Arc<str>),
 }
 
-/// The selection of the open chat. A plain click leaves no selection, only the drag that follows it.
+/// What the marked messages allow, for the bar of message mode (D11).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BarState {
+    pub(crate) count: usize,
+    /// At least one marked message has text to copy.
+    pub(crate) can_copy: bool,
+    /// Every marked message is the user's own sent one.
+    pub(crate) can_delete: bool,
+}
+
+/// The selection of the open chat: nothing, a text range or marked messages (`Pick`), and the text drag
+/// in progress (never during message mode). A plain click leaves no selection, only the drag that follows.
 #[derive(Debug, Default)]
 pub(crate) struct PickState {
-    pub(crate) text: Option<TextSelection>,
+    pick: Pick,
     pub(crate) drag: Option<Drag>,
 }
 
@@ -72,6 +86,10 @@ impl PickState {
         click_count: usize,
         shift: bool,
     ) {
+        // Message mode owns the clicks: they mark messages and never start a text drag.
+        if self.marked().is_some() {
+            return;
+        }
         // A selection that went stale before this render must not be extended or kept.
         self.validate(messages);
         let Some(text) = text_of(messages, ts) else {
@@ -85,7 +103,7 @@ impl PickState {
         let unit = unit_of(click_count);
         if shift
             && unit == Unit::Char
-            && let Some(anchor) = self.text.as_ref().map(|s| s.anchor)
+            && let Some(anchor) = self.text().map(|s| s.anchor)
             && let Some(anchor_text) = text_of(messages, anchor.ts)
         {
             self.drag = Some(Drag {
@@ -93,8 +111,9 @@ impl PickState {
                 origin: (anchor, anchor),
                 source: (anchor.ts, Arc::from(anchor_text)),
             });
-            self.text =
-                TextSelection::new(messages, anchor, at, unit).filter(|s| !s.is_empty(messages));
+            self.set_text(
+                TextSelection::new(messages, anchor, at, unit).filter(|s| !s.is_empty(messages)),
+            );
             return;
         }
         let span = unit_range(text, unit, at.offset);
@@ -111,7 +130,9 @@ impl PickState {
             origin: (from, to),
             source: (ts, Arc::from(text)),
         });
-        self.text = TextSelection::new(messages, from, to, unit).filter(|s| !s.is_empty(messages));
+        self.set_text(
+            TextSelection::new(messages, from, to, unit).filter(|s| !s.is_empty(messages)),
+        );
     }
 
     /// The pointer of a drag is now at `pos`: the focus moves there, extended by the click's unit
@@ -125,10 +146,10 @@ impl PickState {
         // check the old snapshots before a new selection replaces them (D8), also when the move comes
         // before the next render.
         let stale = text_of(messages, drag.source.0).is_none_or(|text| text != &*drag.source.1)
-            || self.text.as_ref().is_some_and(|s| !s.validate(messages));
+            || self.text().is_some_and(|s| !s.validate(messages));
         if stale {
             self.drag = None;
-            return self.text.take().is_some();
+            return self.take_text();
         }
         let Some(text) = text_of(messages, pos.ts) else {
             return false;
@@ -157,8 +178,8 @@ impl PickState {
         };
         let selection = TextSelection::new(messages, anchor, focus, drag.unit)
             .filter(|s| !s.is_empty(messages));
-        let changed = selection != self.text;
-        self.text = selection;
+        let changed = selection.as_ref() != self.text();
+        self.set_text(selection);
         changed
     }
 
@@ -170,27 +191,131 @@ impl PickState {
     /// Drops the selection and the drag. Returns whether there was a selection.
     pub(crate) fn clear(&mut self) -> bool {
         self.drag = None;
-        self.text.take().is_some()
+        std::mem::take(&mut self.pick) != Pick::None
     }
 
     /// Drops the selection (and the drag) when it no longer means what the user selected (D8): an
-    /// endpoint message is gone, or its text is not the snapshot's, even at the same length. Returns
-    /// whether it was dropped.
+    /// endpoint message is gone, or its text is not the snapshot's, even at the same length; in message
+    /// mode, the marks of messages that are gone or no longer eligible go, and an empty set leaves the
+    /// mode. Returns whether the selection was dropped.
     pub(crate) fn validate(&mut self, messages: &[Message]) -> bool {
-        if self.text.as_ref().is_some_and(|s| !s.validate(messages)) {
+        let drop = match &mut self.pick {
+            Pick::None => false,
+            Pick::Text(selection) => !selection.validate(messages),
+            Pick::Messages(set) => {
+                set.prune(messages);
+                set.is_empty()
+            }
+        };
+        if drop {
             self.clear();
-            return true;
         }
-        false
+        drop
     }
 
     /// Selects all loaded selectable text; no text selects nothing. Returns whether the selection changed.
     pub(crate) fn select_all(&mut self, messages: &[Message]) -> bool {
         self.drag = None;
         let selection = select_all(messages);
-        let changed = selection != self.text;
-        self.text = selection;
+        let changed = selection.as_ref() != self.text();
+        self.set_text(selection);
         changed
+    }
+
+    /// The text selection, if that is what is selected.
+    pub(crate) fn text(&self) -> Option<&TextSelection> {
+        match &self.pick {
+            Pick::Text(selection) => Some(selection),
+            _ => None,
+        }
+    }
+
+    /// The marked messages, in message mode.
+    pub(crate) fn marked(&self) -> Option<&MessageSet> {
+        match &self.pick {
+            Pick::Messages(set) => Some(set),
+            _ => None,
+        }
+    }
+
+    fn set_text(&mut self, selection: Option<TextSelection>) {
+        self.pick = selection.map_or(Pick::None, Pick::Text);
+    }
+
+    /// Drops the text selection. Returns whether there was one.
+    fn take_text(&mut self) -> bool {
+        if self.text().is_none() {
+            return false;
+        }
+        self.pick = Pick::None;
+        true
+    }
+
+    /// Enters message mode with message `ts` marked, dropping the text selection and the drag (D11).
+    /// In the mode it marks `ts` if it is not marked. Returns whether anything changed; a message that
+    /// is not loaded or not eligible changes nothing.
+    pub(crate) fn enter(&mut self, messages: &[Message], ts: MessageTs) -> bool {
+        if let Pick::Messages(set) = &mut self.pick {
+            return !set.contains(ts) && set.toggle(messages, ts);
+        }
+        let Some(set) = MessageSet::new(messages, ts) else {
+            return false;
+        };
+        self.drag = None;
+        self.pick = Pick::Messages(set);
+        true
+    }
+
+    /// A click on message `ts` in message mode: marks or unmarks it, or with `shift` marks the range
+    /// from the message toggled last. Unmarking the last one leaves the mode. Returns whether the marks
+    /// changed; outside the mode, or for an ineligible message, nothing happens.
+    pub(crate) fn toggle(&mut self, messages: &[Message], ts: MessageTs, shift: bool) -> bool {
+        let Pick::Messages(set) = &mut self.pick else {
+            return false;
+        };
+        let changed = if shift {
+            set.extend_to(messages, ts)
+        } else {
+            set.toggle(messages, ts)
+        };
+        if set.is_empty() {
+            self.pick = Pick::None;
+        }
+        changed
+    }
+
+    /// Cmd+A in message mode: marks every eligible loaded message. Returns whether the marks changed.
+    pub(crate) fn select_all_messages(&mut self, messages: &[Message]) -> bool {
+        let (Pick::Messages(set), Some(all)) = (&mut self.pick, MessageSet::select_all(messages))
+        else {
+            return false;
+        };
+        let changed = *set != all;
+        *set = all;
+        changed
+    }
+
+    /// What the bar of message mode shows and allows; `None` outside the mode.
+    pub(crate) fn bar(&self, messages: &[Message]) -> Option<BarState> {
+        let marked = self.marked()?.messages(messages);
+        Some(BarState {
+            count: marked.len(),
+            can_copy: marked
+                .iter()
+                .any(|m| copy_text(m).is_some_and(|text| !text.is_empty())),
+            can_delete: all_deletable(&marked),
+        })
+    }
+
+    /// The text a copy of the marked messages puts on the clipboard (D7); `None` outside the mode or
+    /// when no marked message has text.
+    pub(crate) fn marked_text(
+        &self,
+        messages: &[Message],
+        header: impl Fn(&Message) -> String,
+    ) -> Option<String> {
+        let text = extract_messages(messages, self.marked()?, header);
+        (!text.is_empty()).then_some(text)
     }
 
     /// The text a copy puts on the clipboard (D7); `None` for no selection, an empty or a stale one.
@@ -199,7 +324,7 @@ impl PickState {
         messages: &[Message],
         header: impl Fn(&Message) -> String,
     ) -> Option<String> {
-        let selection = self.text.as_ref()?;
+        let selection = self.text()?;
         if selection.is_empty(messages) || !selection.validate(messages) {
             return None;
         }
@@ -317,6 +442,25 @@ fn scroll_list(list: &ListState, step: Pixels) {
     list.set_offset_from_scrollbar(point(px(0.), -to));
 }
 
+/// A button of the bar; a disabled one looks so and has no click handler (the caller adds it only when
+/// enabled).
+fn bar_button(id: &'static str, label: &'static str, enabled: bool) -> Stateful<Div> {
+    let b = div()
+        .id(id)
+        .debug_selector(move || id.into())
+        .px(px(14.))
+        .py(px(8.))
+        .rounded(px(8.))
+        .text_size(px(14.))
+        .bg(rgb(FIELD))
+        .child(label);
+    if enabled {
+        b.cursor_pointer().hover(|s| s.bg(rgb(ROW_HOVER)))
+    } else {
+        b.opacity(0.4)
+    }
+}
+
 impl Desktop {
     /// Runs `f` on the selection state with the loaded messages of the open chat (none without one).
     fn with_picking<R>(
@@ -432,15 +576,16 @@ impl Desktop {
         true
     }
 
-    /// Cmd+C with the timeline focused: puts the selection on the clipboard (D7). Nothing is written for
-    /// no selection, an empty one or a stale one.
+    /// Cmd+C with the timeline focused: puts the selection on the clipboard (D7), or in message mode the
+    /// marked messages. Nothing is written for no selection, an empty one or a stale one.
     pub(crate) fn copy_selection(&mut self, cx: &mut Context<Self>) {
         let clock = self.clock;
         let (dropped, text) = self.with_picking(cx, |state, messages| {
             let dropped = state.validate(messages);
-            let text = state.selected_text(messages, |m| {
-                copy_header(m.author_name.as_deref(), m.timestamp, clock)
-            });
+            let header = |m: &Message| copy_header(m.author_name.as_deref(), m.timestamp, clock);
+            let text = state
+                .selected_text(messages, header)
+                .or_else(|| state.marked_text(messages, header));
             (dropped, text)
         });
         if let Some(text) = text {
@@ -451,9 +596,17 @@ impl Desktop {
         }
     }
 
-    /// Cmd+A with the timeline focused: selects all loaded selectable text of the open chat.
+    /// Cmd+A with the timeline focused: selects all loaded selectable text of the open chat, or in
+    /// message mode marks all eligible messages.
     pub(crate) fn select_all_text(&mut self, cx: &mut Context<Self>) {
-        if self.with_picking(cx, |state, messages| state.select_all(messages)) {
+        let changed = self.with_picking(cx, |state, messages| {
+            if state.marked().is_some() {
+                state.select_all_messages(messages)
+            } else {
+                state.select_all(messages)
+            }
+        });
+        if changed {
             cx.notify();
         }
     }
@@ -484,19 +637,170 @@ impl Desktop {
         }
     }
 
+    /// Whether message mode is on.
+    pub(crate) fn in_mode(&self, cx: &gpui::App) -> bool {
+        self.picking.read(cx).marked().is_some()
+    }
+
+    /// Enters message mode with message `ts` of `chat` marked (D11), for the menu entry «Выбрать» and for
+    /// a primary-modifier click on a bubble. A message that is not loaded, pending, failed or deleted
+    /// does nothing; inside the mode it marks the message. The text selection and any drag are dropped,
+    /// and focus moves to the root, so Cmd+A and Escape reach the mode and not a hidden composer.
+    pub(crate) fn enter_mode(
+        &mut self,
+        chat: ChatId,
+        ts: MessageTs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open.as_ref().map(|o| &o.chat) != Some(&chat) || self.blocked(cx) {
+            return;
+        }
+        self.message_menu = None;
+        if self.with_picking(cx, |state, messages| state.enter(messages, ts)) {
+            self.autoscroll = None;
+            self.drag_pointer = None;
+            window.focus(&self.focus);
+            cx.notify();
+        }
+    }
+
+    /// A left click of message mode on message `ts` of `chat`: marks or unmarks it, with `shift` marks
+    /// the range from the one toggled last. Unmarking the last one leaves the mode.
+    pub(crate) fn toggle_message(
+        &mut self,
+        chat: ChatId,
+        ts: MessageTs,
+        shift: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.open.as_ref().map(|o| &o.chat) != Some(&chat) {
+            return;
+        }
+        if self.with_picking(cx, |state, messages| state.toggle(messages, ts, shift)) {
+            cx.notify();
+        }
+    }
+
+    /// «Скопировать» of the bar: puts the marked messages on the clipboard (D7) and stays in the mode.
+    /// Nothing is written when no marked message has text.
+    pub(crate) fn copy_marked(&mut self, cx: &mut Context<Self>) {
+        let clock = self.clock;
+        let text = self.with_picking(cx, |state, messages| {
+            state.marked_text(messages, |m| {
+                copy_header(m.author_name.as_deref(), m.timestamp, clock)
+            })
+        });
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// «Удалить» of the bar: asks to delete the marked messages, which only a set of the user's own sent
+    /// messages may do. The marks stay while the dialog is open.
+    pub(crate) fn request_delete_marked(&mut self, cx: &mut Context<Self>) {
+        let Some(chat) = self.open.as_ref().map(|o| o.chat.clone()) else {
+            return;
+        };
+        let pending = self.with_picking(cx, |state, messages| {
+            let marked = state.marked()?.messages(messages);
+            all_deletable(&marked).then(|| marked.iter().map(|m| m.timestamp).collect::<Vec<_>>())
+        });
+        if let Some(pending) = pending {
+            self.delete_pending = pending.into_iter().map(|ts| (chat.clone(), ts)).collect();
+            cx.notify();
+        }
+    }
+
+    /// The bar of message mode in place of the composer; `None` outside the mode. The composer's input
+    /// and draft are not touched.
+    pub(crate) fn selection_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let state = self.bar_state(cx)?;
+        Some(
+            div()
+                .debug_selector(|| "selection-bar".into())
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(16.))
+                .py(px(9.))
+                .bg(rgb(PANEL))
+                .border_t_1()
+                .border_color(rgb(DIVIDER))
+                .child(
+                    div()
+                        .debug_selector(|| "selection-count".into())
+                        .flex_1()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(format!("Выбрано: {}", state.count)),
+                )
+                .child(
+                    bar_button("selection-copy", "Скопировать", state.can_copy)
+                        .when(state.can_copy, |b| {
+                            b.on_click(cx.listener(|this, _, _, cx| this.copy_marked(cx)))
+                        }),
+                )
+                .child(
+                    bar_button("selection-delete", "Удалить", state.can_delete).when(
+                        state.can_delete,
+                        |b| {
+                            b.text_color(rgb(DANGER)).on_click(
+                                cx.listener(|this, _, _, cx| this.request_delete_marked(cx)),
+                            )
+                        },
+                    ),
+                )
+                .child(
+                    div()
+                        .id("selection-cancel")
+                        .debug_selector(|| "selection-cancel".into())
+                        .flex_none()
+                        .size(px(28.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(MUTED))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(rgb(ROW_HOVER)))
+                        .child("✕")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.clear_selection(cx);
+                        })),
+                ),
+        )
+    }
+
+    /// What the bar shows and allows; `None` outside message mode.
+    pub(crate) fn bar_state(&self, cx: &gpui::App) -> Option<BarState> {
+        let chat = &self.open.as_ref()?.chat;
+        let messages = &self.store.read(cx).timeline(chat)?.messages;
+        self.picking.read(cx).bar(messages)
+    }
+
+    /// The marked messages of the open chat, in timeline order; `None` outside message mode.
+    #[cfg(test)]
+    pub(crate) fn marked_messages(&self, cx: &gpui::App) -> Option<Vec<MessageTs>> {
+        let chat = &self.open.as_ref()?.chat;
+        let messages = &self.store.read(cx).timeline(chat)?.messages;
+        let set = self.picking.read(cx).marked()?;
+        Some(set.messages(messages).iter().map(|m| m.timestamp).collect())
+    }
+
     /// The selected byte range inside message `ts` of the open chat.
     #[cfg(test)]
     pub(crate) fn selected_range(&self, ts: MessageTs, cx: &gpui::App) -> Option<Range<usize>> {
         let chat = &self.open.as_ref()?.chat;
         let store = self.store.read(cx);
         let messages = &store.timeline(chat)?.messages;
-        self.picking.read(cx).text.as_ref()?.range_in(messages, ts)
+        self.picking.read(cx).text()?.range_in(messages, ts)
     }
 
     /// Whether a text selection exists, whatever it covers.
     #[cfg(test)]
     pub(crate) fn has_selection(&self, cx: &gpui::App) -> bool {
-        self.picking.read(cx).text.is_some()
+        self.picking.read(cx).text().is_some()
     }
 
     /// Whether a text drag is in progress (the button is held).
@@ -516,7 +820,7 @@ mod tests {
     use crate::store::ChatStore;
     use bt_chat_core::model::MessageBody;
     use bt_chat_core::model::{ChatKind, ChatSummary, ClientEvent, HistoryChunk};
-    use gpui::{AppContext as _, Focusable as _, Modifiers, TestAppContext, VisualTestContext};
+    use gpui::{Focusable as _, Modifiers, TestAppContext, VisualTestContext};
     use gpui::{point, size};
 
     fn pos(ts: MessageTs, offset: usize) -> Pos {
@@ -538,7 +842,7 @@ mod tests {
 
     /// The selection as `(anchor, focus)` positions.
     fn ends(state: &PickState) -> Option<(Pos, Pos)> {
-        state.text.as_ref().map(|s| (s.anchor, s.focus))
+        state.text().map(|s| (s.anchor, s.focus))
     }
 
     #[test]
@@ -546,7 +850,7 @@ mod tests {
         let m = chat();
         let mut state = PickState::default();
         state.down(&m, 1, 3, 1, false);
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(
             state.drag,
             Some(Drag {
@@ -585,10 +889,10 @@ mod tests {
         state.down(&m, 1, 8, 1, false);
         state.drag_to(&m, pos(1, 2));
         assert_eq!(ends(&state), Some((pos(1, 8), pos(1, 2))));
-        assert_eq!(state.text.as_ref().unwrap().range_in(&m, 1), Some(2..8));
+        assert_eq!(state.text().unwrap().range_in(&m, 1), Some(2..8));
         // Back to the anchor: nothing is selected, the drag goes on.
         assert!(state.drag_to(&m, pos(1, 8)));
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert!(state.drag.is_some());
         state.drag_to(&m, pos(1, 10));
         assert_eq!(ends(&state), Some((pos(1, 8), pos(1, 10))));
@@ -600,7 +904,7 @@ mod tests {
         let mut state = PickState::default();
         state.down(&m, 1, 6, 1, false);
         state.drag_to(&m, pos(4, 4));
-        let sel = state.text.as_ref().unwrap();
+        let sel = state.text().unwrap();
         assert_eq!(sel.range_in(&m, 1), Some(6..11));
         assert_eq!(sel.range_in(&m, 2), Some(0..16));
         assert_eq!(sel.range_in(&m, 3), None);
@@ -620,9 +924,9 @@ mod tests {
         state.down(&m, 1, 3, 1, false);
         state.drag_to(&m, pos(1, 8));
         state.drag_end();
-        assert!(state.text.is_some());
+        assert!(state.text().is_some());
         state.down(&m, 2, 1, 1, false);
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(
             state.drag.as_ref().map(|d| d.origin),
             Some((pos(2, 1), pos(2, 1)))
@@ -634,11 +938,11 @@ mod tests {
         let m = chat();
         let mut state = PickState::default();
         state.down(&m, 1, 0, 2, false);
-        assert!(state.text.is_some());
+        assert!(state.text().is_some());
         state.down(&m, 3, 0, 1, false);
-        assert_eq!((&state.text, &state.drag), (&None, &None));
+        assert_eq!((state.text(), &state.drag), (None, &None));
         state.down(&m, 99, 0, 1, false);
-        assert_eq!((&state.text, &state.drag), (&None, &None));
+        assert_eq!((state.text(), &state.drag), (None, &None));
     }
 
     #[test]
@@ -681,7 +985,7 @@ mod tests {
         let m = chat();
         let mut state = PickState::default();
         state.down(&m, 1, 3, 1, true);
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(state.drag.as_ref().unwrap().origin, (pos(1, 3), pos(1, 3)));
     }
 
@@ -691,7 +995,7 @@ mod tests {
         let mut state = PickState::default();
         state.down(&m, 1, 8, 2, false);
         assert_eq!(ends(&state), Some((pos(1, 6), pos(1, 11))));
-        assert_eq!(state.text.as_ref().unwrap().unit, Unit::Word);
+        assert_eq!(state.text().unwrap().unit, Unit::Word);
         state.drag_end();
 
         state.down(&m, 2, 13, 3, false);
@@ -700,7 +1004,7 @@ mod tests {
             Some((pos(2, 12), pos(2, 16))),
             "the second line"
         );
-        assert_eq!(state.text.as_ref().unwrap().unit, Unit::Paragraph);
+        assert_eq!(state.text().unwrap().unit, Unit::Paragraph);
         state.drag_end();
         state.down(&m, 2, 3, 4, false);
         assert_eq!(
@@ -729,7 +1033,7 @@ mod tests {
         // Backwards past the start: the origin word stays selected, to the start of the word reached.
         state.drag_to(&m, pos(1, 2));
         assert_eq!(ends(&state), Some((pos(1, 11), pos(1, 0))));
-        assert_eq!(state.text.as_ref().unwrap().range_in(&m, 1), Some(0..11));
+        assert_eq!(state.text().unwrap().range_in(&m, 1), Some(0..11));
     }
 
     #[test]
@@ -754,11 +1058,11 @@ mod tests {
         let m = chat();
         let mut state = PickState::default();
         state.down(&m, 1, 3, 1, false);
-        assert!(state.text.is_none());
+        assert!(state.text().is_none());
         state.drag_to(&m, pos(1, 5));
-        assert_eq!(state.text.as_ref().unwrap().source.len(), 1);
+        assert_eq!(state.text().unwrap().source.len(), 1);
         state.drag_to(&m, pos(4, 2));
-        let source = &state.text.as_ref().unwrap().source;
+        let source = &state.text().unwrap().source;
         assert_eq!(
             source.iter().map(|(ts, t)| (*ts, &**t)).collect::<Vec<_>>(),
             vec![(1, "hello world"), (4, "last one")]
@@ -772,7 +1076,7 @@ mod tests {
         state.down(&m, 1, 3, 1, false);
         state.drag_to(&m, pos(1, 8));
         assert!(state.clear());
-        assert_eq!((&state.text, &state.drag), (&None, &None));
+        assert_eq!((state.text(), &state.drag), (None, &None));
         assert!(!state.clear(), "nothing left to clear");
         state.down(&m, 1, 3, 1, false);
         assert!(!state.clear(), "a bare drag is not a selection");
@@ -784,7 +1088,7 @@ mod tests {
         state.down(m, 1, 6, 1, false);
         state.drag_to(m, pos(2, 6));
         state.drag_end();
-        assert!(state.text.is_some());
+        assert!(state.text().is_some());
         state
     }
 
@@ -797,7 +1101,7 @@ mod tests {
         moved.push(text(9, "newer"));
         moved[3] = message(3, MessageBody::Deleted);
         assert!(!state.validate(&moved));
-        assert!(state.text.is_some());
+        assert!(state.text().is_some());
     }
 
     #[test]
@@ -807,7 +1111,7 @@ mod tests {
         let mut gone = m.clone();
         gone.remove(1);
         assert!(state.validate(&gone));
-        assert_eq!((&state.text, &state.drag), (&None, &None));
+        assert_eq!((state.text(), &state.drag), (None, &None));
         assert!(!state.validate(&gone), "nothing to drop twice");
     }
 
@@ -818,7 +1122,7 @@ mod tests {
         let mut shorter = m.clone();
         shorter[0] = text(1, "hello");
         assert!(state.validate(&shorter));
-        assert!(state.text.is_none());
+        assert!(state.text().is_none());
     }
 
     #[test]
@@ -830,11 +1134,11 @@ mod tests {
         state.drag_end();
         let edited = vec![text(1, "hello there")];
         assert!(
-            state.text.as_ref().unwrap().range_in(&edited, 1).is_some(),
+            state.text().unwrap().range_in(&edited, 1).is_some(),
             "the offsets alone would still be in range"
         );
         assert!(state.validate(&edited));
-        assert!(state.text.is_none());
+        assert!(state.text().is_none());
         assert_eq!(state.selected_text(&edited, header), None);
     }
 
@@ -851,7 +1155,7 @@ mod tests {
         );
         let none = vec![voice(1)];
         assert!(state.select_all(&none));
-        assert!(state.text.is_none());
+        assert!(state.text().is_none());
         assert!(!state.select_all(&none));
     }
 
@@ -865,7 +1169,7 @@ mod tests {
         state.drag_to(&m, pos(1, 5));
         assert_eq!(state.selected_text(&m, header).as_deref(), Some("lo"));
         // A selection that is empty by construction is not copied either.
-        state.text = TextSelection::new(&m, pos(1, 5), pos(1, 5), Unit::Char);
+        state.set_text(TextSelection::new(&m, pos(1, 5), pos(1, 5), Unit::Char));
         assert_eq!(state.selected_text(&m, header), None, "equal ends");
     }
 
@@ -1055,7 +1359,7 @@ mod tests {
             state.drag_to(&m, pos(1, 9)),
             "the selection is dropped, which is a change"
         );
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(state.drag, None);
         assert!(!state.drag_to(&m, pos(1, 10)), "and the drag is over");
     }
@@ -1070,7 +1374,7 @@ mod tests {
             !state.drag_to(&m, pos(1, 9)),
             "there was no selection to drop"
         );
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(state.drag, None);
     }
 
@@ -1082,7 +1386,7 @@ mod tests {
         assert!(state.drag_to(&m, pos(2, 4)));
         m[1] = text(2, "second LINE\nhere");
         assert!(state.drag_to(&m, pos(2, 6)));
-        assert_eq!(state.text, None);
+        assert_eq!(state.text(), None);
         assert_eq!(state.drag, None);
     }
 
@@ -1216,5 +1520,264 @@ mod tests {
             d.text_down(ChatId("other".into()), pos(1, 3), 1, false, window, cx)
         });
         assert!(desktop.read_with(cx, |d, cx| d.picking.read(cx).drag.is_none()));
+    }
+
+    // ---- message mode (D11) ----
+
+    fn own(mut m: Message) -> Message {
+        m.outgoing = true;
+        m
+    }
+
+    fn marked(state: &PickState, m: &[Message]) -> Option<Vec<MessageTs>> {
+        let set = state.marked()?;
+        Some(set.messages(m).iter().map(|m| m.timestamp).collect())
+    }
+
+    #[test]
+    fn entering_marks_the_message_and_drops_the_text_selection_and_the_drag() {
+        let m = chat();
+        let mut state = selected(&m);
+        state.down(&m, 1, 2, 1, false);
+        assert!(state.drag.is_some());
+        assert!(state.enter(&m, 4));
+        assert_eq!(marked(&state, &m), Some(vec![4]));
+        assert_eq!((state.text(), &state.drag), (None, &None));
+        assert!(!state.enter(&m, 4), "already marked: nothing changes");
+        assert!(state.enter(&m, 1), "inside the mode it marks another one");
+        assert_eq!(marked(&state, &m), Some(vec![1, 4]));
+    }
+
+    #[test]
+    fn entering_on_an_ineligible_message_changes_nothing() {
+        let mut m = chat();
+        m.push(message(5, MessageBody::Deleted));
+        let mut state = selected(&m);
+        assert!(!state.enter(&m, 5));
+        assert!(!state.enter(&m, 99));
+        assert!(state.marked().is_none());
+        assert!(state.text().is_some(), "the text selection is kept");
+    }
+
+    #[test]
+    fn clicks_toggle_and_the_last_one_off_leaves_the_mode() {
+        let m = chat();
+        let mut state = PickState::default();
+        assert!(!state.toggle(&m, 1, false), "no mode, no toggle");
+        state.enter(&m, 1);
+        assert!(state.toggle(&m, 4, false));
+        assert_eq!(marked(&state, &m), Some(vec![1, 4]));
+        assert!(state.toggle(&m, 1, false));
+        assert_eq!(marked(&state, &m), Some(vec![4]));
+        assert!(state.toggle(&m, 4, false));
+        assert!(state.marked().is_none(), "the mode is left");
+        assert!(!state.clear(), "and there is nothing left to clear");
+    }
+
+    #[test]
+    fn shift_marks_the_range_from_the_last_toggled() {
+        let m = chat();
+        let mut state = PickState::default();
+        state.enter(&m, 1);
+        assert!(state.toggle(&m, 4, true));
+        assert_eq!(marked(&state, &m), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn text_clicks_are_ignored_in_the_mode() {
+        let m = chat();
+        let mut state = PickState::default();
+        state.enter(&m, 1);
+        state.down(&m, 2, 3, 1, false);
+        assert_eq!(state.drag, None);
+        assert_eq!(marked(&state, &m), Some(vec![1]));
+    }
+
+    #[test]
+    fn select_all_in_the_mode_marks_the_eligible_messages() {
+        let mut m = chat();
+        m.push(message(5, MessageBody::Deleted));
+        let mut state = PickState::default();
+        assert!(!state.select_all_messages(&m), "no mode, nothing marked");
+        state.enter(&m, 2);
+        assert!(state.select_all_messages(&m));
+        assert_eq!(marked(&state, &m), Some(vec![1, 2, 3, 4]));
+        assert!(!state.select_all_messages(&m));
+    }
+
+    #[test]
+    fn validate_prunes_the_marks_and_an_empty_set_leaves_the_mode() {
+        let m = chat();
+        let mut state = PickState::default();
+        state.enter(&m, 1);
+        state.toggle(&m, 4, false);
+        let mut after = m.clone();
+        after[3] = message(4, MessageBody::Deleted);
+        assert!(!state.validate(&after), "one mark is left");
+        assert_eq!(marked(&state, &after), Some(vec![1]));
+        assert!(state.validate(&after[1..]), "the last mark is gone");
+        assert!(state.marked().is_none());
+    }
+
+    #[test]
+    fn the_bar_follows_the_marks() {
+        let m = vec![
+            own(text(1, "mine")),
+            own(voice(2)),
+            text(3, "theirs"),
+            voice(4),
+        ];
+        let mut state = PickState::default();
+        assert_eq!(state.bar(&m), None);
+        state.enter(&m, 1);
+        let bar = |state: &PickState| state.bar(&m).unwrap();
+        assert_eq!(
+            bar(&state),
+            BarState {
+                count: 1,
+                can_copy: true,
+                can_delete: true
+            }
+        );
+        state.toggle(&m, 2, false);
+        assert_eq!((bar(&state).count, bar(&state).can_delete), (2, true));
+        state.toggle(&m, 3, false);
+        assert_eq!(
+            (bar(&state).count, bar(&state).can_delete),
+            (3, false),
+            "a foreign message forbids the delete"
+        );
+        state.toggle(&m, 1, false);
+        state.toggle(&m, 3, false);
+        assert_eq!(
+            bar(&state),
+            BarState {
+                count: 1,
+                can_copy: false,
+                can_delete: true
+            },
+            "a voice message has nothing to copy"
+        );
+    }
+
+    #[test]
+    fn marked_text_is_the_set_in_timeline_order() {
+        let m = chat();
+        let mut state = PickState::default();
+        assert_eq!(state.marked_text(&m, header), None);
+        state.enter(&m, 4);
+        assert_eq!(state.marked_text(&m, header).as_deref(), Some("last one"));
+        state.toggle(&m, 1, false);
+        assert_eq!(
+            state.marked_text(&m, header).as_deref(),
+            Some("H1\nhello world\n\nH4\nlast one")
+        );
+    }
+
+    fn open_chat<'a>(
+        cx: &'a mut TestAppContext,
+        messages: Vec<Message>,
+    ) -> (gpui::Entity<Desktop>, &'a mut VisualTestContext) {
+        player_fake::reset();
+        cx.update(player_fake::install);
+        alerts_fake::reset();
+        cx.update(alerts_fake::install);
+        let (events, event_rx) = async_channel::unbounded();
+        let (command_tx, _commands) = async_channel::unbounded();
+        let store = cx.new(|cx| ChatStore::new(event_rx, command_tx, cx));
+        let (desktop, cx) = cx.add_window_view({
+            let store = store.clone();
+            move |window, cx| Desktop::new(store, Clock::fixed(10_000, 0), window, cx)
+        });
+        cx.simulate_resize(size(px(1200.), px(1400.)));
+        events
+            .try_send(ClientEvent::ChatsReplaced(vec![summary("g")]))
+            .unwrap();
+        cx.run_until_parked();
+        let row = cx.debug_bounds("chat-g-row").expect("the chat row");
+        cx.simulate_click(row.center(), Modifiers::none());
+        events
+            .try_send(ClientEvent::History(HistoryChunk {
+                chat: ChatId("g".into()),
+                messages,
+                reached_start: true,
+                replaces: None,
+                payloads: Vec::new(),
+            }))
+            .unwrap();
+        cx.run_until_parked();
+        (desktop, cx)
+    }
+
+    #[gpui::test]
+    fn the_desktop_enters_the_mode_copies_the_marked_text_and_stays_in_it(cx: &mut TestAppContext) {
+        let (desktop, cx) = open_chat(cx, chat());
+        let g = ChatId("g".into());
+        desktop.update_in(cx, |d, window, cx| {
+            d.text_down(g.clone(), pos(1, 3), 1, false, window, cx);
+            d.drag_to(point(px(74.), px(10.)), &[(1, Line::at(0., 11))], &[], cx);
+            d.drag_end(cx);
+        });
+        assert!(desktop.read_with(cx, |d, cx| d.has_selection(cx)));
+        // A click for another chat does nothing.
+        desktop.update_in(cx, |d, window, cx| {
+            d.enter_mode(ChatId("other".into()), 1, window, cx)
+        });
+        assert!(!desktop.read_with(cx, |d, cx| d.in_mode(cx)));
+        // A message that cannot be marked does nothing.
+        desktop.update_in(cx, |d, window, cx| d.enter_mode(g.clone(), 99, window, cx));
+        assert!(!desktop.read_with(cx, |d, cx| d.in_mode(cx)));
+
+        desktop.update_in(cx, |d, window, cx| d.enter_mode(g.clone(), 4, window, cx));
+        assert!(desktop.read_with(cx, |d, cx| d.in_mode(cx) && !d.has_selection(cx)));
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 1, false, cx));
+        assert_eq!(
+            desktop.read_with(cx, |d, cx| d.marked_messages(cx)),
+            Some(vec![1, 4])
+        );
+        desktop.update(cx, |d, cx| d.copy_marked(cx));
+        let at = "Алиса, 01.01.1970 00:00";
+        assert_eq!(
+            clipboard(cx),
+            Some(format!("{at}\nhello world\n\n{at}\nlast one"))
+        );
+        assert!(
+            desktop.read_with(cx, |d, cx| d.in_mode(cx)),
+            "copying leaves the mode on"
+        );
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 4, false, cx));
+        desktop.update(cx, |d, cx| d.copy_marked(cx));
+        assert_eq!(
+            clipboard(cx).as_deref(),
+            Some("hello world"),
+            "one message is its bare text"
+        );
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 1, false, cx));
+        assert!(!desktop.read_with(cx, |d, cx| d.in_mode(cx)));
+    }
+
+    #[gpui::test]
+    fn requesting_the_delete_of_a_set_with_a_foreign_message_is_refused(cx: &mut TestAppContext) {
+        let m = vec![own(text(1, "a")), own(text(2, "b")), text(3, "theirs")];
+        let (desktop, cx) = open_chat(cx, m);
+        let g = ChatId("g".into());
+        desktop.update_in(cx, |d, window, cx| d.enter_mode(g.clone(), 1, window, cx));
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 3, false, cx));
+        assert_eq!(
+            desktop.read_with(cx, |d, cx| d.bar_state(cx).map(|b| b.can_delete)),
+            Some(false)
+        );
+        desktop.update(cx, |d, cx| d.request_delete_marked(cx));
+        assert!(!desktop.read_with(cx, |d, _| d.delete_is_pending()));
+
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 3, false, cx));
+        desktop.update(cx, |d, cx| d.toggle_message(g.clone(), 2, false, cx));
+        desktop.update(cx, |d, cx| d.request_delete_marked(cx));
+        assert!(desktop.read_with(cx, |d, _| d.delete_is_pending()));
+        assert_eq!(
+            desktop.read_with(cx, |d, cx| d.marked_messages(cx)),
+            Some(vec![1, 2]),
+            "the marks stay under the dialog"
+        );
     }
 }

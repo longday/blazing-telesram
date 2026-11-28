@@ -199,7 +199,7 @@ Order swap, the main session's decision: TS-M runs before TS-Q because the quote
   - Tests: those numbers.
   - Done when: these tests exist.
 
-- [ ] 3.3 Mode state and the bar (D11)
+- [x] 3.3 Mode state and the bar (D11)
   - Owns: `crates/desktop/src/desktop/selecting.rs`.
   - Depends on: 3.1, 3.2.
   - Do: `PickState` holds `Pick`; transitions `enter(ts)`, `toggle(ts, shift)`, `select_all`, `leave`, last-one-off leaves; entering clears the text selection and the drag; `Desktop` methods `enter_mode`, `toggle_message`, `copy_marked` (leaves the mode on), `request_delete_marked`; `selection_bar()` with selectors `selection-bar`, `selection-count`, `selection-copy`, `selection-delete`, `selection-cancel`, the disabled states of D11, no forward button.
