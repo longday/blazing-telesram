@@ -9,14 +9,18 @@ use crate::format::copy_header;
 use crate::selection::{
     Pos, TextSelection, Unit, extract_text, paragraph_at, select_all, snap, text_of, word_at,
 };
+use crate::text_lines::caret_for;
 use bt_chat_core::model::{ChatId, Message, MessageTs};
 use gpui::{Bounds, ClipboardItem, Context, Pixels, Point, TextLayout, Window, px};
 use std::ops::Range;
+use std::time::Duration;
 
 /// Pixels per tick of the autoscroll for each pixel the pointer is outside the viewport.
 const AUTOSCROLL_GAIN: f32 = 0.25;
-/// The fastest autoscroll, in pixels per tick (one tick is 16 ms).
+/// The fastest autoscroll, in pixels per tick.
 const AUTOSCROLL_MAX: f32 = 48.;
+/// The autoscroll timer's period; the speed is in pixels per tick.
+const AUTOSCROLL_TICK: Duration = Duration::from_millis(16);
 
 /// A drag in progress. `origin` is what the gesture started on: the caret (both ends equal), or the
 /// word or the paragraph of a double or triple click, which the drag extends by whole units.
@@ -189,8 +193,9 @@ impl PickState {
 /// (only a measured and prepainted one, which the registry guarantees) and by a stub in tests.
 pub(crate) trait TextHit {
     fn bounds(&self) -> Bounds<Pixels>;
-    /// The byte index under `point`: `Ok` inside the text, `Err` with the nearest index outside it.
-    fn index_for_position(&self, point: Point<Pixels>) -> Result<usize, usize>;
+    /// The caret offset nearest to `point` in this layout of `text`: on a grapheme boundary and a glyph
+    /// cluster boundary (see `text_lines::caret_in`).
+    fn caret(&self, point: Point<Pixels>, text: &str) -> usize;
 }
 
 impl TextHit for TextLayout {
@@ -198,17 +203,17 @@ impl TextHit for TextLayout {
         TextLayout::bounds(self)
     }
 
-    fn index_for_position(&self, point: Point<Pixels>) -> Result<usize, usize> {
-        TextLayout::index_for_position(self, point)
+    fn caret(&self, point: Point<Pixels>, text: &str) -> usize {
+        caret_for(self, point, text)
     }
 }
 
 /// The caret under `point` among the texts painted in the latest frame (D5). Over a text, and beside it
-/// on one of its lines, the hit-tested index. Otherwise the text nearest vertically: above it, its
+/// on one of its lines, the caret the layout gives. Otherwise the text nearest vertically: above it, its
 /// start; below it, its end. So above the first painted text is the start of that one, below the last
 /// the end of it, and between two texts the nearer one (the earlier on a tie), by its start or end.
-/// Rows without text are not in `texts` and are skipped. The offset is snapped to a grapheme boundary.
-/// `None` when no registered text belongs to a loaded message.
+/// Rows without text are not in `texts` and are skipped. `None` when no registered text belongs to a
+/// loaded message.
 pub(crate) fn caret_at<L: TextHit>(
     point: Point<Pixels>,
     texts: &[(MessageTs, L)],
@@ -238,9 +243,7 @@ pub(crate) fn caret_at<L: TextHit>(
     } else if point.y > bounds.bottom() {
         text.len()
     } else {
-        match layout.index_for_position(point) {
-            Ok(index) | Err(index) => snap(text, index),
-        }
+        layout.caret(point, text)
     };
     Some(Pos { ts, offset })
 }
@@ -280,7 +283,7 @@ impl Desktop {
 
     /// Mouse down on the text of message `at.ts` of `chat` at byte `at.offset` (D3): see
     /// `PickState::down`. Focus moves to the root, so the next Cmd+C goes to the selection and not to a
-    /// composer that holds focus.
+    /// composer that holds focus. The drag that starts runs the autoscroll timer until it ends.
     pub(crate) fn text_down(
         &mut self,
         chat: ChatId,
@@ -297,20 +300,26 @@ impl Desktop {
         self.with_picking(cx, |state, messages| {
             state.down(messages, at.ts, at.offset, click_count, shift)
         });
+        if self.picking.read(cx).drag.is_some() {
+            self.start_autoscroll(cx);
+        }
         cx.notify();
     }
 
     /// The pointer of a drag is at `point` (window coordinates); `texts` are the layouts painted in the
-    /// latest frame.
+    /// latest frame. Nothing happens without a drag.
     pub(crate) fn drag_to<L: TextHit>(
         &mut self,
         point: Point<Pixels>,
         texts: &[(MessageTs, L)],
         cx: &mut Context<Self>,
     ) {
+        if self.picking.read(cx).drag.is_none() {
+            return;
+        }
+        self.drag_pointer = Some(point);
         let changed = self.with_picking(cx, |state, messages| {
-            state.drag.is_some()
-                && caret_at(point, texts, messages).is_some_and(|pos| state.drag_to(messages, pos))
+            caret_at(point, texts, messages).is_some_and(|pos| state.drag_to(messages, pos))
         });
         if changed {
             cx.notify();
@@ -319,9 +328,51 @@ impl Desktop {
 
     /// Mouse up, also outside the window: the drag ends, the selection stays.
     pub(crate) fn drag_end(&mut self, cx: &mut Context<Self>) {
+        self.autoscroll = None;
+        self.drag_pointer = None;
         if self.picking.update(cx, |state, _| state.drag_end()) {
             cx.notify();
         }
+    }
+
+    /// Runs the autoscroll timer for the drag that just started. One timer drives the scroll, so the
+    /// repeated moves some platforms send while a button is held neither add speed nor matter.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        self.autoscroll = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTOSCROLL_TICK).await;
+                if !this
+                    .update(cx, |this, cx| this.autoscroll_tick(cx))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// One timer tick: while the pointer of a drag is outside the list's viewport, scrolls by
+    /// `autoscroll_step` and maps the pointer again, so the focus end follows the rows that scroll in.
+    /// Returns whether the timer should go on.
+    fn autoscroll_tick(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.picking.read(cx).drag.is_none() {
+            return false;
+        }
+        let Some(list) = self.open.as_ref().map(|o| o.list.clone()) else {
+            return false;
+        };
+        let Some(point) = self.drag_pointer else {
+            return true;
+        };
+        let step = autoscroll_step(point.y, list.viewport_bounds());
+        if step == px(0.) {
+            return true;
+        }
+        list.scroll_by(step);
+        let texts = self.texts.clone();
+        self.drag_to(point, texts.borrow().as_slice(), cx);
+        cx.notify();
+        true
     }
 
     /// Cmd+C with the timeline focused: puts the selection on the clipboard (D7). Nothing is written for
@@ -350,20 +401,29 @@ impl Desktop {
         }
     }
 
+    /// Drops the selection and any drag without telling the view; for a render that is about to read
+    /// the state. Returns whether there was a selection.
+    pub(crate) fn drop_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        self.autoscroll = None;
+        self.drag_pointer = None;
+        self.picking.update(cx, |state, _| state.clear())
+    }
+
     /// Drops the selection and any drag. Returns whether there was a selection, so Escape can tell
     /// whether it closed something.
     pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        let had = self.picking.update(cx, |state, _| state.clear());
+        let had = self.drop_selection(cx);
         if had {
             cx.notify();
         }
         had
     }
 
-    /// Drops a selection that no longer matches the messages (D8); called on every render.
+    /// Drops a selection that no longer matches the messages (D8), before a render reads it.
     pub(crate) fn validate_selection(&mut self, cx: &mut Context<Self>) {
         if self.with_picking(cx, |state, messages| state.validate(messages)) {
-            cx.notify();
+            self.autoscroll = None;
+            self.drag_pointer = None;
         }
     }
 }
@@ -751,13 +811,9 @@ mod tests {
             )
         }
 
-        fn index_for_position(&self, p: Point<Pixels>) -> Result<usize, usize> {
+        fn caret(&self, p: Point<Pixels>, _text: &str) -> usize {
             let index = ((f32::from(p.x) - 10.) / self.cell).round().max(0.) as usize;
-            if self.bounds().contains(&p) {
-                Ok(index.min(self.len))
-            } else {
-                Err(index.min(self.len))
-            }
+            index.min(self.len)
         }
     }
 
@@ -841,22 +897,6 @@ mod tests {
         );
         assert_eq!(caret_at(point(px(0.), px(0.)), &texts[..0], &m), None);
         assert_eq!(caret_at(point(px(0.), px(0.)), &texts[3..], &m), None);
-    }
-
-    #[test]
-    fn caret_is_snapped_to_a_grapheme_boundary() {
-        let m = vec![text(1, "a😀b")];
-        let at = |x: f32| {
-            let line = Line {
-                top: 0.,
-                len: 6,
-                cell: 1.,
-            };
-            caret_at(point(px(x), px(5.)), &[(1, line)], &m)
-        };
-        // A hit test lands inside the emoji: byte 2 of 1..5, a tie, goes to its start.
-        assert_eq!(at(12.), Some(pos(1, 1)));
-        assert_eq!(at(14.), Some(pos(1, 5)));
     }
 
     #[test]

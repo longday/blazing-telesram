@@ -101,7 +101,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Tests: all transitions with synthetic messages (click, shift-click extends and keeps the anchor, double and triple click units, drag by word, drag backwards, drag across messages, `clear`, `validate` after a delete, a shortening edit and a same-length edit, the snapshot taken at each endpoint); `caret_at` over a layout stub (inside, beside, above the first, below the last, between two rows); the speed function (inside 0, increasing, capped); `copy_selection` with an empty selection writes nothing.
   - Done when: these tests exist.
 
-- [ ] 1.5 Wiring in `Desktop` (D2-D5, D8)
+- [x] 1.5 Wiring in `Desktop` (D2-D5, D8)
   - Owns: `crates/desktop/src/desktop.rs`.
   - Depends on: 1.3, 1.4.
   - Do: `mod selecting;`, the `PickState` entity, `RowContext` fields; a `canvas` before the list that clears the registry, a `canvas` after it that, while a drag is active, registers the window-level mouse move and up handlers and runs the autoscroll task with `ListState::scroll_by`; actions `CopySelection` and `SelectAllText` and their handlers on the root div; `validate` each render; the selection is cleared on chat switch, sign-out, account switch and when an overlay (viewer, dialog) opens. Rows that take no part keep the existing `on_children_prepainted` bounds; this task never drains `RowBounds`.
