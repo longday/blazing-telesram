@@ -1,7 +1,7 @@
 # Spec Delta
 
 ## Purpose
-Lets the user select the text of messages with the mouse, inside one message or across messages of the open chat, and copy it, without any request to the server.
+Lets the user select the text of messages with the mouse, inside one message or across messages of the open chat, and copy it, without any request to the server. In this capability and in `message-selection`, Cmd stands for the platform's primary modifier: Cmd on macOS, Ctrl on Linux and Windows.
 
 ## ADDED Requirements
 
@@ -82,7 +82,7 @@ A selection SHALL be able to start in one message and end in another of the same
 - **THEN** the selection and its highlight do not change
 
 ### Requirement: Copy the selection
-Cmd+C SHALL copy the selected text as plain text when the timeline, not a text field, has the focus. A selection inside one message SHALL copy exactly the selected text. A selection over several messages SHALL copy, for each message that has text, a line with the author and the date and time of the message (`Автор, ДД.ММ.ГГГГ ЧЧ:ММ`), the selected text, and a blank line between messages. Cmd+C with no selection SHALL change nothing. Copying SHALL keep the selection.
+Cmd+C SHALL copy the selected text as plain text when the timeline, not a text field, has the focus. A selection inside one message SHALL copy exactly the selected text; a selection over several messages SHALL copy, per message with text, a line `Автор, ДД.ММ.ГГГГ ЧЧ:ММ`, the selected text and a blank line between messages. Cmd+C with no selection SHALL change nothing, and copying SHALL keep the selection.
 
 #### Scenario: Copy part of a message
 - **WHEN** the user selects "world" in "hello world" and presses Cmd+C
@@ -116,7 +116,7 @@ With the timeline focused, Cmd+A SHALL select all the text of the loaded message
 - **THEN** only the composer's text is selected
 
 ### Requirement: Clearing the selection
-Escape SHALL clear the selection before it closes the info panel or cancels a reply or edit. The selection SHALL also be cleared by a click on empty timeline space, switching the chat, signing out, and starting message selection. It SHALL be dropped when its message is deleted or its text is edited, and SHALL be kept when new messages arrive, when older history loads, when the list scrolls, and when reactions change.
+Escape SHALL clear the selection before it closes the info panel or cancels a reply or edit; a click on empty timeline space, switching the chat, signing out and starting message selection SHALL clear it too. It SHALL be dropped when its message is deleted or a message holding an end of it changes text in any way, even keeping its length, and SHALL be kept on new messages, older history loading, scrolling and reaction changes.
 
 #### Scenario: Escape
 - **WHEN** a selection exists and the user presses Escape
@@ -129,6 +129,10 @@ Escape SHALL clear the selection before it closes the info panel or cancels a re
 #### Scenario: Selected message edited
 - **WHEN** the selected message is edited by its author
 - **THEN** the selection is gone
+
+#### Scenario: Same-length edit
+- **WHEN** the user selects "world" in "hello world" and the message is edited to "hello there"
+- **THEN** the selection is gone, and neither Cmd+C nor «Цитировать» offers "there" or the old range
 
 #### Scenario: New message
 - **WHEN** a new message arrives while a selection exists

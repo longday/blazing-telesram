@@ -6,7 +6,7 @@ Lets the user select whole messages of the open chat and copy them or delete the
 ## ADDED Requirements
 
 ### Requirement: Enter and leave selection mode
-Choosing «Выбрать» in the menu of a sent, non-deleted message, or Cmd+click on such a message, SHALL start a selection mode in which that message is selected. Escape, the bar's close button, deselecting the last message, and leaving the chat SHALL end it. While the mode is on the text selection SHALL be cleared and disabled, and right-click SHALL open no menu.
+Choosing «Выбрать» in the menu of a sent, non-deleted message, or Cmd+click on such a message (Cmd stands for the platform's primary modifier: Cmd on macOS, Ctrl on Linux and Windows), SHALL start a selection mode in which that message is selected. Escape, the bar's close button, deselecting the last message, and leaving the chat SHALL end it. While the mode is on the text selection SHALL be cleared and disabled, and right-click SHALL open no menu.
 
 #### Scenario: Enter from the menu
 - **WHEN** the user right-clicks a sent message and chooses «Выбрать»

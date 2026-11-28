@@ -67,7 +67,7 @@ Sending with a fragment quote SHALL send a reply to the whole original message w
 - **THEN** the message is shown as failed with the reason and the quote is restored with its flag when the user retries or cancels
 
 ### Requirement: Fragment quote in the timeline
-A reply whose quote is a fragment of its original — the trimmed quote differs from the beginning of the trimmed original text — SHALL show the author and the fragment as up to three lines, with line breaks kept and an ellipsis when cut, in the same bordered block as other quotes. A reply whose quote is the beginning of the original, or whose original is not known, SHALL show one truncated line as before.
+A reply whose quote is not the whole text of its original (cut at 200 characters, as the reply action quotes it; both trimmed) SHALL show the author and the quote as up to three lines, line breaks kept and an ellipsis when cut, in the same bordered block. A shorter beginning of the original counts as a fragment. A quote that is the whole original, or whose original is unknown, SHALL show one truncated line as before.
 
 #### Scenario: Fragment from another client
 - **WHEN** another client sends a reply whose quote is a word from the middle of the original
@@ -78,8 +78,12 @@ A reply whose quote is a fragment of its original — the trimmed quote differs 
 - **THEN** the block shows three and ends with an ellipsis
 
 #### Scenario: Whole-message quote
-- **WHEN** a reply quotes the beginning of its original, as the reply action does
+- **WHEN** a reply quotes the whole text of its original, as the reply action does (cut at 200 characters for a longer one)
 - **THEN** the block shows one truncated line
+
+#### Scenario: Beginning of the original
+- **WHEN** a reply quotes only "hello" from the original "hello world"
+- **THEN** the block shows "hello" as a fragment quote
 
 #### Scenario: Original edited later
 - **WHEN** the original of a fragment quote is edited

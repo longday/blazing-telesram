@@ -76,8 +76,8 @@ Work happens on integration branches; a unit reaches `main` only after the check
 - [ ] 1.1 Selection model (D1, D7)
   - Owns: new `crates/desktop/src/selection.rs`; `crates/desktop/src/main.rs` (the `mod selection;` line only).
   - Depends on: nothing.
-  - Do: `selectable_text`, `Pos`, `Unit`, `TextSelection` with `range_in`, `single`, `is_empty`, `validate`, `word_at`, `paragraph_at`, `select_all`, and `extract_text(messages, &TextSelection, header) -> String` (the D7 format). Offsets are bytes on grapheme boundaries (`unicode-segmentation`, already a dependency); `Pos` order is `(message index, offset)`. No gpui types.
-  - Tests: word and paragraph at the start, middle, end, on a space, on punctuation, in Cyrillic, with an emoji and a combining mark, in an empty text; `range_in` for the first, middle, last and outside messages, for an anchor after the focus and equal ends; `single`; `validate` drops an endpoint whose message is gone or whose text shrank, keeps one that only moved; `extract_text` inside one message (bare), across three with a voice message between (skipped), a header per message, a blank line between, the ends cut at the offsets; `select_all` over a chat with only non-text messages is `None`.
+  - Do: `selectable_text`, `Pos`, `Unit`, `TextSelection` (with the endpoint text snapshot `source`, D1) with `range_in`, `single`, `is_empty`, `validate`, `word_at`, `paragraph_at`, `select_all`, and `extract_text(messages, &TextSelection, header) -> String` (the D7 format). Offsets are bytes on grapheme boundaries (`unicode-segmentation`, already a dependency); `Pos` order is `(message index, offset)`. `validate` compares the endpoint's current text with the snapshot, not only the offsets. No gpui types.
+  - Tests: word and paragraph at the start, middle, end, on a space, on punctuation, in Cyrillic, with an emoji and a combining mark, in an empty text; `range_in` for the first, middle, last and outside messages, for an anchor after the focus and equal ends; `single`; `validate` drops the selection when an endpoint's message is gone, when its text shrank, **and when it was edited to a text of the same length** (`hello world` selected at 6..11, edited to `hello there`: offsets in range, snapshot differs, so dropped), and keeps one whose message only moved or whose other messages changed; `extract_text` inside one message (bare), across three with a voice message between (skipped), a header per message, a blank line between, the ends cut at the offsets; `select_all` over a chat with only non-text messages is `None`.
   - Done when: these tests exist.
 
 - [ ] 1.2 Date and time label for the copy header (D7)
@@ -98,7 +98,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Owns: new `crates/desktop/src/desktop/selecting.rs`.
   - Depends on: 1.1, 1.2.
   - Do: `PickState { text: Option<TextSelection>, drag: Option<Drag> }`; pure transitions over `&[Message]`: `down(ts, offset, clicks, shift)` (1 caret/clear, shift extends, 2 word, 3+ paragraph), `drag_to(pos)` extending by the click's unit, `drag_end`, `clear`, `validate`, `select_all`; the caret mapping `caret_at(point, registry) -> Option<Pos>` (D5: over a text, beside a bubble to the nearest row, above/below the painted rows); the autoscroll speed function (distance outside the viewport to pixels per tick, capped, 0 inside); `Desktop` methods `text_down`, `drag_to`, `drag_end`, `copy_selection(cx)` (writes `extract_text` to the clipboard, no-op when empty), `select_all_text(cx)`, `clear_selection(cx)`; focus handed to the root handle on `text_down`.
-  - Tests: all transitions with synthetic messages (click, shift-click extends and keeps the anchor, double and triple click units, drag by word, drag backwards, drag across messages, `clear`, `validate` after a delete and an edit); `caret_at` over a layout stub (inside, beside, above the first, below the last, between two rows); the speed function (inside 0, increasing, capped); `copy_selection` with an empty selection writes nothing.
+  - Tests: all transitions with synthetic messages (click, shift-click extends and keeps the anchor, double and triple click units, drag by word, drag backwards, drag across messages, `clear`, `validate` after a delete, a shortening edit and a same-length edit, the snapshot taken at each endpoint); `caret_at` over a layout stub (inside, beside, above the first, below the last, between two rows); the speed function (inside 0, increasing, capped); `copy_selection` with an empty selection writes nothing.
   - Done when: these tests exist.
 
 - [ ] 1.5 Wiring in `Desktop` (D2-D5, D8)
@@ -111,7 +111,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 - [ ] 1.6 Key bindings (D4)
   - Owns: `crates/desktop/src/main.rs`.
   - Depends on: 1.1, 1.5.
-  - Do: `KeyBinding::new("cmd-c" / "ctrl-c", CopySelection, Some("BlazingTelesram"))` and the same for `cmd-a` / `ctrl-a` with `SelectAllText`; no change to the `TextInput` bindings.
+  - Do: `KeyBinding::new("secondary-c", CopySelection, Some("BlazingTelesram"))` and `"secondary-a"` with `SelectAllText` (`secondary` = Cmd on macOS, Ctrl on Linux and Windows, D4; the `TextInput` bindings are untouched).
   - Tests: in 1.8 (dispatch the actions with the composer focused and unfocused).
   - Done when: the bindings are registered next to the existing ones.
 
@@ -126,7 +126,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 1.3-1.7.
   - Do: a section `// ---- text selection (TS 1.8) ----`; build `MouseDownEvent { click_count }` by hand where `simulate_mouse_down` cannot set it (0.1 (f)).
-  - Tests: drag inside one message highlights exactly the range (assert the state, and the highlight through the debug selector bounds if 0.1 allows); double click selects a word, triple a paragraph; Shift+click extends; a click clears; drag across two messages and Cmd+C gives the D7 text with headers; Cmd+C with the composer focused copies the composer's text, after selecting in the timeline copies the selection; Cmd+A in the timeline then Cmd+C; Escape, chat switch, deletion and edit of the selected message clear it; a new incoming message and loading older history keep it; the quote, the author and a voice card are not selectable; no `Command` is sent by any of these (the fake backend records nothing).
+  - Tests: drag inside one message highlights exactly the range (assert the state, and the highlight through the debug selector bounds if 0.1 allows); double click selects a word, triple a paragraph; Shift+click extends; a click clears; drag across two messages and Cmd+C gives the D7 text with headers; Cmd+C with the composer focused copies the composer's text, after selecting in the timeline copies the selection; Cmd+A in the timeline then Cmd+C; Escape, chat switch, deletion and edit of the selected message clear it, **also an edit that keeps the length** (then neither Cmd+C nor the menu offers the old range); a new incoming message and loading older history keep it; the quote, the author and a voice card are not selectable; no `Command` is sent by any of these (the fake backend records nothing). The shortcut tests dispatch the actions through the `secondary` binding, so they hold on every platform the tests run on.
   - Done when: these tests exist and pass.
 
 ## 2. Quotes (unit TS-Q; starts after TS-A is on `main` and 0.7)
@@ -142,7 +142,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Owns: `crates/desktop/src/selection.rs`.
   - Depends on: 2.1, TS-A merged.
   - Do: `is_fragment(original, quote)` and `fragment_quote(selected)` per D9 (and the rule as refined by 0.7).
-  - Tests: a quote equal to the beginning of the original is not a fragment (also when the original is longer than 200); a word from the middle is; a whole short text is not; trimming and `\r\n`; a 300-character selection is cut to 200 on a char boundary (Cyrillic, an emoji at the cut); a blank selection is `None`; an absent original is handled by the caller (not here).
+  - Tests: the quote of a reply action (the whole text, also a text over 200 characters cut to 200) is **not** a fragment; `hello` from `hello world` **is** a fragment (the one rule of D9: only the whole original, cut at 200, is not); a word from the middle, the end and a non-substring are; a whole short text is not; trimming and `\r\n` on both sides; a 300-character selection is cut to 200 on a char boundary (Cyrillic, an emoji at the cut); a blank selection is `None`; an absent original is handled by the caller (not here). The composer test (2.5), the adapter test (2.4) and the timeline test (2.7) all go through this function.
   - Done when: these tests exist.
 
 - [ ] 2.3 Wire extras (only if 0.7 finds a key beyond `Quote`)
@@ -207,7 +207,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
 - [ ] 3.4 Rows in the mode (D11)
   - Owns: `crates/desktop/src/timeline.rs`, `crates/desktop/src/theme.rs`.
   - Depends on: 3.1.
-  - Do: while the mode is on: a 28 px gutter with ○ / ✓ (text glyphs), a row tint, a transparent full-row layer that turns every left click into `toggle_message(ts, shift)` and starts no text drag; Cmd+click on an eligible bubble outside the mode calls `enter_mode`; selectors `msg-{ts}-check`, `msg-{ts}-marked`; new theme colours for the check and the tint; no change to a row's height or to rows outside the mode.
+  - Do: while the mode is on: a 28 px gutter with ○ / ✓ (text glyphs), a row tint, a transparent full-row layer that turns every left click into `toggle_message(ts, shift)` and starts no text drag; a primary-modifier click (`event.modifiers.secondary()`: Cmd on macOS, Ctrl on Linux and Windows) on an eligible bubble outside the mode calls `enter_mode`; selectors `msg-{ts}-check`, `msg-{ts}-marked`; new theme colours for the check and the tint; no change to a row's height or to rows outside the mode.
   - Tests: in 3.7.
   - Done when: the code is in place and existing timeline tests pass.
 
@@ -229,7 +229,7 @@ Work happens on integration branches; a unit reaches `main` only after the check
   - Owns: `crates/desktop/src/tests.rs`.
   - Depends on: 3.3-3.6.
   - Do: a section `// ---- message selection (TS 3.7) ----`.
-  - Tests: Cmd+click enters; click toggles; Shift+click marks the range; a click on a picture or a reaction chip toggles and opens nothing and sends nothing; Cmd+A marks all eligible; deselecting the last message leaves; chat switch leaves; the bar shows «Выбрано: N»; «Скопировать» puts the D7 text on the clipboard; «Удалить» is disabled with a foreign message; deletion of three own messages end to end through the fake backend; selection and mode never send a request on their own.
+  - Tests: a primary-modifier click (built by hand with `Modifiers::secondary_key()`) enters; click toggles; Shift+click marks the range; a click on a picture or a reaction chip toggles and opens nothing and sends nothing; Cmd+A marks all eligible; deselecting the last message leaves; chat switch leaves; the bar shows «Выбрано: N»; «Скопировать» puts the D7 text on the clipboard; «Удалить» is disabled with a foreign message; deletion of three own messages end to end through the fake backend; selection and mode never send a request on their own.
   - Done when: these tests exist and pass.
 
 ## 4. Verification and close-out
